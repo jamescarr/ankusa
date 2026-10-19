@@ -8,6 +8,13 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`s3` and `gcs` blocks take the object-store transport options (DUR-7).**
+  `timeout_ms`, `upload_timeout_ms`, `op_deadline_ms`, `multipart_threshold_bytes`,
+  `multipart_part_bytes`, `retries`, `breaker_failures`, `breaker_open_ms`,
+  `breaker_slow_ms`, `pool_size`, `pool_count` and `pool_timeout`, under `storage`,
+  `claim_check.store(s)` and `backup.store`/`secondary`, range-checked when the
+  instance starts. See [`configuration.md`](../../docs/configuration.md).
+
 - **`wal.type: dual`, the `intake.*` keys and the `recover` command (DUR-1.b.b,
   [ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)).** `wal.type: dual` (or `ANKUSA_WAL_TYPE=dual`)
   acks a hook only after it is fsynced on the node **and** confirmed in a replicated

@@ -509,11 +509,27 @@ The always-on tests cover:
   validates. The adapters' `*_describe_test.exs` pin what each sink advertises
   (and that no credential reaches it) without a broker.
 
-The 25 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
+The object-store transport has its own unit suites against `Req.Test` stubs, no
+emulator needed: `blob_store_retry_test.exs` (full-jitter retries, `Retry-After`
+honoured and `{:throttled, seconds}` when it does not fit, the one operation
+deadline, the per-bucket breaker on failures and on p99 latency),
+`blob_store_conditional_test.exs` (`put_if_absent` on every adapter),
+`blob_store_checksum_test.exs` (digest headers on `PUT`, `{:error, :integrity}` on a
+corrupted `GET`), `blob_store_multipart_test.exs` (a 16 MiB pack under a
+1 MiB/s-link stub that times out any single request over 10 MiB, so only parts
+get through), `blob_store_credentials_test.exs` (GCS metadata server, Azure
+managed identity and OCI instance principal tokens refreshed on a `401`),
+`blob_store_pool_test.exs` (one Finch pool per endpoint, `pool_size` and
+`pool_timeout` against a real slow endpoint, option ranges) and the "conditional
+pack writes" cases of `claim_check_test.exs` (a collision gets a fresh id with the
+original intact; `Retry-After: 3600` returns inside the deadline).
+
+The `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
 `blob_store_gcs_test.exs`, `blob_store_azure_integration_test.exs`,
 `blob_store_oci_integration_test.exs`) exercise `BlobStore.{S3,GCS,Azure,OCI}`
 against real running emulators: put/get round-trip, `get_range` byte-slicing,
-`:not_found`, `list`+`delete`. `store/backup_s3_integration_test.exs` runs a
+`:not_found`, `list`+`delete`, `put_if_absent` on an existing key, and a 16 MiB
+multipart round-trip. `store/backup_s3_integration_test.exs` runs a
 store backup and restore through floci S3, and `sse header on put`: a segment,
 a backup and a claim `PUT`, recorded on their way to the emulator, all carry
 `x-amz-server-side-encryption`. `sink/sqs_integration_test.exs`

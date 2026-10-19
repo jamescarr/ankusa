@@ -308,6 +308,48 @@ defmodule AnkusaServer.ConfigTest do
     end
   end
 
+  test "an s3 or gcs store takes the object-store transport options, and core's ranges name a bad one" do
+    path =
+      tmp_config("""
+      storage:
+        type: s3
+        s3: {bucket: b, region: r, op_deadline_ms: 90000, upload_timeout_ms: 45000, multipart_threshold_bytes: 16777216, pool_size: 64, breaker_failures: 3}
+      claim_check:
+        store:
+          type: gcs
+          gcs: {bucket: c, auth: none, pool_count: 2, pool_timeout: 2000, retries: 4}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+
+    assert {Ankusa.BlobStore.S3, s3} = config.storage.blob_store
+    assert s3[:op_deadline_ms] == 90_000
+    assert s3[:upload_timeout_ms] == 45_000
+    assert s3[:multipart_threshold_bytes] == 16_777_216
+    assert s3[:pool_size] == 64
+    assert s3[:breaker_failures] == 3
+
+    assert [{Ankusa.BlobStore.GCS, gcs}] = config.claim_check.blob_stores
+    assert {gcs[:pool_count], gcs[:pool_timeout], gcs[:retries]} == {2, 2000, 4}
+
+    # Core's range check names the store and the key.
+    assert :ok = Ankusa.BlobStore.validate_config!(config)
+
+    bad = tmp_config("""
+    storage:
+      type: s3
+      s3: {bucket: b, region: r, op_deadline_ms: 10}
+    sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+    """)
+
+    config = Config.load!(path: bad, env: %{}).config
+
+    assert_raise ArgumentError, ~r/storage.blob_store: op_deadline_ms must be an integer from 1000/, fn ->
+      Ankusa.BlobStore.validate_config!(config)
+    end
+  end
+
   test "claim_check read keys land in core's config, and core's ranges name a bad one" do
     path =
       tmp_config("""

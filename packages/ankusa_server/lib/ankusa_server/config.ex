@@ -101,8 +101,15 @@ defmodule AnkusaServer.Config do
   @intake_kafka_keys ~w(brokers ssl sasl)
   @storage_keys ~w(type roll_bytes roll_ms key_prefix s3 gcs catalogue_retention_days)
   @blob_store_keys ~w(type root s3 gcs)
-  @s3_keys ~w(bucket region endpoint access_key_id secret_access_key session_token sse)
-  @gcs_keys ~w(bucket endpoint auth token sse)
+  # The transport options of `Ankusa.BlobStore.Options`, in milliseconds or bytes
+  # as named; the core range-checks them when the instance starts.
+  @blob_transport_keys ~w(timeout_ms upload_timeout_ms op_deadline_ms multipart_threshold_bytes
+                          multipart_part_bytes retries breaker_failures breaker_open_ms
+                          breaker_slow_ms pool_size pool_count pool_timeout)
+  @blob_transport_options Map.new(@blob_transport_keys, &{&1, String.to_atom(&1)})
+  @s3_keys ~w(bucket region endpoint access_key_id secret_access_key session_token sse) ++
+             @blob_transport_keys
+  @gcs_keys ~w(bucket endpoint auth token sse) ++ @blob_transport_keys
   @sse_keys ~w(type key_id)
   @sse_types %{"aes256" => :aes256, "kms" => :kms}
   @secrets_keys ~w(kek kek_previous providers cache_ttl_ms)
@@ -1115,6 +1122,7 @@ defmodule AnkusaServer.Config do
     |> put_opt(:secret_access_key, string_opt(s3, "secret_access_key", path))
     |> put_opt(:session_token, string_opt(s3, "session_token", path))
     |> put_opt(:sse, sse_opt(s3, path))
+    |> Kernel.++(blob_transport_opts(s3, path))
   end
 
   defp gcs_opts!(gcs, path) do
@@ -1122,8 +1130,17 @@ defmodule AnkusaServer.Config do
 
     ([bucket: bucket]
      |> put_opt(:endpoint, string_opt(gcs, "endpoint", path))
-     |> put_opt(:sse, sse_opt(gcs, path))) ++
+     |> put_opt(:sse, sse_opt(gcs, path))
+     |> Kernel.++(blob_transport_opts(gcs, path))) ++
       gcp_auth!(gcs, path)
+  end
+
+  # `timeout_ms`, `op_deadline_ms`, `multipart_*`, `breaker_*`, `pool_*` … of an
+  # `s3` or `gcs` section, as the adapter options of the same names.
+  defp blob_transport_opts(section, path) do
+    for {key, option} <- @blob_transport_options, value = int_opt(section, key, path) do
+      {option, value}
+    end
   end
 
   # `sse: {type: aes256 | kms, key_id: …}` on an `s3` or `gcs` section: the

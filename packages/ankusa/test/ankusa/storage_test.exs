@@ -120,6 +120,8 @@ defmodule Ankusa.StorageTest do
     end
 
     @impl true
+    def put_if_absent(instance, key, data, opts), do: put(instance, key, data, opts)
+    @impl true
     def get(instance, key, _opts), do: LocalFS.get(instance, key, [])
 
     @impl true
@@ -142,6 +144,9 @@ defmodule Ankusa.StorageTest do
 
     @impl true
     def put(_instance, _key, _data, _opts), do: exit(:boom)
+
+    @impl true
+    def put_if_absent(_instance, _key, _data, _opts), do: exit(:boom)
 
     @impl true
     def get(instance, key, _opts), do: LocalFS.get(instance, key, [])
