@@ -89,7 +89,8 @@ defmodule AnkusaServer.Config do
   @tls_verifies ~w(verify_none verify_peer)
   @tls_versions %{"tlsv1.2" => :"tlsv1.2", "tlsv1.3" => :"tlsv1.3"}
   @batcher_keys ~w(partitions max_batch max_delay_ms max_queue max_queue_bytes)
-  @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms sink_concurrency breaker_failures breaker_open_ms breaker_max_open_ms retry)
+  @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms sink_concurrency breaker_failures breaker_open_ms breaker_max_open_ms retry tenants)
+  @dispatch_tenant_keys ~w(max_inflight max_inflight_bytes concurrency)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
   @wal_keys ~w(type publish_timeout_ms)
   @storage_keys ~w(type roll_bytes roll_ms key_prefix s3 gcs)
@@ -884,12 +885,53 @@ defmodule AnkusaServer.Config do
         |> put_opt(:max_inflight, int_opt(dispatch, "max_inflight", ["dispatch"]))
         |> put_opt(:max_inflight_bytes, int_opt(dispatch, "max_inflight_bytes", ["dispatch"]))
         |> put_opt(:attempt_timeout_ms, int_opt(dispatch, "attempt_timeout_ms", ["dispatch"]))
-        |> put_opt(:sink_concurrency, int_opt(dispatch, "sink_concurrency", ["dispatch"]))
+        |> put_sink_concurrency(dispatch)
         |> put_opt(:breaker_failures, int_opt(dispatch, "breaker_failures", ["dispatch"]))
         |> put_opt(:breaker_open_ms, int_opt(dispatch, "breaker_open_ms", ["dispatch"]))
         |> put_opt(:breaker_max_open_ms, int_opt(dispatch, "breaker_max_open_ms", ["dispatch"]))
         |> put_opt(:retry, retry_policy(retry))
+        |> put_opt(:tenants, dispatch_tenants(dispatch))
     ]
+  end
+
+  # Absent keeps core's default (8); an explicit `null` switches the per-sink
+  # cap off, which `put_opt/3` would drop as "not given".
+  defp put_sink_concurrency(kw, dispatch) do
+    case Map.fetch(dispatch, "sink_concurrency") do
+      {:ok, nil} -> kw ++ [sink_concurrency: nil]
+      _ -> put_opt(kw, :sink_concurrency, int_opt(dispatch, "sink_concurrency", ["dispatch"]))
+    end
+  end
+
+  # `dispatch.tenants`: `default` and one entry per tenant id, each any of
+  # `max_inflight`, `max_inflight_bytes` and `concurrency`. Types only; the
+  # ranges are core's (`Ankusa.Dispatch.Pipeline.validate_config!/1`). A tenant
+  # named `default` cannot be given limits of its own: the key is the default.
+  defp dispatch_tenants(dispatch) do
+    path = ["dispatch", "tenants"]
+
+    case Map.get(dispatch, "tenants") do
+      nil ->
+        nil
+
+      tenants when is_map(tenants) ->
+        Map.new(tenants, fn {tenant, limits} ->
+          tenant = to_string(tenant)
+          limits_path = path ++ [tenant]
+          limits = section!(limits, @dispatch_tenant_keys, limits_path)
+
+          limits =
+            %{}
+            |> put_key(:max_inflight, int_opt(limits, "max_inflight", limits_path))
+            |> put_key(:max_inflight_bytes, int_opt(limits, "max_inflight_bytes", limits_path))
+            |> put_key(:concurrency, int_opt(limits, "concurrency", limits_path))
+
+          {if(tenant == "default", do: :default, else: tenant), limits}
+        end)
+
+      other ->
+        raise ConfigError, message: type_error(path, "a mapping of tenant id to limits", other)
+    end
   end
 
   defp retry_policy(retry) do

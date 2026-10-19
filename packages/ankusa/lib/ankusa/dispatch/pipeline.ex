@@ -26,13 +26,30 @@ defmodule Ankusa.Dispatch.Pipeline do
   hung sink frees its slot; the fallback claim check-in runs inside the same
   deadline.
 
+  ## Per-tenant fairness
+
+  A scan claims from the tenants that have work due
+  (`Deliveries.active_tenants/3`) by deficit round-robin: the page of
+  `dispatch.batch` rows is split into equal shares, a tenant with less due than
+  its share leaves the rest to the others (further passes), and a tenant the page
+  did not reach goes first in the next scan, so a tenant with a million queued
+  rows is one share of a page, not the head of the line. Each tenant also has its
+  own window beside the global one: `dispatch.tenants.default` and
+  `dispatch.tenants[tenant_id]` set `max_inflight` and `max_inflight_bytes` of
+  claimed, unfinished rows and `concurrency` attempts running at once. A tenant
+  whose sink is slow fills its own window and nobody else's; a tenant at its
+  window is skipped by the scan and by the wake-up timer until an outcome frees
+  room. Slots go round-robin across tenants first, then across each tenant's
+  keys.
+
   ## Per-sink isolation
 
-  Claimed jobs wait in one queue per sink key `{source_id, sink index, sink
-  module}`, and slots go round-robin across the keys that have work, so one
-  source's backlog cannot queue ahead of every other source's. With
-  `dispatch.sink_concurrency` set, one key never runs more than that many
-  attempts at once.
+  Claimed jobs wait in one queue per sink key `{tenant_id, source_id, sink
+  index, sink module}`, and a tenant's slots go round-robin across the keys that
+  have work, so one source's backlog cannot queue ahead of every other source's.
+  With `dispatch.sink_concurrency` set (default 8), one key never runs more than
+  that many attempts at once; the key carries the tenant, so the cap and the
+  breaker below are per tenant.
 
   Each key has a circuit breaker. `dispatch.breaker_failures` consecutive
   failures (`0` disables breakers; a `{:permanent, _}` error does not count, see
@@ -72,7 +89,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   require Logger
 
   alias Ankusa.{ClaimCheck, Envelope, Sink, SourceStore, Store, Telemetry}
-  alias Ankusa.Queue.{Deliveries, Reclaim}
+  alias Ankusa.Queue.{Deliveries, Reclaim, Tenants}
   alias Ankusa.Sink.Message
   alias Ankusa.Store.Keys
 
@@ -176,12 +193,10 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
 
     cap = Map.get(dispatch, :sink_concurrency)
-    concurrency = dispatch.concurrency
 
-    unless cap == nil or (is_integer(cap) and is_integer(concurrency) and cap in 1..concurrency) do
+    unless cap == nil or (is_integer(cap) and cap >= 1) do
       raise ArgumentError,
-            "dispatch.sink_concurrency must be nil or an integer from 1 to " <>
-              "dispatch.concurrency (#{inspect(concurrency)}), got #{inspect(cap)}"
+            "dispatch.sink_concurrency must be nil or a positive integer, got #{inspect(cap)}"
     end
 
     failures = Map.get(dispatch, :breaker_failures, 0)
@@ -206,6 +221,53 @@ defmodule Ankusa.Dispatch.Pipeline do
               "(#{inspect(open)}), got #{inspect(max_open)}"
     end
 
+    validate_tenants!(Map.get(dispatch, :tenants))
+
+    :ok
+  end
+
+  @tenant_limit_keys [:max_inflight, :max_inflight_bytes, :concurrency]
+
+  defp validate_tenants!(tenants) do
+    unless is_map(tenants) and is_map(Map.get(tenants, :default)) do
+      raise ArgumentError,
+            "dispatch.tenants must be a map with a :default entry, got #{inspect(tenants)}"
+    end
+
+    Enum.each(tenants, fn
+      {:default, limits} ->
+        validate_tenant_limits!("dispatch.tenants.default", limits, @tenant_limit_keys)
+
+      {tenant, limits} when is_binary(tenant) and tenant != "" ->
+        validate_tenant_limits!("dispatch.tenants[#{inspect(tenant)}]", limits, [])
+
+      {tenant, _limits} ->
+        raise ArgumentError,
+              "dispatch.tenants keys must be :default or a non-empty tenant id string, " <>
+                "got #{inspect(tenant)}"
+    end)
+  end
+
+  defp validate_tenant_limits!(name, limits, required) do
+    unless is_map(limits) do
+      raise ArgumentError, "#{name} must be a map of limits, got #{inspect(limits)}"
+    end
+
+    for key <- required, not is_map_key(limits, key) do
+      raise ArgumentError, "#{name}.#{key} is required"
+    end
+
+    for {key, value} <- limits do
+      unless key in @tenant_limit_keys do
+        raise ArgumentError,
+              "#{name} has unknown key #{inspect(key)}; expected #{inspect(@tenant_limit_keys)}"
+      end
+
+      unless is_integer(value) and value >= 1 do
+        raise ArgumentError, "#{name}.#{key} must be a positive integer, got #{inspect(value)}"
+      end
+    end
+
     :ok
   end
 
@@ -221,6 +283,8 @@ defmodule Ankusa.Dispatch.Pipeline do
     {:ok, task_sup} = Task.Supervisor.start_link()
 
     Process.flag(:trap_exit, true)
+
+    {default_limits, overrides} = tenant_limits(config)
 
     send(self(), :recover)
     Process.send_after(self(), :housekeeping, @housekeeping_ms)
@@ -244,13 +308,33 @@ defmodule Ankusa.Dispatch.Pipeline do
        window_full?: false,
        # a failed scan backs off instead of spinning
        holdoff?: false,
-       # sink key => queue of claimed jobs ready to run; `ring` holds every key
-       # whose queue is non-empty, once, in round-robin order
+       # The default share of the global windows and each named tenant's (a named
+       # tenant inherits the default's other keys), see `dispatch.tenants`
+       default_limits: default_limits,
+       tenant_overrides: overrides,
+       # tenant ordinal => {rows, bytes, tenant id} claimed and not yet finished
+       tenant_claimed: %{},
+       # ordinal => limits, kept only for tenants with claimed rows, and only when
+       # some tenant has an override (otherwise every tenant has the default)
+       tenant_limits: %{},
+       # ordinals at their own window: a scan cannot claim from them, and the
+       # wake-up timer must not spin on their due rows
+       tenant_full: MapSet.new(),
+       # tenants a scan has reached since it last reached every active one
+       served: MapSet.new(),
+       # tenants whose `ankusa_dispatch_tenant_inflight` was last reported nonzero
+       reported_tenants: MapSet.new(),
+       # sink key => queue of claimed jobs ready to run; `rings` maps a tenant
+       # ordinal to the queue of its keys whose queue is non-empty (once each, in
+       # round-robin order) and `ring` holds every tenant that has such a key,
+       # once, in round-robin order
        queues: %{},
+       rings: %{},
        ring: :queue.new(),
        queued: 0,
        running: %{},
        running_by_key: %{},
+       running_by_tenant: %{},
        # sink key => breaker; a key without an entry is closed with no failures
        breakers: %{},
        # pack task ref => the jobs it will give claims to
@@ -525,18 +609,19 @@ defmodule Ankusa.Dispatch.Pipeline do
 
     case Deliveries.active_tenants(state.instance, now, @active_limit) do
       {:ok, []} ->
-        %{state | window_full?: false}
+        %{state | window_full?: false, served: MapSet.new()}
 
       {:ok, tenants} ->
-        case visit(state, tenants, now, limit, budget, 0, 0) do
-          {:ok, state, claimed, visited} ->
+        case claim_round(state, tenants, now, limit, budget) do
+          {:ok, state, claimed, visited, blocked?} ->
             state = %{state | tenants_visited: max(state.tenants_visited, visited)}
 
             # A full page means there is probably more; a short one means
-            # nothing else is due right now.
+            # nothing else is due right now, or only what a tenant's own
+            # window does not let it claim yet (an outcome frees that).
             if claimed >= limit,
               do: fill(state),
-              else: %{state | window_full?: at_capacity?(state)}
+              else: %{state | window_full?: at_capacity?(state) or blocked?}
 
           {:error, state} ->
             holdoff(state)
@@ -548,38 +633,122 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
-  # Tenants in marker order (oldest second first), each one's rows oldest first,
-  # until the page or the byte budget is spent. There is no fairness between
-  # tenants beyond that order (TEN-3).
-  defp visit(state, [], _now, _limit, _budget, claimed, visited),
-    do: {:ok, state, claimed, visited}
+  # Deficit round-robin over the active tenants. A pass gives each tenant, in
+  # turn, an equal share of what is left of the page (`share`, at least one row)
+  # of its due rows, within its own window; a tenant that took its whole share
+  # may have more and goes into the next pass with the share of what is left,
+  # one that took less has nothing more due and forfeits the rest. Tenants not
+  # reached since the last full round go first, so when there are more active
+  # tenants than rows in a page every one of them still gets its turn.
+  defp claim_round(state, tenants, now, limit, budget) do
+    {fresh, reached} =
+      Enum.split_with(tenants, fn {ord, _buckets} -> not MapSet.member?(state.served, ord) end)
 
-  defp visit(state, [{ord, buckets} | rest], now, limit, budget, claimed, visited) do
-    remaining = limit - claimed
+    acc = %{
+      left: limit,
+      budget: budget,
+      claimed: 0,
+      reached: MapSet.new(),
+      read: MapSet.new(),
+      blocked?: false,
+      wanting: []
+    }
 
-    if remaining <= 0 or (claimed > 0 and budget <= 0) do
-      {:ok, state, claimed, visited}
+    case drr(state, fresh ++ reached, now, acc) do
+      {:ok, state, acc} ->
+        state = mark_served(state, tenants, acc.reached)
+        {:ok, state, acc.claimed, MapSet.size(acc.read), acc.blocked?}
+
+      {:error, state} ->
+        {:error, state}
+    end
+  end
+
+  defp drr(state, tenants, now, acc) do
+    share = max(1, div(acc.left, length(tenants)))
+
+    case pass(state, tenants, now, share, %{acc | wanting: []}) do
+      {:ok, state, acc} ->
+        wanting = Enum.reverse(acc.wanting)
+
+        if wanting == [] or acc.left <= 0 or (acc.claimed > 0 and acc.budget <= 0),
+          do: {:ok, state, acc},
+          else: drr(state, wanting, now, acc)
+
+      {:error, state} ->
+        {:error, state}
+    end
+  end
+
+  defp pass(state, [], _now, _share, acc), do: {:ok, state, acc}
+
+  defp pass(state, [{ord, buckets} | rest], now, share, acc) do
+    if acc.left <= 0 or (acc.claimed > 0 and acc.budget <= 0) do
+      {:ok, state, acc}
     else
-      floor = Map.get(state.cursors, ord, 0)
-
-      case Deliveries.due_for_tenant(state.instance, ord, now, floor, remaining, budget) do
-        {:ok, dues} ->
-          case claim_tenant(state, ord, dues, now) do
-            {:ok, state} ->
-              n = length(dues)
-              bytes = Enum.reduce(dues, 0, &(&1.size + &2))
-              state = tidy_tenant(state, ord, buckets, now)
-              visit(state, rest, now, limit, budget - bytes, claimed + n, visited + 1)
-
-            {:error, state} ->
-              {:error, state}
-          end
-
-        {:error, reason} ->
-          Logger.error("[ankusa] dispatch could not scan the store, retrying: #{inspect(reason)}")
-          {:error, state}
+      case pass_tenant(state, ord, buckets, now, share, acc) do
+        {:ok, state, acc} -> pass(state, rest, now, share, acc)
+        {:error, state} -> {:error, state}
       end
     end
+  end
+
+  defp pass_tenant(state, ord, buckets, now, share, acc) do
+    limits = limits_of(state, ord)
+    {rows, bytes} = tenant_window(state, ord)
+    acc = %{acc | reached: MapSet.put(acc.reached, ord)}
+
+    if rows >= limits.max_inflight or bytes >= limits.max_inflight_bytes do
+      {:ok, state, %{acc | blocked?: true}}
+    else
+      ask = Enum.min([share, acc.left, limits.max_inflight - rows])
+      budget = min(acc.budget, limits.max_inflight_bytes - bytes)
+      take(state, ord, buckets, now, {ask, share, budget}, acc)
+    end
+  end
+
+  defp take(state, ord, buckets, now, {ask, share, budget}, acc) do
+    floor = Map.get(state.cursors, ord, 0)
+
+    case Deliveries.due_for_tenant(state.instance, ord, now, floor, ask, budget) do
+      {:ok, dues} ->
+        took(state, ord, buckets, now, share, dues, acc)
+
+      {:error, reason} ->
+        Logger.error("[ankusa] dispatch could not scan the store, retrying: #{inspect(reason)}")
+        {:error, state}
+    end
+  end
+
+  defp took(state, ord, buckets, now, share, dues, acc) do
+    case claim_tenant(state, ord, dues, now) do
+      {:ok, state} ->
+        n = length(dues)
+        bytes = Enum.reduce(dues, 0, &(&1.size + &2))
+        state = tidy_tenant(state, ord, buckets, now)
+        wanting = if n >= share, do: [{ord, []} | acc.wanting], else: acc.wanting
+
+        {:ok, state,
+         %{
+           acc
+           | left: acc.left - n,
+             budget: acc.budget - bytes,
+             claimed: acc.claimed + n,
+             read: MapSet.put(acc.read, ord),
+             wanting: wanting
+         }}
+
+      {:error, state} ->
+        {:error, state}
+    end
+  end
+
+  # The tenants reached by the scans since the last full round; the round starts
+  # over once every active tenant has been reached.
+  defp mark_served(state, tenants, reached) do
+    active = MapSet.new(tenants, fn {ord, _buckets} -> ord end)
+    served = state.served |> MapSet.union(reached) |> MapSet.intersection(active)
+    %{state | served: if(MapSet.equal?(served, active), do: MapSet.new(), else: served)}
   end
 
   defp claim_tenant(state, _ord, [], _now), do: {:ok, state}
@@ -591,6 +760,95 @@ defmodule Ankusa.Dispatch.Pipeline do
       {:ok, state} -> {:ok, raise_cursor(state, ord, List.last(dues).at)}
       {:error, state} -> {:error, state}
     end
+  end
+
+  # ── per-tenant windows ────────────────────────────────────────────────────
+
+  # The default share and each named tenant's, a named tenant inheriting the
+  # default's other keys.
+  defp tenant_limits(config) do
+    {default, named} = Map.pop!(config.dispatch.tenants, :default)
+    {default, Map.new(named, fn {tenant, limits} -> {tenant, Map.merge(default, limits)} end)}
+  end
+
+  # A tenant's limits. Only a tenant with an override needs its name, which a
+  # tenant with claimed rows already has in `tenant_limits`; the others cost one
+  # point read of the `tenants` family the first time a scan meets them.
+  defp limits_of(state, ord) do
+    case state.tenant_limits do
+      %{^ord => limits} ->
+        limits
+
+      _ when map_size(state.tenant_overrides) == 0 ->
+        state.default_limits
+
+      _ ->
+        case Tenants.name(state.instance, ord) do
+          {:ok, name} -> Map.get(state.tenant_overrides, name, state.default_limits)
+          _ -> state.default_limits
+        end
+    end
+  end
+
+  defp tenant_window(state, ord) do
+    case state.tenant_claimed do
+      %{^ord => {rows, bytes, _tenant}} -> {rows, bytes}
+      _ -> {0, 0}
+    end
+  end
+
+  # A job enters the tenant's window when it is staged, and leaves it when it is
+  # parked or has an outcome (the three places `claimed` moves).
+  defp tenant_add(state, %{ord: ord, size: size, key: {tenant, _, _, _}}) do
+    {rows, bytes, _tenant} = Map.get(state.tenant_claimed, ord, {0, 0, tenant})
+    entry = {rows + 1, bytes + size, tenant}
+    state = %{state | tenant_claimed: Map.put(state.tenant_claimed, ord, entry)}
+
+    state =
+      if rows == 0 and map_size(state.tenant_overrides) > 0 do
+        limits = Map.get(state.tenant_overrides, tenant, state.default_limits)
+        %{state | tenant_limits: Map.put(state.tenant_limits, ord, limits)}
+      else
+        state
+      end
+
+    mark_full(state, ord, entry)
+  end
+
+  defp tenant_sub(state, ord, size) do
+    case state.tenant_claimed do
+      %{^ord => {1, _bytes, _tenant}} ->
+        %{
+          state
+          | tenant_claimed: Map.delete(state.tenant_claimed, ord),
+            tenant_limits: Map.delete(state.tenant_limits, ord),
+            tenant_full: MapSet.delete(state.tenant_full, ord)
+        }
+
+      %{^ord => {rows, bytes, tenant}} ->
+        entry = {rows - 1, bytes - size, tenant}
+
+        mark_full(
+          %{state | tenant_claimed: Map.put(state.tenant_claimed, ord, entry)},
+          ord,
+          entry
+        )
+
+      _ ->
+        state
+    end
+  end
+
+  defp mark_full(state, ord, {rows, bytes, _tenant}) do
+    limits = Map.get(state.tenant_limits, ord, state.default_limits)
+    full? = rows >= limits.max_inflight or bytes >= limits.max_inflight_bytes
+
+    full =
+      if full?,
+        do: MapSet.put(state.tenant_full, ord),
+        else: MapSet.delete(state.tenant_full, ord)
+
+    %{state | tenant_full: full}
   end
 
   # After a visit: stale markers go (at most once a second a tenant, it is a
@@ -737,7 +995,8 @@ defmodule Ankusa.Dispatch.Pipeline do
         expand(item, source, {state, ops, pairs, jobs, sources}, now)
 
       true ->
-        key = {item.env.source_id, item.sink, item.row.module}
+        key =
+          {Tenants.normalize(item.env.tenant_id), item.env.source_id, item.sink, item.row.module}
 
         case admit(state, key) do
           {:park, at, state} ->
@@ -954,11 +1213,13 @@ defmodule Ankusa.Dispatch.Pipeline do
   defp stage(state, jobs) do
     bytes = Enum.reduce(jobs, 0, &(&1.size + &2))
 
-    state = %{
-      state
-      | claimed: state.claimed + length(jobs),
-        claimed_bytes: state.claimed_bytes + bytes
-    }
+    state =
+      %{
+        state
+        | claimed: state.claimed + length(jobs),
+          claimed_bytes: state.claimed_bytes + bytes
+      }
+      |> then(fn state -> Enum.reduce(jobs, state, &tenant_add(&2, &1)) end)
 
     {needing, ready} = Enum.split_with(jobs, &needs_claim?/1)
     state = Enum.reduce(ready, state, &enqueue(&2, &1))
@@ -1059,16 +1320,27 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
-  defp push(state, %{key: key} = job) do
+  defp push(state, %{key: key, ord: ord} = job) do
     queue = Map.get(state.queues, key, :queue.new())
-    ring = if :queue.is_empty(queue), do: :queue.in(key, state.ring), else: state.ring
+    state = if :queue.is_empty(queue), do: ring_in(state, ord, key), else: state
 
-    %{
-      state
-      | queues: Map.put(state.queues, key, :queue.in(job, queue)),
-        ring: ring,
-        queued: state.queued + 1
-    }
+    %{state | queues: Map.put(state.queues, key, :queue.in(job, queue)), queued: state.queued + 1}
+  end
+
+  # `key` has a first queued job: it joins its tenant's keys, and the tenant the
+  # ring of tenants if it had no queued key.
+  defp ring_in(state, ord, key) do
+    case state.rings do
+      %{^ord => keys} ->
+        %{state | rings: Map.put(state.rings, ord, :queue.in(key, keys))}
+
+      _ ->
+        %{
+          state
+          | rings: Map.put(state.rings, ord, :queue.from_list([key])),
+            ring: :queue.in(ord, state.ring)
+        }
+    end
   end
 
   # ── breakers ──────────────────────────────────────────────────────────────
@@ -1108,6 +1380,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   # moving the whole DLQ into rows that wait on the breaker.
   defp park(state, job, at) do
     state = %{state | claimed: state.claimed - 1, claimed_bytes: state.claimed_bytes - job.size}
+    state = tenant_sub(state, job.ord, job.size)
     state |> bump_replay(job.row, :parked) |> append(park_ops(job, at))
   end
 
@@ -1202,19 +1475,35 @@ defmodule Ankusa.Dispatch.Pipeline do
           probe: nil
       })
 
-    park_queued(state, job.key, now_ms() + period)
+    park_queued(state, job.ord, job.key, now_ms() + period)
   end
 
-  defp park_queued(state, key, at) do
+  defp park_queued(state, ord, key, at) do
     case Map.pop(state.queues, key) do
       {nil, _queues} ->
         state
 
       {queue, queues} ->
         jobs = :queue.to_list(queue)
-        ring = :queue.delete(key, state.ring)
-        state = %{state | queues: queues, ring: ring, queued: state.queued - length(jobs)}
+        state = drop_key(state, ord, key)
+        state = %{state | queues: queues, queued: state.queued - length(jobs)}
         Enum.reduce(jobs, state, &park(&2, &1, at))
+    end
+  end
+
+  # `key` has no queued job any more: it leaves its tenant's keys, and the
+  # tenant the ring of tenants once it has none.
+  defp drop_key(state, ord, key) do
+    case state.rings do
+      %{^ord => keys} ->
+        keys = :queue.delete(key, keys)
+
+        if :queue.is_empty(keys),
+          do: %{state | rings: Map.delete(state.rings, ord), ring: :queue.delete(ord, state.ring)},
+          else: %{state | rings: Map.put(state.rings, ord, keys)}
+
+      _ ->
+        state
     end
   end
 
@@ -1231,9 +1520,11 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   # ── running ───────────────────────────────────────────────────────────────
 
-  # Round-robin over the keys with queued jobs: one job per key per turn. A key
-  # at its `sink_concurrency` cap, or half-open with its probe running, is
-  # skipped; a full turn that starts nothing stops the loop.
+  # Round-robin over the tenants with queued jobs, and within a tenant over its
+  # keys: one job per tenant per turn, so a tenant with a hundred keys gets no
+  # more turns than one with a single key. A tenant at its `concurrency`, a key
+  # at its `sink_concurrency` or half-open with its probe running is skipped; a
+  # full turn that starts nothing stops the loop.
   defp start_jobs(state), do: start_jobs(state, :queue.len(state.ring))
 
   defp start_jobs(state, 0), do: state
@@ -1246,26 +1537,55 @@ defmodule Ankusa.Dispatch.Pipeline do
         {:empty, _ring} ->
           state
 
-        {{:value, key}, ring} ->
+        {{:value, ord}, ring} ->
           state = %{state | ring: ring}
 
-          case admit(state, key) do
-            {:park, at, state} ->
-              state |> park_queued_from_ring(key, at) |> start_jobs(budget - 1)
-
-            {:pass, state} ->
-              if at_sink_cap?(state, key) do
-                start_jobs(%{state | ring: :queue.in(key, state.ring)}, budget - 1)
-              else
-                state = start_one(state, key)
-                start_jobs(state, :queue.len(state.ring))
-              end
+          if at_tenant_cap?(state, ord) do
+            start_jobs(%{state | ring: :queue.in(ord, ring)}, budget - 1)
+          else
+            case start_from_tenant(state, ord, :queue.len(Map.fetch!(state.rings, ord))) do
+              {:started, state} -> start_jobs(state, :queue.len(state.ring))
+              {:none, state} -> start_jobs(state, budget - 1)
+            end
           end
       end
     end
   end
 
-  # `key` is already out of the ring.
+  # `ord` is already out of the ring of tenants; `finish_tenant/2` puts it back
+  # if it still has a queued key.
+  defp start_from_tenant(state, ord, 0), do: {:none, finish_tenant(state, ord)}
+
+  defp start_from_tenant(state, ord, turns) do
+    case :queue.out(Map.fetch!(state.rings, ord)) do
+      {:empty, _keys} ->
+        {:none, finish_tenant(state, ord)}
+
+      {{:value, key}, keys} ->
+        state = %{state | rings: Map.put(state.rings, ord, keys)}
+
+        case admit(state, key) do
+          {:park, at, state} ->
+            state |> park_queued_from_ring(key, at) |> start_from_tenant(ord, turns - 1)
+
+          {:pass, state} ->
+            if at_sink_cap?(state, key) do
+              rings = Map.put(state.rings, ord, :queue.in(key, keys))
+              start_from_tenant(%{state | rings: rings}, ord, turns - 1)
+            else
+              {:started, state |> start_one(ord, key) |> finish_tenant(ord)}
+            end
+        end
+    end
+  end
+
+  defp finish_tenant(state, ord) do
+    if :queue.is_empty(Map.fetch!(state.rings, ord)),
+      do: %{state | rings: Map.delete(state.rings, ord)},
+      else: %{state | ring: :queue.in(ord, state.ring)}
+  end
+
+  # `key` is already out of its tenant's keys.
   defp park_queued_from_ring(state, key, at) do
     {queue, queues} = Map.pop(state.queues, key)
     jobs = :queue.to_list(queue)
@@ -1280,14 +1600,20 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
-  # `key` is out of the ring and has a non-empty queue.
-  defp start_one(state, key) do
+  defp at_tenant_cap?(state, ord) do
+    limits = Map.get(state.tenant_limits, ord, state.default_limits)
+    Map.get(state.running_by_tenant, ord, 0) >= limits.concurrency
+  end
+
+  # `key` is out of its tenant's keys and has a non-empty queue.
+  defp start_one(state, ord, key) do
     {{:value, job}, queue} = :queue.out(Map.fetch!(state.queues, key))
 
-    {queues, ring} =
+    {queues, rings} =
       if :queue.is_empty(queue),
-        do: {Map.delete(state.queues, key), state.ring},
-        else: {Map.put(state.queues, key, queue), :queue.in(key, state.ring)}
+        do: {Map.delete(state.queues, key), state.rings},
+        else:
+          {Map.put(state.queues, key, queue), Map.update!(state.rings, ord, &:queue.in(key, &1))}
 
     # Bind what the task needs *before* building the closure. Reaching into
     # `state.instance`/`state.config` inside it captures the whole state
@@ -1320,10 +1646,11 @@ defmodule Ankusa.Dispatch.Pipeline do
     %{
       state
       | queues: queues,
-        ring: ring,
+        rings: rings,
         queued: state.queued - 1,
         running: Map.put(state.running, task.ref, entry),
-        running_by_key: Map.update(state.running_by_key, key, 1, &(&1 + 1))
+        running_by_key: Map.update(state.running_by_key, key, 1, &(&1 + 1)),
+        running_by_tenant: Map.update(state.running_by_tenant, ord, 1, &(&1 + 1))
     }
   end
 
@@ -1393,13 +1720,22 @@ defmodule Ankusa.Dispatch.Pipeline do
         n -> Map.put(state.running_by_key, job.key, n - 1)
       end
 
-    state = %{
-      state
-      | running: running,
-        running_by_key: running_by_key,
-        claimed: state.claimed - 1,
-        claimed_bytes: state.claimed_bytes - job.size
-    }
+    running_by_tenant =
+      case Map.fetch!(state.running_by_tenant, job.ord) do
+        1 -> Map.delete(state.running_by_tenant, job.ord)
+        n -> Map.put(state.running_by_tenant, job.ord, n - 1)
+      end
+
+    state =
+      %{
+        state
+        | running: running,
+          running_by_key: running_by_key,
+          running_by_tenant: running_by_tenant,
+          claimed: state.claimed - 1,
+          claimed_bytes: state.claimed_bytes - job.size
+      }
+      |> tenant_sub(job.ord, job.size)
 
     attempts = job.row.attempts + 1
     now = now_ms()
@@ -1489,7 +1825,37 @@ defmodule Ankusa.Dispatch.Pipeline do
       %{instance: state.instance}
     )
 
-    %{state | tenants_visited: 0}
+    report_tenants(%{state | tenants_visited: 0})
+  end
+
+  @top_tenants 100
+
+  # `ankusa_dispatch_tenant_inflight{tenant}`: the claimed, unfinished rows of
+  # the tenants holding the most of them, which is how close each is to its
+  # window. A tenant that leaves the top, or drains, is reported once as 0 so its
+  # series does not keep a stale value (TEN-7 owns how many series may exist).
+  defp report_tenants(state) do
+    top =
+      state.tenant_claimed
+      |> Enum.map(fn {_ord, {rows, _bytes, tenant}} -> {tenant, rows} end)
+      |> Enum.sort_by(fn {_tenant, rows} -> rows end, :desc)
+      |> Enum.take(@top_tenants)
+
+    current = MapSet.new(top, fn {tenant, _rows} -> tenant end)
+
+    for {tenant, rows} <- top, do: emit_tenant(state, tenant, rows)
+
+    for tenant <- MapSet.difference(state.reported_tenants, current),
+        do: emit_tenant(state, tenant, 0)
+
+    %{state | reported_tenants: current}
+  end
+
+  defp emit_tenant(state, tenant, rows) do
+    Telemetry.emit([:dispatch, :tenant_state], %{inflight: rows}, %{
+      instance: state.instance,
+      tenant: tenant
+    })
   end
 
   # A delivery belonging to a replay job: counted so the Replayer can report
@@ -1656,7 +2022,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   defp schedule_next(state) do
-    case Deliveries.next_due_at(state.instance, state.cursors) do
+    case Deliveries.next_due_at(state.instance, state.cursors, skip: state.tenant_full) do
       {:ok, nil} ->
         cancel_timer(state)
 
