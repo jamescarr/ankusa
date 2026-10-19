@@ -25,9 +25,12 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   to two partitions at once still stores one hook. New keys
   `batcher.group_commit_max_bytes` (default 4 MiB: every caller waits for its whole
   group, so the cap bounds the ack latency a backlog adds) and
-  `batcher.group_commit_max_records` (1 024); a partition now keeps
-  `batcher.max_commits` (2) commits in flight so the writer always has a group
-  waiting; `batcher.partitions` now defaults to 4. A delivery row's `at` is the
+  `batcher.group_commit_max_records` (1 024); a partition now keeps up to
+  `batcher.max_commits` (64) commits in flight instead of one, so the writer finds
+  every waiting caller in its mailbox, and a saturated writer waits
+  `batcher.group_commit_delay_ms` (1) for the callers it just answered to join the
+  next group (never at low load); `batcher.partitions` now defaults to 4. A
+  delivery row's `at` is the
   time the hook was received rather than the
   writer's stamp (the due key keeps the writer's). `bench/store_commit.exs`
   measures commits/s and ack p99 at 1, 5 and 10 ms of fsync, and a one-second

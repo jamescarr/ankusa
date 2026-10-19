@@ -933,9 +933,9 @@ larger of fsync and confirm, not their sum) and the dual throughput is at least
 `Ankusa.Edge.Batcher.commit/4` with 10 KB bodies over 4 partitions and makes the
 writer's commit cost 1, 5 and 10 ms (a telemetry handler sleeps in the writer before
 the store write). Throughput: 256 closed-loop clients, grouped against ungrouped
-(`group_commit_max_records: 1, max_commits: 1`: one commit per partition batch, one at
-a time, what the writer did before cross-partition group commit), printing records/s,
-commits/s, mean group and
+(`group_commit_max_records: 1, max_commits: 1, group_commit_delay_ms: 0`: one commit
+per partition batch, one at a time, what the writer did before cross-partition group
+commit), printing records/s, commits/s, mean group and
 ack p50/p99. Burst: 1 000 req/s open loop, the writer stalled for one second, then
 drained while arrivals continue. It passes only if grouped is at least 2 x ungrouped
 at 5 ms and the ack p99 of the requests that arrived after the stall is at most 50 ms

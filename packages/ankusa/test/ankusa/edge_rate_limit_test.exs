@@ -294,6 +294,7 @@ defmodule Ankusa.Edge.RateLimitTest do
 
   defp held_by(batcher) do
     state = :sys.get_state(batcher)
+
     state.count +
       Enum.reduce(state.inflight, 0, fn {_ref, %{entries: entries}}, n -> n + length(entries) end)
   end

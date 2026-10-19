@@ -89,7 +89,7 @@ defmodule AnkusaServer.Config do
   @auth_mtls_keys ~w(subject_map)
   @tls_verifies ~w(verify_none verify_peer)
   @tls_versions %{"tlsv1.2" => :"tlsv1.2", "tlsv1.3" => :"tlsv1.3"}
-  @batcher_keys ~w(partitions max_batch max_commits group_commit_max_bytes group_commit_max_records max_delay_ms max_queue max_queue_bytes)
+  @batcher_keys ~w(partitions max_batch max_commits group_commit_max_bytes group_commit_max_records group_commit_delay_ms max_delay_ms max_queue max_queue_bytes)
   @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms sink_concurrency breaker_failures breaker_open_ms breaker_max_open_ms retry tenants)
   @dispatch_tenant_keys ~w(max_inflight max_inflight_bytes concurrency)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
@@ -893,6 +893,10 @@ defmodule AnkusaServer.Config do
           int_opt(batcher, "group_commit_max_records", ["batcher"])
         )
         |> put_opt(:max_delay_ms, int_opt(batcher, "max_delay_ms", ["batcher"]))
+        |> put_opt(
+          :group_commit_delay_ms,
+          int_opt(batcher, "group_commit_delay_ms", ["batcher"])
+        )
         |> put_opt(:max_queue, int_opt(batcher, "max_queue", ["batcher"]))
         |> put_opt(:max_queue_bytes, int_opt(batcher, "max_queue_bytes", ["batcher"]))
     ]

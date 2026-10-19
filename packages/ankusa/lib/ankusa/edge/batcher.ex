@@ -8,7 +8,7 @@ defmodule Ankusa.Edge.Batcher do
   ack honest.
 
   The append itself runs in a `Task`, so the batcher keeps accepting requests
-  while commits are in flight, up to `batcher.max_commits` of them (two by
+  while commits are in flight, up to `batcher.max_commits` of them (64 by
   default): a request that finds a free slot is handed to the writer at once, one
   that does not accumulates behind the commits ahead and goes the instant one
   finishes. Keeping a second commit queued at the writer is what lets it merge
@@ -317,8 +317,9 @@ defmodule Ankusa.Edge.Batcher do
 
   # Every commit slot taken: the new record waits in `buffer` and the next
   # completion flushes it immediately.
-  defp maybe_flush(%{inflight: inflight, max_commits: max} = state) when map_size(inflight) >= max,
-    do: state
+  defp maybe_flush(%{inflight: inflight, max_commits: max} = state)
+       when map_size(inflight) >= max,
+       do: state
 
   defp maybe_flush(state) do
     cond do

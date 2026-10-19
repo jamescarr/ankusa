@@ -12,10 +12,10 @@
 #   1. Throughput. 256 closed-loop clients for `DURATION` seconds, at a simulated
 #      fsync of 1, 5 and 10 ms: records per second, commits per second, mean
 #      group (records per synced commit) and ack p50/p99. Each cell runs grouped
-#      (`batcher.group_commit_*` at their defaults) and ungrouped
-#      (`group_commit_max_records: 1, max_commits: 1`: every partition's batch is a
-#      commit of its own and one at a time, which is what the writer did before
-#      cross-partition group commit).
+#      (`batcher.group_commit_*` and `max_commits` at their defaults) and ungrouped
+#      (`group_commit_max_records: 1, max_commits: 1, group_commit_delay_ms: 0`:
+#      every partition's batch is a commit of its own, one at a time, which is what
+#      the writer did before cross-partition group commit).
 #
 #   2. Burst. 1 000 req/s of 10 KB bodies arrive open loop; the writer stalls for
 #      one second (the requests pile up behind it), then drains while arrivals
@@ -42,6 +42,27 @@ defmodule Bench.StoreCommit do
     clients = int("CLIENTS", 256)
     body = :crypto.strong_rand_bytes(int("BODY_BYTES", 10_240))
 
+    if System.get_env("SWEEP") == "1",
+      do: sweep(clients, seconds, body),
+      else: measure(opts, clients, seconds, body)
+  end
+
+  # `SWEEP=1`: how the commit slots per partition shape the groups (not a check).
+  defp sweep(clients, seconds, body) do
+    IO.puts(
+      "\nsweep: #{clients} clients, 5 ms fsync, #{@partitions} partitions\nmax_commits records/s  commits/s  mean group   p50 ms   p99 ms"
+    )
+
+    for k <- [1, 2, 4, 8, 16, 64] do
+      r = throughput(%{max_commits: k}, 5, clients, seconds, body)
+
+      IO.puts(
+        "#{String.pad_trailing("#{k}", 11)}#{String.pad_leading(fmt(r.per_s, 0), 10)}  #{String.pad_leading(fmt(r.commits_per_s, 0), 9)}  #{String.pad_leading(fmt(r.mean_group), 10)}  #{String.pad_leading(fmt(r.p50_ms), 7)}  #{String.pad_leading(fmt(r.p99_ms), 7)}"
+      )
+    end
+  end
+
+  defp measure(opts, clients, seconds, body) do
     IO.puts("""
 
     throughput: #{clients} closed-loop clients, #{byte_size(body)} B bodies, #{@partitions} partitions, #{seconds} s per cell
@@ -50,7 +71,7 @@ defmodule Bench.StoreCommit do
 
     rows =
       for fsync <- [1, 5, 10], mode <- [:ungrouped, :grouped], into: %{} do
-        result = throughput(mode, fsync, clients, seconds, body)
+        result = throughput(batcher_for(mode), fsync, clients, seconds, body)
         print(fsync, mode, result)
         {{fsync, mode}, result}
       end
@@ -90,10 +111,12 @@ defmodule Bench.StoreCommit do
 
   # ── throughput ────────────────────────────────────────────────────────────
 
-  defp throughput(mode, fsync, clients, seconds, body) do
-    batcher =
-      if mode == :grouped, do: %{}, else: %{group_commit_max_records: 1, max_commits: 1}
+  defp batcher_for(:grouped), do: %{}
 
+  defp batcher_for(:ungrouped),
+    do: %{group_commit_max_records: 1, max_commits: 1, group_commit_delay_ms: 0}
+
+  defp throughput(batcher, fsync, clients, seconds, body) do
     with_instance(batcher, fsync, fn inst, commits ->
       deadline = System.monotonic_time(:millisecond) + seconds * 1000
       started = System.monotonic_time(:microsecond)

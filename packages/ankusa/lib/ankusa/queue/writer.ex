@@ -103,6 +103,8 @@ defmodule Ankusa.Queue.Writer do
         # wrote lately (two generations, `recent_since` is when the older began)
         group_max_bytes: config.batcher.group_commit_max_bytes,
         group_max_records: config.batcher.group_commit_max_records,
+        group_delay_ms: config.batcher.group_commit_delay_ms,
+        last_group: 0,
         recent_cur: :ets.new(:ankusa_dedupe_recent, [:set, :private]),
         recent_old: :ets.new(:ankusa_dedupe_recent, [:set, :private]),
         recent_gen_at: mono,
@@ -260,12 +262,13 @@ defmodule Ankusa.Queue.Writer do
 
   @recent_ms 2_000
   @recent_max 100_000
+  @busy_records 16
 
   # `first` and every `:enqueue` call already queued (no `extra_ops`), as long as
   # the group stays within its caps; the call that would pass one starts the next
   # group (`handle_continue/2`). The first call is always taken, however large.
   defp group_commit({_from, prepared, _deadline} = first, state) do
-    state = begin_group(state)
+    state = state |> begin_group() |> linger()
     {calls, leftover} = drain([first], prepared.count, prepared.bytes, state)
 
     live =
@@ -307,9 +310,22 @@ defmodule Ankusa.Queue.Writer do
     end
   end
 
+  # A writer whose last group held at least `@busy_records` hooks is saturated,
+  # and the callers it just answered are about to call again: a short wait lets
+  # them join the next group instead of forming the one after it (without it a
+  # closed loop of clients splits into two cohorts that commit alternately, each
+  # half the size it could be). Never at low load, where it would only add latency.
+  defp linger(%{group_delay_ms: 0} = state), do: state
+
+  defp linger(state) do
+    if state.last_group >= @busy_records, do: Process.sleep(state.group_delay_ms)
+    state
+  end
+
   defp commit_group(live, state) do
     items = Enum.flat_map(live, fn {_from, prepared, _deadline} -> prepared.items end)
     calls = Enum.map(live, fn {from, prepared, _deadline} -> {from, prepared.count} end)
+    state = %{state | last_group: length(items)}
 
     case commit_batch(items, merge_prefetch(live, state), [], state, calls) do
       {:reply, reply, state} ->
@@ -323,11 +339,12 @@ defmodule Ankusa.Queue.Writer do
 
   # Each call gets the replies of its own hooks, in its own order.
   defp reply_calls(calls, {:ok, results}) do
-    Enum.reduce(calls, results, fn {from, count}, rest ->
-      {mine, rest} = Enum.split(rest, count)
-      GenServer.reply(from, {:ok, mine})
-      rest
-    end)
+    _unanswered =
+      Enum.reduce(calls, results, fn {from, count}, rest ->
+        {mine, rest} = Enum.split(rest, count)
+        GenServer.reply(from, {:ok, mine})
+        rest
+      end)
 
     :ok
   end
