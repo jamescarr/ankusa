@@ -27,6 +27,9 @@ this project follows [Semantic Versioning](https://semver.org/).
   `allow_unsigned=True` it raises `InvalidSignatureError` (`invalid_secret`).
   The signature is judged before the hook id. Returns a `ReceivedDelivery`
   (`headers`, `verified`).
+- `AdminClient.list_audit(**params)`: `GET /v1/audit`, the audit trail
+  (newest first, paged by `cursor`/`limit`, filtered by `since`, `until`,
+  `actor`, `action`, `tenant`).
 
 ## [0.5.0] - 2026-10-14
 

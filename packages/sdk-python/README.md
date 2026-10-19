@@ -280,6 +280,7 @@ admin = AdminClient(os.environ.get("ADMIN_URL", "http://localhost:4002"))
 admin.health()                          # {"status": "ok", "instance": ..., "roles": [...]}
 admin.list_dead_letters({"limit": 10})  # {"total": ..., "entries": [...]}
 admin.list_quarantined()
+admin.list_audit({"since": "2026-10-01T00:00:00Z", "limit": 50})  # {"entries": [...], "next_cursor": ...}
 
 job = admin.create_replay({"kind": "dlq", "source_id": "stripe", "rate": 500})
 admin.get_replay(job["id"])
@@ -294,7 +295,9 @@ API sends it.
 
 Methods: `health()`, `metrics()` (Prometheus text), `config()`,
 `list_dead_letters()`, `create_replay()`, `get_replay()`, `list_replays()`,
-`update_replay()`, `list_quarantined()`. Failures are `AdminError` subclasses:
+`update_replay()`, `list_quarantined()`, `list_audit()` (`GET /v1/audit`, the
+audit trail newest first, paged by `cursor`/`limit`, filtered by `since`,
+`until`, `actor`, `action`, `tenant`). Failures are `AdminError` subclasses:
 `RoleNotEnabledError` (409 `role_not_enabled`, carrying `role`),
 `AdminRejectedError` (any other 4xx — a missing replay is a 404 with
 `code="replay_not_found"`, carrying `scope` when a `403 forbidden` names the

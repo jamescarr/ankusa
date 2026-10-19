@@ -120,6 +120,18 @@ class AdminClient:
         """
         return self._json(self._request("GET", "/v1/quarantine", params=_query(params)))
 
+    def list_audit(
+        self,
+        params: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """``GET /v1/audit`` -> a page of audit trail entries, newest first.
+
+        ``params`` may carry ``cursor``, ``limit``, ``since``, ``until``,
+        ``actor``, ``action`` and ``tenant``; absent keys are omitted from the
+        query string rather than sent as ``=undefined``.
+        """
+        return self._json(self._request("GET", "/v1/audit", params=_query(params)))
+
     def _request(
         self,
         method: str,
