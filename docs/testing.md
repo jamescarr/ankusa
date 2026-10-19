@@ -31,7 +31,7 @@ the same dependencies, PLT paths and coverage floor.
 
 ```sh
 mise run check:package ankusa         # no external infra needed
-mise run test:integration             # +21 tests against the floci emulators (see below)
+mise run test:integration             # +22 tests against the floci emulators (see below)
 ```
 
 The always-on tests cover:
@@ -338,6 +338,31 @@ The always-on tests cover:
   (`MIX_ENV=test mix run bench/tenant_fairness_bench.exs`, not part of
   `bench:gate`) runs the same 99:1 load through the edge and prints both
   tenants' p99.
+- **Tenant erase** (`tenant_test.exs`, `tenant_s3_integration_test.exs`):
+  `erase leaves no trace` fills a tenant and its neighbour with sources, routes,
+  an override, delivery rows in every state, held hooks, dedupe keys and claim
+  objects, erases one, and scans every column family, the claim store and the
+  edge's tables for its id and ordinal: nothing is left, the counters equal a
+  fold of the rows, and the neighbour is untouched. A lifecycle consumer is
+  told in order (`deleted` of each source and route, then `tenant.deleted`) and
+  a replay of the window emits nothing else of the tenant.
+  `a running attempt cannot put a row back` erases while a slow sink's attempts
+  are running and asserts no row, counter or marker remains, even after the
+  retry would have been due. A tenant being erased takes no hook (`503
+  tenant_erasing`, the quarantine pen too) and one that was erased is a new
+  tenant. `a fetch of an erased hook is gone` archives hooks, erases, and
+  asserts `Storage.fetch/2` is `{:error, :gone}` for them and not for the
+  neighbour's, and that an archive replay skips them. `resumes after kill -9`
+  runs the erase in a child BEAM, kills it with `kill -9` in the `queue` stage
+  while its sink never answers, reopens the store, and asserts the tenant is
+  still closed, the job runs to `erased`, one `tenant.delete` audit row and the
+  `tenant.deleted` event exist, and the neighbour's hooks are all still
+  stored. The request cases cover a wrong `confirm`, `default`, a bad name, a
+  configured source, and the admin routes (`202`, the status, the audit actor);
+  `admin/router_auth_test.exs` has the `401`/`403` cases, a token for the
+  tenant itself included. The S3 test puts claim objects for two tenants in
+  floci, erases one, and asserts its prefix is empty and the other's objects
+  remain.
 - **Filesystem durability** (`fsync_test.exs`): the helpers return an error
   for a path they cannot open, write or rename, never raise, and `write_file`
   replaces content in one step and leaves no temp file. `mkdir_p/2` fsyncs the
@@ -484,7 +509,7 @@ The always-on tests cover:
   validates. The adapters' `*_describe_test.exs` pin what each sink advertises
   (and that no credential reaches it) without a broker.
 
-The 24 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
+The 25 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
 `blob_store_gcs_test.exs`, `blob_store_azure_integration_test.exs`,
 `blob_store_oci_integration_test.exs`) exercise `BlobStore.{S3,GCS,Azure,OCI}`
 against real running emulators: put/get round-trip, `get_range` byte-slicing,
@@ -853,6 +878,44 @@ The bench reports `ingest_per_s`, `p50_ms`, `p99_ms` (ingest latency),
 acked never arrived. The numbers are machine-dependent and move with the
 pipeline, so run it on your own hardware rather than reading a figure here.
 
+### Dual commit: `wal.type: dual`
+
+[ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md) lists every case; each half of the
+commit is driven alone with `Ankusa.Intake.Memory` (a file-backed log with
+injectable latency, per-call failures, a lost ack, a held publish) or by taking the
+store down, and asserts on what a consumer sees (the `201`, the stored hooks, the
+sink's deliveries, the log's records):
+
+- `queue_dual_test.exs`: `no ack without intake confirm`, the max-not-sum
+  latency, a log that fails after the local commit (one hook id per dedupe key,
+  one delivery, the retry is `intake_pending` until the reconciler completes
+  the hook and `duplicate` after), a store that fails after the publish, both
+  halves failing, a lost ack republished and applied once, the refusals before
+  either half (open breaker, pending ceilings, record too large), the breaker's
+  open / half-open / close cycle and that it never degrades to disk-only, the
+  router's `503`s and `Retry-After`, the fleet claim staying pending, the
+  startup lines, the metric series.
+- `intake/reconciler_test.exs`: the log half, the local half, a local half that
+  already landed is not reapplied, a stuck entry releases its claim, a permanent
+  failure is stuck and kept, `hold` against a finished entry, claims promote only
+  when both halves are confirmed.
+- `intake/recovery_test.exs`: replay from `m:intake_offset` with the original seqs,
+  duplicate and reordered records, a seq collision re-sequenced, republishing the
+  local tail (`disk` to `dual`), unknown versions, kinds and sources, a truncated
+  log, a node id mismatch, `Recovery.run_offline/2` (what `mix ankusa.recover`
+  runs) twice and with `--dry-run`, a clean stop leaving the offset at the log
+  head, and the offset staying below a record only the log holds.
+- `config_test.exs` (every `intake.*` range and the cross-key rules, the
+  `/v1/config` redaction), `health_test.exs` (`intake` up, down, recovering).
+
+`bench/intake_bench.exs` (`MIX_ENV=test mix run bench/intake_bench.exs`, also run
+by `mise run bench:gate`) compares `wal: :dual` with `wal: :disk` in one VM:
+`Ankusa.Intake.Memory` confirms after 5 ms, one client measures the ack p50 over
+200 requests, 512 clients measure throughput over 6 000 (the best of three rounds). It passes only if the
+dual p50 is within `max(disk p50, 5 ms) + 5 ms` (the parallel commit costs the
+larger of fsync and confirm, not their sum) and the dual throughput is at least
+0.3 x the disk's (ADR 0002 asks for 0.8 x; see its Amendments for the measurement behind the lower floor).
+
 ### Perf gate: `mise run bench:gate`
 
 A hot-path change must not make ingest slower unnoticed, so
@@ -907,8 +970,8 @@ and the heavy tenant's peak claimed rows and running attempts, and exits 1 if
 the light tenant's p99 is more than 2× its solo p99 (or over 25 ms) or the
 heavy tenant passes its window.
 
-`mise run bench:gate` also runs three self-asserting scripts first, with no
-baseline entry:
+`mise run bench:gate` also runs four self-asserting scripts first, with no
+baseline entry (the fourth, [`bench/intake_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/intake_bench.exs), is under [Dual commit](#dual-commit-wal-type-dual)):
 [`bench/gauges_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/gauges_bench.exs)
 times `Ankusa.Metrics.Gauges.measure/1` and
 [`bench/dispatch_tick_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/dispatch_tick_bench.exs)

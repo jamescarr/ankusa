@@ -31,6 +31,7 @@ defmodule Ankusa.Edge.Quarantine do
   alias Ankusa.Audit.Context
   alias Ankusa.Queue.Tenants
   alias Ankusa.Store.Keys
+  alias Ankusa.Tenant.Gate
 
   # Idle buckets are dropped this often (a missing bucket is a full one).
   @sweep_interval_ms 60_000
@@ -86,12 +87,18 @@ defmodule Ankusa.Edge.Quarantine do
   `{:rate_limited, retry_after_ms}` when the source's bucket is empty; `:full`
   when the entry would take the pen past `max_bytes` (no token is spent); or
   `{:error, :store_unavailable}` when the store could not take the write (no
-  token is spent).
+  token is spent); `{:error, :tenant_erasing}` when an erase of the envelope's
+  tenant is running (`Ankusa.Tenant`).
   """
   @spec put(atom(), Envelope.t(), term()) ::
-          :ok | {:rate_limited, pos_integer()} | :full | {:error, :store_unavailable}
+          :ok
+          | {:rate_limited, pos_integer()}
+          | :full
+          | {:error, :store_unavailable | :tenant_erasing}
   def put(instance, env, reason) do
-    GenServer.call(Ankusa.via(instance, :quarantine), {:put, env, reason})
+    if Gate.closed?(instance, Ankusa.Queue.Tenants.normalize(env.tenant_id)),
+      do: {:error, :tenant_erasing},
+      else: GenServer.call(Ankusa.via(instance, :quarantine), {:put, env, reason})
   catch
     :exit, _reason -> {:error, :store_unavailable}
   end

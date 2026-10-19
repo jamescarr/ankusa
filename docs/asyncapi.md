@@ -78,6 +78,7 @@ route-management API, or `Ankusa.SourceStore.put/5`, `delete/3` and
 | --- | --- | --- |
 | `io.ankusa.source.created` / `updated` / `deleted` | a webhook endpoint (source) changes | `<tenant>.<name>` |
 | `io.ankusa.route.created` / `updated` / `deleted` | a route changes (`PUT` on a new id is `created`) | the route id |
+| `io.ankusa.tenant.deleted` | a tenant was erased ([`multi-tenancy.md`](multi-tenancy.md#erasing-a-tenant)), after the `deleted` event of each of its sources and routes; `data` is `{"tenant": <id>}`, no entity | the tenant id |
 | `io.ankusa.instance.restored` | the store was restored from a backup, before any new change | the instance name |
 
 The body is a [CloudEvents 1.0](https://cloudevents.io) structured-mode event:

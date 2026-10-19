@@ -51,6 +51,39 @@ defmodule Ankusa.LossTest do
            "lost #{MapSet.size(missing)} acked hooks: #{inspect(Enum.take(missing, 5))}"
   end
 
+  # `wal: :dual` against the loss `disk` cannot survive: the host. The child
+  # acks under a file-backed intake log, is killed with SIGKILL, and the whole
+  # data dir goes. A node started on the empty volume replays the log at boot.
+  test "dual: kill -9 under load and an emptied data dir, boot recovery delivers every acked id" do
+    data_dir = unique_data_dir(:crash_harness)
+    log = Path.join(System.tmp_dir!(), "crash-intake-#{System.unique_integer([:positive])}.log")
+
+    on_exit(fn ->
+      File.rm_rf(data_dir)
+      File.rm(log)
+    end)
+
+    config = Ankusa.CrashHarness.config(data_dir, log: log)
+
+    port = start_child(data_dir, [{~c"INTAKE_LOG", String.to_charlist(log)}])
+    on_exit(fn -> kill_if_alive(port) end)
+    {:os_pid, os_pid} = Port.info(port, :os_pid)
+
+    acked = collect_acks(port, @count)
+    assert MapSet.size(acked) == @count
+
+    {_, 0} = System.cmd("kill", ["-9", Integer.to_string(os_pid)])
+    assert_receive {^port, {:exit_status, 137}}, 10_000
+    File.rm_rf!(data_dir)
+
+    start_supervised!({Ankusa.Instance, config})
+    {:ok, hooks} = Ankusa.Queue.hooks(config.instance, 0, 1_000_000)
+    missing = MapSet.difference(acked, MapSet.new(hooks, & &1.id))
+
+    assert MapSet.size(missing) == 0,
+           "lost #{MapSet.size(missing)} acked hooks: #{inspect(Enum.take(missing, 5))}"
+  end
+
   # The index and the counters are written in the same synced batch as the hook,
   # so a SIGKILL leaves them agreeing: every hook has one due row under its
   # tenant's ordinal, and the counters are what a fold of the index says.

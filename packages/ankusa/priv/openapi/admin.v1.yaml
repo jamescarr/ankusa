@@ -80,6 +80,12 @@ tags:
       Per-tenant ingest rate limits: config values plus this node's runtime
       overrides (persisted in the node's store). `:edge` role
       only; node-local.
+  - name: tenants
+    description: |
+      Erase a whole tenant on this node: `DELETE /v1/tenants/{tenant}?confirm={tenant}`
+      runs a resumable background job and `GET /v1/tenants/{tenant}/erase` reports
+      it. Needs `tenants:write` **and** `tenant:*`, whoever the tenant is. `:edge`
+      role only when `routes.enabled`; node-local like the store it empties.
   - name: routes
     description: |
       Route definitions and the global IP rules, on the `routes.admin.port`
@@ -759,6 +765,107 @@ paths:
           $ref: '#/components/responses/RateLimitNotFound'
         '409':
           $ref: '#/components/responses/RoleNotEnabled'
+        '503':
+          $ref: '#/components/responses/NodeStoreUnavailable'
+  /v1/tenants/{tenant}:
+    parameters:
+      - name: tenant
+        in: path
+        required: true
+        description: The tenant id, as it appears in the catch URL.
+        schema:
+          type: string
+    delete:
+      operationId: eraseTenant
+      tags: [tenants]
+      summary: Erase a tenant
+      description: |
+        Starts a resumable job that deletes everything this node holds for the
+        tenant: its stored sources and routes (each a `deleted` lifecycle event),
+        its rate-limit override, its pending, in-flight and dead delivery rows,
+        archive obligations, quarantine rows, claim objects (`claims/tenant=<t>/`
+        on every claim store), dedupe keys and entities; then writes the tombstone
+        `m:erased:<tenant>` and one `tenant.delete` audit row in one synced batch,
+        which becomes the `io.ankusa.tenant.deleted` lifecycle event. The tenant is
+        closed first: new hooks for it are `503 tenant_erasing`, dispatch stops
+        claiming its rows, and running attempts drain before rows are deleted.
+        A hook of the tenant that was archived before the erase answers `410`
+        (`Storage.fetch` is `{:error, :gone}`) until its segment expires. The job
+        survives a restart and resumes at boot. Refused with `409` while a
+        configured (static or seeded) source names the tenant, and for `default`.
+        `confirm` must be the tenant again.
+      parameters:
+        - name: confirm
+          in: query
+          required: true
+          description: The tenant being erased, typed again.
+          schema:
+            type: string
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '202':
+          description: The job is recorded and running.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantErase'
+        '200':
+          description: A job for this tenant is already running.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantErase'
+        '400':
+          description: '`400`. `invalid_tenant`, or `confirm_mismatch`: `confirm` is not the tenant.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: '`409`. `default_tenant`, `tenant_has_configured_sources` (`sources` lists them) or `role_not_enabled`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/responses/NodeStoreUnavailable'
+  /v1/tenants/{tenant}/erase:
+    parameters:
+      - name: tenant
+        in: path
+        required: true
+        description: The tenant id, as it appears in the catch URL.
+        schema:
+          type: string
+    get:
+      operationId: getTenantErase
+      tags: [tenants]
+      summary: Where a tenant's erase is
+      description: |
+        `state: erasing` with the `stage` it is in, or `state: erased` with the
+        time of the tombstone. `404` when this node has neither.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The job's state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantErase'
+        '400':
+          $ref: '#/components/responses/InvalidTenant'
+        '404':
+          description: '`404`. `erase_not_found`: no erase of this tenant is running or recorded on this node.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '503':
           $ref: '#/components/responses/NodeStoreUnavailable'
   /admin/routes/test:
@@ -1897,6 +2004,27 @@ components:
           type: integer
           minimum: 1
           example: 67108864
+    TenantErase:
+      type: object
+      description: |
+        One tenant's erase. `stage` and `started_at` (ISO 8601) appear while
+        `state` is `erasing` and the status is read; `erased_at` once it is `erased`.
+      required: [tenant, state]
+      properties:
+        tenant:
+          type: string
+        state:
+          type: string
+          enum: [erasing, erased]
+        stage:
+          type: string
+          enum: [sources, routes, rate_limit, queue, archive, quarantine, claims, dedupe, entities, commit]
+        started_at:
+          type: string
+          format: date-time
+        erased_at:
+          type: string
+          format: date-time
     TenantRateLimit:
       type: object
       description: |

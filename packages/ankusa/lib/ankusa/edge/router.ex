@@ -305,11 +305,21 @@ defmodule Ankusa.Edge.Router do
   end
 
   # The node already knows `tenants.max` tenants: this one is refused until an
-  # operator raises the cap (or erases a tenant), so a short retry is no use.
+  # operator raises the cap, so a short retry is no use. (Erasing a tenant
+  # retires its ordinal, it does not free one: `Ankusa.Tenant`.)
   defp respond(conn, {:error, :tenant_limit}) do
     conn
     |> Plug.Conn.put_resp_header("retry-after", "300")
     |> send_json(503, %{error: "tenant_limit"})
+  end
+
+  # The tenant is being erased (`Ankusa.Tenant`): its hooks are refused until
+  # the erase commits, a matter of seconds to minutes, after which the same
+  # request is the first of a new tenant (or a `404`, with its sources gone).
+  defp respond(conn, {:error, :tenant_erasing}) do
+    conn
+    |> Plug.Conn.put_resp_header("retry-after", "30")
+    |> send_json(503, %{error: "tenant_erasing"})
   end
 
   # The node holds `dedupe.max_entries` live dedupe keys (or the tenant holds
@@ -319,6 +329,25 @@ defmodule Ankusa.Edge.Router do
     conn
     |> Plug.Conn.put_resp_header("retry-after", "60")
     |> send_json(503, %{error: "dedupe_quota"})
+  end
+
+  # `wal: :dual`: the intake log cannot confirm (its breaker is open, the pending
+  # set is full), so nothing was stored and the provider retries
+  # (`intake.retry_after_s`).
+  defp respond(conn, {:error, :intake_unavailable}) do
+    retry_after = Ankusa.config(instance(conn)).intake.retry_after_s
+
+    conn
+    |> Plug.Conn.put_resp_header("retry-after", Integer.to_string(retry_after))
+    |> send_json(503, %{error: "intake_unavailable"})
+  end
+
+  # `wal: :dual`: this is the retry of a hook the node holds but has not yet
+  # confirmed in the log. Not a `201`: the provider retries in a second.
+  defp respond(conn, {:error, :intake_pending}) do
+    conn
+    |> Plug.Conn.put_resp_header("retry-after", "1")
+    |> send_json(503, %{error: "intake_pending"})
   end
 
   # The dead-letter queue is over `queue.dlq.max_rows`/`max_bytes` and has no row

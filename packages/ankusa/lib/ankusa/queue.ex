@@ -42,7 +42,8 @@ defmodule Ankusa.Queue do
   half-way: an abandoned call would commit anyway, unacknowledged.
 
   An entry's reply is `{:error, :tenant_limit}` instead when its tenant would
-  be one past `tenants.max`: that hook is not written. It is
+  be one past `tenants.max`, or `{:error, :tenant_erasing}` when an erase of
+  its tenant is running (`Ankusa.Tenant`): that hook is not written. It is
   `{:error, :dedupe_quota}` when its dedupe key would be a new live key past
   `dedupe.max_entries` or `dedupe.max_entries_per_tenant`: the hook is not
   written either, and never stored without its key.
@@ -52,7 +53,9 @@ defmodule Ankusa.Queue do
            [
              {:committed, Envelope.t()}
              | {:duplicate, Envelope.t()}
-             | {:error, :tenant_limit | :dedupe_quota}
+             | {:error, :tenant_limit | :tenant_erasing | :dedupe_quota}
+             | {:error, :intake_unavailable | :intake_pending | :store_unavailable}
+             | {:error, {:half, :intake_unavailable | :store_unavailable, String.t()}}
            ]}
           | {:error, term()}
   def enqueue(instance, entries, deadline \\ :infinity) do
@@ -69,7 +72,8 @@ defmodule Ankusa.Queue do
   row, with `extra_ops` (the pen deletes and the job's cursor) in the same
   synced batch — so a crash cannot leave a hook both committed and still held,
   or held and gone. `extra_ops` commit even when every entry is a duplicate.
-  A tenant past `tenants.max` is the whole call's `{:error, :tenant_limit}`:
+  A tenant past `tenants.max` (or one being erased) is the whole call's
+  `{:error, :tenant_limit}` (`:tenant_erasing`):
   nothing commits, the pen keeps its entries.
   Never deadline-bound.
   """
@@ -237,13 +241,21 @@ defmodule Ankusa.Queue do
   def dead_for_tenant(instance, tenant), do: Deliveries.dead_for_tenant(instance, tenant)
 
   @doc """
-  Removes `tenant`'s `:pending` (every due row) and/or `:dead` rows (`kinds` a
-  subset of `[:pending, :dead]`) in synced chunks of 500: idempotent, so a run
-  that stopped part-way resumes by being called again, and it never touches
-  claimed rows. Returns the rows removed per kind.
+  Removes `tenant`'s `:pending` (every due row), `:inflight` (claimed rows,
+  for a tenant dispatch has stopped claiming: see `Ankusa.Tenant`) and/or
+  `:dead` rows (`kinds` a subset of `[:pending, :inflight, :dead]`) in synced
+  chunks of 500: idempotent, so a run that stopped part-way resumes by being
+  called again. Without `:inflight` it never touches claimed rows. Returns the
+  rows removed per kind.
   """
-  @spec purge_tenant(atom(), String.t(), [:pending | :dead]) ::
-          {:ok, %{pending: non_neg_integer(), dead: non_neg_integer()}} | {:error, term()}
+  @spec purge_tenant(atom(), String.t(), [:pending | :inflight | :dead]) ::
+          {:ok,
+           %{
+             required(:pending) => non_neg_integer(),
+             required(:dead) => non_neg_integer(),
+             optional(:inflight) => non_neg_integer()
+           }}
+          | {:error, term()}
   def purge_tenant(instance, tenant, kinds), do: Deliveries.purge_tenant(instance, tenant, kinds)
 
   defp next_seq(instance) do
@@ -286,10 +298,12 @@ defmodule Ankusa.Queue do
 
   @doc """
   The configured queue mode's name, for boot banners and `check-config`:
-  `"disk"` for the store-backed queue, `"none"` under `wal: :none`.
+  `"disk"` for the store-backed queue, `"dual"` for the store plus the intake
+  log (`wal: :dual`), `"none"` under `wal: :none`.
   """
-  @spec label(:disk | :none) :: String.t()
+  @spec label(:disk | :dual | :none) :: String.t()
   def label(:none), do: "none"
+  def label(:dual), do: "dual"
   def label(:disk), do: "disk"
 
   # ── boot validation ─────────────────────────────────────────────────────

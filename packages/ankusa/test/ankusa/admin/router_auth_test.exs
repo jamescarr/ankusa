@@ -16,8 +16,8 @@ defmodule Ankusa.Admin.RouterAuthTest do
 
   # {method, path, scope, tenancy}: `:open` routes are not about a tenant,
   # `:filtered` ones hold every tenant's rows and are limited to the caller's
-  # tenants (`tenant:*` for all of them), `{:tenant, t}` ones belong to tenant
-  # `t`.
+  # tenants (`tenant:*` for all of them), `:global` ones need `tenant:*` whoever
+  # the tenant is, `{:tenant, t}` ones belong to tenant `t`.
   @routes [
     {:get, "/metrics", "metrics:read", :open},
     {:get, "/v1/wal", "metrics:read", :open},
@@ -39,7 +39,11 @@ defmodule Ankusa.Admin.RouterAuthTest do
     {:get, "/v1/rate-limits", "rate_limits:read", :filtered},
     {:get, "/v1/tenants/acme/rate-limit", "rate_limits:read", {:tenant, "acme"}},
     {:put, "/v1/tenants/acme/rate-limit", "rate_limits:write", {:tenant, "acme"}},
-    {:delete, "/v1/tenants/acme/rate-limit", "rate_limits:write", {:tenant, "acme"}}
+    {:delete, "/v1/tenants/acme/rate-limit", "rate_limits:write", {:tenant, "acme"}},
+    # A confirmation naming another tenant: the operator's request is a `400`
+    # that erases nothing.
+    {:delete, "/v1/tenants/acme?confirm=globex", "tenants:write", :global},
+    {:get, "/v1/tenants/acme/erase", "tenants:write", :global}
   ]
 
   @every_scope Principal.scopes()
@@ -166,6 +170,15 @@ defmodule Ankusa.Admin.RouterAuthTest do
 
         refute call_naming(inst, route, "acme", "acme").status in [401, 403]
         refute call_naming(inst, route, "globex", "operator").status in [401, 403]
+      end
+    end
+
+    test "a global route needs tenant:* even for the tenant a token holds", %{inst: inst} do
+      for {method, path, _scope, :global} = route <- @routes,
+          token <- ["tenantless", "acme", "globex"] do
+        conn = call(inst, route, token)
+        assert conn.status == 403, "#{token} on #{method} #{path} answered #{conn.status}"
+        assert %{"scope" => "tenant:*"} = JSON.decode!(conn.resp_body)
       end
     end
   end

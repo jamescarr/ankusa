@@ -18,7 +18,7 @@ mix compile
 # commit's sources, which have neither the tenant layout nor these benches'
 # APIs, so it skips them.
 if [ "${BENCH_REBASELINE:-}" != 1 ] && [ "${BENCH_REBASELINE:-}" != true ]; then
-  for bench in gauges_bench dispatch_tick_bench; do
+  for bench in gauges_bench dispatch_tick_bench intake_bench; do
     echo "==> bench/$bench.exs"
     MIX_ENV=test mix run "bench/$bench.exs"
   done

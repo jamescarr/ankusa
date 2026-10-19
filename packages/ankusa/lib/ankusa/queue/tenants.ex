@@ -62,6 +62,28 @@ defmodule Ankusa.Queue.Tenants do
   end
 
   @doc """
+  The first ordinal nothing uses: the greater of the `m:next_ord` marker and one
+  past the highest stored tenant row (a marker lost to a crash never reissues).
+  """
+  @spec next_free_ord(atom()) :: {:ok, pos_integer()} | {:error, term()}
+  def next_free_ord(instance) do
+    %{hi: hi} = Keys.family(:tenants)
+
+    with {:ok, marker} <- next_ord(instance),
+         {:ok, last} <-
+           Store.fold(
+             instance,
+             :tenants,
+             {Keys.tenant(0), hi},
+             0,
+             fn <<?t, ord::32>>, _v, _acc -> {:halt, ord} end,
+             reverse: true
+           ) do
+      {:ok, max(marker, last + 1)}
+    end
+  end
+
+  @doc """
   Hands out ordinals to `tenants` (distinct tenant ids with no ordinal yet), in
   order, starting at `next` and stopping once `max` ordinals exist. Returns
   `{ords, ops, next, refused}`: the new `tenant => ord` pairs, the puts of their

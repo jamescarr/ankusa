@@ -67,9 +67,12 @@ defmodule Ankusa.Edge.Ingest do
              :unknown_source
              | :overload
              | :tenant_limit
+             | :tenant_erasing
              | :dedupe_quota
              | :dlq_full
              | :store_unavailable
+             | :intake_unavailable
+             | :intake_pending
              | :quarantine_full
              | {:invalid_header, String.t() | nil}
              | {:rate_limited, pos_integer()}
@@ -302,7 +305,7 @@ defmodule Ankusa.Edge.Ingest do
       # A forged, flag-accepted request must not claim a provider event key and
       # suppress the real event, so no key is extracted when the hook was flagged.
       case Quarantine.hit(instance, env.source_id, env.tenant_id) do
-        :ok -> commit_stored(instance, source, env)
+        :ok -> commit_stored(instance, source, env, nil)
         {:rate_limited, ms} -> {{:error, {:quarantine_rate_limited, ms}}, 0}
         {:error, :store_unavailable} -> {{:error, :store_unavailable}, 0}
       end
@@ -313,9 +316,7 @@ defmodule Ankusa.Edge.Ingest do
 
       case Fleet.admit(instance, source, env) do
         {:ok, claim} ->
-          {result, dropped} = commit_stored(instance, source, env)
-          Fleet.settle(instance, claim, result)
-          {result, dropped}
+          commit_stored(instance, source, env, claim)
 
         {:duplicate, hook_id} ->
           {{:duplicate, %{env | id: hook_id, seq: nil}}, 0}
@@ -361,9 +362,31 @@ defmodule Ankusa.Edge.Ingest do
 
   defp drop_credentials(policy, _verifier), do: policy
 
-  defp commit_stored(instance, source, env) do
+  # The claim (`dedupe.scope: :fleet`) is settled with the commit's outcome. A hook
+  # that persisted in only one of the places `wal: :dual` promises
+  # (`{:error, {:half, reason, id}}`) is carried to completion by the reconciler,
+  # so its claim is neither promoted nor released: the reconciler promotes it when
+  # both halves are confirmed, and the provider's retry meets it pending.
+  defp commit_stored(instance, source, env, claim) do
     {env, dropped} = store_headers(instance, source, env)
-    {commit(instance, source, env), dropped}
+    {settle(instance, claim, commit(instance, source, env)), dropped}
+  end
+
+  defp settle(instance, claim, {:error, {:half, reason, id}}) do
+    if claim != nil do
+      case Ankusa.Intake.Reconciler.hold(instance, id, claim) do
+        :held -> :ok
+        :completed -> Fleet.promote(instance, claim, id)
+        :stuck -> Fleet.release(instance, claim)
+      end
+    end
+
+    {:error, reason}
+  end
+
+  defp settle(instance, claim, result) do
+    Fleet.settle(instance, claim, result)
+    result
   end
 
   # ── verification + policy ─────────────────────────────────────────────────
@@ -453,9 +476,14 @@ defmodule Ankusa.Edge.Ingest do
         {:duplicate, duplicate} -> {:duplicate, duplicate}
         {:error, :overload} -> {:error, :overload}
         {:error, :tenant_limit} -> {:error, :tenant_limit}
+        {:error, :tenant_erasing} -> {:error, :tenant_erasing}
         {:error, :dedupe_quota} -> {:error, :dedupe_quota}
         {:error, {:tenant_overload, _ms}} = refused -> tenant_overload(instance, env, refused)
         {:error, :store_unavailable} -> {:error, :store_unavailable}
+        # `wal: :dual`
+        {:error, :intake_unavailable} -> {:error, :intake_unavailable}
+        {:error, :intake_pending} -> {:error, :intake_pending}
+        {:error, {:half, _reason, _id}} = half -> half
       end
     catch
       :exit, _ -> {:error, :store_unavailable}
@@ -476,6 +504,7 @@ defmodule Ankusa.Edge.Ingest do
       :ok -> {:quarantined, reason}
       {:rate_limited, retry_after_ms} -> {:error, {:quarantine_rate_limited, retry_after_ms}}
       :full -> {:error, :quarantine_full}
+      {:error, :tenant_erasing} -> {:error, :tenant_erasing}
       {:error, :store_unavailable} -> {:error, :store_unavailable}
     end
   end

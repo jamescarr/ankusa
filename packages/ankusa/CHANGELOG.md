@@ -32,6 +32,41 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `test/fixtures/store-v6.tar.zst`. A node running format 6 cannot be rolled back to
   an image that writes format 5. See `docs/claim-check.md#claim-leases`.
 
+- **`wal: :dual`: the ack waits for a replicated intake log too (DUR-1.b.a,
+  [ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)).** The core of the
+  dual commit: the `Ankusa.Intake` behaviour and `Ankusa.Intake.Memory` (a
+  file-backed test double with fault injection), `Queue.Writer` running the synced
+  local write and the confirmed publish **in parallel** (both required for the
+  `201`; the reply is a message when the publish task answers, so batches
+  pipeline), a bounded pending set, the breaker (`Intake.Gate`), the live
+  `Intake.Reconciler` that **carries** a half-persisted hook to completion (the
+  fleet dedupe claim is held, then promoted; a retry that meets an unconfirmed
+  original is `503 intake_pending`, never `201`), boot recovery
+  (`Intake.Recovery`: identity, replay from `m:intake_offset` through the
+  seq-and-id rule, republish of the local tail; `mix ankusa.recover`),
+  `Health.ready` `intake: up | down | recovering`, `GET /v1/wal` `intake`, the
+  `ankusa_intake_*` series, `503 intake_unavailable` / `intake_pending`, and
+  every `intake.*` key with its range. New meta rows only (`m:intake_seq`,
+  `m:intake_node`, `m:intake_partition`); the store format is unchanged. The
+  Kafka adapter, the YAML keys, the fleet drill and the architecture, storage and
+  deployment docs are DUR-1.b.b. `bench/intake_bench.exs` is part of `mise run
+  bench:gate`.
+- **Tenant erase (TEN-5).** `DELETE /v1/tenants/{tenant}?confirm={tenant}`
+  (new scope `tenants:write`, which also needs `tenant:*`) and
+  `Ankusa.Tenant.delete/3` erase a tenant as a resumable background job
+  (`GET /v1/tenants/{tenant}/erase` reports it): the tenant is closed first
+  (`503 tenant_erasing`, dispatch stops claiming its rows, running attempts
+  drain), then its sources, routes, rate-limit override, pending/inflight/dead
+  rows, archive obligations, quarantine rows, `claims/tenant=<t>/` objects,
+  dedupe keys and lifecycle entities are deleted, and one synced batch commits
+  the tombstone `m:erased:<tenant>` with a `tenant.delete` audit row, which is
+  the new lifecycle event `io.ankusa.tenant.deleted`. Progress is kept in
+  `m:erase:<tenant>`, so a `kill -9` resumes the job at the next boot.
+  `Ankusa.Storage.fetch/2` answers `{:error, :gone}` for an erased tenant's
+  archived hooks and archive and lifecycle replay skip them.
+  `Queue.purge_tenant/3` accepts `:inflight`. Configured (static or seeded)
+  sources naming the tenant, and `default`, are refused with `409`.
+  Proof: `test/ankusa/tenant_test.exs`, `tenant_s3_integration_test.exs`.
 - **DLQ, quarantine and catalogue retention; audit and lifecycle-outbox ceilings
   (DUR-2.b).** `Ankusa.Queue.DlqReaper` evicts dead rows past
   `queue.dlq.retention_days` and over `max_rows`/`max_bytes`, only while their hook

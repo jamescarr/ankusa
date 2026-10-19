@@ -31,6 +31,12 @@ defmodule Ankusa.Store.Keys do
   def meta("incarnation"), do: "m:incarnation"
   def meta("incarnation_pending"), do: "m:incarnation_pending"
   def meta("intake_offset"), do: "m:intake_offset"
+  # The intake log's other rows (`Ankusa.Intake`, ADR 0002): the watermark (the
+  # highest seq every lower one of which is confirmed in the log or had no
+  # record), and the node id and partition this store was stamped with.
+  def meta("intake_seq"), do: "m:intake_seq"
+  def meta("intake_node"), do: "m:intake_node"
+  def meta("intake_partition"), do: "m:intake_partition"
   # The audit trail's size (`<<rows::64, bytes::64, newest_counted_seq::64>>`),
   # written in every batch that adds or removes a row, so `audit.max_rows` and
   # `audit.max_bytes` are checked in O(1) (`Ankusa.Audit`). A value that does not
@@ -61,6 +67,13 @@ defmodule Ankusa.Store.Keys do
   # The last audit `seq` the lifecycle publisher has delivered to every
   # lifecycle sink (`Ankusa.Lifecycle.Publisher`): 8 bytes, big-endian.
   def lifecycle_cursor, do: "m:lifecycle_cursor"
+
+  # A tenant erase (`Ankusa.Tenant`): `m:erase:<tenant>` is the job's progress,
+  # present from the request until the erase commits; `m:erased:<tenant>` is
+  # the tombstone it leaves, `<<at::64>>` (ms): archived hooks of the tenant
+  # received at or before `at` are gone (`Ankusa.Tenant.erased?/3`).
+  def erase(tenant) when is_binary(tenant), do: "m:erase:" <> tenant
+  def erased(tenant) when is_binary(tenant), do: "m:erased:" <> tenant
 
   # ── hooks ─────────────────────────────────────────────────────────────────
 
@@ -185,6 +198,8 @@ defmodule Ankusa.Store.Keys do
   def decode_audit(<<?a, seq::64, at::64>>), do: {seq, at}
   def decode_lifecycle_entity(<<?o, seq::64>>), do: seq
   def decode_audit_pending(<<?p, seq::64>>), do: seq
+  def decode_erase("m:erase:" <> tenant), do: tenant
+  def decode_erased("m:erased:" <> tenant), do: tenant
   def decode_source_revision(<<"v:", rest::binary>>), do: decode_source(<<"s:", rest::binary>>)
 
   def decode_dedupe_expiry(<<?e, at::64, rest::binary>>) do
@@ -243,6 +258,8 @@ defmodule Ankusa.Store.Keys do
     source_revisions: %{cf: :default, lo: "v:", hi: <<"v:", 0xFF>>},
     audit: %{cf: :audit, lo: <<?a>>, hi: <<?a, @ff16::binary>>},
     audit_pending: %{cf: :audit, lo: <<?p>>, hi: <<?p, @ff8::binary>>},
+    erases: %{cf: :default, lo: "m:erase:", hi: <<"m:erase:", 0xFF>>},
+    erased: %{cf: :default, lo: "m:erased:", hi: <<"m:erased:", 0xFF>>},
     lifecycle_entities: %{cf: :audit, lo: <<?o>>, hi: <<?o, @ff8::binary>>}
   }
 

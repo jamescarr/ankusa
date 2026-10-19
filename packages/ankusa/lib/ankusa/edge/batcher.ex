@@ -71,9 +71,15 @@ defmodule Ankusa.Edge.Batcher do
   Returns `{:committed, env}` | `{:duplicate, env}` | `{:error, :overload}` |
   `{:error, {:tenant_overload, retry_after_ms}}` |
   `{:error, :tenant_limit}` (the hook's tenant would pass `tenants.max`) |
+  `{:error, :tenant_erasing}` (an erase of the hook's tenant is running) |
   `{:error, :dedupe_quota}` (its dedupe key would pass `dedupe.max_entries` or
   `dedupe.max_entries_per_tenant`) |
-  `{:error, :store_unavailable}`. The queue itself is never allowed to crash the
+  `{:error, :store_unavailable}`; under `wal: :dual` also
+  `{:error, :intake_unavailable}` (the intake breaker is open or its pending set is
+  full: nothing was stored), `{:error, :intake_pending}` (a retry that met an
+  original not yet confirmed in the log) and `{:error, {:half, reason, id}}` (the
+  hook persisted in only one place and is carried to completion by
+  `Ankusa.Intake.Reconciler`). The queue itself is never allowed to crash the
   call: a failed commit (or a dead writer process) is reported as
   `:store_unavailable`, which the edge maps to `503`.
 
@@ -89,7 +95,10 @@ defmodule Ankusa.Edge.Batcher do
   @spec commit(atom(), non_neg_integer(), Queue.entry(), timeout()) ::
           {:committed, Ankusa.Envelope.t()}
           | {:duplicate, Ankusa.Envelope.t()}
-          | {:error, :overload | :tenant_limit | :dedupe_quota | :store_unavailable}
+          | {:error,
+             :overload | :tenant_limit | :tenant_erasing | :dedupe_quota | :store_unavailable}
+          | {:error, :intake_unavailable | :intake_pending}
+          | {:error, {:half, :intake_unavailable | :store_unavailable, String.t()}}
           | {:error, {:tenant_overload, pos_integer()}}
   def commit(instance, partition, record, timeout \\ 15_000) do
     case acquire(instance, record) do
