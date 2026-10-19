@@ -378,5 +378,118 @@ defmodule Ankusa.Routes.RouterTest do
 
       assert call(config, :delete, "/admin/routes/a", token: "writer").status == 204
     end
+
+    test "the tenant surface needs tenant:<t> for its own tenant, and no more", %{
+      config: config
+    } do
+      created =
+        call(config, :post, "/v1/tenants/acme/routes",
+          token: "acme",
+          body: ~s({"id":"a","path":"/hooks/a","source_id":"acme.billing"})
+        )
+
+      assert created.status == 201
+      assert %{"id" => "a", "tenant_id" => "acme", "source_id" => "acme.billing"} = json(created)
+
+      assert call(config, :get, "/v1/tenants/acme/routes/a", token: "acme").status == 200
+
+      assert %{"routes" => [%{"id" => "a"}]} =
+               json(call(config, :get, "/v1/tenants/acme/routes", token: "acme"))
+
+      assert call(config, :put, "/v1/tenants/acme/routes/a",
+               token: "acme",
+               body: ~s({"path":"/hooks/a2"})
+             ).status == 200
+
+      assert call(config, :patch, "/v1/tenants/acme/routes/a",
+               token: "acme",
+               body: ~s({"enabled":false})
+             ).status == 200
+
+      assert call(config, :delete, "/v1/tenants/acme/routes/a", token: "acme").status == 204
+
+      # tenant:* reaches every tenant's surface; reading is not writing there too.
+      assert call(config, :get, "/v1/tenants/globex/routes", token: "reader").status == 200
+
+      assert call(config, :post, "/v1/tenants/globex/routes", token: "reader", body: "{}").status ==
+               403
+
+      assert call(config, :get, "/v1/tenants/globex/routes", token: "operator").status == 200
+    end
+
+    test "cross-tenant route CRUD is 403", %{config: config} do
+      for {method, path} <- [
+            {:get, "/v1/tenants/globex/routes"},
+            {:post, "/v1/tenants/globex/routes"},
+            {:get, "/v1/tenants/globex/routes/x"},
+            {:put, "/v1/tenants/globex/routes/x"},
+            {:patch, "/v1/tenants/globex/routes/x"},
+            {:delete, "/v1/tenants/globex/routes/x"}
+          ] do
+        response = call(config, method, path, token: "acme", body: "{}")
+        assert response.status == 403, "#{method} #{path} answered #{response.status}"
+        assert %{"error" => "forbidden", "scope" => "tenant:globex"} = json(response)
+      end
+
+      # And the operator surface, which spans tenants, stays tenant:* only.
+      assert call(config, :get, "/admin/routes", token: "acme").status == 403
+    end
+
+    test "a route another tenant owns is a 404 on the tenant surface, and stays untouched",
+         %{config: config} do
+      operator = fn method, path, body ->
+        call(config, method, path, token: "operator", body: body)
+      end
+
+      assert operator.(
+               :post,
+               "/admin/routes",
+               ~s({"id":"g","path":"/hooks/g","tenant_id":"globex"})
+             ).status == 201
+
+      assert call(config, :get, "/v1/tenants/acme/routes/g", token: "acme").status == 404
+      assert call(config, :delete, "/v1/tenants/acme/routes/g", token: "acme").status == 404
+
+      assert call(config, :patch, "/v1/tenants/acme/routes/g",
+               token: "acme",
+               body: ~s({"enabled":false})
+             ).status == 404
+
+      assert %{"routes" => []} =
+               json(call(config, :get, "/v1/tenants/acme/routes", token: "acme"))
+
+      # An id or a path the other tenant holds is a 409 that does not say whose.
+      for body <- [~s({"id":"g","path":"/hooks/new"}), ~s({"id":"n","path":"/hooks/g"})] do
+        response = call(config, :post, "/v1/tenants/acme/routes", token: "acme", body: body)
+        assert response.status == 409
+        assert json(response) == %{"error" => "duplicate_route"}
+      end
+
+      # A body naming another tenant is a 400, not a quiet move.
+      response =
+        call(config, :post, "/v1/tenants/acme/routes",
+          token: "acme",
+          body: ~s({"path":"/hooks/n","tenant_id":"globex"})
+        )
+
+      assert response.status == 400
+      assert %{"error" => "invalid_route", "field" => "tenant_id"} = json(response)
+
+      # The operator still sees it, owned by globex, untouched.
+      assert %{"tenant_id" => "globex", "enabled" => true} =
+               json(operator.(:get, "/admin/routes/g", nil))
+    end
+
+    test "a tenant that is not an identity is a 400 invalid_tenant", %{config: config} do
+      for {method, path} <- [
+            {:get, "/v1/tenants/a.b/routes"},
+            {:get, "/v1/tenants/a.b/routes/x"},
+            {:delete, "/v1/tenants/a.b/routes/x"}
+          ] do
+        response = call(config, method, path, token: "operator")
+        assert response.status == 400
+        assert json(response) == %{"error" => "invalid_tenant"}
+      end
+    end
   end
 end

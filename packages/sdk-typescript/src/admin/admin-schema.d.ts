@@ -26,6 +26,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Readiness probe
+         * @description `200` while this node can ack a hook: on a node that runs the local
+         *     store, a synced write to it succeeds (the answer is cached for 1 s).
+         *     `503` with `Retry-After: 1` while it cannot — a full disk, a store
+         *     that is closed or reopening — and `200` again on its own once it can.
+         *     A node without a store is always ready (`store: none`). `/health`
+         *     stays a liveness probe.
+         */
+        get: operations["getReady"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/metrics": {
         parameters: {
             query?: never;
@@ -237,6 +262,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The audit trail, newest first
+         * @description Needs `audit:read`. The trail spans tenants: a caller without
+         *     `tenant:*` sees only the rows of its own tenants (none of the rows that
+         *     belong to no tenant: routes, IP rules, replay jobs, the quarantine
+         *     pen), and naming another tenant in `tenant` is a `403`. Rows are in
+         *     commit order; `cursor` is the `next_cursor` of the previous page. A
+         *     page can be shorter than `limit` while `next_cursor` is set: the scan
+         *     of one call is bounded, keep going. No row holds a secret: `before_hash`
+         *     and `after_hash` are keyed hashes that show a change without revealing
+         *     the value.
+         */
+        get: operations["listAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/rate-limits": {
         parameters: {
             query?: never;
@@ -416,6 +469,89 @@ export interface paths {
         patch: operations["updateRoute"];
         trace?: never;
     };
+    "/v1/tenants/{tenant}/routes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The tenant (`[A-Za-z0-9_-]{1,64}`). The principal needs `tenant:<tenant>` or `tenant:*`.
+                 * @example acme
+                 */
+                tenant: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * List one tenant's route definitions
+         * @description Ordered by id, like `GET /admin/routes`, but only the routes the tenant
+         *     owns, read from the tenant's own index: the cost is the page, not the
+         *     table. Another tenant's routes are not in the answer.
+         */
+        get: operations["listTenantRoutes"];
+        put?: never;
+        /**
+         * Create a route definition owned by the tenant
+         * @description Like `POST /admin/routes`, with the tenant taken from the path: the body
+         *     may omit `tenant_id` or repeat the path's, and naming another tenant is a
+         *     `400 invalid_route` (`field: tenant_id`). An id (or an enabled route's
+         *     path and method) that another tenant holds is a `409 duplicate_route`
+         *     that does **not** name the holder.
+         */
+        post: operations["createTenantRoute"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant}/routes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The tenant (`[A-Za-z0-9_-]{1,64}`). The principal needs `tenant:<tenant>` or `tenant:*`.
+                 * @example acme
+                 */
+                tenant: string;
+                /**
+                 * @description The route's id (a lowercase slug). A route another tenant owns is a `404`.
+                 * @example stripe
+                 */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Fetch one of the tenant's route definitions */
+        get: operations["getTenantRoute"];
+        /**
+         * Replace one of the tenant's route definitions
+         * @description Like `PUT /admin/routes/{id}`: a full, idempotent definition, creating
+         *     the route when the id is free. The tenant is the path's; a body that
+         *     names another is `400`. An id another tenant owns is a
+         *     `409 duplicate_route` that does not name the holder.
+         */
+        put: operations["replaceTenantRoute"];
+        post?: never;
+        /**
+         * Delete one of the tenant's route definitions
+         * @description Immediate, like `DELETE /admin/routes/{id}`. A route another tenant owns
+         *     is a `404`, and the store checks the owner in the delete itself, so a
+         *     route re-created under another tenant a moment ago is never removed.
+         */
+        delete: operations["deleteTenantRoute"];
+        options?: never;
+        head?: never;
+        /**
+         * Patch one of the tenant's route definitions
+         * @description Only `enabled`, `methods`, `ip_rules`, and `metadata` are patchable;
+         *     `id`, `path`, `tenant_id` and `source_id` are **immutable** here and
+         *     answer `400 invalid_route` with `message: "immutable; use PUT"`.
+         */
+        patch: operations["updateTenantRoute"];
+        trace?: never;
+    };
     "/admin/ip-rules": {
         parameters: {
             query?: never;
@@ -452,6 +588,18 @@ export interface components {
             instance: string;
             /** @description The roles this node runs, sorted. */
             roles: ("claim_check" | "dispatch" | "edge" | "storage")[];
+        };
+        Readiness: {
+            /** @enum {string} */
+            status: "ready" | "unavailable";
+            instance: string;
+            /**
+             * @description `none` on a node without a local store; `store_unavailable` when
+             *     the store is closed or does not answer; `write_failed` when the
+             *     probe write failed.
+             * @enum {string}
+             */
+            store: "ok" | "none" | "store_unavailable" | "write_failed";
         };
         Wal: {
             instance: string;
@@ -504,6 +652,51 @@ export interface components {
             deleted: number;
             /** @description The bytes they held against `quarantine.max_bytes`. */
             bytes: number;
+        };
+        AuditPage: {
+            entries: components["schemas"]["AuditEntry"][];
+            /** @description Pass as `cursor` for the next page; `null` on the last. */
+            next_cursor: string | null;
+        };
+        AuditEntry: {
+            /** @description The row's place in commit order. Strictly increasing; the key of the row. */
+            seq: number;
+            /** Format: date-time */
+            at: string;
+            /** @description The principal id (`Ankusa.Principal`); `system` for a change made from code. */
+            actor: string;
+            /** @description The client address, behind `routes.trusted_proxies` the one `X-Forwarded-For` names. */
+            remote_ip: string | null;
+            /**
+             * @description `source.create|update|delete`, `rate_limit.put|delete`,
+             *     `quarantine.purge`, `replay.create|update|cancel`,
+             *     `route.create|update|delete`, `ip_rules.put`.
+             */
+            action: string;
+            tenant: string | null;
+            /** @description The subject's id (`<tenant>.<name>` for a source, the route id, the replay job id). */
+            resource: string | null;
+            /** @description HMAC-SHA256 (hex) of the subject before the change; `null` when there was none. */
+            before_hash: string | null;
+            /** @description HMAC-SHA256 (hex) of the subject after the change; `null` for a delete. */
+            after_hash: string | null;
+            /** @description The request's `X-Request-Id`, or the id the node made up (answered in the same response header). */
+            request_id: string | null;
+            /**
+             * @description `ok`: the change was made. `failed`: the store refused it. `interrupted`:
+             *     the node died between writing the row and finishing it (a change in
+             *     the route store or the Redis source store): the change may or may not
+             *     have been applied, and `after_hash` is the hash of what was about to
+             *     be written.
+             * @enum {string}
+             */
+            result: "ok" | "failed" | "interrupted";
+            /** @description The subject's revision after the change, for a subject that has one (sources in the node's store, routes). */
+            revision: number | null;
+            /** @description Non-secret particulars: a purge's filter and count, a replay's kind, a rate limit's numbers. */
+            detail: {
+                [key: string]: unknown;
+            } | null;
         };
         ReplaySpec: {
             /**
@@ -678,7 +871,9 @@ export interface components {
         };
         /**
          * @description A route definition: the capture gate. It decides whether a request is
-         *     captured, not which source it belongs to.
+         *     captured and, with `tenant_id` and `source_id`, which tenant and source
+         *     it may admit it into. A resolver result that disagrees with the binding
+         *     is a `404` to the sender.
          */
         Route: {
             /**
@@ -688,6 +883,22 @@ export interface components {
              * @example stripe
              */
             id: string;
+            /**
+             * @description The owning tenant, `[A-Za-z0-9_-]{1,64}`; `default` (the default) is
+             *     the shared tenant and binds none. A route owned by a tenant admits
+             *     hooks only into that tenant: a request whose resolver names another
+             *     tenant, or whose source belongs to another, is a `404`. Where the
+             *     resolver names no tenant and the source is shared, the hook is
+             *     stored under this tenant.
+             * @example default
+             */
+            tenant_id: string;
+            /**
+             * @description The one source the route admits, or `null` to leave it to the
+             *     resolver. A request the resolver maps to another source is a `404`.
+             * @example null
+             */
+            source_id: string | null;
             /**
              * @description A pattern, not a regex: `/`-separated segments, each a literal, a
              *     `:param` (exactly one segment), or a trailing `*` wildcard (one or
@@ -726,6 +937,11 @@ export interface components {
                 [key: string]: unknown;
             };
             /**
+             * @description Counts the definition's changes, from 1 at creation. Re-creating a deleted route starts again at 1.
+             * @example 1
+             */
+            revision: number;
+            /**
              * Format: date-time
              * @description Set once, at creation. A `PUT` keeps it; a `PATCH` cannot touch it.
              * @example 2026-09-28T14:16:26Z
@@ -745,6 +961,17 @@ export interface components {
         RouteInput: {
             /** @description Optional on create. On `PUT` the path's `id` wins. */
             id?: string;
+            /**
+             * @description Defaults to `default`. On the tenant surface the path's tenant is
+             *     used, and a different one is `400 invalid_route`.
+             * @default default
+             */
+            tenant_id: string;
+            /**
+             * @description Optional; at most 256 characters, without whitespace or `/`.
+             * @default null
+             */
+            source_id: string | null;
             /** @example /webhooks/stripe */
             path: string;
             /**
@@ -763,8 +990,8 @@ export interface components {
             };
         };
         /**
-         * @description Only these four fields are patchable. `path` and `id` answer
-         *     `400 invalid_route` with `message: "immutable; use PUT"`.
+         * @description Only these four fields are patchable. `path`, `id`, `tenant_id` and
+         *     `source_id` answer `400 invalid_route` with `message: "immutable; use PUT"`.
          */
         RoutePatch: {
             enabled?: boolean;
@@ -838,7 +1065,7 @@ export interface components {
         /** @description The error shape every endpoint answers with, on every listener. */
         Error: {
             /** @enum {string} */
-            error: "not_found" | "invalid_filter" | "role_not_enabled" | "invalid_route" | "duplicate_route" | "too_many_routes" | "invalid_query" | "invalid_ip_rules" | "invalid_request" | "invalid_body" | "invalid_tenant" | "invalid_rate_limit" | "rate_limit_not_found" | "store_unavailable" | "wal_disabled";
+            error: "not_found" | "invalid_filter" | "role_not_enabled" | "invalid_route" | "duplicate_route" | "too_many_routes" | "invalid_query" | "invalid_ip_rules" | "invalid_request" | "invalid_body" | "invalid_tenant" | "invalid_rate_limit" | "rate_limit_not_found" | "store_unavailable" | "wal_disabled" | "unauthenticated" | "forbidden";
             /**
              * @description The offending field: on `invalid_filter` the parameter or `body`; on
              *     the route errors the route field (`path`, `ip_rules`, …), the
@@ -853,6 +1080,11 @@ export interface components {
             conflicting_id?: string;
             /** @description Present on `too_many_routes`; the configured cap. */
             max_routes?: number;
+            /**
+             * @description Present on `forbidden`; the scope the principal lacks (`dlq:read`,
+             *     `tenant:acme`, `tenant:*`, …).
+             */
+            scope?: string;
         };
     };
     responses: {
@@ -920,7 +1152,7 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
-        /** @description `400`. `invalid_route`: a route definition that would not mean what it says — a path that is not rooted or has an illegal segment, a non-boolean `enabled`, a bad CIDR, unknown fields, or `path`/`id` in a `PATCH`. `field` names it and `message` says why. Also `invalid_body` when the body never parsed. */
+        /** @description `400`. `invalid_route`: a route definition that would not mean what it says — a path that is not rooted or has an illegal segment, a non-boolean `enabled`, a bad CIDR, a `tenant_id` or `source_id` that is not valid (or, on the tenant surface, a `tenant_id` other than the path's), unknown fields, or `path`/`id`/`tenant_id`/`source_id` in a `PATCH`. `field` names it and `message` says why. Also `invalid_body` when the body never parsed, and, on the tenant surface, `invalid_tenant` when the tenant in the path is not an identity. */
         InvalidRoute: {
             headers: {
                 [name: string]: unknown;
@@ -1001,6 +1233,31 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
+        /** @description `401`. `unauthenticated`: no credential, or one that is wrong, expired or unknown. The body is the same whatever the cause. Every operation except `GET /health` and `GET /ready` needs a credential. */
+        Unauthorized: {
+            headers: {
+                /** @description Always `Bearer realm="ankusa"`. */
+                "WWW-Authenticate"?: string;
+                [name: string]: unknown;
+            };
+            content: {
+                /**
+                 * @example {
+                 *       "error": "unauthenticated"
+                 *     }
+                 */
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description `403`. `forbidden`: the credential is good, but its principal lacks `scope`, which the operation needs. Scopes are checked before anything else, so a caller without them learns nothing about this node. */
+        Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
     };
     parameters: never;
     requestBodies: never;
@@ -1033,6 +1290,51 @@ export interface operations {
             };
         };
     };
+    getReady: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ready. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "status": "ready",
+                     *       "instance": "default",
+                     *       "store": "ok"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["Readiness"];
+                };
+            };
+            /** @description Not ready. */
+            503: {
+                headers: {
+                    /** @description Always `1`. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "status": "unavailable",
+                     *       "instance": "default",
+                     *       "store": "write_failed"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["Readiness"];
+                };
+            };
+        };
+    };
     getMetrics: {
         parameters: {
             query?: never;
@@ -1052,6 +1354,8 @@ export interface operations {
                     "text/plain": string;
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     getConfig: {
@@ -1078,6 +1382,8 @@ export interface operations {
                     };
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     getAsyncApi: {
@@ -1104,6 +1410,8 @@ export interface operations {
                     };
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     getWal: {
@@ -1124,6 +1432,8 @@ export interface operations {
                     "application/json": components["schemas"]["Wal"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["WalDisabled"];
         };
     };
@@ -1153,6 +1463,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["InvalidFilter"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["RoleNotEnabled"];
             503: components["responses"]["NodeStoreUnavailable"];
         };
@@ -1175,6 +1487,8 @@ export interface operations {
                     "application/json": components["schemas"]["ReplayList"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["RoleNotEnabled"];
             503: components["responses"]["NodeStoreUnavailable"];
         };
@@ -1220,6 +1534,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["InvalidFilter"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             /**
              * @description `role_not_enabled` (an `archive` or `quarantine` job on a node
              *     without a queue writer — both roles, `edge` and `dispatch`, must
@@ -1256,6 +1572,8 @@ export interface operations {
                     "application/json": components["schemas"]["Replay"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["ReplayNotFound"];
             409: components["responses"]["RoleNotEnabled"];
             503: components["responses"]["NodeStoreUnavailable"];
@@ -1286,6 +1604,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["InvalidFilter"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["ReplayNotFound"];
             /** @description `role_not_enabled`, or `replay_finished` for a finished job. */
             409: {
@@ -1321,6 +1641,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["InvalidFilter"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["RoleNotEnabled"];
             503: components["responses"]["NodeStoreUnavailable"];
         };
@@ -1355,7 +1677,47 @@ export interface operations {
                 };
             };
             400: components["responses"]["InvalidFilter"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["RoleNotEnabled"];
+            503: components["responses"]["NodeStoreUnavailable"];
+        };
+    };
+    listAudit: {
+        parameters: {
+            query?: {
+                /** @description Inclusive lower bound on `at`, unix milliseconds. */
+                since?: number;
+                /** @description Inclusive upper bound on `at`, unix milliseconds. */
+                until?: number;
+                /** @description The principal id that made the change (`system` for a change made from code). */
+                actor?: string;
+                /** @description One action, such as `source.update` or `route.delete`. */
+                action?: string;
+                tenant?: string;
+                /** @description The `next_cursor` of the previous page. */
+                cursor?: number;
+                /** @description Maximum rows in the page. Values outside 1..1000 are clamped to that range. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of rows, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditPage"];
+                };
+            };
+            400: components["responses"]["InvalidFilter"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             503: components["responses"]["NodeStoreUnavailable"];
         };
     };
@@ -1377,6 +1739,8 @@ export interface operations {
                     "application/json": components["schemas"]["RateLimits"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["RoleNotEnabled"];
         };
     };
@@ -1402,6 +1766,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["InvalidTenant"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["RoleNotEnabled"];
         };
     };
@@ -1431,6 +1797,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["InvalidRateLimit"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["RoleNotEnabled"];
             503: components["responses"]["NodeStoreUnavailable"];
         };
@@ -1455,6 +1823,8 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["InvalidTenant"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["RateLimitNotFound"];
             409: components["responses"]["RoleNotEnabled"];
             503: components["responses"]["NodeStoreUnavailable"];
@@ -1490,6 +1860,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["InvalidRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     listRoutes: {
@@ -1527,6 +1899,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["InvalidQuery"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     createRoute: {
@@ -1570,6 +1944,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["InvalidRoute"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["DuplicateRoute"];
             503: components["responses"]["StoreUnavailable"];
         };
@@ -1598,6 +1974,8 @@ export interface operations {
                     "application/json": components["schemas"]["Route"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -1644,6 +2022,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["InvalidRoute"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["DuplicateRoute"];
             503: components["responses"]["StoreUnavailable"];
         };
@@ -1670,6 +2050,8 @@ export interface operations {
                 };
                 content?: never;
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             503: components["responses"]["StoreUnavailable"];
         };
@@ -1708,6 +2090,270 @@ export interface operations {
                 };
             };
             400: components["responses"]["InvalidRoute"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["DuplicateRoute"];
+            503: components["responses"]["StoreUnavailable"];
+        };
+    };
+    listTenantRoutes: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Filter by `enabled`. Anything other than `true`/`false` is `400 invalid_query`.
+                 * @example true
+                 */
+                enabled?: "true" | "false";
+                /**
+                 * @description Maximum routes per page. Clamped to 1..200.
+                 * @example 100
+                 */
+                limit?: number;
+                /**
+                 * @description The `next_cursor` of the previous page; returns ids greater than it.
+                 * @example checkout
+                 */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /**
+                 * @description The tenant (`[A-Za-z0-9_-]{1,64}`). The principal needs `tenant:<tenant>` or `tenant:*`.
+                 * @example acme
+                 */
+                tenant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of the tenant's route definitions. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoutePage"];
+                };
+            };
+            400: components["responses"]["InvalidQuery"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createTenantRoute: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The tenant (`[A-Za-z0-9_-]{1,64}`). The principal needs `tenant:<tenant>` or `tenant:*`.
+                 * @example acme
+                 */
+                tenant: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                /**
+                 * @example {
+                 *       "id": "stripe",
+                 *       "source_id": "acme.stripe",
+                 *       "path": "/webhooks/acme/stripe",
+                 *       "methods": [
+                 *         "POST"
+                 *       ],
+                 *       "metadata": {
+                 *         "owner": "payments"
+                 *       }
+                 *     }
+                 */
+                "application/json": components["schemas"]["RouteInput"];
+            };
+        };
+        responses: {
+            /** @description The stored route, owned by the tenant in the path. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Route"];
+                };
+            };
+            400: components["responses"]["InvalidRoute"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["DuplicateRoute"];
+            503: components["responses"]["StoreUnavailable"];
+        };
+    };
+    getTenantRoute: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The tenant (`[A-Za-z0-9_-]{1,64}`). The principal needs `tenant:<tenant>` or `tenant:*`.
+                 * @example acme
+                 */
+                tenant: string;
+                /**
+                 * @description The route's id (a lowercase slug). A route another tenant owns is a `404`.
+                 * @example stripe
+                 */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The route. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Route"];
+                };
+            };
+            400: components["responses"]["InvalidTenant"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    replaceTenantRoute: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The tenant (`[A-Za-z0-9_-]{1,64}`). The principal needs `tenant:<tenant>` or `tenant:*`.
+                 * @example acme
+                 */
+                tenant: string;
+                /**
+                 * @description The route's id (a lowercase slug). A route another tenant owns is a `404`.
+                 * @example stripe
+                 */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                /**
+                 * @example {
+                 *       "source_id": "acme.stripe",
+                 *       "path": "/webhooks/acme/stripe",
+                 *       "methods": [
+                 *         "POST"
+                 *       ],
+                 *       "enabled": false,
+                 *       "metadata": {
+                 *         "owner": "payments",
+                 *         "staging": true
+                 *       }
+                 *     }
+                 */
+                "application/json": components["schemas"]["RouteInput"];
+            };
+        };
+        responses: {
+            /** @description The stored route, with the `inserted_at` it already had. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Route"];
+                };
+            };
+            400: components["responses"]["InvalidRoute"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["DuplicateRoute"];
+            503: components["responses"]["StoreUnavailable"];
+        };
+    };
+    deleteTenantRoute: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The tenant (`[A-Za-z0-9_-]{1,64}`). The principal needs `tenant:<tenant>` or `tenant:*`.
+                 * @example acme
+                 */
+                tenant: string;
+                /**
+                 * @description The route's id (a lowercase slug). A route another tenant owns is a `404`.
+                 * @example stripe
+                 */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. No body. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["InvalidTenant"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["StoreUnavailable"];
+        };
+    };
+    updateTenantRoute: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The tenant (`[A-Za-z0-9_-]{1,64}`). The principal needs `tenant:<tenant>` or `tenant:*`.
+                 * @example acme
+                 */
+                tenant: string;
+                /**
+                 * @description The route's id (a lowercase slug). A route another tenant owns is a `404`.
+                 * @example stripe
+                 */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                /**
+                 * @example {
+                 *       "enabled": true
+                 *     }
+                 */
+                "application/json": components["schemas"]["RoutePatch"];
+            };
+        };
+        responses: {
+            /** @description The patched route. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Route"];
+                };
+            };
+            400: components["responses"]["InvalidRoute"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["DuplicateRoute"];
             503: components["responses"]["StoreUnavailable"];
@@ -1731,6 +2377,8 @@ export interface operations {
                     "application/json": components["schemas"]["IpRules"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     putIpRules: {
@@ -1767,6 +2415,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["InvalidIpRules"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             503: components["responses"]["StoreUnavailable"];
         };
     };

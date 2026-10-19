@@ -114,7 +114,7 @@ defmodule Ankusa.RoutesTest do
     def replace(instance, _route, _version), do: stale(instance)
 
     @impl true
-    def delete(_instance, _id), do: {:error, :not_found}
+    def delete(_instance, _id, _tenant), do: {:error, :not_found}
 
     @impl true
     def put_ip_rules(_instance, _ip_rules), do: :ok
@@ -1094,6 +1094,52 @@ defmodule Ankusa.RoutesTest do
       assert {:error, {:invalid, "methods", _message}} =
                Route.from_attrs(%{"path" => "/hooks/x", "methods" => ["POST\n"]})
     end
+
+    test "tenant_id defaults to the shared tenant and source_id to none" do
+      assert {:ok, %Route{tenant_id: "default", source_id: nil}} =
+               Route.from_attrs(%{"path" => "/hooks/x"})
+
+      assert %{"tenant_id" => "default", "source_id" => nil} =
+               Route.to_json(elem(Route.from_attrs(%{"path" => "/hooks/x"}), 1))
+    end
+
+    test "a tenant and a source bind, validate, and survive to_json/from_json" do
+      {:ok, route} =
+        Route.from_attrs(%{
+          "id" => "r",
+          "path" => "/hooks/r",
+          "tenant_id" => "acme",
+          "source_id" => "acme.billing"
+        })
+
+      assert %Route{tenant_id: "acme", source_id: "acme.billing"} = route
+      assert {:ok, ^route} = Route.from_json(Route.to_json(route))
+
+      for tenant <- ["", "a b", "a.b", String.duplicate("a", 65), 7, true] do
+        assert {:error, {:invalid, "tenant_id", _message}} =
+                 Route.from_attrs(%{"path" => "/hooks/x", "tenant_id" => tenant})
+      end
+
+      for source <- ["", "a b", "a/b", "a\n", String.duplicate("a", 257), 7, true] do
+        assert {:error, {:invalid, "source_id", _message}} =
+                 Route.from_attrs(%{"path" => "/hooks/x", "source_id" => source})
+      end
+    end
+
+    test "the stored form leaves out a binding the route does not have" do
+      {:ok, plain} = Route.from_attrs(%{"id" => "p", "path" => "/hooks/p"})
+      {:ok, bound} = Route.from_attrs(%{"id" => "b", "path" => "/hooks/b", "tenant_id" => "acme"})
+      {:ok, sourced} = Route.from_attrs(%{"id" => "s", "path" => "/hooks/s", "source_id" => "x"})
+
+      refute Map.has_key?(Route.to_stored_json(plain), "tenant_id")
+      refute Map.has_key?(Route.to_stored_json(plain), "source_id")
+      assert Route.to_stored_json(bound)["tenant_id"] == "acme"
+      assert Route.to_stored_json(sourced)["source_id"] == "x"
+
+      for route <- [plain, bound, sourced] do
+        assert {:ok, ^route} = Route.from_json(Route.to_stored_json(route))
+      end
+    end
   end
 
   describe "telemetry" do
@@ -1236,6 +1282,180 @@ defmodule Ankusa.RoutesTest do
 
       assert Enum.map(readers, &Task.await(&1, 30_000)) == List.duplicate({:ok, "probe"}, 8)
       assert authorize(config, "POST", "/hooks/d/5000") == {:ok, "d5000"}
+    end
+  end
+
+  describe "tenant routes" do
+    defp tenant_seed do
+      [
+        %{"id" => "a1", "path" => "/hooks/a1", "tenant_id" => "acme"},
+        %{"id" => "a2", "path" => "/hooks/a2", "tenant_id" => "acme", "enabled" => false},
+        %{"id" => "a3", "path" => "/hooks/a3", "tenant_id" => "acme"},
+        %{"id" => "g1", "path" => "/hooks/g1", "tenant_id" => "globex"},
+        %{"id" => "d1", "path" => "/hooks/d1"}
+      ]
+    end
+
+    defp ids({:ok, %{routes: routes}}), do: Enum.map(routes, & &1.id)
+
+    test "a tenant lists only its own routes, id ascending, with a cursor" do
+      config = start(seed: tenant_seed())
+      instance = config.instance
+
+      assert ids(Routes.list(instance, tenant: "acme")) == ["a1", "a2", "a3"]
+      assert ids(Routes.list(instance, tenant: "globex")) == ["g1"]
+      assert ids(Routes.list(instance, tenant: "default")) == ["d1"]
+      assert ids(Routes.list(instance, tenant: "nobody")) == []
+      assert ids(Routes.list(instance)) == ["a1", "a2", "a3", "d1", "g1"]
+
+      assert {:ok, %{routes: [%{id: "a1"}, %{id: "a2"}], next_cursor: "a2"}} =
+               Routes.list(instance, tenant: "acme", limit: 2)
+
+      assert {:ok, %{routes: [%{id: "a3"}], next_cursor: nil}} =
+               Routes.list(instance, tenant: "acme", limit: 2, cursor: "a2")
+
+      assert ids(Routes.list(instance, tenant: "acme", enabled: true)) == ["a1", "a3"]
+      assert ids(Routes.list(instance, tenant: "acme", enabled: false)) == ["a2"]
+    end
+
+    test "the tenant index follows create, a move to another tenant, and delete" do
+      config = start(seed: tenant_seed())
+      instance = config.instance
+
+      {:ok, _} = Routes.create(instance, %{"id" => "a0", "path" => "/hooks/a0"}, tenant: "acme")
+      assert ids(Routes.list(instance, tenant: "acme")) == ["a0", "a1", "a2", "a3"]
+
+      # A full replace (the operator's) may move a route to another tenant.
+      {:ok, moved} =
+        Routes.replace(instance, "a1", %{"path" => "/hooks/a1", "tenant_id" => "globex"})
+
+      assert moved.tenant_id == "globex"
+      assert ids(Routes.list(instance, tenant: "acme")) == ["a0", "a2", "a3"]
+      assert ids(Routes.list(instance, tenant: "globex")) == ["a1", "g1"]
+
+      assert :ok = Routes.delete(instance, "a3", tenant: "acme")
+      assert ids(Routes.list(instance, tenant: "acme")) == ["a0", "a2"]
+
+      # The index read straight from the table agrees with the listing.
+      assert %{gen: gen} = Routes.meta(instance)
+
+      assert instance
+             |> Ankusa.Routes.Snapshot.tenant_routes(%{gen: gen}, "globex", nil)
+             |> Enum.map(& &1.id) == ["a1", "g1"]
+    end
+
+    test "a route another tenant owns is not there for a tenant-scoped caller" do
+      config = start(seed: tenant_seed())
+      instance = config.instance
+
+      assert {:ok, %Route{id: "a1"}} = Routes.get(instance, "a1", tenant: "acme")
+      assert {:error, :not_found} = Routes.get(instance, "a1", tenant: "globex")
+      assert {:ok, %Route{id: "a1"}} = Routes.get(instance, "a1")
+
+      assert {:error, :not_found} =
+               Routes.update(instance, "a1", %{"enabled" => false}, tenant: "globex")
+
+      assert {:error, :not_found} = Routes.delete(instance, "a1", tenant: "globex")
+      assert {:ok, %Route{enabled: true}} = Routes.get(instance, "a1")
+
+      assert {:ok, %Route{enabled: false}} =
+               Routes.update(instance, "a1", %{"enabled" => false}, tenant: "acme")
+    end
+
+    test "the store refuses a delete for a tenant that does not own the route" do
+      config = start(seed: tenant_seed())
+      instance = config.instance
+
+      # Past the facade's own check, which reads this node's snapshot.
+      assert {:error, :not_found} = Ankusa.Routes.Store.delete(instance, "a1", "globex")
+      assert {:ok, %Route{}} = Routes.get(instance, "a1")
+      assert :ok = Ankusa.Routes.Store.delete(instance, "a1", "acme")
+      assert :ok = Ankusa.Routes.Store.delete(instance, "d1", nil)
+    end
+
+    test "a tenant-scoped write takes the tenant from its scope, and a body cannot change it" do
+      config = start(seed: tenant_seed())
+      instance = config.instance
+
+      assert {:ok, %Route{tenant_id: "acme"}} =
+               Routes.create(instance, %{"id" => "n1", "path" => "/hooks/n1"}, tenant: "acme")
+
+      assert {:ok, %Route{tenant_id: "acme"}} =
+               Routes.create(
+                 instance,
+                 %{"id" => "n2", "path" => "/hooks/n2", "tenant_id" => "acme"},
+                 tenant: "acme"
+               )
+
+      assert {:error, {:invalid, "tenant_id", message}} =
+               Routes.create(
+                 instance,
+                 %{"id" => "n3", "path" => "/hooks/n3", "tenant_id" => "globex"},
+                 tenant: "acme"
+               )
+
+      assert message =~ "acme"
+
+      assert {:error, {:invalid, "tenant_id", _message}} =
+               Routes.replace(instance, "n1", %{"path" => "/hooks/n1", "tenant_id" => "globex"},
+                 tenant: "acme"
+               )
+
+      assert {:error, :not_found} = Routes.get(instance, "n3")
+    end
+
+    test "an id or a path another tenant holds is a conflict that does not say whose" do
+      config = start(seed: tenant_seed())
+      instance = config.instance
+
+      # The id: a1 is acme's, so globex learns only that it is taken.
+      assert {:error, {:conflict, nil}} =
+               Routes.create(instance, %{"id" => "a1", "path" => "/hooks/new"}, tenant: "globex")
+
+      assert {:error, {:conflict, nil}} =
+               Routes.replace(instance, "a1", %{"path" => "/hooks/new"}, tenant: "globex")
+
+      # The path: an enabled route of acme's holds it.
+      assert {:error, {:conflict, nil}} =
+               Routes.create(instance, %{"id" => "x", "path" => "/hooks/a1"}, tenant: "globex")
+
+      # The operator, and the owner itself, are told.
+      assert {:error, {:conflict, "a1"}} =
+               Routes.create(instance, %{"id" => "a1", "path" => "/hooks/new"})
+
+      assert {:error, {:conflict, "a1"}} =
+               Routes.create(instance, %{"id" => "y", "path" => "/hooks/a1"}, tenant: "acme")
+    end
+
+    test "tenant_id and source_id are immutable under a patch" do
+      config = start(seed: tenant_seed())
+      instance = config.instance
+
+      for field <- ["tenant_id", "source_id"] do
+        assert {:error, {:invalid, ^field, "immutable; use PUT"}} =
+                 Routes.update(instance, "a1", %{field => "x"})
+      end
+    end
+
+    test "the guard's answer is the route itself, with its binding" do
+      config =
+        start(
+          seed: [
+            %{"id" => "b", "path" => "/hooks/b", "tenant_id" => "acme", "source_id" => "acme.s"}
+          ]
+        )
+
+      segments = ["hooks", "b"]
+
+      assert {{:ok, %Route{id: "b", tenant_id: "acme", source_id: "acme.s"}}, false} =
+               Routes.capture(config.instance, "POST", segments, "/hooks/b", ip("1.2.3.4"))
+
+      # And it is the cached decision's route too.
+      assert {{:ok, %Route{id: "b"}}, true} =
+               Routes.capture(config.instance, "POST", segments, "/hooks/b", ip("1.2.3.4"))
+
+      assert {{:reject, :no_route}, _cached} =
+               Routes.capture(config.instance, "POST", ["nope"], "/nope", ip("1.2.3.4"))
     end
   end
 end

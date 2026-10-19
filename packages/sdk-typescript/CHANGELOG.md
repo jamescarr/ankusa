@@ -8,6 +8,12 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The generated admin types (`src/admin/admin-schema.d.ts`) follow the
+  tenant-aware route API: `Route` has `tenant_id` and `source_id`, `RouteInput`
+  takes them, and the tenant surface (`/v1/tenants/{tenant}/routes[/{id}]`) is in
+  `paths`. The routes client still calls `/admin/routes`, which spans tenants and
+  needs `tenant:*`; it has no methods for the tenant paths yet, so a principal
+  limited to one tenant calls them with its own HTTP client.
 - `parseClaimRef` and `redeem` accept signed, expiring v2 refs
   (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`): the
   parsed `path` carries `?exp=&sig=`, `redeem` sends them as the query, and

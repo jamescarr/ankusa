@@ -176,6 +176,33 @@ or set aside a hook that was not verified, and the tenant it names with it.
 Under tenant routing, give a shared source `reject` or `quarantine` instead if
 nothing downstream checks the flag.
 
+## Routes are owned by a tenant and bound to a source
+
+With route management on (`routes.enabled`), the route that admitted a request
+is part of the answer, not only a gate in front of it. A route has a `tenant_id`
+(default `"default"`, the shared tenant) and an optional `source_id`
+([configuration](configuration.md#route-management)), and the edge holds them
+against what the resolver and the source store say. A disagreement is the
+`404` an unknown source gets, so it tells the sender nothing:
+
+| Route | Request | Result |
+| --- | --- | --- |
+| `tenant_id: acme` | resolves to a source owned by `globex` | `404` |
+| `tenant_id: acme` | `TenantPath` names `globex` | `404` |
+| `tenant_id: acme` | resolves to a shared (`default`) source, no tenant in the URL | `201`, stored under `acme` |
+| `tenant_id: acme` | resolves to a source owned by `acme` | `201`, stored under `acme` |
+| `source_id: acme.billing` | resolves to another source | `404` |
+| `tenant_id: default`, no `source_id` | anything | as without routes: the source and the URL decide |
+
+That makes a route the place a tenant is resolved for a shared source whose URL
+carries none; where a per-tenant source and a shared source could both apply,
+the per-tenant source's owner wins, and the route has to agree with it. A route
+owned by a tenant is also what a tenant-scoped principal manages:
+`/v1/tenants/<tenant>/routes` needs `tenant:<tenant>` and cannot see or change
+another tenant's routes, and a route's lifecycle events and audit rows carry its
+tenant, so a replay or an audit read filtered to one tenant sees its own route
+changes.
+
 ## Dynamic sources
 
 Everything above is a store decision, not a boot-time one: the router resolves

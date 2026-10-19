@@ -934,9 +934,11 @@ first boot, so a route deleted there is not resurrected by a restart.
 **Management API**, on `routes.admin.port` (its own listener, never the ingest
 port), authenticated by `routes.admin.auth` like the operator admin API (see
 [Control-plane authentication](#control-plane-authentication)): `routes:read`
-for `GET` and the dry run, `routes:write` for everything else, and in both
-cases `tenant:*`, since route definitions and IP rules belong to no tenant.
-The HTTP contract is the `routes` tag of
+for `GET` and the dry run, `routes:write` for everything else. It has two
+surfaces over the same definitions. `/admin/routes` and `/admin/ip-rules` span
+tenants (and the IP rules belong to none), so they need `tenant:*` as well.
+`/v1/tenants/:tenant/routes` needs `tenant:<tenant>` instead and shows and
+changes only that tenant's routes. The HTTP contract is the `routes` tag of
 [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml),
 examples included — and
 [`test/ankusa/routes/router_openapi_test.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/test/ankusa/routes/router_openapi_test.exs)
@@ -947,17 +949,45 @@ cannot drift apart:
 | --- | --- | --- |
 | `GET` | `/admin/routes?enabled=&limit=&cursor=` | list, id-ordered, cursor-paginated |
 | `POST` / `PUT` / `PATCH` / `DELETE` | `/admin/routes[/:id]` | create, replace, update, delete |
+| `GET` | `/v1/tenants/:tenant/routes?enabled=&limit=&cursor=` | the same list, for one tenant's routes |
+| `POST` / `PUT` / `PATCH` / `DELETE` | `/v1/tenants/:tenant/routes[/:id]` | the same writes, for one tenant's routes |
 | `GET` / `PUT` | `/admin/ip-rules` | the global rules and default |
 | `POST` | `/admin/routes/test` | dry run: `{method, path, ip}` → decision, reason, route id, and the rule that decided it |
 | `GET` | `/health` | `{status, routes}` |
 
-A route is `{id, path, methods: [POST], enabled, ip_rules, metadata,
-inserted_at, updated_at}`. Ids are lowercase slugs, `path`/`id` are immutable
-under `PATCH` (moving a route changes what it captures — that is a `PUT`), and
-two enabled routes may not share a path and method. `POST /admin/routes/test`
-answers "why was this rejected" without capturing anything and **without
-reading or writing the decision cache**, so a dry run can never change what
-live requests decide, and a route change can be checked before it goes live.
+A route is `{id, tenant_id, source_id, path, methods: [POST], enabled,
+ip_rules, metadata, revision, inserted_at, updated_at}`. Ids are lowercase slugs
+(one namespace across tenants), `id`/`path`/`tenant_id`/`source_id` are immutable
+under `PATCH` (moving a route changes what it captures and where it files it —
+that is a `PUT`), and two enabled routes may not share a path and method.
+`POST /admin/routes/test` answers "why was this rejected" without capturing
+anything and **without reading or writing the decision cache**, so a dry run can
+never change what live requests decide, and a route change can be checked before
+it goes live.
+
+**A route is owned by a tenant and may be bound to a source.** `tenant_id`
+(default `default`, the shared tenant) and `source_id` (default none) are held
+against what the catch URL's resolver says (see
+[Multi-tenancy](multi-tenancy.md#routes-are-owned-by-a-tenant-and-bound-to-a-source)):
+a route owned by one tenant admits nothing into another tenant's source, and a
+route bound to a source admits nothing for another one. A disagreement is the
+`404` an unknown source gets. In a `routes.seed` entry both are plain keys.
+
+**The tenant surface.** `POST /v1/tenants/acme/routes` creates a route owned by
+`acme` (a body that names another tenant is `400 invalid_route`, field
+`tenant_id`). Another tenant's route is `404` there, never listed, never
+changed; an id or an enabled path and method that another tenant holds is
+`409 duplicate_route` without `conflicting_id`, so the answer does not say whose
+it is. Its delete is checked against the owner in the store itself (a Lua
+script, for the Redis store), so a route that was re-created under another
+tenant a moment ago is never removed by it. Route paths are one fleet-wide
+namespace — a tenant that may write routes can claim any path nobody holds and
+shadow a less specific pattern — so give `routes:write` with `tenant:<t>` only to
+a principal you would trust with that. The Redis store keeps `tenant_id` and
+`source_id` out of a definition that has none (so a node from before them still
+reads a table with no tenant routes); once a route owned by a tenant is stored,
+an older node refuses the reload and keeps serving what it had until it is
+upgraded.
 
 `PUT /admin/ip-rules` requires both `default` and `rules`. Omitting either is a
 `400 invalid_ip_rules` that names the field, because an omitted `default` used

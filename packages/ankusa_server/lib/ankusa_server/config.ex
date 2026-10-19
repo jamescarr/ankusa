@@ -116,7 +116,7 @@ defmodule AnkusaServer.Config do
   @routes_ip_rules_keys ~w(default rules)
   @routes_rule_keys ~w(action cidr)
   @routes_admin_keys ~w(port ip tls auth)
-  @routes_seed_keys ~w(id path methods enabled ip_rules metadata)
+  @routes_seed_keys ~w(id tenant_id source_id path methods enabled ip_rules metadata)
   @rate_limits_keys ~w(default tenants per_ip node sources)
   @rate_limit_keys ~w(rate burst bytes_per_second burst_bytes max_body_bytes max_queue max_queue_bytes)
   @hook_limit_keys ~w(rate burst)

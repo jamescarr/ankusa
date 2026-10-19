@@ -25,7 +25,10 @@ defmodule Ankusa.Routes.Snapshot do
       one row a reader starts from;
     * `{{:pattern, gen, priority, id}, route, segments}` — every route, enabled
       or not, in priority order (the table's own key order);
-    * `{{:id, gen, id}, route}`.
+    * `{{:id, gen, id}, route}`;
+    * `{{:tenant, gen, tenant_id, id}}` — the `{tenant, id}` index: one key per
+      route, so a tenant's routes come back id-ascending from a walk over its
+      own keys, not over every tenant's.
 
   A reader reads `:meta` once and uses its `gen` for every other row.
   `publish/1` (boot, a Redis reload) writes a whole new generation, then flips
@@ -129,7 +132,11 @@ defmodule Ankusa.Routes.Snapshot do
       end)
 
     ids = Enum.map(snapshot.by_id, fn {id, route} -> {{:id, gen, id}, route} end)
-    true = :ets.insert(table, patterns ++ ids)
+
+    tenants =
+      Enum.map(snapshot.by_id, fn {id, route} -> {{:tenant, gen, route.tenant_id, id}} end)
+
+    true = :ets.insert(table, patterns ++ ids ++ tenants)
 
     meta = %{
       gen: gen,
@@ -178,11 +185,19 @@ defmodule Ankusa.Routes.Snapshot do
 
     # The new rows first: a reader walking now sees the old pattern, the new
     # one, or both, never neither.
-    true = :ets.insert(table, [{key, route, placed.segments}, {{:id, gen, id}, route}])
+    true =
+      :ets.insert(table, [
+        {key, route, placed.segments},
+        {{:id, gen, id}, route},
+        {{:tenant, gen, route.tenant_id, id}}
+      ])
 
-    with [{_key, %Route{} = old}] <- previous,
-         old_key when old_key != key <- pattern_key(gen, place(old)) do
-      :ets.delete(table, old_key)
+    with [{_key, %Route{} = old}] <- previous do
+      old_key = pattern_key(gen, place(old))
+      if old_key != key, do: :ets.delete(table, old_key)
+
+      if old.tenant_id != route.tenant_id,
+        do: :ets.delete(table, {:tenant, gen, old.tenant_id, id})
     end
 
     :ok
@@ -192,6 +207,7 @@ defmodule Ankusa.Routes.Snapshot do
     case :ets.lookup(table, {:id, gen, id}) do
       [{_key, %Route{} = old}] ->
         :ets.delete(table, pattern_key(gen, place(old)))
+        :ets.delete(table, {:tenant, gen, old.tenant_id, id})
         :ets.delete(table, {:id, gen, id})
 
       [] ->
@@ -210,7 +226,8 @@ defmodule Ankusa.Routes.Snapshot do
   def drop_generation(instance, gen) do
     :ets.select_delete(table(instance), [
       {{{:pattern, gen, :_, :_}, :_, :_}, [], [true]},
-      {{{:id, gen, :_}, :_}, [], [true]}
+      {{{:id, gen, :_}, :_}, [], [true]},
+      {{{:tenant, gen, :_, :_}}, [], [true]}
     ])
 
     :ok
@@ -425,7 +442,8 @@ defmodule Ankusa.Routes.Snapshot do
         # The old owner's `{:drop_generation, old}` timer died with it.
         :ets.select_delete(table, [
           {{{:pattern, :"$1", :_, :_}, :_, :_}, [{:"/=", :"$1", gen}], [true]},
-          {{{:id, :"$1", :_}, :_}, [{:"/=", :"$1", gen}], [true]}
+          {{{:id, :"$1", :_}, :_}, [{:"/=", :"$1", gen}], [true]},
+          {{{:tenant, :"$1", :_, :_}}, [{:"/=", :"$1", gen}], [true]}
         ])
 
         {:ok,
@@ -454,6 +472,41 @@ defmodule Ankusa.Routes.Snapshot do
     :ets.select(table(instance), [{{{:id, gen, :_}, :"$1"}, [], [:"$1"]}])
   rescue
     ArgumentError -> []
+  end
+
+  @doc """
+  The routes `tenant` owns in `meta`'s generation, id ascending, as a lazy
+  stream that starts after `after_id` (`nil` for the first). It walks the
+  `{tenant, id}` index, so its cost is the page read, not the table.
+  """
+  @spec tenant_routes(atom(), meta(), String.t(), String.t() | nil) :: Enumerable.t()
+  def tenant_routes(instance, %{gen: gen}, tenant, after_id) do
+    table = table(instance)
+
+    Stream.unfold({:tenant, gen, tenant, after_id || ""}, fn key ->
+      case next_key(table, key) do
+        {:tenant, ^gen, ^tenant, id} = next ->
+          # A route deleted between `next` and `lookup` is skipped by the `nil`.
+          route =
+            case :ets.lookup(table, {:id, gen, id}) do
+              [{_key, %Route{} = route}] -> route
+              [] -> nil
+            end
+
+          {route, next}
+
+        _end_of_tenant ->
+          nil
+      end
+    end)
+    |> Stream.reject(&is_nil/1)
+  end
+
+  # A table that is gone (the instance is stopping) ends the walk.
+  defp next_key(table, key) do
+    :ets.next(table, key)
+  rescue
+    ArgumentError -> :"$end_of_table"
   end
 
   @doc "Every `{route, segments}` of `meta`'s generation, in priority order."

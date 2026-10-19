@@ -66,7 +66,7 @@ defmodule Ankusa.Edge.Router do
 
     with {:ok, route} <- resolve(conn, instance),
          :ok <- check_content_length(conn, instance, declared, max),
-         {:ok, source, tenant_id} <- lookup(conn, instance, route),
+         {:ok, source, tenant_id} <- lookup(conn, instance, route, conn.assigns[:ankusa_route]),
          {:ok, cap} <- tenant_cap(conn, instance, tenant_id, declared, max),
          :ok <- pre_read(conn, instance, source, declared),
          :ok <- check_headers(conn, instance),
@@ -91,6 +91,10 @@ defmodule Ankusa.Edge.Router do
     end
   end
 
+  # The route the guard matched, if routes are on: ingest reports it.
+  defp route_id(%Plug.Conn{assigns: %{ankusa_route: %{id: id}}}), do: id
+  defp route_id(%Plug.Conn{}), do: nil
+
   # The request the ingest path reads. `peer_cert` is a live call into the TLS
   # socket, so it is made for a source verified by `Ankusa.Verifier.ClientCert`
   # and nobody else; no certificate (plain HTTP, a transport that cannot answer)
@@ -101,7 +105,8 @@ defmodule Ankusa.Edge.Router do
       path: conn.request_path,
       headers: conn.req_headers,
       query: conn.query_string,
-      body: body
+      body: body,
+      route_id: route_id(conn)
     }
 
     if verifier == Ankusa.Verifier.ClientCert,
@@ -176,9 +181,9 @@ defmodule Ankusa.Edge.Router do
     end
   end
 
-  # `lookup/2` has already counted the refusal.
-  defp lookup(conn, instance, route) do
-    case Ingest.lookup(instance, route) do
+  # `lookup/3` has already counted the refusal.
+  defp lookup(conn, instance, route, binding) do
+    case Ingest.lookup(instance, route, binding) do
       {:ok, source, tenant_id} ->
         {:ok, source, tenant_id}
 

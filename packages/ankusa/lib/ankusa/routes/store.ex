@@ -36,9 +36,14 @@ defmodule Ankusa.Routes.Store do
   would otherwise happily validate against a table another node already changed,
   and two nodes could both create the same id.
 
-  `delete/2` and `put_ip_rules/2` carry no cross-route validation, so they take
+  `delete/3` and `put_ip_rules/2` carry no cross-route validation, so they take
   no version: a delete answers `{:error, :not_found}` from the store's own
   authoritative state, and replacing the global rules is a whole-value write.
+  A delete made on behalf of one tenant passes it as `tenant`, and the store
+  answers `{:error, :not_found}` for a route another tenant owns, checked in
+  the same step as the delete, so a route that was re-created under another
+  tenant between the caller's read and the delete is never removed; `nil`
+  deletes whoever owns it.
 
   `{:error, :store_unavailable}` is the transient failure — Redis is down, or the
   store process did not answer, which the facade reports the same way. The
@@ -65,7 +70,7 @@ defmodule Ankusa.Routes.Store do
 
   @callback replace(atom(), Route.t(), pos_integer()) :: :ok | {:error, error()}
 
-  @callback delete(atom(), String.t()) :: :ok | {:error, error()}
+  @callback delete(atom(), String.t(), String.t() | nil) :: :ok | {:error, error()}
 
   @callback put_ip_rules(atom(), map()) :: :ok | {:error, error()}
 
@@ -79,8 +84,8 @@ defmodule Ankusa.Routes.Store do
   def replace(instance, %Route{} = route, version),
     do: call(instance, :replace, [instance, route, version])
 
-  @spec delete(atom(), String.t()) :: :ok | {:error, error()}
-  def delete(instance, id), do: call(instance, :delete, [instance, id])
+  @spec delete(atom(), String.t(), String.t() | nil) :: :ok | {:error, error()}
+  def delete(instance, id, tenant), do: call(instance, :delete, [instance, id, tenant])
 
   @spec put_ip_rules(atom(), map()) :: :ok | {:error, error()}
   def put_ip_rules(instance, ip_rules), do: call(instance, :put_ip_rules, [instance, ip_rules])
