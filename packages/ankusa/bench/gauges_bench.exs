@@ -13,7 +13,7 @@
 #            are scheduled a day ahead)
 #
 # Passes only if the slowest cell is within 1.5x of the fastest and under 50 ms
-# (median of 100 ticks per cell). Exits 1 otherwise. `mise run bench:gate` runs
+# (lowest of 5 medians of 200 ticks per cell). Exits 1 otherwise. `mise run bench:gate` runs
 # it after the ingest gate.
 
 Logger.configure(level: :warning)

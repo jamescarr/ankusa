@@ -289,28 +289,13 @@ defmodule Ankusa.MetricsTest do
       assert gauge(scrape, "ankusa_dispatch_runnable", config.instance) == 0.0
     end
 
-    # The families `Ankusa.Store.fold/6` is asked for while `fun` runs.
-    defp folded_families(fun) do
-      :erlang.trace_pattern({Ankusa.Store, :fold, 6}, true, [:local])
-      :erlang.trace(self(), true, [:call])
-
-      try do
-        fun.()
-      after
-        :erlang.trace(self(), false, [:call])
-        :erlang.trace_pattern({Ankusa.Store, :fold, 6}, false, [:local])
-      end
-
-      collect_folds([])
-    end
-
-    defp collect_folds(acc) do
-      receive do
-        {:trace, _pid, :call, {Ankusa.Store, :fold, [_instance, family | _]}} ->
-          collect_folds([family | acc])
-      after
-        100 -> Enum.reverse(acc)
-      end
+    # The families `Ankusa.Store` is asked to fold (`fold/6`) and to seek in
+    # (`first/4`) while `Gauges.measure/1` runs. The trace must have seen reads,
+    # so a broken trace cannot pass.
+    defp gauge_scans(inst) do
+      {_result, calls} = store_calls(fn -> Ankusa.Metrics.Gauges.measure(inst) end)
+      assert calls != []
+      %{folds: for({:fold, f} <- calls, do: f), seeks: for({:first, f} <- calls, do: f)}
     end
 
     defp tenant_gauge(scrape, tenant) do
@@ -328,10 +313,12 @@ defmodule Ankusa.MetricsTest do
         assert {:ok, _} = Ankusa.Edge.Ingest.ingest(inst, request("demo", ~s({"id":"c#{i}"})))
       end
 
-      folds = folded_families(fn -> :ok = Ankusa.Metrics.Gauges.measure(inst) end)
+      scans = gauge_scans(inst)
 
-      # Nothing folds a queue family: the gauges are counter reads and the first markers.
-      assert Enum.uniq(folds) -- [:active] == []
+      # Nothing folds a queue family: the gauges are counter reads and one seek
+      # into the active index (plus the first due row it names).
+      refute Enum.any?(scans.folds, &(&1 in [:due, :inflight, :dead, :dead_by_tenant, :archive_pending]))
+      assert Enum.count(scans.seeks, &(&1 == :due)) <= 1
 
       scrape = Ankusa.Metrics.scrape(inst)
       assert gauge(scrape, "ankusa_queue_pending", inst) == 3.0
@@ -346,8 +333,9 @@ defmodule Ankusa.MetricsTest do
 
       :ok = Ankusa.Store.write(inst, due_index_ops(inst, 700, 0, now - 7_000, 10), sync: true)
 
-      folds = folded_families(fn -> :ok = Ankusa.Metrics.Gauges.measure(inst) end)
-      refute Enum.any?(folds, &(&1 in [:due, :inflight, :dead, :archive_pending]))
+      scans = gauge_scans(inst)
+      refute Enum.any?(scans.folds, &(&1 in [:due, :inflight, :dead, :dead_by_tenant, :archive_pending]))
+      assert :active in scans.seeks or :active in scans.folds
 
       scrape = Ankusa.Metrics.scrape(inst)
       age = gauge(scrape, "ankusa_queue_oldest_due_age_seconds", inst)

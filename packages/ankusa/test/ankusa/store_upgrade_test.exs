@@ -423,12 +423,14 @@ defmodule Ankusa.StoreUpgradeTest do
 
       # A release that writes format 2 takes the backup.
       start_supervised!({Store, instance: inst, migrations: [{1, 2, AuditTrail}]}, id: :v2)
+      start_supervised!({Ankusa.Store.Backup, instance: inst}, id: :v2_backup)
       seed_v2!(inst, 0)
       assert Store.get(inst, :default, Keys.format_version()) == {:ok, "2"}
       assert {:ok, %{uploaded: uploaded}} = Ankusa.Store.Backup.run(inst)
       assert uploaded > 0
 
       # The host is gone; the next boot restores the backup and migrates it.
+      stop_supervised!(:v2_backup)
       stop_supervised!(:v2)
       File.rm_rf!(config.data_dir)
       start_supervised!({Ankusa.Instance, config})
@@ -512,7 +514,8 @@ defmodule Ankusa.StoreUpgradeTest do
   # rows of seq 1, to take the migration through several steps.
   defp seed_v2!(inst, extra) do
     past = 1_000
-    future = System.system_time(:millisecond) + 86_400_000
+    # Fixed, so two seeded stores hold the same keys (2100-01-01).
+    future = 4_102_444_800_000
 
     hooks = [
       {1, hook("acme", 1)},

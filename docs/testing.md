@@ -141,6 +141,32 @@ The always-on tests cover:
   2 fixture (`store-v2.tar.zst`) carries audit rows, which
   `store_upgrade_test.exs` reads back; the format 1 fixture, upgraded, gives
   every source revision 1.
+- **Tenant key layout and counters** ([ADR 0001](adr/0001-tenant-key-layout.md);
+  `queue/deliveries_test.exs`, `store_upgrade_test.exs`, `metrics_test.exs`,
+  `dispatch_test.exs`, `admin/router_test.exs`, `loss_test.exs`):
+  `counters equal a fold after any sequence of transitions` (a property test
+  over ingest, claim, retry, deliver, dead-letter, revive, recover, expand,
+  purge and archive settle) and `concurrent writers do not lose counts` pin the
+  per-tenant counters to the index; `no due row without a marker` and `cleanup
+  does not lose a marker to a concurrent enqueue` pin the active-tenant index;
+  `tenant ordinal is assigned once and never reused` and the `tenants.max`
+  cases pin the ordinals; a source-grep test keeps the tenant-keyed constructors
+  inside `queue/deliveries.ex`. The format 3 fixture (`store-v3.tar.zst`, from
+  `mix ankusa.store.fixture`) is booted like the others, and the migration's own
+  cases cover the v2 → v3 upgrade with counters equal to a fold, a kill before
+  every step (rows and counters equal an uninterrupted run), each ordinal
+  allocated once, hooks with no tenant or envelope filed under `default`, a
+  format 2 release refusing a format 3 store, and a restored format 2 backup
+  migrating on boot. `queue gauges read counters` traces the store reads of
+  `Gauges.measure/1` (no scan of a queue family) and `tenant scoped dlq reads
+  one range` those of a tenant's DLQ listing (one range scan, a hook read only
+  for the returned page); the traces run the code in a traced child process,
+  because a process's calls to itself deliver no trace messages
+  (`Ankusa.TestHelpers.store_calls/1`). `a tick visits only tenants with work`
+  puts 1 000 tenants in the queue with 3 due and reads the scan's
+  `active_tenants` gauge. `bench/gauges_bench.exs` and
+  `bench/dispatch_tick_bench.exs` are self-asserting and run by `bench:gate`
+  (see [Perf gate](#perf-gate-mise-run-benchgate)).
 - **HTTP adapters** (outbound): the SigV4 signing `BlobStore.S3` puts on the
   wire, pinned against AWS's published reference signatures and against the
   request `Req.Test` captures; the RSA-SHA256 *Signature version 1* signing
@@ -353,6 +379,11 @@ The always-on tests cover:
   `edge_direct_test.exs`, which asserts the response really does wait for the
   sink's confirm — and is a `503` when that confirm never comes. A full disk,
   a failing disk and a power cut are the crash drill's, below.
+  `loss_test.exs` also runs the harness with `TENANTS=4` (four sources, each
+  owned by a tenant and with a sink): after the `kill -9`, every hook has one
+  due row under its tenant's ordinal, `pending_for_tenant/2` agrees, and the
+  stored per-tenant counters equal a fold of the index (`counters equal the
+  index after kill -9`).
 - **Lifecycle events** (`lifecycle_test.exs`, `replay_test.exs`): through a real
   instance, a source's create/update/delete and a route's
   create/replace/patch/delete each deliver one CloudEvent to the configured
@@ -790,6 +821,22 @@ class prints a `WARN` (a laptop is usually faster than the CI runner, so it
 passes; a slower one can fail without a regression). `BENCH_RUNS`,
 `BENCH_CONFIRM`, `BENCH_RUNNER`, `BENCH_BASELINE` and `BENCH_REBASELINE` are
 documented in the script's header.
+
+`mise run bench:gate` also runs two self-asserting scripts first, with no
+baseline entry:
+[`bench/gauges_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/gauges_bench.exs)
+times `Ankusa.Metrics.Gauges.measure/1` and
+[`bench/dispatch_tick_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/dispatch_tick_bench.exs)
+times a dispatch scan (`Deliveries.active_tenants/3` plus `due_for_tenant/6`
+for each tenant named), each against 10³, 10⁴, 10⁵ and 10⁶ queued rows over 10
+tenants and against 10, 10³ and 10⁵ tenants of which 8 have rows due, while a
+process commits 3 000 batches of counter merges a second. A cell is the lowest
+of five medians of 200 ticks (a tick is a fraction of a millisecond, so one
+median moves with whatever else the machine does; a growth with the queue
+raises every round). A script exits 1 unless its slowest cell is within 1.5× of
+its fastest and under 50 ms ([ADR 0001](adr/0001-tenant-key-layout.md),
+Proof). A rebaseline run (`BENCH_REBASELINE=1`) skips them: it measures the
+base commit's sources, which have neither the layout nor these APIs.
 
 CI runs it as the `perf gate` job in `ci.yml`: on every push to `main`, and on
 a pull request whose diff touches a hot-path file: anything under

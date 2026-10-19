@@ -256,6 +256,55 @@ defmodule Ankusa.DispatchTest do
     assert_receive {:delivered, :a, ^late_id}
   end
 
+  # ADR 0001 §5: a tick walks the active-tenant index, not every tenant. 1 000
+  # tenants have a row, 997 of them not due for an hour: only the 3 with work
+  # due are visited, and `[:dispatch, :state]` says so. The 3 are written last
+  # and come due together, so no scan can see them one at a time.
+  test "a tick visits only tenants with work" do
+    inst = start(%{"src1" => %{sinks: [{TagSink, tag: :a, pid: self()}]}})
+    far = System.system_time(:millisecond) + 3_600_000
+
+    for n <- 4..1_000 do
+      env = %{build_env("src1") | tenant_id: "tenant-#{n}"}
+      write_pending!(inst, 10_000 + n, env, TagSink, far)
+    end
+
+    due_at = System.system_time(:millisecond) + 300
+
+    ids =
+      for n <- 1..3 do
+        env = %{build_env("src1") | tenant_id: "tenant-#{n}"}
+        write_pending!(inst, 10_000 + n, env, TagSink, due_at)
+        env.id
+      end
+
+    handler = "visits-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(handler, [:ankusa, :dispatch, :state], &__MODULE__.forward_state/4, self())
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    Process.sleep(max(due_at - System.system_time(:millisecond), 0) + 50)
+    assert {:ok, _settled} = Pipeline.tick(inst)
+    for id <- ids, do: assert_receive({:delivered, :a, ^id}, 5_000)
+
+    assert await_active_tenants() == 3
+  end
+
+  @doc false
+  def forward_state(_event, measurements, _meta, pid), do: send(pid, {:dispatch_state, measurements})
+
+  # The first non-zero `active_tenants` the housekeeping tick reports.
+  defp await_active_tenants do
+    receive do
+      {:dispatch_state, %{active_tenants: 0}} -> await_active_tenants()
+      {:dispatch_state, %{active_tenants: n}} -> n
+    after
+      5_000 -> flunk("dispatch reported no visited tenants")
+    end
+  end
+
   # Outcomes are written in batches, and the capacity they free is claimed when
   # the batch is flushed. Housekeeping flushes too: if it lands between a
   # window draining and that flush, it cancels the flush timer, and nothing

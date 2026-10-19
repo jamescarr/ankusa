@@ -929,7 +929,7 @@ defmodule Ankusa.Queue.Deliveries do
           {:ok, %{total: non_neg_integer(), entries: [map()]}} | {:error, term()}
   def dead(instance, opts) do
     limit = Keyword.fetch!(opts, :limit)
-    filter = opts |> Keyword.take([:source_id, :since]) |> Map.new()
+    filter = for {k, v} <- Keyword.take(opts, [:source_id, :since]), v != nil, into: %{}, do: {k, v}
     tenants = Keyword.get(opts, :tenants)
 
     scan =

@@ -290,4 +290,70 @@ defmodule Ankusa.TestHelpers do
         if counters == zero, do: acc, else: Map.put(acc, ord, counters)
     end
   end
+
+  @doc """
+  Runs `fun` in a fresh process traced for calls into the store's read API
+  and returns `{result, calls}`: `{:fold, family}`, `{:first, family}`,
+  `{:get, cf, [key]}` and `{:multi_get, cf, keys}`, in call order.
+
+  A process cannot be its own tracer in a way that delivers (the trace messages
+  never arrive), so `fun` runs in a spawned process traced by the caller.
+  """
+  def store_calls(fun) do
+    me = self()
+
+    pid =
+      spawn_link(fn ->
+        receive do
+          :go ->
+            result =
+              try do
+                {:ok, fun.()}
+              catch
+                kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+              end
+
+            send(me, {:store_calls_result, self(), result})
+        end
+      end)
+
+    patterns = [fold: 6, first: 4, get: 3, multi_get: 3]
+    for {f, a} <- patterns, do: :erlang.trace_pattern({Ankusa.Store, f, a}, true, [:local])
+    1 = :erlang.trace(pid, true, [:call, {:tracer, me}])
+    send(pid, :go)
+
+    outcome =
+      receive do
+        {:store_calls_result, ^pid, outcome} -> outcome
+      after
+        60_000 -> raise "store_calls: the traced function did not return"
+      end
+
+    # The traced process exits right after replying, which ends its tracing.
+    for {f, a} <- patterns, do: :erlang.trace_pattern({Ankusa.Store, f, a}, false, [:local])
+    calls = collect_store_calls(pid, [])
+
+    case outcome do
+      {:ok, result} -> {result, calls}
+      {:raised, kind, reason, stack} -> :erlang.raise(kind, reason, stack)
+    end
+  end
+
+  defp collect_store_calls(pid, acc) do
+    receive do
+      {:trace, ^pid, :call, {Ankusa.Store, :fold, [_instance, family | _]}} ->
+        collect_store_calls(pid, [{:fold, family} | acc])
+
+      {:trace, ^pid, :call, {Ankusa.Store, :first, [_instance, family | _]}} ->
+        collect_store_calls(pid, [{:first, family} | acc])
+
+      {:trace, ^pid, :call, {Ankusa.Store, :get, [_instance, cf, key]}} ->
+        collect_store_calls(pid, [{:get, cf, [key]} | acc])
+
+      {:trace, ^pid, :call, {Ankusa.Store, :multi_get, [_instance, cf, keys]}} ->
+        collect_store_calls(pid, [{:multi_get, cf, keys} | acc])
+    after
+      100 -> Enum.reverse(acc)
+    end
+  end
 end

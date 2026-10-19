@@ -13,7 +13,11 @@
 # `ACK <id>` after each `201` (the synced commit has returned). `RATE` is the
 # target hooks per second across all ingesters (default 0: unpaced),
 # `CONCURRENCY` the number of ingesters (default 32) and `BODY_BYTES` the size
-# of each hook's body (default 0: a few bytes).
+# of each hook's body (default 0: a few bytes). `TENANTS` (default 1) is the
+# number of tenants: with more than one, the ingesters round-robin over
+# sources `load-<i>` owned by tenants `t<i>`, each with a sink, so every ack
+# leaves a due row under its tenant's ordinal (with one, a single sink-less
+# `load` source of tenant `default`).
 #
 # `verify` opens `Ankusa.Store` alone over `DATA_DIR`, reads back every id in
 # `ACKS_FILE` (stdout of a `serve` run) and prints
@@ -27,6 +31,20 @@ defmodule Ankusa.CrashHarness do
   @instance :crash_harness
   @source_id "load"
 
+  @doc "The `{source_id, source opts}` pairs of an instance with `tenants` tenants."
+  def sources(1), do: [{@source_id, [verifier: {Ankusa.Verifier.None, []}]}]
+
+  def sources(tenants) do
+    for i <- 0..(tenants - 1) do
+      {"#{@source_id}-#{i}",
+       [
+         verifier: {Ankusa.Verifier.None, []},
+         tenant_id: "t#{i}",
+         sinks: [{Ankusa.Sink.Log, []}]
+       ]}
+    end
+  end
+
   @doc "The instance config both the serving child and a reopening parent use."
   def config(data_dir, opts \\ []) do
     Ankusa.Config.new(
@@ -35,15 +53,16 @@ defmodule Ankusa.CrashHarness do
       port: Keyword.get(opts, :port, 0),
       roles: [:edge],
       source_store:
-        {Ankusa.SourceStore.Static,
-         sources: %{@source_id => [verifier: {Ankusa.Verifier.None, []}]}},
+        {Ankusa.SourceStore.Static, sources: Map.new(sources(Keyword.get(opts, :tenants, 1)))},
       batcher: %{partitions: 4, max_batch: 64, max_delay_ms: 5, max_queue: 100_000}
     )
   end
 
   @doc "Boot the instance and ingest until killed."
   def serve do
-    config = config(System.fetch_env!("DATA_DIR"), port: env_int("HTTP_PORT", 0))
+    tenants = env_int("TENANTS", 1)
+    config = config(System.fetch_env!("DATA_DIR"), port: env_int("HTTP_PORT", 0), tenants: tenants)
+    source_ids = tenants |> sources() |> Enum.map(&elem(&1, 0))
     pace_ms = pace_ms(env_int("RATE", 0), env_int("CONCURRENCY", 32))
     body = body(env_int("BODY_BYTES", 0))
 
@@ -57,8 +76,8 @@ defmodule Ankusa.CrashHarness do
     Ankusa.put_config(config)
     {:ok, _} = Ankusa.Instance.start_link(config)
 
-    for _ <- 1..env_int("CONCURRENCY", 32) do
-      spawn(fn -> loop(config.instance, pace_ms, body) end)
+    for n <- 1..env_int("CONCURRENCY", 32) do
+      spawn(fn -> loop(config.instance, pace_ms, body, source_ids, n) end)
     end
 
     Process.sleep(:infinity)
@@ -102,11 +121,13 @@ defmodule Ankusa.CrashHarness do
     |> MapSet.new()
   end
 
-  defp loop(instance, pace_ms, body) do
+  defp loop(instance, pace_ms, body, source_ids, n) do
+    source_id = Enum.at(source_ids, rem(n, length(source_ids)))
+
     req = %{
-      source_id: @source_id,
+      source_id: source_id,
       method: "POST",
-      path: "/webhooks/#{@source_id}",
+      path: "/webhooks/#{source_id}",
       headers: [],
       body: body
     }
@@ -126,7 +147,7 @@ defmodule Ankusa.CrashHarness do
       :exit, _ -> Process.sleep(max(pace_ms, 20))
     end
 
-    loop(instance, pace_ms, body)
+    loop(instance, pace_ms, body, source_ids, n + 1)
   end
 
   # A JSON body of `bytes` (a few bytes when 0). Constant padding: the store

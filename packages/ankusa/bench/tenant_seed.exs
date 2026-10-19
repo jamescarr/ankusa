@@ -120,13 +120,22 @@ defmodule Bench.TenantSeed do
     end
   end
 
-  @doc "Median of `runs` microsecond timings of `fun`, in milliseconds (after 5 warm-ups)."
-  def median_ms(runs, fun) do
+  @doc """
+  The lowest of `rounds` medians of `runs` microsecond timings of `fun`, in
+  milliseconds (after 5 warm-ups). A tick costs a fraction of a millisecond, so
+  one median is moved by whatever else the machine did in those 20 ms; noise only
+  ever adds time, so the quietest round is the cell's cost, and a real growth with
+  the queue raises every round.
+  """
+  def median_ms(runs, fun, rounds \\ 5) do
     for _ <- 1..5, do: fun.()
 
-    times = for _ <- 1..runs, do: elem(:timer.tc(fun), 0)
-    sorted = Enum.sort(times)
-    Enum.at(sorted, div(runs, 2)) / 1000
+    1..rounds
+    |> Enum.map(fn _ ->
+      times = for _ <- 1..runs, do: elem(:timer.tc(fun), 0)
+      Enum.at(Enum.sort(times), div(runs, 2)) / 1000
+    end)
+    |> Enum.min()
   end
 
   @doc """
@@ -207,7 +216,7 @@ defmodule Bench.TenantSeed do
 
   defp measured(instance, fun) do
     load = start_load(instance)
-    result = median_ms(100, fun)
+    result = median_ms(200, fun)
     stop_load(load)
     result
   end
