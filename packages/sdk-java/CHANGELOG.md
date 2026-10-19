@@ -9,6 +9,9 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `AdminClient.listAudit(ListAuditParams)`: `GET /v1/audit`, the audit trail
+  (newest first, paged by `cursor`/`limit`, filtered by `since`, `until`,
+  `actor`, `action`, `tenant`).
 - `revision` on `Route`: counts the definition's changes, from 1 at creation;
   re-creating a deleted route starts again at 1; null from a node older than
   the field.
