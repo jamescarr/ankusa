@@ -29,8 +29,8 @@ defmodule Ankusa.Queue.Writer do
 
   alias Ankusa.Config
   alias Ankusa.Intake
-  alias Ankusa.Intake.{Pending, Reconciler}
   alias Ankusa.Intake.Gate, as: IntakeGate
+  alias Ankusa.Intake.{Pending, Reconciler}
   alias Ankusa.Queue.Deliveries
   alias Ankusa.Queue.Deliveries.Counters
   alias Ankusa.Queue.Tenants
