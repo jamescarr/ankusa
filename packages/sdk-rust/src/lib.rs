@@ -19,9 +19,9 @@ pub use bytes;
 pub use http;
 
 pub use crate::admin::{
-    AdminClient, AdminError, AdminHealth, DlqEntry, DlqPage, ListDeadLettersParams,
-    ListQuarantinedParams, QuarantineEntry, QuarantinePage, Replay, ReplayList, ReplayPatch,
-    ReplaySpec,
+    AdminClient, AdminError, AdminHealth, AuditEntry, AuditPage, DlqEntry, DlqPage,
+    ListAuditParams, ListDeadLettersParams, ListQuarantinedParams, QuarantineEntry, QuarantinePage,
+    Replay, ReplayList, ReplayPatch, ReplaySpec,
 };
 pub use crate::claim_check::{ClaimCheckClient, ClaimCheckError, ClaimCheckHealth};
 pub use crate::claim_ref::{InvalidClaimRefError, ParsedClaimRef, parse_claim_ref};

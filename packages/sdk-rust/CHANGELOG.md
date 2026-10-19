@@ -27,6 +27,9 @@ this project follows [Semantic Versioning](https://semver.org/).
   the delivery must verify (as `verify_signature`); with none and no
   `allow_unsigned` it returns `InvalidSignatureError` (`invalid_secret`). The
   signature is judged before the hook id.
+- `AdminClient::list_audit`: `GET /v1/audit`, the audit trail (newest first,
+  paged by `cursor`/`limit`, filtered by `since`, `until`, `actor`, `action`,
+  `tenant`).
 
 ## [0.5.0] - 2026-10-14
 

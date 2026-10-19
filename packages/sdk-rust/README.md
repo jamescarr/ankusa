@@ -262,6 +262,31 @@ println!("{} of {} dead letters", page.entries.len(), page.total);
 # }
 ```
 
+`list_audit` pages the audit trail (newest first), filtered by `since`,
+`until`, `actor`, `action` and `tenant`; naming a tenant the credential
+cannot see is `AdminError::Rejected` with scope `tenant:*`:
+
+```rust,no_run
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+use ankusa::{AdminClient, ListAuditParams};
+
+let admin = AdminClient::new("http://127.0.0.1:4002")?;
+let page = admin
+    .list_audit(&ListAuditParams {
+        tenant: Some("acme".to_owned()),
+        action: Some("route.update".to_owned()),
+        limit: Some(50),
+        ..ListAuditParams::default()
+    })
+    .await?;
+for row in &page.entries {
+    println!("{} {} {}", row.at, row.actor, row.action);
+}
+# Ok(())
+# }
+```
+
 Replay jobs are managed on the same listener. `create_replay` starts one (a
 `dlq` job over dead-lettered rows, an `archive` job over a time window, or a
 `quarantine` job that re-verifies held hooks and releases those that pass) and

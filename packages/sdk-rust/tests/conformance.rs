@@ -23,7 +23,7 @@ use ankusa::bytes::Bytes;
 use ankusa::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use ankusa::{
     AdminClient, AdminError, ClaimCheckClient, ClaimCheckError, ClientBuilder, DryRunRequest,
-    InvalidClaimRefError, InvalidMessageError, InvalidSignatureError, IpRules,
+    InvalidClaimRefError, InvalidMessageError, InvalidSignatureError, IpRules, ListAuditParams,
     ListDeadLettersParams, ListQuarantinedParams, ListRoutesParams, Message, MissingHookIdError,
     ReceiveError, ReceiveOptions, ReplayPatch, ReplaySpec, RouteInput, RoutePatch, RoutesClient,
     RoutesError, Transport, TransportError, Verification, VerifyOptions, decode_message,
@@ -491,6 +491,13 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
                     .list_quarantined(&params)
                     .await
                     .map_err(OpError::Admin)?,
+            ))
+        }
+        "admin_audit_list" => {
+            let client = admin(builder);
+            let params: ListAuditParams = input_or_default(case, "params");
+            Ok(to_value(
+                &client.list_audit(&params).await.map_err(OpError::Admin)?,
             ))
         }
         other => panic!("case {}: unknown operation {other:?}", case.id),
