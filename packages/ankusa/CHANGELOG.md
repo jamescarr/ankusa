@@ -28,6 +28,12 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   quarter (`retry_open_ms`, `retry_open_max_ms` store options). **Changed:**
   `Ankusa.Store.ready/1` answers `{:error, {:store_unavailable | :write_failed,
   class}}` instead of `{:error, :store_unavailable | :write_failed | raw_reason}`.
+  **Also:** the reopen a failed write asks for now waits until a synced write of
+  a small file next to the database works (`ankusa_store_reopen_total{result="deferred"}`)
+  instead of closing a database that still answers reads while the disk still
+  fails. The crash drills' EIO windows fail only the file data area (journal and
+  metadata stay up), their harness logs to stderr (it was silent), and they
+  check `/ready`'s `reason` and the `ankusa_store_*` series.
   See `docs/storage.md#durability-corruption-full-disk`.
 - **`queue.rocksdb`: the store's RocksDB settings are config, and `index` and
   `deliveries` carry a bloom filter (DUR-3).** `block_cache_bytes` (64 MiB),

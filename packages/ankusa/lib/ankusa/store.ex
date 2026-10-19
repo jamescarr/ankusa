@@ -145,6 +145,7 @@ defmodule Ankusa.Store do
                open_failure: nil,
                reopen_interval_ms: reopen_interval_ms,
                last_reopen: nil,
+               reopen_probe: Path.join(state.path, "REOPEN_PROBE"),
                ready_at: nil,
                ready_result: :ok,
                last_write_failure: nil,
@@ -473,20 +474,7 @@ defmodule Ankusa.Store do
         Logger.warning("[ankusa] readiness probe write failed (#{class}): #{inspect(reason)}")
         emit_write_failed(state.instance, class, reason)
 
-        state =
-          if reopen_due?(state) do
-            state =
-              case reopen_db(state) do
-                {:ok, state} -> state
-                {:error, _reason, state} -> state
-              end
-
-            %{state | last_reopen: System.monotonic_time(:millisecond)}
-          else
-            state
-          end
-
-        {{:error, {:write_failed, class}}, state}
+        {{:error, {:write_failed, class}}, reopen_after_failure(state)}
     end
   end
 
@@ -512,27 +500,76 @@ defmodule Ankusa.Store do
 
     if reopen_due?(state) do
       Logger.warning(
-        "[ankusa] store write failed (#{inspect(reason)}); reopening to clear a latched error"
+        "[ankusa] store write failed (#{failure_class(reason)}): #{inspect(reason)}; " <>
+          "reopening to clear a latched error once the disk takes a synced write"
       )
-
-      state =
-        case reopen_db(state) do
-          {:ok, state} -> state
-          {:error, _reason, state} -> state
-        end
-
-      # Stamped once the reopen is over: a slow WAL replay must not make every
-      # report that queued up behind it look overdue.
-      {:noreply, %{state | last_reopen: System.monotonic_time(:millisecond)}}
-    else
-      {:noreply, state}
     end
+
+    {:noreply, reopen_after_failure(state)}
   end
 
   defp reopen_due?(%{last_reopen: nil}), do: true
 
   defp reopen_due?(%{last_reopen: last, reopen_interval_ms: interval}),
     do: System.monotonic_time(:millisecond) - last >= interval
+
+  # The reopen a failed write asks for, once it is due. Stamped when it is over:
+  # a slow WAL replay must not make every report that queued up behind it look
+  # overdue.
+  defp reopen_after_failure(state) do
+    if reopen_due?(state) do
+      state = attempt_reopen(state)
+      %{state | last_reopen: System.monotonic_time(:millisecond)}
+    else
+      state
+    end
+  end
+
+  # A reopen closes a database that still answers reads and opens one whose
+  # recovery flushes the WAL to a new SST. While the disk still refuses writes
+  # that costs the node its reads, and a recovery that fails halfway leaves a
+  # directory the next open may reject, so the reopen waits for a synced file
+  # write next to the database to work, and the next failed write asks again.
+  defp attempt_reopen(state) do
+    case disk_write(state.reopen_probe) do
+      :ok -> settled(reopen_db(state))
+      {:error, reason} -> defer_reopen(state, reason)
+    end
+  end
+
+  defp settled({:ok, state}), do: state
+  defp settled({:error, _reason, state}), do: state
+
+  defp defer_reopen(state, reason) do
+    class = failure_class(reason)
+
+    Logger.warning(
+      "[ankusa] store at #{state.path} not reopened: the disk still refuses a synced " <>
+        "write (#{class}): #{inspect(reason)}"
+    )
+
+    Telemetry.emit([:store, :reopened], %{duration: 0, unavailable_ms: 0}, %{
+      instance: state.instance,
+      result: :deferred,
+      class: class
+    })
+
+    state
+  end
+
+  # One small synced file write: what a WAL append and its fsync need from the
+  # directory, without touching the database.
+  defp disk_write(path) do
+    with {:ok, io} <- :file.open(path, [:write, :raw, :binary]) do
+      try do
+        with :ok <- :file.write(io, <<System.system_time(:millisecond)::64>>),
+             do: :file.sync(io)
+      after
+        :file.close(io)
+        _ = File.rm(path)
+      end
+    end
+  end
 
   # A store left closed by a failed reopen opens itself again. With no ingest
   # nothing else would ask, and dispatch, the pen and the admin API all answer

@@ -845,8 +845,7 @@ mise run test:crash
   instance is `kill -9`ed under load once it has served again for 5 s and at
   least 20 s into the run, the store is reopened with `Ankusa.Store` alone,
   and every id the harness printed as acked must read back (`missing=0`).
-- **EIO and power loss** (`scripts/drills/flakey.sh`): `/data` is ext4 (no
-  journal, see below) on a
+- **EIO and power loss** (`scripts/drills/flakey.sh`): `/data` is ext4 on a
   device-mapper device over a loop device. Two 2 s windows (+5 s, +10 s) where
   every I/O fails, with the same `503`/resume assertions, then at +20 s a power
   cut: the device fails every I/O, the instance is killed, the filesystem is
@@ -862,15 +861,25 @@ mise run test:crash
   skip). Where no privileged Docker host exists, it is a manual pre-release step.
   The windows use device-mapper's `error` target rather than `dm-flakey`, a
   module some kernels lack; the fault is the same, I/O errors for 2 s.
-  The volume has no journal on purpose: a window fails every I/O, the journal's
-  too, and a journal that cannot be written is aborted, after which ext4
-  remounts the volume read-only for good (`Aborting journal on device`,
-  `Remounting filesystem read-only`, whatever `errors=` says). No application
-  can reopen a store on a read-only volume, so with a journal `the node did
-  not resume` depended on whether a journal commit happened to land in a
-  window, while the store's own retry reopened it about 5 s after each window
-  (`ankusa_store_reopen_total`). A drill that fails for that reason prints the
-  kernel's filesystem lines and says the volume went read-only.
+  A window fails the file data area, not the whole device: the volume is made
+  with `packed_meta_blocks`, which puts the journal, bitmaps and inode tables
+  in one run at the start, and only the blocks after it get the `error` target
+  (the power cut still fails everything). With the whole device failing, the
+  journal's writes failed too, and a journal that cannot be written is aborted:
+  ext4 then remounts the volume read-only for good (`Aborting journal on
+  device`, `Remounting filesystem read-only`, whatever `errors=` says), which
+  no application can reopen a store on, so `the node did not resume` depended
+  on whether a journal commit happened to land in a window. A drill that still
+  fails that way prints the kernel's filesystem lines and says the volume went
+  read-only.
+  The other half of the fix is in the store: a write failure asks for a reopen,
+  but the reopen (close, then an open whose recovery flushes the WAL to an SST)
+  now waits until a synced file write next to the database works
+  (`ankusa_store_reopen_total{result="deferred"}`). Without the wait, with the
+  fault limited to the data area, a reopen that started inside a window was
+  followed in one of two runs by a store no later open accepted (`Corruption:
+  missing start of fragmented record`), and the node never resumed; with it,
+  eight consecutive runs passed.
 - **What the drills assert about the store's failure reporting.** While the
   fault is on, `/ready` answers `503` with a `reason` (`no_space` for the
   tmpfs, `io_error`/`read_only` for the device), and after the node resumed the

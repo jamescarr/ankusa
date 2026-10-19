@@ -468,6 +468,49 @@ defmodule Ankusa.StoreTest do
     end
   end
 
+  describe "a reopen asked for by a failed write" do
+    test "waits until the disk takes a synced write, keeping the database open meanwhile" do
+      cfg = test_config(roles: [:edge])
+      inst = cfg.instance
+      put_config(cfg)
+      pid = start_supervised!({Store, instance: inst, reopen_interval_ms: 50})
+      :ok = Store.write(inst, [{:put, :hooks, Keys.hook(1), "kept"}], sync: true)
+      attach(inst, [[:ankusa, :store, :reopened]])
+
+      # The probe file cannot be written: its parent is a file, as a failing disk
+      # refuses the write.
+      probe = :sys.get_state(pid).reopen_probe
+      blocker = Path.join(cfg.data_dir, "blocker")
+      File.write!(blocker, "a file where a directory has to be")
+
+      :sys.replace_state(pid, fn state -> %{state | reopen_probe: Path.join(blocker, "probe")} end)
+
+      Store.report_write_failure(inst, ~c"IO error: While fdatasync: 000004.log: I/O error")
+
+      assert_receive {:telemetry, [:ankusa, :store, :reopened], %{duration: 0, unavailable_ms: 0},
+                      %{instance: ^inst, result: :deferred, class: class}}
+
+      assert class in [:io_error, :other, :busy, :no_space, :read_only, :corruption]
+
+      # Deferred: the database was not closed, reads still work, nothing replayed.
+      assert Store.get(inst, :hooks, Keys.hook(1)) == {:ok, "kept"}
+      refute_received {:telemetry, [:ankusa, :store, :reopened], _, %{result: :ok}}
+
+      # The disk takes a write again: the next report inside no interval reopens.
+      :sys.replace_state(pid, fn state -> %{state | reopen_probe: probe} end)
+      Process.sleep(60)
+      Store.report_write_failure(inst, ~c"IO error: While fdatasync: 000004.log: I/O error")
+
+      assert_receive {:telemetry, [:ankusa, :store, :reopened], %{duration: duration},
+                      %{instance: ^inst, result: :ok, class: nil}},
+                     2_000
+
+      assert duration > 0
+      assert Store.get(inst, :hooks, Keys.hook(1)) == {:ok, "kept"}
+      refute File.exists?(probe)
+    end
+  end
+
   describe "effective settings" do
     # RocksDB ignores an option value it cannot parse and keeps the default, and
     # for `wal_recovery_mode` the default is the mode that silently drops every

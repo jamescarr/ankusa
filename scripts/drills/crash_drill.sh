@@ -20,7 +20,9 @@
 #                 5 s and at least 20 s into the run.
 #   FAULT=eio     /data is ext4 on a device-mapper device over a loop device
 #                 (needs --privileged). Two 2 s windows (+5 s, +10 s) where
-#                 every I/O on the device fails, then at +20 s a power-loss cut:
+#                 every I/O on the file data area fails (the journal and the
+#                 metadata at the start of the volume stay up, see dm_setup),
+#                 then at +20 s a power-loss cut:
 #                 the device fails every I/O, the instance is killed, the
 #                 filesystem is unmounted, repaired and remounted, so whatever
 #                 was not fsynced is gone. A tmpfs cannot show a missing fsync
@@ -133,7 +135,7 @@ dm_setup() {
   # only what follows it. (No journal at all is no answer: without ordered
   # data and metadata a failed window leaves a WAL no recovery mode accepts.)
   mkfs.ext4 -q -F -b 4096 -E packed_meta_blocks=1 -O ^flex_bg "/dev/mapper/$dm_name"
-  first_data_block=$(dumpe2fs "/dev/mapper/$dm_name" 2>/dev/null |
+  first_data_block=$(dumpe2fs "/dev/mapper/$dm_name" |
     sed -n '/^Group 0:/,/^Group 1:/s/^ *Free blocks: *\([0-9][0-9]*\).*/\1/p')
   [ -n "$first_data_block" ] || fail "cannot tell where the file data area of the volume starts"
   meta_sectors=$((first_data_block * 8))
@@ -145,7 +147,7 @@ dm_setup() {
 
 log "installing build dependencies"
 apk add --no-cache bash curl build-base cmake git linux-headers openssl-dev zstd-dev \
-  device-mapper losetup e2fsprogs >/dev/null
+  device-mapper losetup e2fsprogs e2fsprogs-extra >/dev/null
 
 if [ "$fault" = eio ]; then dm_setup; fi
 

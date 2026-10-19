@@ -124,7 +124,10 @@ This release writes v0. The release after it writes v1, so a rollback of
   dispatch, the archive, the quarantine pen, source and rate-limit edits) also
   tells the Store, whichever process saw it, and the Store closes and reopens
   itself at most once every 5 s. That clears a latched RocksDB write error if
-  one outlives the freed space. A store that cannot reopen stays closed (every
+  one outlives the freed space. The reopen waits until a synced write of a small
+  file next to the database works (`ankusa_store_reopen_total{result="deferred"}`
+  counts the waits): a disk that still fails keeps its database open and
+  readable instead of being closed and half-recovered. A store that cannot reopen stays closed (every
   call answers `:store_unavailable`) and retries by itself after 5 s, then
   twice as long each time up to 60 s, each wait jittered down by up to a
   quarter, so a fleet whose disks came back together does not replay its WALs
