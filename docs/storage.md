@@ -132,6 +132,63 @@ This release writes v0. The release after it writes v1, so a rollback of
   the store closes with it. SIGKILL keeps the data (RocksDB WAL recovery), but a
   node halted mid-write-load with the DB open can segfault at exit.
 
+### RocksDB tuning and the index filters
+
+The store's RocksDB settings are config, not constants: `queue.rocksdb` in
+[`configuration.md`](configuration.md#library-configuration-elixir) sets the
+block cache, the bloom filter, `max_open_files`, the compaction style, a
+flush/compaction rate limiter, the background job budget and a memtable size
+per column family. They are read when the database opens and again by every
+reopen (`Store.reopen/1`). What stays fixed is everything the durability
+promise above rests on: `paranoid_checks`, the WAL recovery mode, the
+`sync: true` commit, `max_total_wal_size` and `db_write_buffer_size`; no
+tunable touches the WAL or its fsync (the [crash drill](testing.md#crash-consistency-drill-mise-run-testcrash)
+is unchanged and passes).
+
+- **Filters where the reads are point lookups of absent keys.** The `index`
+  family holds the ingest dedupe keys (`?u`, `?e`) next to the ordered
+  due/inflight/dead/active rows, and `Queue.Writer` asks it for a whole batch of
+  never-seen dedupe keys before every commit (`Store.multi_get/3`); `deliveries`
+  is read by point too. Both get a whole-key bloom filter (`bloom_bits_per_key`,
+  10 by default, about a 1 % false-positive rate) and keep their index and filter
+  blocks in the block cache (`cache_index_and_filter_blocks`), so a miss costs a
+  filter probe per file instead of an index and data block read, and the memory
+  stays inside `block_cache_bytes`. The other families have no filter. There is
+  no prefix extractor: `index` is also scanned in key order, and a prefix
+  extractor would make every such iterator choose between a total-order and a
+  prefix seek, for no gain over whole-key filtering on the dedupe lookup.
+- **No migration.** A filter is written into the files a flush or compaction
+  creates, so an upgraded store gains it as compaction rewrites its files; the
+  key layout and the store format are unchanged. `bloom_bits_per_key: 0` restores
+  the plain table options.
+- **Size the cache for the filters.** At 10 bits a dedupe key (a `?u` and a `?e`
+  key) costs about 2.5 bytes of filter, so 10⁸ keys (`dedupe.max_entries`) are
+  about 250 MB of filters plus the index blocks, all competing for
+  `block_cache_bytes`. The default 64 MiB cache caps the memory; it does not hold
+  those blocks for a store that size, which is why the table below shows a
+  raised cache helping on top of the filter.
+- **Measured.** `bench/dedupe_bench.exs` fills a store with 10⁸ dedupe keys
+  (the `index` family's files came to 12.6 GB), then times 2 000 batches of 256
+  fresh keys, each a `multi_get` followed by a `sync: true` commit. On an
+  arm64 Mac with 48 GiB RAM, so the files sat in the OS page cache and the
+  numbers are a lower bound on what the filters save when blocks come from disk
+  (2026-10-19, [PR #145](https://github.com/jamescarr/ankusa/pull/145)):
+
+  | run | block cache | miss p50 / p99 (ms) | commit p50 / p99 (ms) |
+  | --- | --- | --- | --- |
+  | before (no filter) | 64 MiB | 34.7 / 109.7 | 40.3 / 117.0 |
+  | after (defaults) | 64 MiB | 12.8 / 22.3 | 17.7 / 28.0 |
+  | before, cache raised | 1 GiB | 31.0 / 184.7 | 36.7 / 212.9 |
+  | after, cache raised | 1 GiB | 1.4 / 9.2 | 6.0 / 25.7 |
+
+  The commit p99 falls by 76 % at the default cache and by 88 % at 1 GiB. A p99
+  over 2 000 samples on a shared machine is noisy (a second run of the same
+  setup gave 106 ms and 32 ms at the default cache); the p50 moved more than any
+  noise. Proof: `bench/dedupe_bench.exs`; the settings are read back from the
+  `OPTIONS-*` file by `store_test.exs` (`effective settings`; RocksDB does not
+  write the rate limiter or the cache's capacity there, so those are asserted
+  from the store's state and `:rocksdb.cache_info/2`).
+
 ### Reclamation: a hook is deleted by its obligations
 
 A hook's obligations are its delivery rows (pending or dead) and, only if
@@ -392,9 +449,10 @@ is the hooks acked since the last backup.
   expired one makes the restore fail (`{:download_failed, key, _}`) and the
   node refuse to boot.
 - **Costs.** An upload reads one file into memory at a time; RocksDB files here
-  are bounded by the 64 MiB write buffers and the 64 MiB blob file size the
-  store sets. Each backup uploads the files written since the previous one,
-  plus a few small per-backup files.
+  are bounded by the write buffers (64 MiB by default; `queue.rocksdb.write_buffer_bytes`
+  raises them, and with them the memory of an upload) and the 64 MiB blob file
+  size the store sets. Each backup uploads the files written since the previous
+  one, plus a few small per-backup files.
 - **Watching it.** `ankusa_backup_age_seconds` is the time since the last
   successful backup — the data a lost host would take with it —
   `ankusa_backup_runs_total{result}` counts attempts, and

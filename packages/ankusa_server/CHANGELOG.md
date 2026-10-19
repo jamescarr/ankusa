@@ -23,6 +23,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   [--allow-gap]` replays a stopped node's intake log into its store (a replacement
   node does the same at boot); `--allow-gap` writes an `intake.recover.allow_gap`
   audit row. See `docs/configuration.md` and `docs/deployment.md`.
+- **`queue.rocksdb.*` (DUR-3).** YAML keys for the store's RocksDB settings:
+  `block_cache_bytes`, `bloom_bits_per_key`, `max_open_files`, `compaction_style`,
+  `rate_limiter_bytes_per_sec`, `max_background_jobs` and
+  `write_buffer_bytes.<family>`. The defaults put a bloom filter on the `index` and
+  `deliveries` families; see `docs/configuration.md` and
+  `config-examples/reference.yml`.
 - **`claim_check.redeem_grace_ms`, `sweep_max_objects` and `bucket_expiry_days`
   (DUR-2.c).** YAML keys for the claim leases: how long a claim pack stays redeemable
   after its hook is delivered (default 86 400 000 ms), how many packs and leases one

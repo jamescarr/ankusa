@@ -2223,6 +2223,59 @@ defmodule AnkusaServer.ConfigTest do
     end
   end
 
+  test "queue.rocksdb maps to core's queue.rocksdb, and what it leaves out keeps the default" do
+    path =
+      tmp_config("""
+      queue:
+        rocksdb:
+          block_cache_bytes: 134217728
+          bloom_bits_per_key: 14
+          max_open_files: -1
+          compaction_style: universal
+          rate_limiter_bytes_per_sec: 52428800
+          max_background_jobs: 8
+          write_buffer_bytes: {index: 33554432, counters: 262144}
+      """)
+
+    assert %{dlq: dlq, rocksdb: rocksdb} = Config.load!(path: path, env: %{}).config.queue
+    assert rocksdb.block_cache_bytes == 134_217_728
+    assert rocksdb.bloom_bits_per_key == 14
+    assert rocksdb.max_open_files == -1
+    assert rocksdb.compaction_style == :universal
+    assert rocksdb.rate_limiter_bytes_per_sec == 52_428_800
+    assert rocksdb.max_background_jobs == 8
+    assert rocksdb.write_buffer_bytes.index == 33_554_432
+    assert rocksdb.write_buffer_bytes.counters == 262_144
+    assert rocksdb.write_buffer_bytes.hooks == 67_108_864
+    assert dlq == Ankusa.Config.new().queue.dlq
+
+    assert Config.load!(path: tmp_config("node: {}\n"), env: %{}).config.queue ==
+             Ankusa.Config.new().queue
+  end
+
+  test "a bad queue.rocksdb key names it, and core's ranges come back as core's message" do
+    for {yaml, message} <- [
+          {"queue: {rocks: {}}", ~s(queue: unknown key "rocks")},
+          {"queue: {rocksdb: {bloom: 1}}", ~s(queue.rocksdb: unknown key "bloom")},
+          {"queue: {rocksdb: {write_buffer_bytes: {blobs: 1}}}",
+           ~s(queue.rocksdb.write_buffer_bytes: unknown key "blobs")},
+          {"queue: {rocksdb: {max_open_files: many}}",
+           ~s(queue.rocksdb.max_open_files: expected an integer, got "many")},
+          {"queue: {rocksdb: {write_buffer_bytes: {hooks: big}}}",
+           ~s(queue.rocksdb.write_buffer_bytes.hooks: expected an integer, got "big")},
+          {"queue: {rocksdb: {compaction_style: fifo}}",
+           ~s(queue.rocksdb.compaction_style: unknown value "fifo"; expected one of level, universal)},
+          {"queue: {rocksdb: {bloom_bits_per_key: 99}}",
+           "queue.rocksdb.bloom_bits_per_key must be 0 (off) or an integer from 1 to 32, got 99"},
+          {"queue: {rocksdb: {write_buffer_bytes: {hooks: 1}}}",
+           "queue.rocksdb.write_buffer_bytes.hooks must be an integer >= 65536, got 1"}
+        ] do
+      path = tmp_config(yaml <> "\n")
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message == message
+    end
+  end
+
   # ── translation: storage ────────────────────────────────────────────────────
 
   test "storage.gcs.auth selects the token provider" do

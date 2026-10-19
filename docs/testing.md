@@ -1001,6 +1001,18 @@ and the heavy tenant's peak claimed rows and running attempts, and exits 1 if
 the light tenant's p99 is more than 2× its solo p99 (or over 25 ms) or the
 heavy tenant passes its window.
 
+[`bench/dedupe_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/dedupe_bench.exs)
+is the DUR-3 bench, run by hand (`KEYS=100000000 MIX_ENV=test mix run
+bench/dedupe_bench.exs`, about 30 minutes and 13 GB of disk at 10⁸ keys; the
+default `KEYS` is 10⁶): it fills a store with `KEYS` dedupe keys, once with the
+settings from before DUR-3 (no bloom filter) and once with the defaults, and
+prints the p50 and p99 of a `multi_get` of 256 fresh keys and of the
+`sync: true` commit after it, each at the default block cache and at
+`CACHE_BYTES`. It prints numbers and does not gate; the 10⁸-key results are in
+[`storage.md`](storage.md#rocksdb-tuning-and-the-index-filters). The settings
+themselves are checked by `store_test.exs` (`effective settings`), which reads
+them back from the `OPTIONS-*` file.
+
 `mise run bench:gate` also runs four self-asserting scripts first, with no
 baseline entry (the fourth, [`bench/intake_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/intake_bench.exs), is under [Dual commit](#dual-commit-wal-type-dual)):
 [`bench/gauges_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/gauges_bench.exs)
