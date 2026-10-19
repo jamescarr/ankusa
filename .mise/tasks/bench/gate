@@ -22,6 +22,12 @@ if [ "${BENCH_REBASELINE:-}" != 1 ] && [ "${BENCH_REBASELINE:-}" != true ]; then
     echo "==> bench/$bench.exs"
     MIX_ENV=test mix run "bench/$bench.exs"
   done
+  # The route table asserts its own budgets (TEN-9: boot/reload time, miss p99
+  # with the cache out of the picture, create/list flat in the table size,
+  # bytes per route). The gate runs it at 10^5 routes; `mix run
+  # bench/routes_bench.exs` defaults to the 10^6 the task is judged at.
+  echo "==> bench/routes_bench.exs (ROUTES_BENCH_N=${ROUTES_BENCH_N:-100000})"
+  ROUTES_BENCH_N="${ROUTES_BENCH_N:-100000}" MIX_ENV=test mix run bench/routes_bench.exs
 fi
 unset MIX_ENV
 

@@ -13,6 +13,29 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Routes at 10⁶ entries (TEN-9).** The route snapshot is indexed by the
+  literal segments a pattern starts with (`{:lit, gen, prefix, priority, id}`,
+  up to eight), so a request is matched against the few routes that share its
+  leading literals, merged in priority order, instead of every pattern in the
+  table: a miss with the decision cache out of the picture is microseconds at a
+  million routes, with the same answers as the old walk (the new
+  `routes/snapshot_test.exs` checks it against the old walk on random tables).
+  Enabled routes are also indexed by `{compiled pattern, method}`, so the
+  create/replace/update conflict check is one lookup per method, not a scan of
+  every pattern; `Routes.list/2` pages from its cursor with `:ets.next/2`
+  instead of sorting the table; publishing a generation inserts in batches of
+  2 000 routes and no longer sorts. New `routes.memory_budget_bytes` (default
+  8 GiB): at boot `max_routes` is multiplied by an estimate of what a route
+  costs (`Snapshot.estimated_bytes/1`) and a cap that does not fit is an
+  `ArgumentError` naming both keys; a store refuses a load that does not fit
+  (`Snapshot.check_budget/2`). `bench/routes_bench.exs` (10⁶ routes over 10⁵
+  paths by default; `mise run bench:gate` runs it at 10⁵) asserts boot and
+  reload time, miss p99 < 1 ms, create/list flat in the table size and bytes
+  per route against the estimate. The same prefix index backs
+  `Snapshot.overlaps/4` (every route whose pattern shares a request path with
+  a candidate, each carrying its `tenant_id`; one prefix chain, not the table)
+  and `Matcher.overlap?/2`: the query a cross-tenant path-overlap check
+  (TEN-4.b) needs. Nothing calls it yet.
 - **Per-tenant observability with a cardinality policy (TEN-7).** `metrics.detail`
   (`:tenant` by default, `:source`, `:none`) says which identity labels the
   per-hook Prometheus series carry, and `metrics.max_series_per_metric` (default
@@ -517,6 +540,12 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- `routes.max_routes` defaults to 1 000 000 (was 10 000, TEN-9); the cap is
+  still hard and nothing is evicted, and it is checked against the new
+  `routes.memory_budget_bytes`. The snapshot's `:pattern` rows are replaced by
+  `:lit` rows, `:meta` gains `max_prefix`, and a `:conflict` index is added;
+  `Snapshot.patterns/2` and `Snapshot.build/1` are gone (nothing outside the
+  snapshot read them).
 - **`dispatch.sink_concurrency` defaults to `8` (was `nil`), and the per-tenant
   windows of `dispatch.tenants.default` apply by default (TEN-3).** A
   deployment whose hooks all share one tenant (none, or one tenant id) is held

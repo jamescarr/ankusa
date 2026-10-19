@@ -1449,6 +1449,7 @@ defmodule AnkusaServer.ConfigTest do
       routes:
         enabled: true
         max_routes: 50
+        memory_budget_bytes: 100000000
         log_sample: 0
         ip_denied_status: 404
         trusted_proxies: ["10.0.0.0/8", "192.168.0.0/16"]
@@ -1468,6 +1469,7 @@ defmodule AnkusaServer.ConfigTest do
 
     assert routes.enabled
     assert routes.max_routes == 50
+    assert routes.memory_budget_bytes == 100_000_000
     assert routes.log_sample == 0
     assert routes.ip_denied_status == 404
     assert routes.trusted_proxies == ["10.0.0.0/8", "192.168.0.0/16"]
@@ -1515,7 +1517,7 @@ defmodule AnkusaServer.ConfigTest do
       tmp_config("""
       routes:
         enabled: true
-        store: {type: redis, url: redis://cache:6379, namespace: ankusa:routes, tick_ms: 5000}
+        store: {type: redis, url: redis://cache:6379, namespace: ankusa:routes, tick_ms: 5000, timeout_ms: 2000, load_timeout_ms: 90000}
       """)
 
     assert {Ankusa.Routes.Store.Redis, opts} =
@@ -1523,6 +1525,8 @@ defmodule AnkusaServer.ConfigTest do
 
     assert opts[:namespace] == "ankusa:routes"
     assert opts[:tick_ms] == 5000
+    assert opts[:timeout_ms] == 2000
+    assert opts[:load_timeout_ms] == 90_000
   end
 
   test "a url with type: ets is rejected instead of silently dropped" do
@@ -1570,6 +1574,15 @@ defmodule AnkusaServer.ConfigTest do
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message =~ ~s("url", "tick_ms" are only valid with type: redis)
     assert error.message =~ "set type: redis or remove them"
+  end
+
+  test "timeout_ms and load_timeout_ms with an ets store are rejected" do
+    for key <- ~w(timeout_ms load_timeout_ms) do
+      path = tmp_config("routes: {enabled: true, store: {#{key}: 5000}}\n")
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ ~s(routes.store: "#{key}" is only valid with type: redis)
+    end
   end
 
   test "type: redis without a url is rejected" do
@@ -1637,7 +1650,8 @@ defmodule AnkusaServer.ConfigTest do
     routes = Config.load!(path: path, env: %{}).config.routes
 
     assert routes.enabled
-    assert routes.max_routes == 10_000
+    assert routes.max_routes == 1_000_000
+    assert routes.memory_budget_bytes == 8_589_934_592
     assert routes.store == {Ankusa.Routes.Store.ETS, []}
     assert Map.delete(routes.admin, :auth) == %{port: 4003, ip: "127.0.0.1", tls: nil}
     assert routes.ip_denied_status == 403
@@ -2643,7 +2657,7 @@ defmodule AnkusaServer.ConfigTest do
   test "source_store: redis carries the URL, namespace, tick, seeds and decoder" do
     path =
       tmp_config("""
-      source_store: {type: redis, url: "redis://cache:6379", namespace: "ankusa:sources", tick_ms: 5000}
+      source_store: {type: redis, url: "redis://cache:6379", namespace: "ankusa:sources", tick_ms: 5000, timeout_ms: 2000, load_timeout_ms: 90000}
       sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
       """)
 
@@ -2653,6 +2667,8 @@ defmodule AnkusaServer.ConfigTest do
     assert opts[:url] == "redis://cache:6379"
     assert opts[:namespace] == "ankusa:sources"
     assert opts[:tick_ms] == 5000
+    assert opts[:timeout_ms] == 2000
+    assert opts[:load_timeout_ms] == 90_000
     assert Map.keys(opts[:sources]) == ["demo"]
     assert is_function(opts[:decoder], 2)
   end

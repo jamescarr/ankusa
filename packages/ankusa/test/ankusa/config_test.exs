@@ -130,6 +130,25 @@ defmodule Ankusa.ConfigTest do
       end
     end
 
+    test "checks max_routes against routes.memory_budget_bytes at boot" do
+      assert_raise ArgumentError, ~r/routes\.memory_budget_bytes/, fn ->
+        validated(memory_budget_bytes: 0)
+      end
+
+      # The default cap fits the default budget; a larger cap does not, and the
+      # message names both keys.
+      assert :ok = validated(max_routes: 1_000_000)
+
+      error =
+        assert_raise ArgumentError, ~r/routes\.max_routes \(10000000\)/, fn ->
+          validated(max_routes: 10_000_000)
+        end
+
+      assert error.message =~ "routes.memory_budget_bytes (8589934592)"
+
+      assert :ok = validated(max_routes: 10_000_000, memory_budget_bytes: 100 * 1_073_741_824)
+    end
+
     test "rejects a store that is not a {module, opts} pair" do
       assert_raise ArgumentError, ~r/routes\.store/, fn -> validated(store: "ets") end
     end

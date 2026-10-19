@@ -251,7 +251,10 @@ defmodule Ankusa.Config do
             routes: %{
               enabled: false,
               # a hard cap on definitions; nothing is ever evicted
-              max_routes: 10_000,
+              max_routes: 1_000_000,
+              # what this node may spend on routes: checked at boot against an
+              # estimate of `max_routes` definitions (`Ankusa.Routes.Snapshot`)
+              memory_budget_bytes: 8_589_934_592,
               # {module, opts} implementing Ankusa.Routes.Store
               store: {Ankusa.Routes.Store.ETS, []},
               # the decision cache (see Ankusa.Routes.Cache); gc_interval_ms

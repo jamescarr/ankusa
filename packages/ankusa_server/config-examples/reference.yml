@@ -166,7 +166,12 @@ routes:
   enabled: false
   # A hard cap on definitions. Creating one past it is a 409; nothing is ever
   # evicted — an evicted route would start rejecting real webhooks.
-  max_routes: 10000
+  max_routes: 1000000
+  # What this node may spend on route definitions, in bytes. At boot the cap is
+  # checked against an estimate of ~5 KiB per definition (the snapshot plus the
+  # store's copy): a `max_routes` that does not fit is a config error naming
+  # both keys, and a table loaded from Redis that does not fit refuses the boot.
+  memory_budget_bytes: 8589934592
   # 1 in this many rejections is logged at :debug. 0 disables the sampling.
   log_sample: 100
   # 403, or 404 for uniformity with a path that simply does not exist.
@@ -182,7 +187,7 @@ routes:
     # redis -> definitions in Redis, shared by every edge node (ankusa_redis);
     #          a `url` with no `type` means redis
     type: ets
-    # The three keys below are only valid with `type: redis`. With `type: ets`
+    # The five keys below are only valid with `type: redis`. With `type: ets`
     # (or no `type` at all, which means ets) setting any of them is a config
     # error naming the key, not a silent drop: a fleet that set only a url
     # would otherwise keep every definition to itself while its operator
@@ -195,6 +200,12 @@ routes:
     # The safety net for a missed pub/sub broadcast: how often a node re-reads
     # the version. This is the worst-case staleness after a disconnect.
     # tick_ms: 30000
+    # The timeout of every Redis command, in ms. A load reads the definitions a
+    # page at a time (HSCAN, 1000 per page), so it applies to each page.
+    # timeout_ms: 5000
+    # The deadline of a whole load (boot or reload), in ms: a million
+    # definitions load without any one command near the timeout above.
+    # load_timeout_ms: 300000
 
   cache:
     # The per-request decision cache. A mutation bumps the version, which
@@ -661,7 +672,7 @@ lifecycle:
 #               means redis.
 source_store:
   type: static
-  # The three keys below are only valid with `type: redis`.
+  # The five keys below are only valid with `type: redis`.
   # [env ANKUSA_SOURCE_STORE_URL]
   # url: redis://cache:6379
   # Share sources across nodes by giving them the same namespace; defaults to
@@ -670,6 +681,11 @@ source_store:
   # How often a node re-reads the version in case it missed a broadcast: the
   # worst-case staleness after a disconnect.
   # tick_ms: 30000
+  # The timeout of every Redis command, in ms; a load reads the hash a page at a
+  # time (HSCAN, 1000 per page), so it applies to each page.
+  # timeout_ms: 5000
+  # The deadline of a whole load (boot or reload), in ms.
+  # load_timeout_ms: 300000
 
 # Secrets at rest. With a key-encryption key (KEK: 32 random bytes, base64,
 # `openssl rand -base64 32`, optionally `<id>:<base64>`), the secret-bearing

@@ -80,6 +80,18 @@ defmodule Ankusa.Routes.Store.Redis do
   already durable in Redis and this node's mirror is already updated, so the
   only cost is that other nodes wait for their tick.
 
+  ## Loading at scale
+
+  A load reads the hash a page at a time (`HSCAN … COUNT 1000`), not with one
+  `HGETALL`: no single command ties up Redis or the connection for the whole
+  table, `timeout_ms` bounds each page, and `load_timeout_ms` (a much larger
+  default) bounds the walk. A million definitions boot and reload without a
+  command near a timeout. The snapshot is written in batches, and a change
+  that arrives in step with this node's version is applied to it as one row
+  change (`Ankusa.Routes.Snapshot.mutate/3`), not by republishing the table;
+  only a write that raced another node's reloads the whole table. A table
+  that would not fit `routes.memory_budget_bytes` is refused at the load.
+
   ## Failing loudly
 
   The store refuses to *first* boot against a Redis it cannot reach —
@@ -110,8 +122,9 @@ defmodule Ankusa.Routes.Store.Redis do
   @default_tick_ms 30_000
 
   @doc """
-  Options: `url` (required), `namespace`, and `tick_ms` — the store options of
-  `config.routes.store`'s `{module, opts}` pair.
+  Options: `url` (required), `namespace`, `tick_ms`, `timeout_ms` (every command
+  but a load's pages, default 5 s) and `load_timeout_ms` (a whole load, default
+  5 min) — the store options of `config.routes.store`'s `{module, opts}` pair.
   """
   @impl Ankusa.Routes.Store
   def start_link(opts), do: Supervisor.start_link(__MODULE__, opts)
@@ -125,6 +138,7 @@ defmodule Ankusa.Routes.Store.Redis do
     url = Keyword.fetch!(store_opts, :url)
     namespace = Keyword.get(store_opts, :namespace) || "ankusa:routes:#{instance}"
     tick_ms = Keyword.get(store_opts, :tick_ms, @default_tick_ms)
+    {timeout_ms, load_timeout_ms} = Ankusa.Redis.Options.timeouts(store_opts, "routes.store")
 
     # The children's start arguments are printed by this supervisor's reports
     # and status: they carry the password as an MFA, read back on connect.
@@ -148,7 +162,12 @@ defmodule Ankusa.Routes.Store.Redis do
           {Redix.PubSub, :start_link,
            [redis ++ [name: Ankusa.via(instance, :routes_redis_pubsub), sync_connect: sync?]]}
       },
-      {State, instance: instance, namespace: namespace, tick_ms: tick_ms}
+      {State,
+       instance: instance,
+       namespace: namespace,
+       tick_ms: tick_ms,
+       timeout_ms: timeout_ms,
+       load_timeout_ms: load_timeout_ms}
     ]
 
     # `:rest_for_one`: the state process depends on both connections, and holds a
@@ -196,13 +215,17 @@ defmodule Ankusa.Routes.Store.Redis.State do
 
   require Logger
 
+  alias Ankusa.Redis.Scan
   alias Ankusa.Routes.{Route, Snapshot}
 
-  # A write is at most three round trips — the script, a reload if it raced, the
-  # publish — each bounded by Redix's own timeout. The call has to outlast all of
-  # them, or its caller would give up on a write Redis is about to apply.
-  @redis_timeout 5_000
-  @call_timeout 20_000
+  # A load that sees the version move under it is repeated this many times
+  # before its result is kept anyway (see `fetch_table/2`).
+  @load_attempts 3
+
+  # A write is at most three round trips (the script, a reload if it raced, the
+  # publish) and the reload is a whole load: the call outlasts all of them
+  # (`call_timeout/1`), or its caller would give up on a write Redis is about
+  # to apply.
 
   # Every script reads the version first: a wrong-typed version key aborts the
   # script before anything has been written, and a missing one reads as 1 (see
@@ -282,7 +305,14 @@ defmodule Ankusa.Routes.Store.Redis.State do
   @impl Ankusa.Routes.Store
   def put_ip_rules(instance, rules), do: call(instance, {:put_ip_rules, rules})
 
-  defp call(instance, message), do: GenServer.call(server(instance), message, @call_timeout)
+  defp call(instance, message),
+    do: GenServer.call(server(instance), message, call_timeout(instance))
+
+  defp call_timeout(instance) do
+    {_module, store_opts} = Ankusa.config(instance).routes.store
+    {timeout_ms, load_timeout_ms} = Ankusa.Redis.Options.timeouts(store_opts, "routes.store")
+    3 * timeout_ms + load_timeout_ms
+  end
 
   # ── GenServer ───────────────────────────────────────────────────────────────
 
@@ -299,6 +329,9 @@ defmodule Ankusa.Routes.Store.Redis.State do
       conn: Ankusa.via(instance, :routes_redis),
       pubsub: Ankusa.via(instance, :routes_redis_pubsub),
       tick_ms: Keyword.fetch!(opts, :tick_ms),
+      timeout_ms: Keyword.fetch!(opts, :timeout_ms),
+      load_timeout_ms: Keyword.fetch!(opts, :load_timeout_ms),
+      memory_budget_bytes: config.routes.memory_budget_bytes,
       version: 0,
       routes: %{},
       ip_rules: %{default: :allow, rules: []},
@@ -337,7 +370,9 @@ defmodule Ankusa.Routes.Store.Redis.State do
 
     case eval(state, @delete_route, keys, [id, tenant]) do
       {:ok, ["ok", version]} ->
-        committed(state, version, :delete, id, fn s -> %{s | routes: Map.delete(s.routes, id)} end)
+        committed(state, version, :delete, id, {:delete, id}, fn s ->
+          %{s | routes: Map.delete(s.routes, id)}
+        end)
 
       {:ok, ["not_found"]} ->
         {:reply, {:error, :not_found}, state}
@@ -353,7 +388,7 @@ defmodule Ankusa.Routes.Store.Redis.State do
 
     case eval(state, @put_ip_rules, keys, args) do
       {:ok, ["ok", version]} ->
-        committed(state, version, :ip_rules, nil, fn s -> %{s | ip_rules: ip_rules} end)
+        committed(state, version, :ip_rules, nil, :ip_rules, fn s -> %{s | ip_rules: ip_rules} end)
 
       {:error, reason} ->
         unavailable(state, reason)
@@ -412,7 +447,7 @@ defmodule Ankusa.Routes.Store.Redis.State do
     receive do
       {:redix_pubsub, _pid, ^ref, :subscribed, _properties} -> :ok
     after
-      @redis_timeout -> {:error, {:pubsub_subscribe_failed, :timeout}}
+      state.timeout_ms -> {:error, {:pubsub_subscribe_failed, :timeout}}
     end
   end
 
@@ -471,23 +506,41 @@ defmodule Ankusa.Routes.Store.Redis.State do
 
   # ── reading the table ───────────────────────────────────────────────────────
 
-  # The version and the definitions are read in one MULTI/EXEC, so what comes
-  # back is a table that existed, not a version from one moment and a hash from
-  # the next. Nothing is published here: callers decide what to announce.
-  defp fetch_table(state) do
-    commands = [
-      ["GET", version_key(state)],
-      ["HGETALL", routes_key(state)],
-      ["GET", ip_rules_key(state)]
-    ]
+  # The definitions are read a page at a time (`HSCAN`), so no command holds
+  # Redis or this node's connection for a table's worth of work and the
+  # mirror is built as pages arrive. A scan is not a snapshot, so the version
+  # is read before and after: every write moves it in the same step as the
+  # hash, so equal versions mean the pages saw one table. If it moved, the scan
+  # is repeated (a few times; writes to routes are rare) and, if it still does
+  # not hold still, kept with the version read *before*, which no longer
+  # matches Redis's, so the next broadcast or tick loads again.
+  # Nothing is published here: callers decide what to announce.
+  defp fetch_table(state), do: fetch_table(state, 1)
 
-    with {:ok, [raw_version, raw_routes, raw_rules]} <- transaction(state, commands),
-         :ok <- not_emptied(state, raw_version, raw_routes),
+  defp fetch_table(state, attempt) do
+    deadline = System.monotonic_time(:millisecond) + state.load_timeout_ms
+
+    with {:ok, [raw_version, raw_rules]} <-
+           transaction(state, [["GET", version_key(state)], ["GET", ip_rules_key(state)]]),
+         {:ok, routes} <- scan_routes(state, deadline),
+         {:ok, version_after} <- command(state, ["GET", version_key(state)]),
+         :ok <- not_emptied(state, raw_version, routes),
          {:ok, version} <- parse_version(raw_version || "1"),
-         {:ok, routes} <- decode_routes(raw_routes),
-         {:ok, rules} <- decode_rules(raw_rules) do
-      {:ok, %{state | version: version, routes: routes, ip_rules: rules}}
+         {:ok, rules} <- decode_rules(raw_rules),
+         :ok <- Snapshot.check_budget(map_size(routes), state.memory_budget_bytes) do
+      if version_after == raw_version or attempt >= @load_attempts do
+        {:ok, %{state | version: version, routes: routes, ip_rules: rules}}
+      else
+        fetch_table(state, attempt + 1)
+      end
     end
+  end
+
+  defp scan_routes(state, deadline) do
+    Scan.reduce(state.conn, routes_key(state), %{}, &decode_page/2,
+      timeout: state.timeout_ms,
+      deadline: deadline
+    )
   end
 
   # No version key and no definitions, while this node is enforcing a table: a
@@ -495,8 +548,10 @@ defmodule Ankusa.Routes.Store.Redis.State do
   # Reading that as "the operator deleted every route" would open (or close,
   # with `default: :deny` rules gone) every catch URL at once, so the reload is
   # refused and the mirror keeps serving.
-  defp not_emptied(state, nil, []) when map_size(state.routes) > 0, do: {:error, :namespace_empty}
-  defp not_emptied(_state, _raw_version, _raw_routes), do: :ok
+  defp not_emptied(state, nil, routes) when map_size(routes) == 0 and map_size(state.routes) > 0,
+    do: {:error, :namespace_empty}
+
+  defp not_emptied(_state, _raw_version, _routes), do: :ok
 
   # The version key is written on first boot. Its absence is reported as
   # `:missing`, for `sync/1` to decide: a node that holds a table keeps it (see
@@ -509,10 +564,10 @@ defmodule Ankusa.Routes.Store.Redis.State do
     end
   end
 
-  defp decode_routes(flat) do
-    flat
-    |> Enum.chunk_every(2)
-    |> Enum.reduce_while({:ok, %{}}, fn [_id, json], {:ok, acc} ->
+  # One page of the hash into the routes read so far. `HSCAN` may return an
+  # entry more than once, so a route is put by id, never appended.
+  defp decode_page(pairs, routes) do
+    Enum.reduce_while(pairs, {:ok, routes}, fn {_id, json}, {:ok, acc} ->
       case Route.from_json(decode_json(json)) do
         {:ok, route} ->
           {:cont, {:ok, Map.put(acc, route.id, route)}}
@@ -562,7 +617,7 @@ defmodule Ankusa.Routes.Store.Redis.State do
 
     case eval(state, @put_route, keys, [version, route.id, encode(route), cap]) do
       {:ok, ["ok", new_version]} ->
-        committed(state, new_version, action, route.id, fn s ->
+        committed(state, new_version, action, route.id, {:put, route}, fn s ->
           %{s | routes: Map.put(s.routes, route.id, route)}
         end)
 
@@ -579,10 +634,11 @@ defmodule Ankusa.Routes.Store.Redis.State do
 
   # Redis accepted the write. If the new version is exactly one past this node's
   # own, nothing else was written in between and applying the change to the
-  # mirror gives Redis's table. If not, another node's write is in Redis and not
+  # mirror gives Redis's table: the snapshot takes the one route, not a
+  # republish of the table. If not, another node's write is in Redis and not
   # in the mirror, and applying only ours would drop it — take Redis's table,
   # which has both.
-  defp committed(state, new_version, action, route_id, update) do
+  defp committed(state, new_version, action, route_id, change, update) do
     broadcast(state, new_version)
 
     if new_version == state.version + 1 do
@@ -590,7 +646,7 @@ defmodule Ankusa.Routes.Store.Redis.State do
         state
         |> update.()
         |> Map.put(:version, new_version)
-        |> Snapshot.publish({action, route_id})
+        |> Snapshot.mutate(change, {action, route_id})
 
       {:reply, :ok, state}
     else
@@ -689,14 +745,14 @@ defmodule Ankusa.Routes.Store.Redis.State do
   # Every Redis failure — a disconnected client, a wrong-type key, a timeout —
   # arrives here the same way and is reported the same way.
   defp command(state, command) do
-    case Redix.command(state.conn, command, timeout: @redis_timeout) do
+    case Redix.command(state.conn, command, timeout: state.timeout_ms) do
       {:ok, value} -> {:ok, value}
       {:error, reason} -> {:error, {:redis_unavailable, reason}}
     end
   end
 
   defp transaction(state, commands) do
-    case Redix.transaction_pipeline(state.conn, commands, timeout: @redis_timeout) do
+    case Redix.transaction_pipeline(state.conn, commands, timeout: state.timeout_ms) do
       {:ok, results} -> {:ok, results}
       {:error, reason} -> {:error, {:redis_unavailable, reason}}
     end
