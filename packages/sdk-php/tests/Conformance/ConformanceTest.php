@@ -30,6 +30,7 @@ use Ankusa\Webhook\InvalidSignatureError;
 use Ankusa\Webhook\MissingHookIdError;
 use Ankusa\Webhook\Receiver;
 use Ankusa\Webhook\Signature;
+use Ankusa\Webhook\Verification;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
@@ -295,6 +296,7 @@ final class ConformanceTest extends TestCase
             'dedupe_key' => $headers->dedupeKey,
             'replay_id' => $headers->replayId,
             'idempotency_key' => $headers->idempotencyKey,
+            'verification' => self::verificationArray($headers->verification),
         ];
     }
 
@@ -387,6 +389,7 @@ final class ConformanceTest extends TestCase
             'dedupe_key' => $headers->dedupeKey,
             'replay_id' => $headers->replayId,
             'idempotency_key' => $headers->idempotencyKey,
+            'verification' => self::verificationArray($headers->verification),
         ];
     }
 
@@ -415,7 +418,16 @@ final class ConformanceTest extends TestCase
             'replay_id' => $message->replayId,
             'idempotency_key' => $message->idempotencyKey,
             'headers' => $message->headers,
+            'verification' => self::verificationArray($message->verification),
         ];
+    }
+
+    /**
+     * @return array{status: string, flagged: bool}|null
+     */
+    private static function verificationArray(?Verification $verification): ?array
+    {
+        return $verification === null ? null : ['status' => $verification->status, 'flagged' => $verification->flagged];
     }
 
     /**

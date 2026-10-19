@@ -7,6 +7,7 @@ namespace Ankusa\Message;
 use Ankusa\ClaimCheck\InvalidClaimRefError;
 use Ankusa\ClaimCheck\ParsedClaimRef;
 use Ankusa\Internal\IdempotencyKey;
+use Ankusa\Webhook\Verification;
 
 /**
  * One decoded v1 queue message — what an Ankusa consumer reads off Redis, a
@@ -74,6 +75,8 @@ final readonly class Message
          */
         public ?string $idempotencyKey,
         public array $headers,
+        /** How Ankusa verified the hook at ingest; `null` from a node older than the field. */
+        public ?Verification $verification = null,
     ) {}
 
     /**
@@ -129,6 +132,8 @@ final readonly class Message
             throw new InvalidMessageError('invalid message field', 'invalid_field', 'sha256');
         }
 
+        $verification = self::verification($raw);
+
         $bodyBase64 = self::field($raw, 'body_base64');
         $claim = self::field($raw, 'claim');
 
@@ -166,6 +171,7 @@ final readonly class Message
                 replayId: $replayId,
                 idempotencyKey: $idempotencyKey,
                 headers: $headers,
+                verification: $verification,
             );
         }
 
@@ -199,6 +205,7 @@ final readonly class Message
             replayId: $replayId,
             idempotencyKey: $idempotencyKey,
             headers: $headers,
+            verification: $verification,
         );
     }
 
@@ -272,5 +279,24 @@ final readonly class Message
         }
 
         return $item;
+    }
+
+    private static function verification(\stdClass $raw): ?Verification
+    {
+        $value = self::field($raw, 'verification');
+        if ($value === null) {
+            return null;
+        }
+        if (!$value instanceof \stdClass) {
+            throw new InvalidMessageError('invalid message field', 'invalid_field', 'verification');
+        }
+
+        $status = property_exists($value, 'status') ? $value->status : null;
+        $flagged = property_exists($value, 'flagged') ? $value->flagged : null;
+        if (!\is_string($status) || $status === '' || !\is_bool($flagged)) {
+            throw new InvalidMessageError('invalid message field', 'invalid_field', 'verification');
+        }
+
+        return new Verification($status, $flagged);
     }
 }
