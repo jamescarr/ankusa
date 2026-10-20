@@ -214,6 +214,49 @@ defmodule Ankusa.DispatchTest do
     assert stored_ids(inst) == []
   end
 
+  @doc false
+  # Runs in the queue's syncer, before its fsync: tells the test and waits.
+  def hold_sync(_event, _measurements, %{instance: inst}, {inst, test_pid}) do
+    send(test_pid, {:syncing, self()})
+
+    receive do
+      :release -> :ok
+    after
+      10_000 -> :ok
+    end
+  end
+
+  def hold_sync(_event, _measurements, _metadata, _config), do: :ok
+
+  # DUR-4.b, ground rules 1 and 5: the writer applies a group before its fsync, and
+  # a row that is in the store is visible to every reader, but dispatch must not
+  # deliver a hook the provider has not been told `201` for.
+  test "a group applied but not yet fsynced is not delivered until the fsync returns" do
+    inst = start(%{"src1" => %{sinks: [{TagSink, tag: :a, pid: self()}]}})
+    handler = "dispatch-hold-sync-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:ankusa, :wal_sync, :start],
+      &__MODULE__.hold_sync/4,
+      {inst, self()}
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    task = Task.async(fn -> enqueue!(inst, build_env("src1")) end)
+    assert_receive {:syncing, syncer}, 5_000
+
+    # the due row is in the store and long past due, and dispatch has been woken
+    assert Deliveries.next_due_at(inst) |> elem(1) != nil
+    send(Ankusa.whereis(inst, :dispatch), :wake)
+    refute_receive {:delivered, :a, _}, 400
+
+    send(syncer, :release)
+    id = Task.await(task).id
+    assert_receive {:delivered, :a, ^id}, 5_000
+  end
+
   test "retries a failing sink until it succeeds" do
     {:ok, agent} = Agent.start_link(fn -> 0 end)
 

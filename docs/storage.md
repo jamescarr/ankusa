@@ -69,15 +69,28 @@ The batch is atomic: a commit either lands whole or nothing is acked, and a
 failed commit makes the batcher answer `503 store_unavailable`. Seqs are
 strictly increasing and never reused — gaps are allowed, because a failed
 commit still consumes seqs. `[:ankusa, :commit, :stop]` reports `batch_size`,
-`bytes` and `duration`. A hook whose source has no sinks while `:storage` is
+`bytes` and `duration` of the write of a group into the store; the fsync that
+makes it durable is `[:ankusa, :wal_sync]` (`ankusa_wal_sync_duration_seconds`).
+A hook whose source has no sinks while `:storage` is
 off has no obligations at all: it is acked and stamped with a seq but not
 stored.
 
 A commit is a **group**. The writer takes every batch the batcher partitions have
 queued (up to `batcher.group_commit_max_bytes`, 4 MiB, and
-`batcher.group_commit_max_records`) and writes them as one synced batch, so
-four partitions at one fsync each become one fsync; while it syncs, the next
-group accumulates in its mailbox. Everything that needs no seq is done before
+`batcher.group_commit_max_records`) and writes them as one batch, so four
+partitions at one fsync each become one fsync. The writer applies the group
+without an fsync and hands its callers' replies to the **syncer**
+(`Ankusa.Queue.Syncer`), which fsyncs the WAL once for every group applied so
+far and then answers them: while group N syncs, group N+1 is assembled and
+applied, so a group costs the larger of its CPU and its fsync, not their sum.
+A group is applied before it is durable, so until its fsync returns nothing
+external may rely on it: dispatch does not claim its rows, the archive does not
+read them, and a retry of one of its hooks is not answered `201 duplicate`
+([ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md),
+amendment 17). A failed fsync answers every group it covers `503`, reopens the
+store like a failed write, fences the writer and deletes the rows of those
+groups before it accepts work again, so a hook the provider was told `503` is
+never delivered and its retry is stored once. Everything that needs no seq is done before
 the writer is called, in the batcher's commit task: the hook's binary, its
 delivery rows, and a read of its dedupe keys. That read is a prefetch the
 writer re-validates before it assigns seqs: the first occurrence of a key in
@@ -88,7 +101,7 @@ store one hook (`dedupe_test.exs`, "the same key on two batcher partitions").
 The cap is a latency bound: every caller waits for its whole group, so a
 group is kept to what one fsync and one produce request can carry in a few
 milliseconds ([`configuration.md`](configuration.md#library-configuration-elixir)).
-A writer that is saturated (its last group held 16 or more hooks) waits
+A writer that is saturated (its last group held 64 or more hooks) waits
 `batcher.group_commit_delay_ms` (1 ms) before it starts the next group, so the
 callers it just answered join it instead of forming the one after: under a
 closed loop of clients the groups are twice the size (`bench/store_commit.exs`),
@@ -127,7 +140,7 @@ This release writes v0. The release after it writes v1, so a rollback of
 
 ### Durability, corruption, full disk
 
-- One `sync: true` batch per group commit: hundreds of hooks from every partition, one fsync. The boot
+- One fsync per group commit (`sync_wal` after a `sync: false` batch): hundreds of hooks from every partition, one fsync, answered only after it. The boot
   line says it plainly: `[ankusa] store at <path>. Durable to power loss on
   THIS host only.` `kill -9` loses no acked hook; RocksDB recovers its own WAL
   (`loss_test.exs`, and the [crash drill](testing.md#crash-consistency-drill-mise-run-testcrash),
