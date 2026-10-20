@@ -83,38 +83,45 @@ defmodule Ankusa.ClaimCheck do
   # entry locate them all.
   @index_read_bytes Pack.index_prefix_bytes(1023)
 
+  # A pack id is 48 bits of time and 64 random bits, so a claim store already
+  # holding an object under a new one is a reused id, not luck. `check_in/4`
+  # mints a fresh id this many times before it gives up.
+  @max_pack_attempts 3
+
   @doc """
-  Store `items` for one tenant as a single pack object, with one `PUT`.
+  Store `items` for one tenant as a single pack object, with one conditional
+  `PUT` (`Ankusa.BlobStore.put_if_absent/4`): a claim store that already holds
+  an object under the pack's key refuses, and `check_in/4` writes the pack
+  under a **fresh pack id** (at most 3 attempts), so a reused or colliding id
+  can never overwrite claims that are already referenced. The refs it returns
+  name the id the pack was written under.
 
   Returns a `t:claim/0` per item id once the write is durable in one of the
-  claim stores (`Ankusa.ClaimCheck.Stores.write/5`). opts:
+  claim stores (`Ankusa.ClaimCheck.Stores.write/6`). The whole call, every
+  store tried, every attempt and multipart part, and every pack-id retry,
+  shares one deadline (`Ankusa.ClaimCheck.Stores.write_deadline/1`, the largest
+  claim store `op_deadline_ms`): past it the call returns an error rather than
+  keep a dispatch task and its connections busy. A store that throttles with a
+  `Retry-After` that does not fit is `{:error, {:unavailable, {:throttled,
+  seconds}}}` at once, for dispatch's own backoff to schedule. opts:
 
-    * `:pack_id` — the pack's id (`Ankusa.ClaimCheck.Ref.pack_id/2`); default
-      a freshly minted one (`Ref.new_pack_id/0`: now plus 64 random bits).
+    * `:pack_id` — the first pack id tried (`Ankusa.ClaimCheck.Ref.pack_id/2`);
+      default a freshly minted one (`Ref.new_pack_id/0`: now plus 64 random bits).
   """
   @spec check_in(atom(), String.t(), [item()], keyword()) ::
           {:ok, %{String.t() => claim()}} | {:error, reason()}
   def check_in(instance, tenant_id, [_ | _] = items, opts \\ []) do
-    pack_id = Keyword.get_lazy(opts, :pack_id, &Ref.new_pack_id/0)
+    first_id = Keyword.get_lazy(opts, :pack_id, &Ref.new_pack_id/0)
     started = System.monotonic_time()
 
-    result =
+    {result, pack_id} =
       with :ok <- Ref.validate_tenant(tenant_id),
-           :ok <- Ref.validate_pack_id(pack_id) do
+           :ok <- Ref.validate_pack_id(first_id) do
         config = Ankusa.config(instance)
-        expires_at = ref_expires_at(config)
-
-        claims =
-          items
-          |> Enum.with_index()
-          |> Enum.map(fn {item, index} -> claim(item, Ref.claim_id(pack_id, index)) end)
-
-        {data, _placements} = Pack.build(claims)
-        key = Ref.object_key(tenant_id, pack_id, config.claim_check.key_layout)
-
-        with {:ok, store} <- Stores.write(instance, config, pack_id, key, data) do
-          {:ok, Map.new(claims, &{&1.id, checked_in(config, expires_at, tenant_id, &1)}), store}
-        end
+        deadline = Stores.write_deadline(config)
+        write_pack(instance, config, tenant_id, items, first_id, deadline, @max_pack_attempts)
+      else
+        {:error, _reason} = error -> {error, first_id}
       end
 
     Telemetry.emit(
@@ -136,6 +143,55 @@ defmodule Ankusa.ClaimCheck do
     case result do
       {:ok, claims, _store} -> {:ok, claims}
       {:error, _reason} = error -> error
+    end
+  end
+
+  # One pack written under `pack_id`; on a collision, again under a fresh id.
+  # Returns the result and the id it ended on.
+  defp write_pack(instance, config, tenant_id, items, pack_id, deadline, attempts_left) do
+    expires_at = ref_expires_at(config)
+
+    claims =
+      items
+      |> Enum.with_index()
+      |> Enum.map(fn {item, index} -> claim(item, Ref.claim_id(pack_id, index)) end)
+
+    {data, _placements} = Pack.build(claims)
+    key = Ref.object_key(tenant_id, pack_id, config.claim_check.key_layout)
+
+    case Stores.write(instance, config, pack_id, key, data, deadline: deadline) do
+      {:ok, store} ->
+        {{:ok, Map.new(claims, &{&1.id, checked_in(config, expires_at, tenant_id, &1)}), store},
+         pack_id}
+
+      {:error, :already_exists} ->
+        Telemetry.emit([:claim_check, :pack_collision], %{}, %{
+          instance: instance,
+          tenant_id: tenant_id,
+          pack_id: pack_id
+        })
+
+        cond do
+          attempts_left <= 1 ->
+            {{:error, {:unavailable, :pack_id_collision}}, pack_id}
+
+          System.monotonic_time(:millisecond) >= deadline ->
+            {{:error, {:unavailable, :deadline}}, pack_id}
+
+          true ->
+            write_pack(
+              instance,
+              config,
+              tenant_id,
+              items,
+              Ref.new_pack_id(),
+              deadline,
+              attempts_left - 1
+            )
+        end
+
+      {:error, _reason} = error ->
+        {error, pack_id}
     end
   end
 

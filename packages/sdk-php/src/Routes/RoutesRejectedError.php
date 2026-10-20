@@ -11,7 +11,8 @@ namespace Ankusa\Routes;
  * `duplicate_route`, `too_many_routes`, ...); `$field`, `$detail`,
  * `$conflictingId` and `$maxRoutes` are carried through when the body supplies
  * them with the right type. (`$detail` is the body's `message` field: PHP
- * reserves `message` for {@see \Throwable}.)
+ * reserves `message` for {@see \Throwable}.) `$scope` is the body's `scope`
+ * field, when a `403` supplies it: the scope the credential lacks.
  */
 final class RoutesRejectedError extends RoutesError
 {
@@ -23,6 +24,7 @@ final class RoutesRejectedError extends RoutesError
         public readonly ?string $detail = null,
         public readonly ?string $conflictingId = null,
         public readonly ?int $maxRoutes = null,
+        public readonly ?string $scope = null,
     ) {
         parent::__construct($message);
     }

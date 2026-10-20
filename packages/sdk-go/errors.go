@@ -65,7 +65,8 @@ type InvalidRouteIdError struct {
 }
 
 // RoutesRejectedError reports a 4xx other than 404 from the
-// route-management listener.
+// route-management listener. Scope is nil unless the body (a 403) carries
+// one.
 type RoutesRejectedError struct {
 	Status        int
 	Code          string
@@ -73,6 +74,7 @@ type RoutesRejectedError struct {
 	Message       string
 	ConflictingID string
 	MaxRoutes     int
+	Scope         *string
 }
 
 // RoutesUnavailableError reports a route-management listener that could not
@@ -90,10 +92,12 @@ type RoleNotEnabledError struct {
 }
 
 // AdminRejectedError reports a 4xx other than that 409 from the admin
-// listener. Code is the body's `error` field.
+// listener. Code is the body's `error` field. Scope is nil unless the body
+// (a 403) carries one.
 type AdminRejectedError struct {
 	Status int
 	Code   string
+	Scope  *string
 }
 
 // AdminUnavailableError reports an admin listener that could not be reached,
@@ -183,6 +187,15 @@ func (e *AdminUnavailableError) Retryable() bool      { return true }
 func (e *ClaimCheckUnavailableError) Unwrap() error { return e.Cause }
 func (e *RoutesUnavailableError) Unwrap() error     { return e.Cause }
 func (e *AdminUnavailableError) Unwrap() error      { return e.Cause }
+
+// scopePointer returns nil for an empty scope, else a pointer to it — the
+// body's `scope` field is absent (zero value) unless a 403 carries one.
+func scopePointer(scope string) *string {
+	if scope == "" {
+		return nil
+	}
+	return &scope
+}
 
 func unavailableMessage(message string, cause error) string {
 	if cause == nil {

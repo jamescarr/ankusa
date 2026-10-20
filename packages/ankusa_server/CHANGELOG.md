@@ -8,6 +8,18 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`storage.max_segments_per_tick` (DUR-8).** The most segments one compactor tick
+  writes (default 16); `storage.roll_ms` now bounds how long a partial segment waits.
+  Segments are written under `archive/v1/dt=<day>/<node>/` (the node is
+  `intake.node_id`, else the host name) with a header and a sha256, and the store is
+  format 7. See [`storage.md`](../../docs/storage.md#ankusacodec-and-segment-format).
+
+- **`s3` and `gcs` blocks take the object-store transport options (DUR-7).**
+  `timeout_ms`, `upload_timeout_ms`, `op_deadline_ms`, `multipart_threshold_bytes`,
+  `multipart_part_bytes`, `retries`, `breaker_failures`, `breaker_open_ms`,
+  `breaker_slow_ms`, `pool_size`, `pool_count` and `pool_timeout`, under `storage`,
+  `claim_check.store(s)` and `backup.store`/`secondary`, range-checked when the
+  instance starts. See [`configuration.md`](../../docs/configuration.md).
 - **`batcher.max_commits`, `group_commit_max_bytes`, `group_commit_max_records` and
   `group_commit_delay_ms` (DUR-4), and `batcher.partitions` defaults to 4.** YAML
   keys for the cross-partition group commit: the commits a partition keeps in

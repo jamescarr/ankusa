@@ -32,6 +32,8 @@ final readonly class HookHeaders
         'x-ankusa-replay-id',
         'x-ankusa-idempotency-key',
         'content-type',
+        'x-ankusa-verification',
+        'x-ankusa-verification-flagged',
     ];
 
     public function __construct(
@@ -50,6 +52,8 @@ final readonly class HookHeaders
          * that predates the header). Read it through {@see self::idempotencyKey()}.
          */
         public ?string $idempotencyKey,
+        /** How Ankusa verified the hook at ingest; `null` when absent or empty. */
+        public ?Verification $verification = null,
     ) {}
 
     /**
@@ -93,7 +97,21 @@ final readonly class HookHeaders
             dedupeKey: self::optional($lowered['x-ankusa-dedupe-key'] ?? null),
             replayId: self::optional($lowered['x-ankusa-replay-id'] ?? null),
             idempotencyKey: self::optional($lowered['x-ankusa-idempotency-key'] ?? null),
+            verification: self::parseVerification($lowered),
         );
+    }
+
+    /**
+     * @param array<string, string|null> $lowered
+     */
+    private static function parseVerification(array $lowered): ?Verification
+    {
+        $status = self::optional($lowered['x-ankusa-verification'] ?? null);
+        if ($status === null) {
+            return null;
+        }
+
+        return new Verification($status, ($lowered['x-ankusa-verification-flagged'] ?? null) === 'true');
     }
 
     /**

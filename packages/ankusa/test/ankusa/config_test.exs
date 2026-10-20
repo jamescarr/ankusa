@@ -691,6 +691,18 @@ defmodule Ankusa.ConfigTest do
         end
       end
     end
+
+    test "storage.max_segments_per_tick is a positive integer; storage.roll_ms may be 0" do
+      assert Config.new().storage.max_segments_per_tick == 16
+      assert %Config{} = Config.new(storage: %{max_segments_per_tick: 1})
+      assert %Config{} = Config.new(storage: %{roll_ms: 0})
+
+      for bad <- [0, -1, 1.5, nil, "16"] do
+        assert_raise ArgumentError,
+                     "storage.max_segments_per_tick must be a positive integer, got #{inspect(bad)}",
+                     fn -> Config.new(storage: %{max_segments_per_tick: bad}) end
+      end
+    end
   end
 
   describe "the backup section" do

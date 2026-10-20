@@ -1,7 +1,8 @@
 # AsyncAPI and lifecycle events
 
-A running Ankusa publishes delivered hooks to Kafka, RabbitMQ, NATS, or Redis.
-It describes where, in [AsyncAPI 3.0](https://www.asyncapi.com/docs/reference/specification/v3.0.0),
+A running Ankusa publishes delivered hooks to Kafka, RabbitMQ, NATS, Redis,
+SQS, or Google Cloud Pub/Sub. It describes where, in
+[AsyncAPI 3.0](https://www.asyncapi.com/docs/reference/specification/v3.0.0),
 so a consumer can ask the instance instead of reading its YAML. It can also
 announce when a webhook endpoint or route is created, updated, or deleted, on a
 channel the same document describes.

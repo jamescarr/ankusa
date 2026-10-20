@@ -27,6 +27,18 @@ defmodule Ankusa.BlobStore.LocalFS do
     end
   end
 
+  # Not atomic across processes (the file is written to a temporary name and
+  # renamed over `key`, which replaces): one node's keys are unique by
+  # construction, and a claim pack's id carries 64 random bits.
+  @impl true
+  def put_if_absent(instance, key, data, opts) do
+    if File.exists?(Path.join(root(instance, opts), key)) do
+      Ankusa.BlobStore.same_object(__MODULE__, instance, key, data, opts)
+    else
+      put(instance, key, data, opts)
+    end
+  end
+
   @impl true
   # The path comes from operator config or this node's own index, never request input.
   # sobelow_skip ["Traversal.FileModule"]

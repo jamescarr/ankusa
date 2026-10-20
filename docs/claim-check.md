@@ -1,9 +1,9 @@
 # Claim check
 
 Webhook bodies can be megabytes; queue messages shouldn't be. When a RabbitMQ,
-Kafka, NATS, or Redis sink gets a body larger than its `inline_max_bytes` (64
-KiB by default), Ankusa writes the body to the object store and publishes a
-small **reference** in its place. Your worker turns the reference into an HTTP GET
+Kafka, NATS, Redis, SQS or Google Cloud Pub/Sub sink gets a body larger than
+its `inline_max_bytes` (64 KiB by default), Ankusa writes the body to the
+object store and publishes a small **reference** in its place. Your worker turns the reference into an HTTP GET
 and gets the exact bytes back, with an HTTP client and nothing else: no
 Elixir, no cloud SDK, no object-store credentials.
 
@@ -616,7 +616,16 @@ runs, shared by every sink of that source. Two more levers keep writes cheap:
   instead of one per hook, with no added latency (the batch is already in
   hand). A group bigger than `claim_check.pack_max_bytes` (16 MiB default)
   splits into several objects; a body bigger than that gets an object of its
-  own.
+  own. The `PUT` is **conditional** (`put_if_absent`: S3 and Azure
+  `If-None-Match: *`, GCS `ifGenerationMatch=0`, OCI `if-none-match: *`): a pack id
+  a store already holds an object under is refused, and the pack is written again
+  under a fresh id (at most 3 attempts; each refusal emits `[:ankusa, :claim_check,
+  :pack_collision]`), so a reused id can never overwrite claims that are already
+  referenced. The whole check-in shares one deadline
+  (`op_deadline_ms` of the claim stores, 120 s by default): a store that is slow
+  or throttles with a `Retry-After` that does not fit costs a dispatch task at
+  most that long, and the batch's items fail with
+  `{:unavailable, {:throttled, seconds}}` for dispatch's own backoff.
 
 Packs never mix tenants, so the write count is one per *tenant present* in a
 batch. A tenant with thousands of distinct values, an account id say, keeps
@@ -658,7 +667,7 @@ claims/tenant=acme/dt=2026-09-24/01M39VMD8RA3C5HR4RBV67Y000
 ```
 
 in the claim store (the storage bucket unless `claim_check.store` or
-`claim_check.stores` is set), beside the `seg/` segments and never under
+`claim_check.stores` is set), beside the `archive/` segments and never under
 `storage.key_prefix`. The last segment is the pack id: any of its claim ids
 with the position bits (the last three characters, plus the lowest bit of the
 fourth-from-last) zeroed. A pack id is the check-in time plus 64 random bits,
@@ -762,9 +771,10 @@ give every node its own root.
 
 **Object-store claims have no lease.** A bucket lifecycle rule expires by age and
 cannot see Ankusa's store, so its age is the real cutoff, and it has to outlast
-the longest a claim can be needed: the retry horizon (21 days for the default
-exponential policy, longer for a custom one), plus `queue.dlq.retention_days`,
-plus `claim_check.redeem_grace_ms`. Declare the rule's age in
+the longest a claim can be needed. The check assumes a 21-day retry horizon
+(the shipped exponential policy gives up after about 6 hours, so this is
+conservative), plus `queue.dlq.retention_days`, plus
+`claim_check.redeem_grace_ms`. Declare the rule's age in
 `claim_check.bucket_expiry_days`: boot refuses a value below that sum
 (`21 + 30 + 1 = 52` days by default) and, left undeclared, logs the minimum. (Tagging leased objects so the rule skips them would need a
 tag call in every provider's blob store and a lifecycle filter every provider

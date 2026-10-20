@@ -327,6 +327,78 @@ defmodule Ankusa.EdgeTest do
     assert forged(config, "q", body).status == 202
   end
 
+  test "a hook the pen has no room for spends no token" do
+    body = String.duplicate("x", 2_000)
+
+    config =
+      start_edge(quarantining(["q"]),
+        quarantine: %{burst: 2, rate: 0.001, max_bytes: 3_000}
+      )
+
+    assert forged(config, "q", body).status == 202
+    assert forged(config, "q", body).status == 503
+    assert {:ok, %{deleted: 1}} = Ankusa.Edge.Quarantine.purge(config.instance, %{}, 10)
+
+    # The refused hook gave its token back: the bucket still holds the second.
+    assert forged(config, "q", body).status == 202
+  end
+
+  test "concurrent charges on one source's bucket never pass its burst" do
+    config = start_edge(quarantining(["q"]), quarantine: %{burst: 50, rate: 0.001})
+
+    results =
+      1..200
+      |> Task.async_stream(fn _ -> Ankusa.Edge.Quarantine.hit(config.instance, "q", nil) end,
+        max_concurrency: 200
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.count(results, &(&1 == :ok)) == 50
+    assert Enum.all?(results -- List.duplicate(:ok, 50), &match?({:rate_limited, _}, &1))
+  end
+
+  test "a pen with 1 000 writes waiting refuses the next with 503, and counts nothing for it" do
+    config =
+      start_edge(quarantining(["q"]), quarantine: %{burst: 100_000, rate: 100_000})
+
+    inst = config.instance
+    assert {:ok, %{bytes: 0, pending: 0, entries: 0}} = Ankusa.Edge.Quarantine.held(inst)
+
+    pen = Ankusa.whereis(inst, :quarantine)
+    :ok = :sys.suspend(pen)
+    on_exit(fn -> if Process.alive?(pen), do: :sys.resume(pen) end)
+
+    waiting =
+      for i <- 1..1_000 do
+        Task.async(fn ->
+          Ingest.ingest(inst, request("q", "forged-#{i}", [{"webhook-signature", "v1,nope"}]))
+        end)
+      end
+
+    counters = :"ankusa_quarantine_counters_#{inst}"
+    eventually(fn -> :ets.lookup_element(counters, :pending, 2) == 1_000 end)
+    bytes_waiting = :ets.lookup_element(counters, :bytes, 2)
+
+    refused = forged(config, "q")
+    assert refused.status == 503
+    assert JSON.decode!(refused.resp_body) == %{"error" => "overload"}
+    assert Plug.Conn.get_resp_header(refused, "retry-after") == ["1"]
+    assert :ets.lookup_element(counters, :bytes, 2) == bytes_waiting
+    assert :ets.lookup_element(counters, :pending, 2) == 1_000
+
+    :ok = :sys.resume(pen)
+    assert Enum.all?(Task.await_many(waiting, 20_000), &match?({:quarantined, _}, &1))
+
+    # Every waiting write landed, group-committed, and the count is exactly
+    # their bytes.
+    assert {:ok, %{bytes: bytes, entries: 1_000, pending: 0}} =
+             Ankusa.Edge.Quarantine.held(inst)
+
+    assert {:ok, entries} = Ankusa.Edge.Quarantine.recent(inst, 2_000)
+    assert length(entries) == 1_000
+    assert bytes == Enum.sum(Enum.map(entries, & &1.size))
+  end
+
   test "the pen's byte count survives a restart" do
     body = String.duplicate("x", 2_000)
     config = start_edge(quarantining(["q"]), quarantine: %{max_bytes: 3_000})
@@ -863,7 +935,8 @@ defmodule Ankusa.EdgeTest do
       assert JSON.decode!(down.resp_body) == %{
                "status" => "unavailable",
                "instance" => name,
-               "store" => "store_unavailable"
+               "store" => "store_unavailable",
+               "reason" => "not_running"
              }
 
       # Liveness is unaffected.

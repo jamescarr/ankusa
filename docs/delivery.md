@@ -546,8 +546,9 @@ flows straight into the source's `Ankusa.RetryPolicy`:
 | `{:error, :not_connected}` | No channel yet. Connection loss doesn't crash the GenServer; it reconnects every `:retry_ms` (default 5000). |
 
 There is no option to turn `mandatory` off, and no separate reconnect policy
-to get wrong. A connection whose sink is removed from config stays up until
-the node restarts (nothing reaps idle connections).
+to get wrong. A connection whose sink is removed from config closes after
+`:idle_timeout_ms` with no delivery through it (`Ankusa.Sink.Reaper`), so a
+deleted source does not leave it open for the life of the node.
 
 ### `Sink.Kafka`: topic delivery
 
@@ -659,7 +660,10 @@ carries the same headers the Kafka sink sets — always `ankusa_id`,
 parses one set of fields regardless of
 transport. Unlike Kafka, there is no separate record key: NATS has no
 partition-ordering contract to lean on and no partition count to change under
-you. Order within a subject is the order the stream received it.
+you. Order within a subject is the order the stream received the messages: the
+order Ankusa published them, not the order the hooks arrived (see
+[Deliveries are not ordered](#the-dispatch-pipeline)); dedupe on
+`idempotency_key`.
 
 **Connection lifecycle**: one `Gnat.ConnectionSupervisor` per `(instance,
 connection)`, started on demand by the first `deliver/3` under `ankusa_nats`'s
@@ -784,7 +788,10 @@ durable for [direct mode](#direct-mode). The other outcomes:
 **FIFO when the queue URL ends `.fifo`** (AWS requires the suffix). Each send
 carries a `MessageGroupId`, `message_group_id` or by default
 `"tenant_id/source_id"` (`"/source_id"` without a tenant), the scope of the
-Kafka sink's default key: one group's messages are received in order. Its
+Kafka sink's default key: messages in one group are received in the order
+Ankusa sent them, which is not the order the hooks arrived. See
+[Deliveries are not ordered](#the-dispatch-pipeline); dedupe on
+`idempotency_key`. Its
 `MessageDeduplicationId` is the hook's `id`, or `id:replay:<replay_id>` on a
 replay (the `Nats-Msg-Id` rule), so SQS collapses a retry after a lost
 response while a deliberate replay is stored. SQS's deduplication window is
@@ -1012,6 +1019,27 @@ synced batch: a summary (id, source, tenant, time, reason, size) and the whole
 envelope — method, path, headers, body. `put/3` answers `:ok` only once both
 are on disk; a store that cannot take the write makes ingest answer `503` and
 spends no token. A restart neither empties the pen nor forgets its size.
+
+**How a forged flood is kept off everything else.** The decisions are made in
+the request's own process: a source's bucket is one ETS row updated with a
+compare-and-swap (the rate limiter's GCRA), the byte count and the number of
+waiting writes are `:ets.update_counter/3`, and a refusal after the token was
+taken gives the token back. Only the disk write is shared, and it is a group
+commit: callers hand their two rows to the pen process, which commits every
+write that has queued meanwhile in one synced `Store.write`. A flood therefore
+costs one fsync per group rather than one per hook, holds one of the VM's
+dirty-IO schedulers however many callers wait (the ack path's own commits keep
+theirs), and never makes another source's `put/3` or an `accept_flag` hook's
+charge wait for it. `purge/3` runs in the pen process and so holds up the
+writes queued behind it for the length of one purge call; the retention sweep
+does not (it runs in a process of its own).
+
+| | |
+| --- | --- |
+| Cap | 1 000 writes waiting for the pen's group commit (queued or in the group being committed), plus the per-source bucket and `max_bytes` above |
+| Sweep | a source's bucket row is deleted once it is full again (every 60 s); a write leaves the count when the pen has answered it |
+| Metric | `ankusa_quarantine_pending` (writes waiting), `ankusa_quarantine_bytes`, `ankusa_quarantine_entries` |
+| Refusal | the 1 001st waiting write is `503 overload` with `Retry-After: 1`, and spends no token and no bytes; a write the pen does not answer within 5 s is `503 store_unavailable` (it may still land afterwards, so it keeps its token and its bytes counted) |
 
 **Inspect** with `GET /v1/quarantine` on the admin port (newest first, no
 bodies) or `Ankusa.Edge.Quarantine.recent/2`.

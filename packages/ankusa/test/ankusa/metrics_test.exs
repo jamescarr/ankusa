@@ -239,6 +239,62 @@ defmodule Ankusa.MetricsTest do
     refute scrape =~ ~r/ankusa_backup_verify_failed_total\{[^}]*target="primary"/
   end
 
+  test "the store's failure series follow its write failures and reopens" do
+    config = start_instance()
+    inst = config.instance
+    store = Ankusa.via(inst, :store)
+
+    # Booted: the outage gauge is there to alert on, at 0.
+    assert gauge(Ankusa.Metrics.scrape(inst), "ankusa_store_unavailable_seconds", inst) == 0.0
+
+    # A failed write is counted by class, and the reopen it asks for is timed.
+    Ankusa.Store.report_write_failure(inst, ~c"IO error: No space left on device: While append")
+
+    scrape =
+      scrape_until(inst, ~r/^ankusa_store_wal_replay_seconds_count\{instance="#{inst}"\} 1$/m)
+
+    assert scrape =~
+             ~r/^ankusa_store_write_failures_total\{class="no_space",instance="#{inst}"\} 1$/m
+
+    assert scrape =~ ~r/^ankusa_store_reopen_total\{instance="#{inst}",result="ok"\} 1$/m
+    assert gauge(scrape, "ankusa_store_unavailable_seconds", inst) == 0.0
+
+    # A reopen that fails is counted, adds nothing to the replay histogram, and
+    # the one that works again resets the gauge.
+    pid = GenServer.whereis(store)
+    good = :sys.get_state(pid).path
+    blocker = Path.join(config.data_dir, "blocker")
+    File.write!(blocker, "a file where a directory has to be")
+    :sys.replace_state(pid, fn state -> %{state | path: Path.join(blocker, "store")} end)
+    assert {:error, _reason} = Ankusa.Store.reopen(inst)
+
+    scrape = Ankusa.Metrics.scrape(inst)
+    assert scrape =~ ~r/^ankusa_store_reopen_total\{instance="#{inst}",result="error"\} 1$/m
+    assert scrape =~ ~r/^ankusa_store_wal_replay_seconds_count\{instance="#{inst}"\} 1$/m
+    assert gauge(scrape, "ankusa_store_unavailable_seconds", inst) >= 0.0
+
+    :sys.replace_state(pid, fn state -> %{state | path: good} end)
+    assert :ok = Ankusa.Store.reopen(inst)
+
+    scrape = Ankusa.Metrics.scrape(inst)
+    assert scrape =~ ~r/^ankusa_store_reopen_total\{instance="#{inst}",result="ok"\} 2$/m
+    assert scrape =~ ~r/^ankusa_store_wal_replay_seconds_count\{instance="#{inst}"\} 2$/m
+    assert gauge(scrape, "ankusa_store_unavailable_seconds", inst) == 0.0
+  end
+
+  # The scrape once `pattern` shows in it (a write failure's reopen runs in the
+  # store process, after the report returns), or the last one after 2 s.
+  defp scrape_until(inst, pattern, tries \\ 100) do
+    scrape = Ankusa.Metrics.scrape(inst)
+
+    if scrape =~ pattern or tries == 0 do
+      scrape
+    else
+      Process.sleep(20)
+      scrape_until(inst, pattern, tries - 1)
+    end
+  end
+
   test "deliveries are counted per sink under dispatch and in direct mode" do
     sources = %{"q" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{OkSink, []}]]}
 
@@ -287,6 +343,7 @@ defmodule Ankusa.MetricsTest do
       assert gauge(scrape, "ankusa_store_disk_bytes", inst) != nil
       assert gauge(scrape, "ankusa_quarantine_entries", inst) == 1.0
       assert gauge(scrape, "ankusa_quarantine_bytes", inst) > 0.0
+      assert gauge(scrape, "ankusa_quarantine_pending", inst) == 0.0
       assert gauge(scrape, "ankusa_sink_http_pool_origins", inst) == 0.0
     end
 

@@ -19,7 +19,8 @@ constructed in memory doesn't. `{:error, reason}` triggers the source's
 [`delivery.md`](delivery.md)). A sink never talks to a job framework's SDK
 directly unless it's your own in-process sink (see the Oban section below);
 the shipped sinks (`Sink.Log`, `Sink.Http`, `Sink.RabbitMQ`, `Sink.Kafka`,
-`Sink.NATS`, `Sink.Redis`, `Sink.SQS`) are all framework-neutral.
+`Sink.NATS`, `Sink.Redis`, `Sink.SQS`, `Sink.GooglePubSub`) are all
+framework-neutral.
 
 ## HTTP handoff (any language)
 
@@ -132,6 +133,26 @@ An opt-out on the sink (`allow_unsigned: true`) and on the receiver go
 together: a receiver that opts out accepts anything, so keep it off any
 address you do not control. The shared vectors are the
 `webhook.require_signature` cases in `conformance/cases/receive.json`.
+
+Every parsed-headers, decoded-message, and received-delivery result also
+carries how the node verified the hook at ingest: `{status, flagged}`, or
+`null` from a node older than the field. `flagged` is `true` only when the
+node accepted a failed check (`on_verify_failure: accept_flag`) — treat that
+delivery as unverified.
+
+| SDK | Verification accessor |
+| --- | --- |
+| TypeScript (`ankusa`) | `parsed.verification` / `message.verification` / `received.verification` |
+| Python (`ankusa`) | `parsed.verification` / `message.verification` / `received.verification` |
+| Go | `parsed.Verification` / `message.Verification` / `received.Verification` |
+| Rust | `parsed.verification` / `message.verification` / `received.verification` |
+| Ruby (`ankusa-sdk`) | `parsed.verification` / `message.verification` / `received.verification` |
+| PHP | `$parsed->verification` / `$message->verification` / `$received->verification` |
+| Java | `parsed.verification()` / `message.verification()` / `received.verification()` |
+| Elixir (`ankusa_sdk`) | `hook.verification` / `message.verification` / `received.verification` |
+| Clojure (`ankusa-clj`) | `(:verification parsed)` / `(:verification message)` / `(:verification received)` |
+
+The shared vectors are `conformance/cases/verification.json`.
 
 Elixir consumers get this contract as a `Plug`: `Ankusa.SDK.Receiver` (Hex
 package
@@ -385,11 +406,10 @@ while it was away, and a publish no live subscriber receives is an error
 rather than a stored job — use it for consumers that may miss messages, not
 for durable work. See
 [`delivery.md`](delivery.md) for the full
-message contract and reconnection/confirm semantics, and the three existing
-worked examples,
+message contract and reconnection/confirm semantics, and the worked examples
 [`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/),
-[`examples/nats-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/nats-consumer/)
-and
-[`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/),
+[`examples/nats-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/nats-consumer/),
+[`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/)
+and [`examples/jetstream-k8s/`](https://github.com/jamescarr/ankusa/tree/main/examples/jetstream-k8s/),
 for end-to-end deployments where the worker is itself the consumer (rather
 than a job-framework broker in between).

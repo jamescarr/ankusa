@@ -61,4 +61,25 @@ defmodule Ankusa.BlobStore.S3Test do
     assert {:ok, keys} = S3.list(:i, "seg/it-listed", @opts)
     refute key in keys
   end
+
+  test "put_if_absent writes a free key, and refuses an existing one leaving it intact" do
+    key = key("conditional")
+
+    assert :ok = S3.put_if_absent(:i, key, "first", @opts)
+    assert {:error, :already_exists} = S3.put_if_absent(:i, key, "second", @opts)
+    assert {:ok, "first"} = S3.get(:i, key, @opts)
+
+    # the same bytes again are the same object, not a collision
+    assert :ok = S3.put_if_absent(:i, key, "first", @opts)
+  end
+
+  test "a 16 MiB object goes up in parts and reads back byte for byte" do
+    key = key("multipart")
+    body = :crypto.strong_rand_bytes(16 * 1_048_576)
+
+    assert :ok = S3.put(:i, key, body, @opts)
+    assert {:ok, ^body} = S3.get(:i, key, @opts)
+    assert {:ok, slice} = S3.get_range(:i, key, 8 * 1_048_576 - 2, 4, @opts)
+    assert slice == binary_part(body, 8 * 1_048_576 - 2, 4)
+  end
 end

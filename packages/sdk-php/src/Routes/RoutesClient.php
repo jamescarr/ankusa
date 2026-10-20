@@ -205,6 +205,7 @@ final class RoutesClient
                 self::stringField($body, 'message'),
                 self::stringField($body, 'conflicting_id'),
                 self::intField($body, 'max_routes'),
+                self::stringField($body, 'scope'),
             );
         }
 

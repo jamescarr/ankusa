@@ -37,18 +37,20 @@ module Ankusa
   # The listener rejected the request (400 or any other non-404 4xx).
   #
   # `code` is the body's `error` field (`invalid_route`, `duplicate_route`,
-  # `too_many_routes`, ...); `field`, `message`, `conflicting_id` and
-  # `max_routes` are carried through when the body supplies them.
+  # `too_many_routes`, ...); `field`, `message`, `conflicting_id`,
+  # `max_routes` and `scope` are carried through when the body supplies them.
+  # `scope` is the scope a 403 forbidden says the credential lacks.
   class RoutesRejectedError < RoutesError
-    attr_reader :status, :code, :field, :conflicting_id, :max_routes
+    attr_reader :status, :code, :field, :conflicting_id, :max_routes, :scope
 
-    def initialize(message, status:, code:, field: nil, conflicting_id: nil, max_routes: nil)
+    def initialize(message, status:, code:, field: nil, conflicting_id: nil, max_routes: nil, scope: nil)
       super(message)
       @status = status
       @code = code
       @field = field
       @conflicting_id = conflicting_id
       @max_routes = max_routes
+      @scope = scope
     end
   end
 
@@ -149,7 +151,8 @@ module Ankusa
           code: field(body, "error"),
           field: field(body, "field"),
           conflicting_id: field(body, "conflicting_id"),
-          max_routes: field(body, "max_routes")
+          max_routes: field(body, "max_routes"),
+          scope: field(body, "scope")
         )
       end
 

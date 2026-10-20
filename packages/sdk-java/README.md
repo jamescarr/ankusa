@@ -102,6 +102,7 @@ AdminHealth health = admin.health();                    // status, instance, rol
 String metrics = admin.metrics();                       // Prometheus text
 DlqPage dlq = admin.listDeadLetters(ListDeadLettersParams.builder().limit(10).build());
 QuarantinePage quarantine = admin.listQuarantined();
+AuditPage audit = admin.listAudit(ListAuditParams.builder().tenant("acme").limit(50).build());
 
 // Delete held hooks for good. Run a "quarantine" replay first to keep the ones that now verify.
 QuarantinePurge purged = admin.purgeQuarantined(PurgeQuarantinedParams.builder().sourceId("demo").limit(100).build());
@@ -217,6 +218,12 @@ try {
   response.setStatus(400);
 }
 ```
+
+`hook.verification()` (also on `Receiver.parseHeaders` and
+`Receiver.decodeMessage` results) says how the *node* verified the hook at
+ingest, `null` from a node older than the field. `hook.verification().flagged()
+== true` means the node accepted a failed check
+(`on_verify_failure: accept_flag`) — treat it as unverified.
 
 ## Consuming queue messages
 

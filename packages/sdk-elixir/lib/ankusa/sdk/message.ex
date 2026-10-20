@@ -65,6 +65,7 @@ defmodule Ankusa.SDK.Message do
           dedupe_key: String.t() | nil,
           replay_id: String.t() | nil,
           idempotency_key: String.t() | nil,
+          verification: %{status: String.t(), flagged: boolean()} | nil,
           headers: %{String.t() => String.t()}
         }
 
@@ -82,6 +83,7 @@ defmodule Ankusa.SDK.Message do
     :dedupe_key,
     :replay_id,
     :idempotency_key,
+    :verification,
     headers: %{}
   ]
 
@@ -141,6 +143,7 @@ defmodule Ankusa.SDK.Message do
       dedupe_key: message.dedupe_key,
       replay_id: message.replay_id,
       idempotency_key: message.idempotency_key,
+      verification: message.verification,
       headers: message.headers
     }
   end
@@ -172,7 +175,8 @@ defmodule Ankusa.SDK.Message do
          {:ok, replay_id} <- optional_string(raw, "replay_id"),
          {:ok, idempotency_key} <- optional_string(raw, "idempotency_key"),
          {:ok, headers} <- headers(raw),
-         {:ok, sha256} <- sha256(raw) do
+         {:ok, sha256} <- sha256(raw),
+         {:ok, verification} <- verification(raw) do
       {:ok,
        %__MODULE__{
          v: 1,
@@ -186,7 +190,8 @@ defmodule Ankusa.SDK.Message do
          replay_id: replay_id,
          idempotency_key: idempotency_key,
          headers: headers,
-         sha256: sha256
+         sha256: sha256,
+         verification: verification
        }}
     end
   end
@@ -245,6 +250,27 @@ defmodule Ankusa.SDK.Message do
 
       {:ok, _other} ->
         {:error, invalid_field("sha256")}
+    end
+  end
+
+  # `verification` is absent from a node that predates the field, so that's
+  # `nil`, same as an explicit JSON `null`; present-but-malformed is the
+  # single `invalid_field` outcome — the status value itself is never judged,
+  # so a status this SDK doesn't know about still decodes (forward-compatible).
+  defp verification(raw) do
+    case Map.fetch(raw, "verification") do
+      :error ->
+        {:ok, nil}
+
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, %{"status" => status, "flagged" => flagged}}
+      when is_binary(status) and status != "" and is_boolean(flagged) ->
+        {:ok, %{status: status, flagged: flagged}}
+
+      {:ok, _other} ->
+        {:error, invalid_field("verification")}
     end
   end
 

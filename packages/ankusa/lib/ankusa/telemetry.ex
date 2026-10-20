@@ -31,6 +31,9 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :dispatch, :breaker]` | — | `:instance`, `:sink`, `:source_id`, `:tenant_id`, `:state` (`:open`, `:closed`) |
   | `[:ankusa, :dispatch, :state]` | `:running`, `:claimed`, `:claimed_bytes`, `:runnable`, `:breakers_open`, `:active_tenants` (the most tenants one scan visited since the last report) | `:instance` |
   | `[:ankusa, :store, :state]` | `:hooks`, `:deliveries`, `:disk_bytes`, `:next_seq` | `:instance` |
+  | `[:ankusa, :store, :write_failed]` | `:count` | `:instance`, `:class` (`:no_space`, `:io_error`, `:read_only`, `:corruption`, `:busy`, `:other`; `Ankusa.Store.failure_class/1`), `:reason` (the raw term; never a label). One per failed store write a process reported, and per failed readiness probe |
+  | `[:ankusa, :store, :reopened]` | `:duration` (the close plus the open: the WAL replay), `:unavailable_ms` (how long the store has been closed) | `:instance`, `:result` (`:ok`, `:error`, `:deferred`: put off because the disk still refuses a synced write, nothing closed, both measurements `0`), `:class` (why the open failed or was put off, `nil` on `:ok`). One per reopen attempt, whoever asked for it, including the store's own retries (5 s, doubling to 60 s, jittered) |
+  | `[:ankusa, :store, :unavailable]` | `:seconds` (how long the store has been closed; `0` at boot and once open again) | `:instance`, `:class` (why the open failed, `:none` once open) |
   | `[:ankusa, :queue, :state]` | `:pending` (first attempts waiting), `:scheduled` (retries waiting), `:inflight`, `:dead`, `:archive_pending`, `:claim_leases` (claim packs leased to live or just-reclaimed hooks), `:tenants`, `:oldest_due_age_ms` | `:instance` |
   | `[:ankusa, :tenant, :state]` | `:pending` (one event per tenant of the top 100 by pending) | `:instance`, `:tenant` |
   | `[:ankusa, :quarantine, :state]` | `:bytes`, `:entries` | `:instance` |
@@ -39,7 +42,8 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :compact, :stop]` | `:records`, `:bytes`, `:duration` | `:instance` |
   | `[:ankusa, :backup, :stop]` | `:duration`, `:files`, `:bytes` | `:instance`, `:result` (`:ok`, `:error`), `:reason` (on `:error`) |
   | `[:ankusa, :backup, :state]` | `:age_seconds` (since the last successful backup, or since the uploader started) | `:instance` |
-  | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size`, `:claims` | `:instance`, `:tenant_id`, `:pack_id`, `:result`, `:store` (index into `claim_check.blob_stores` the pack was written to, `nil` on failure) |
+  | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size`, `:claims` | `:instance`, `:tenant_id`, `:pack_id` (the id the pack was written under, after any collision), `:result`, `:store` (index into `claim_check.blob_stores` the pack was written to, `nil` on failure) |
+  | `[:ankusa, :claim_check, :pack_collision]` | — | `:instance`, `:tenant_id`, `:pack_id` (an id a claim store already held an object under; `check_in/4` mints a fresh one, up to 3 attempts) |
   | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:claim_id`, `:result` |
   | `[:ankusa, :claim_check, :sweep]` | `:deleted` (partition directories removed), `:scanned` (partitions), `:packs` (pack objects deleted), `:kept` (packs a lease held back), `:leases_pruned` (lease rows deleted: grace over, or their hook no longer names the pack), `:backlog` (names the tick did not examine in the partition it stopped in), `:partitions_left` (expired partitions it did not reach), `:duration` | `:instance` |
   | `[:ankusa, :claim_check, :store_breaker]` | — | `:instance`, `:store` (index into `claim_check.blob_stores`), `:state` (`:open`, `:closed`), `:reason` (`nil` on `:closed`) |
@@ -47,7 +51,8 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :claim_check, :read]` | `:duration` | `:instance`, `:kind` (`:index`, `:bytes`, `:range`), `:source` (`:cache`, `:store`, `:coalesced`, `:shed`, `:direct`), `:result` (`:ok`, `:not_found`, `:forbidden`, `:throttled`, `:unavailable`, `:overloaded`, `:deadline`), `:store`. One per caller: `:store` is the caller whose fetch went to the store, `:coalesced` one that joined it, `:shed` one answered without a fetch's result (the queue was full, or its deadline passed — a fetch it started still finishes and is counted as `:store`) |
   | `[:ankusa, :claim_check, :read_limit]` | `:limit` | `:instance`, `:store` (every change of a store's adaptive read limit) |
   | `[:ankusa, :claim_check, :read_state]` | `:limit`, `:inflight`, `:queued` | `:instance`, `:store` (every second, per store the gateway's reader has read from) |
-  | `[:ankusa, :blob_store, :retry]` | `:delay_ms` | `:instance`, `:attempt`, `:status` (an HTTP status or `:transport`) |
+  | `[:ankusa, :blob_store, :retry]` | `:delay_ms` (full jitter, or the throttle's `Retry-After` when longer) | `:instance`, `:attempt`, `:status` (an HTTP status or `:transport`) |
+  | `[:ankusa, :blob_store, :breaker]` | — | `:instance`, `:endpoint`, `:bucket`, `:state` (`:open`, `:closed`), `:reason` (`{:failures, n}` or `{:slow, p99_ms}` on `:open`, `nil` on `:closed`) |
   | `[:ankusa, :lifecycle, :delivered]` | — | `:instance`, `:type`, `:sink` |
   | `[:ankusa, :lifecycle, :dropped]` | — | `:instance`, `:type`, `:sink`, `:reason` (`:gave_up`, `:unreadable`) |
   | `[:ankusa, :instance, :subtree_down]` | `:delay_ms` | `:instance`, `:domain`, `:reason` |

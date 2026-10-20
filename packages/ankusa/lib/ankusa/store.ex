@@ -47,11 +47,16 @@ defmodule Ankusa.Store do
   alias Ankusa.Store.Backup
   alias Ankusa.Store.Keys
   alias Ankusa.Store.Migrate
+  alias Ankusa.Telemetry
 
   @cf_names ~w(default hooks deliveries index archive quarantine audit tenants counters)a
 
-  # How long a store that failed to reopen waits before trying again by itself.
+  # How long a store that failed to reopen waits before its first retry. Every
+  # failed retry doubles it up to `@retry_open_max_ms`, and each wait is
+  # jittered down by up to a quarter (`retry_delay_ms/3`), so a fleet whose
+  # disks came back together does not replay its WALs in step.
   @retry_open_ms 5_000
+  @retry_open_max_ms 60_000
 
   # The least time between two reopens a failed write asks for. A reopen
   # replays the WAL and many writers fail together, so one reopen answers them
@@ -109,6 +114,7 @@ defmodule Ankusa.Store do
     Process.flag(:trap_exit, true)
 
     retry_open_ms = Keyword.get(opts, :retry_open_ms, @retry_open_ms)
+    retry_open_max_ms = Keyword.get(opts, :retry_open_max_ms, @retry_open_max_ms)
     reopen_interval_ms = Keyword.get(opts, :reopen_interval_ms, @reopen_interval_ms)
 
     # `origin` is how the directory came to hold a database; `migrations` is the
@@ -122,15 +128,28 @@ defmodule Ankusa.Store do
       case open_native(config.queue.rocksdb) do
         {:ok, native} ->
           with {:ok, state} <- open_and_publish(instance, path, native, config, boot) do
+            # The series exists from boot, so an alert on it has a 0 to compare.
+            Telemetry.emit([:store, :unavailable], %{seconds: 0}, %{
+              instance: instance,
+              class: :none
+            })
+
             {:ok,
              Map.merge(state, %{
+               instance: instance,
                retry_open_ms: retry_open_ms,
+               retry_open_max_ms: retry_open_max_ms,
                retry_ref: nil,
+               retry_attempt: 0,
+               closed_at: nil,
+               open_failure: nil,
                reopen_interval_ms: reopen_interval_ms,
                last_reopen: nil,
+               reopen_probe: Path.join(state.path, "REOPEN_PROBE"),
                ready_at: nil,
                ready_result: :ok,
                last_write_failure: nil,
+               last_write_class: nil,
                checkpoint: nil
              })}
           end
@@ -398,7 +417,7 @@ defmodule Ankusa.Store do
   end
 
   def handle_call(:ready, _from, %{db: nil} = state),
-    do: {:reply, {:error, :store_unavailable}, state}
+    do: {:reply, {:error, {:store_unavailable, state.open_failure || :other}}, state}
 
   def handle_call(:ready, _from, state) do
     now = System.monotonic_time(:millisecond)
@@ -406,7 +425,7 @@ defmodule Ankusa.Store do
     cond do
       state.last_write_failure != nil and
           now - state.last_write_failure < @write_failure_window_ms ->
-        {:reply, {:error, :write_failed}, state}
+        {:reply, {:error, {:write_failed, state.last_write_class || :other}}, state}
 
       state.ready_at != nil and now - state.ready_at < @ready_cache_ms ->
         {:reply, state.ready_result, state}
@@ -451,22 +470,11 @@ defmodule Ankusa.Store do
         {:ok, state}
 
       {:error, reason} ->
-        Logger.warning("[ankusa] readiness probe write failed: #{inspect(reason)}")
+        class = failure_class(reason)
+        Logger.warning("[ankusa] readiness probe write failed (#{class}): #{inspect(reason)}")
+        emit_write_failed(state.instance, class, reason)
 
-        state =
-          if reopen_due?(state) do
-            state =
-              case reopen_db(state) do
-                {:ok, state} -> state
-                {:error, _reason, state} -> state
-              end
-
-            %{state | last_reopen: System.monotonic_time(:millisecond)}
-          else
-            state
-          end
-
-        {{:error, reason}, state}
+        {{:error, {:write_failed, class}}, reopen_after_failure(state)}
     end
   end
 
@@ -474,35 +482,96 @@ defmodule Ankusa.Store do
   # store is already retrying by itself, and a reopen that just ran has done
   # what another one would.
   @impl true
-  def handle_cast({:write_failed, _reason}, %{db: nil} = state),
-    do: {:noreply, %{state | last_write_failure: System.monotonic_time(:millisecond)}}
+  def handle_cast({:write_failed, reason}, %{db: nil} = state) do
+    {:noreply,
+     %{
+       state
+       | last_write_failure: System.monotonic_time(:millisecond),
+         last_write_class: failure_class(reason)
+     }}
+  end
 
   def handle_cast({:write_failed, reason}, state) do
-    state = %{state | last_write_failure: System.monotonic_time(:millisecond)}
+    state = %{
+      state
+      | last_write_failure: System.monotonic_time(:millisecond),
+        last_write_class: failure_class(reason)
+    }
 
     if reopen_due?(state) do
       Logger.warning(
-        "[ankusa] store write failed (#{inspect(reason)}); reopening to clear a latched error"
+        "[ankusa] store write failed (#{failure_class(reason)}): #{inspect(reason)}; " <>
+          "reopening to clear a latched error once the disk takes a synced write"
       )
-
-      state =
-        case reopen_db(state) do
-          {:ok, state} -> state
-          {:error, _reason, state} -> state
-        end
-
-      # Stamped once the reopen is over: a slow WAL replay must not make every
-      # report that queued up behind it look overdue.
-      {:noreply, %{state | last_reopen: System.monotonic_time(:millisecond)}}
-    else
-      {:noreply, state}
     end
+
+    {:noreply, reopen_after_failure(state)}
   end
 
   defp reopen_due?(%{last_reopen: nil}), do: true
 
   defp reopen_due?(%{last_reopen: last, reopen_interval_ms: interval}),
     do: System.monotonic_time(:millisecond) - last >= interval
+
+  # The reopen a failed write asks for, once it is due. Stamped when it is over:
+  # a slow WAL replay must not make every report that queued up behind it look
+  # overdue.
+  defp reopen_after_failure(state) do
+    if reopen_due?(state) do
+      state = attempt_reopen(state)
+      %{state | last_reopen: System.monotonic_time(:millisecond)}
+    else
+      state
+    end
+  end
+
+  # A reopen closes a database that still answers reads and opens one whose
+  # recovery flushes the WAL to a new SST. While the disk still refuses writes
+  # that costs the node its reads, and a recovery that fails halfway leaves a
+  # directory the next open may reject, so the reopen waits for a synced file
+  # write next to the database to work, and the next failed write asks again.
+  defp attempt_reopen(state) do
+    case disk_write(state.reopen_probe) do
+      :ok -> settled(reopen_db(state))
+      {:error, reason} -> defer_reopen(state, reason)
+    end
+  end
+
+  defp settled({:ok, state}), do: state
+  defp settled({:error, _reason, state}), do: state
+
+  defp defer_reopen(state, reason) do
+    class = failure_class(reason)
+
+    Logger.warning(
+      "[ankusa] store at #{state.path} not reopened: the disk still refuses a synced " <>
+        "write (#{class}): #{inspect(reason)}"
+    )
+
+    Telemetry.emit([:store, :reopened], %{duration: 0, unavailable_ms: 0}, %{
+      instance: state.instance,
+      result: :deferred,
+      class: class
+    })
+
+    state
+  end
+
+  # One small synced file write: what a WAL append and its fsync need from the
+  # directory, without touching the database. The path is the store's own
+  # directory plus a fixed name, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
+  defp disk_write(path) do
+    with {:ok, io} <- :file.open(path, [:write, :raw, :binary]) do
+      try do
+        with :ok <- :file.write(io, <<System.system_time(:millisecond)::64>>),
+             do: :file.sync(io)
+      after
+        :file.close(io)
+        _ = File.rm(path)
+      end
+    end
+  end
 
   # A store left closed by a failed reopen opens itself again. With no ingest
   # nothing else would ask, and dispatch, the pen and the admin API all answer
@@ -561,6 +630,11 @@ defmodule Ankusa.Store do
   end
 
   defp reopen_db(state) do
+    started = System.monotonic_time()
+    # When the store first stopped answering; kept across failed retries, so
+    # `[:ankusa, :store, :unavailable]` reports the whole outage.
+    state = %{state | closed_at: state.closed_at || System.monotonic_time(:millisecond)}
+
     # Drop the published handles first, so callers see `:store_unavailable`
     # instead of racing the close. `state.cfs` keeps them alive until the close
     # is done (see `close_db/2`).
@@ -579,26 +653,120 @@ defmodule Ankusa.Store do
         true =
           :ets.insert(state.table, {:handles, %{db: db, cache: state.native.cache, cfs: cfs}})
 
-        {:ok, cancel_retry(%{state | db: db, cfs: cfs})}
+        emit_reopened(state, :ok, nil, started)
+
+        {:ok, cancel_retry(%{state | db: db, cfs: cfs, closed_at: nil, open_failure: nil})}
 
       {:error, reason} ->
         # Stay up and unpublished: every call answers `:store_unavailable` until
         # a later reopen works, which `schedule_retry/1` makes happen on its own.
-        Logger.error("[ankusa] store at #{state.path} could not be reopened: #{inspect(reason)}")
-        {:error, reason, schedule_retry(%{state | db: nil, cfs: %{}})}
+        class = failure_class(reason)
+
+        Logger.error(
+          "[ankusa] store at #{state.path} could not be reopened (#{class}): #{inspect(reason)}"
+        )
+
+        emit_reopened(state, :error, class, started)
+        {:error, reason, schedule_retry(%{state | db: nil, cfs: %{}, open_failure: class})}
     end
   end
 
-  defp schedule_retry(%{retry_ref: nil} = state),
-    do: %{state | retry_ref: Process.send_after(self(), :retry_open, state.retry_open_ms)}
+  # One `:reopened` per attempt: `:duration` is the close plus the open, which
+  # is the WAL replay. `:unavailable_ms` is how long the store has been closed;
+  # `[:ankusa, :store, :unavailable]` carries it as the gauge, `0` once open.
+  defp emit_reopened(state, result, class, started) do
+    down_ms = System.monotonic_time(:millisecond) - state.closed_at
+
+    Telemetry.emit(
+      [:store, :reopened],
+      %{duration: System.monotonic_time() - started, unavailable_ms: down_ms},
+      %{instance: state.instance, result: result, class: class}
+    )
+
+    Telemetry.emit(
+      [:store, :unavailable],
+      %{seconds: if(result == :ok, do: 0, else: down_ms / 1000)},
+      %{instance: state.instance, class: class || :none}
+    )
+  end
+
+  defp emit_write_failed(instance, class, reason) do
+    Telemetry.emit([:store, :write_failed], %{count: 1}, %{
+      instance: instance,
+      class: class,
+      reason: reason
+    })
+  end
+
+  @doc """
+  The class of a RocksDB or file system failure, for the `class` label and the
+  `/ready` `reason`: `:no_space` (ENOSPC), `:io_error` (EIO and the rest of
+  RocksDB's `IO error`s), `:read_only`, `:corruption`, `:busy` (the database
+  lock is held, or a resource is temporarily unavailable) or `:other`. A fixed
+  set, so no label is ever built from an error string.
+  """
+  @spec failure_class(term()) :: :no_space | :io_error | :read_only | :corruption | :busy | :other
+  def failure_class(:enospc), do: :no_space
+  def failure_class(:eio), do: :io_error
+  def failure_class(:erofs), do: :read_only
+  def failure_class({:corruption, _}), do: :corruption
+  def failure_class({:io_error, reason}), do: io_default(failure_class(reason))
+  def failure_class(reason) when is_atom(reason), do: :other
+
+  def failure_class(reason) do
+    text = reason |> failure_text() |> String.downcase()
+
+    cond do
+      String.contains?(text, ["no space", "enospc"]) -> :no_space
+      String.contains?(text, ["read-only", "read only", "erofs"]) -> :read_only
+      String.contains?(text, "corruption") -> :corruption
+      String.contains?(text, ["lock hold", "lock held", "temporarily unavailable"]) -> :busy
+      String.contains?(text, ["io error", "input/output", "eio"]) -> :io_error
+      true -> :other
+    end
+  end
+
+  # `{:io_error, _}` is an I/O error unless its message says which kind.
+  defp io_default(:other), do: :io_error
+  defp io_default(class), do: class
+
+  defp failure_text(reason) when is_binary(reason), do: reason
+
+  defp failure_text(reason) when is_list(reason) do
+    List.to_string(reason)
+  rescue
+    _ in [ArgumentError, UnicodeConversionError] -> inspect(reason)
+  end
+
+  defp failure_text(reason), do: inspect(reason)
+
+  # The wait before retry number `attempt` (0 for the first): `base`, doubled
+  # per failed retry up to `max`, less a random share of up to a quarter.
+  @doc false
+  @spec retry_delay_ms(non_neg_integer(), pos_integer(), pos_integer()) :: pos_integer()
+  def retry_delay_ms(attempt, base, max) do
+    ceiling = min(base * Integer.pow(2, min(attempt, 30)), max)
+    low = ceiling - div(ceiling, 4)
+    low + :rand.uniform(ceiling - low + 1) - 1
+  end
+
+  defp schedule_retry(%{retry_ref: nil} = state) do
+    delay = retry_delay_ms(state.retry_attempt, state.retry_open_ms, state.retry_open_max_ms)
+
+    %{
+      state
+      | retry_ref: Process.send_after(self(), :retry_open, delay),
+        retry_attempt: state.retry_attempt + 1
+    }
+  end
 
   defp schedule_retry(state), do: state
 
-  defp cancel_retry(%{retry_ref: nil} = state), do: state
+  defp cancel_retry(%{retry_ref: nil} = state), do: %{state | retry_attempt: 0}
 
   defp cancel_retry(%{retry_ref: ref} = state) do
     Process.cancel_timer(ref)
-    %{state | retry_ref: nil}
+    %{state | retry_ref: nil, retry_attempt: 0}
   end
 
   @doc """
@@ -610,7 +778,9 @@ defmodule Ankusa.Store do
   WAL, drops a torn tail, and clears the latch. `write/3` asks for it itself
   through `report_write_failure/2`, at most once every few seconds. A failed reopen
   leaves the store unavailable, not crashed, and the store then retries by
-  itself every few seconds until it opens.
+  itself, after 5 s and then twice as long each time up to 60 s (each wait
+  jittered down by up to a quarter), until it opens. Every attempt emits
+  `[:ankusa, :store, :reopened]` and `[:ankusa, :store, :unavailable]`.
   """
   @spec reopen(atom()) :: :ok | {:error, term()}
   def reopen(instance) do
@@ -620,20 +790,23 @@ defmodule Ankusa.Store do
   @doc """
   Readiness: whether the store can take a synced write right now.
 
-  `{:error, :write_failed}` while any write reported through
+  `{:error, {:write_failed, class}}` while any write reported through
   `report_write_failure/2` failed in the last 5 s: a full disk can refuse an
   ingest batch while a few bytes still fit. Otherwise writes one meta key with
   `sync: true` (the same WAL append and fsync an ingest commit needs) and
-  answers `:ok`, or `{:error, reason}` when the write fails — in which case the
-  store also reopens itself, as for any failed write. `{:error,
-  :store_unavailable}` when the store is closed or does not answer within 5 s.
+  answers `:ok`, or `{:error, {:write_failed, class}}` when the write fails — in
+  which case the store also reopens itself, as for any failed write.
+  `{:error, {:store_unavailable, class}}` when the store is closed (`class` is
+  why its last open failed) or does not answer within 5 s (`:timeout`, or
+  `:not_running` when no store runs). `class` is a `failure_class/1`.
   The probe's answer is cached for 1 s.
   """
-  @spec ready(atom()) :: :ok | {:error, term()}
+  @spec ready(atom()) :: :ok | {:error, {:store_unavailable | :write_failed, atom()}}
   def ready(instance) do
     GenServer.call(Ankusa.via(instance, :store), :ready, 5_000)
   catch
-    :exit, _ -> {:error, :store_unavailable}
+    :exit, {:timeout, _} -> {:error, {:store_unavailable, :timeout}}
+    :exit, _ -> {:error, {:store_unavailable, :not_running}}
   end
 
   @doc """
@@ -656,11 +829,14 @@ defmodule Ankusa.Store do
   Tell the store a write failed. A failed WAL append (a full disk) can leave
   RocksDB with a latched background error that outlives the freed space; the
   store reopens itself to clear it, at most once per `reopen_interval_ms`
-  (5 s), whichever process saw the failure. Never blocks.
+  (5 s), whichever process saw the failure. Emits
+  `[:ankusa, :store, :write_failed]` from the calling process. Never blocks.
   """
   @spec report_write_failure(atom(), term()) :: :ok
-  def report_write_failure(instance, reason),
-    do: GenServer.cast(Ankusa.via(instance, :store), {:write_failed, reason})
+  def report_write_failure(instance, reason) do
+    emit_write_failed(instance, failure_class(reason), reason)
+    GenServer.cast(Ankusa.via(instance, :store), {:write_failed, reason})
+  end
 
   # The native resources a store shares across opens: the block cache, the
   # rate limiter (`nil` when `rate_limiter_bytes_per_sec` is 0) and the

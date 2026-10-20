@@ -17,7 +17,9 @@
 # number of tenants: with more than one, the ingesters round-robin over
 # sources `load-<i>` owned by tenants `t<i>`, each with a sink, so every ack
 # leaves a due row under its tenant's ordinal (with one, a single sink-less
-# `load` source of tenant `default`).
+# `load` source of tenant `default`). `METRICS_PORT` (default unset) starts the
+# metrics listener on that port, so a drill can read the store's failure series.
+# Log lines go to stderr at `LOG_LEVEL` (default `info`; `none` silences them).
 #
 # `verify` opens `Ankusa.Store` alone over `DATA_DIR`, reads back every id in
 # `ACKS_FILE` (stdout of a `serve` run) and prints
@@ -56,9 +58,14 @@ defmodule Ankusa.CrashHarness do
         source_store:
           {Ankusa.SourceStore.Static, sources: Map.new(sources(Keyword.get(opts, :tenants, 1)))},
         batcher: %{partitions: 4, max_batch: 64, max_delay_ms: 5, max_queue: 100_000}
-      ] ++ dual(Keyword.get(opts, :log))
+      ] ++ dual(Keyword.get(opts, :log)) ++ metrics(Keyword.get(opts, :metrics_port, 0))
     )
   end
+
+  # The metrics listener, only when a drill asked for a port: it serves the
+  # store's failure series while the edge listener is refusing writes.
+  defp metrics(0), do: []
+  defp metrics(port), do: [metrics: %{enabled: true, port: port, ip: "127.0.0.1"}]
 
   # `log:` runs the node under `wal: :dual` over a file-backed `Intake.Memory`
   # that outlives the process (and the data dir): the host-loss drill.
@@ -80,7 +87,8 @@ defmodule Ankusa.CrashHarness do
       config(System.fetch_env!("DATA_DIR"),
         port: env_int("HTTP_PORT", 0),
         tenants: tenants,
-        log: System.get_env("INTAKE_LOG")
+        log: System.get_env("INTAKE_LOG"),
+        metrics_port: env_int("METRICS_PORT", 0)
       )
 
     source_ids = tenants |> sources() |> Enum.map(&elem(&1, 0))
@@ -88,9 +96,25 @@ defmodule Ankusa.CrashHarness do
     body = body(env_int("BODY_BYTES", 0))
 
     # stdout carries only `ACK <id>` lines; log output goes to stderr. The
-    # handler's output type cannot be changed in place, so it is replaced.
+    # handler's output type cannot be changed in place, so it is replaced, and
+    # the replacement takes every event: the default handler's own filters
+    # (`filter_default: :stop`, the OTP domain filter) would otherwise leave a
+    # drill that fails with an empty stderr.
     :ok = :logger.remove_handler(:default)
-    :ok = :logger.add_handler(:default, :logger_std_h, %{config: %{type: :standard_error}})
+
+    case System.get_env("LOG_LEVEL", "info") do
+      "none" ->
+        :ok
+
+      level ->
+        :ok =
+          :logger.add_handler(:default, :logger_std_h, %{
+            level: String.to_existing_atom(level),
+            filter_default: :log,
+            filters: [],
+            config: %{type: :standard_error}
+          })
+    end
 
     {:ok, _} = Application.ensure_all_started(:bandit)
     {:ok, _} = Registry.start_link(keys: :unique, name: Ankusa.Registry)

@@ -9,6 +9,12 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `list-audit`: `GET /v1/audit`, the audit trail (newest first, paged by
+  `cursor`/`limit`, filtered by `since`, `until`, `actor`, `action`,
+  `tenant`).
+- `verification` on parsed headers, decoded messages and received deliveries:
+  how Ankusa verified the hook at ingest (`{status, flagged}`, `null` from a
+  node older than the field).
 - `ankusa.sdk.claim-ref/parse` and `ankusa.sdk.claim-check/redeem` accept
   signed, expiring v2 refs
   (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`): the
@@ -75,3 +81,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   through `pr`, `pprint`, or a log line.
 - The language-neutral conformance runner (`clojure.test`,
   `ankusa.sdk.conformance-test`), passing every vector in `conformance/cases`.
+- `:scope` on the admin and routes rejected-error ex-data: the scope a `403
+  forbidden` says the credential lacks (control planes require a credential
+  since Ankusa 0.6).

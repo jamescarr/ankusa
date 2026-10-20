@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { parseClaimRef, type ParsedClaimRef } from "../claim-check/ref.js";
-import type { HookHeaders } from "../webhook/headers.js";
+import type { HookHeaders, Verification } from "../webhook/headers.js";
 
 /**
  * A decoded v1 queue message — the same JSON a broker carries, so the field
@@ -37,6 +37,8 @@ export type Message = {
   idempotency_key: string | null;
   /** Forwarded provider request headers (lowercase names); `{}` when none. */
   headers: Record<string, string>;
+  /** How Ankusa verified the hook at ingest; `null` from a node older than the field. */
+  verification: Verification | null;
   /** The decoded inline body (non-enumerable); `null` for a claim message. */
   body: Uint8Array | null;
 };
@@ -80,6 +82,18 @@ const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/
 function decodeBase64(value: string): Buffer | null {
   if (!BASE64_PATTERN.test(value)) return null;
   return Buffer.from(value, "base64");
+}
+
+function decodeVerification(value: unknown): Verification | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new InvalidMessageError("invalid_field", "verification");
+  }
+  const { status, flagged } = value as Record<string, unknown>;
+  if (typeof status !== "string" || status.length === 0 || typeof flagged !== "boolean") {
+    throw new InvalidMessageError("invalid_field", "verification");
+  }
+  return { status, flagged };
 }
 
 /**
@@ -138,6 +152,7 @@ export function decodeMessage(data: string | Uint8Array): Message {
   if (sha256 !== undefined && (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256))) {
     throw new InvalidMessageError("invalid_field", "sha256");
   }
+  const verification = decodeVerification(raw.verification);
 
   // Body form: exactly one of body_base64 and claim.
   const bodyBase64 = raw.body_base64;
@@ -190,6 +205,7 @@ export function decodeMessage(data: string | Uint8Array): Message {
     replay_id: (raw.replay_id ?? null) as string | null,
     idempotency_key: (raw.idempotency_key ?? null) as string | null,
     headers,
+    verification,
   } as Message;
   // Non-enumerable, so a decoded message still serializes to exactly the wire
   // shape (and deep-equals the conformance vectors).

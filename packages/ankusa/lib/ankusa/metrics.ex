@@ -84,6 +84,9 @@ defmodule Ankusa.Metrics do
   # The claim gateway answers at up to `claim_check.read_deadline_ms` (5 s by
   # default): the tail this histogram exists for sits past 2.5 s.
   @gateway_seconds_buckets @seconds_buckets ++ [5, 10]
+  # A reopen replays the WAL: 10 ms for an idle store, up to a minute for one
+  # that crashed with 512 MiB of log to apply.
+  @replay_seconds_buckets [0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10, 30, 60]
 
   @doc """
   Child spec for this instance's metrics: a supervisor over the cardinality
@@ -442,6 +445,34 @@ defmodule Ankusa.Metrics do
           keep: &(&1.result == :error),
           tags: [:instance, :target]
         )
+      ),
+      counter(
+        "ankusa.store.write_failures.total",
+        scoped(own, event_name: [:ankusa, :store, :write_failed], tags: [:instance, :class])
+      ),
+      counter(
+        "ankusa.store.reopen.total",
+        scoped(own, event_name: [:ankusa, :store, :reopened], tags: [:instance, :result])
+      ),
+      last_value(
+        "ankusa.store.unavailable.seconds",
+        scoped(own,
+          event_name: [:ankusa, :store, :unavailable],
+          measurement: :seconds,
+          unit: :second,
+          tags: [:instance]
+        )
+      ),
+      distribution(
+        "ankusa.store.wal_replay.seconds",
+        scoped(own,
+          event_name: [:ankusa, :store, :reopened],
+          keep: &(&1.result == :ok),
+          measurement: &duration_seconds/1,
+          unit: :second,
+          tags: [:instance],
+          reporter_options: [buckets: @replay_seconds_buckets]
+        )
       )
     ]
 
@@ -559,6 +590,7 @@ defmodule Ankusa.Metrics do
            &oldest_due_age_seconds/1, :second},
           {"ankusa.quarantine.bytes", [:ankusa, :quarantine, :state], :bytes, :byte},
           {"ankusa.quarantine.entries", [:ankusa, :quarantine, :state], :entries, :unit},
+          {"ankusa.quarantine.pending", [:ankusa, :quarantine, :state], :pending, :unit},
           {"ankusa.disk.free.bytes", [:ankusa, :disk, :state], :free_bytes, :byte},
           {"ankusa.disk.total.bytes", [:ankusa, :disk, :state], :total_bytes, :byte},
           {"ankusa.dispatch.running", [:ankusa, :dispatch, :state], :running, :unit},

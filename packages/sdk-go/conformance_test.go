@@ -355,6 +355,11 @@ func dispatch(t *testing.T, c conformanceCase, recorder *recorder) (any, error) 
 		defer closeGateway()
 		return admin.ListQuarantined(ctx, decode[ankusa.ListQuarantinedParams](t, c.Input["params"]))
 
+	case "admin_audit_list":
+		admin, closeGateway := buildAdminClient(t, gateway, client, recorder)
+		defer closeGateway()
+		return admin.ListAudit(ctx, decode[ankusa.ListAuditParams](t, c.Input["params"]))
+
 	default:
 		t.Fatalf("unknown conformance operation %q", c.Operation)
 		return nil, nil
@@ -627,6 +632,7 @@ var errorFields = map[string]string{
 	"conflicting_id": "ConflictingID",
 	"max_routes":     "MaxRoutes",
 	"role":           "Role",
+	"scope":          "Scope",
 }
 
 // assertError checks a vector's `expect.error` against the returned error: the

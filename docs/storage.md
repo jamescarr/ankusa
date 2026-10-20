@@ -160,9 +160,33 @@ This release writes v0. The release after it writes v1, so a rollback of
   dispatch, the archive, the quarantine pen, source and rate-limit edits) also
   tells the Store, whichever process saw it, and the Store closes and reopens
   itself at most once every 5 s. That clears a latched RocksDB write error if
-  one outlives the freed space. The crash drill fills a 96 MiB tmpfs under load
+  one outlives the freed space. The reopen waits until a synced write of a small
+  file next to the database works (`ankusa_store_reopen_total{result="deferred"}`
+  counts the waits): a disk that still fails keeps its database open and
+  readable instead of being closed and half-recovered. A store that cannot reopen stays closed (every
+  call answers `:store_unavailable`) and retries by itself after 5 s, then
+  twice as long each time up to 60 s, each wait jittered down by up to a
+  quarter, so a fleet whose disks came back together does not replay its WALs
+  in step. The crash drill fills a 192 MiB tmpfs under load
   and checks the `503`s, the `/ready` flip and the resume
   ([`testing.md`](testing.md#crash-consistency-drill-mise-run-testcrash)).
+- A failing store is visible without reading logs. `/ready` answers `503` with
+  `store` (`"write_failed"` or `"store_unavailable"`) and a `reason` from a
+  fixed set: `no_space`, `io_error`, `read_only`, `corruption`, `busy`,
+  `timeout`, `not_running`, `other` (`Ankusa.Store.failure_class/1`). The
+  scrape carries `ankusa_store_write_failures_total{class}` (every failed
+  write a process reported and every failed readiness probe),
+  `ankusa_store_reopen_total{result}` (every reopen attempt, the store's own
+  retries included), `ankusa_store_unavailable_seconds` (how long the store has
+  been closed: `0` while it is open, and refreshed by every failed retry, so
+  at most 60 s stale) and `ankusa_store_wal_replay_seconds` (the close plus the
+  open of each successful reopen). The events behind them are
+  `[:ankusa, :store, :write_failed | :reopened | :unavailable]`
+  ([`Ankusa.Telemetry`](https://hexdocs.pm/ankusa/Ankusa.Telemetry.html)).
+  The first open of a process is not a reopen: its replay is in the boot log.
+  Tests: `store_test.exs` (`write failure telemetry`, `reopen backoff`),
+  `metrics_test.exs`, and the crash drills, which fail unless the series rise
+  and `/ready` names the reason.
 - Stop an instance cleanly (supervisor shutdown, `docker stop`'s SIGTERM) and
   the store closes with it. SIGKILL keeps the data (RocksDB WAL recovery), but a
   node halted mid-write-load with the DB open can segfault at exit.
@@ -264,8 +288,10 @@ The active index is what makes a dispatch scan cost the tenants with work due,
 not all tenants: a scan reads the markers up to the current second, claims from
 each tenant named, oldest second first, and removes a marker once its second is
 over and the tenant has nothing due in it (delete, then verify no commit slipped
-a row in). Until TEN-3 that order is the only fairness: a tenant with a long
-backlog is served before one that arrived later in the same scan. A due row
+a row in). The index order alone would serve a tenant with a long backlog before
+one that arrived later in the same scan; dispatch's claim splits its page
+across the tenants with work due and gives each its own in-flight window
+([`delivery.md#fairness-between-tenants`](delivery.md#fairness-between-tenants)). A due row
 is never written without its marker (`Deliveries.due_ops/6`), and a counter is
 never changed by hand: both only through the `Deliveries` op builders.
 `Ankusa.Queue.purge_tenant/3` removes a tenant's pending, in-flight or dead rows
@@ -328,6 +354,19 @@ format 6 store cannot be opened by a format 5 image.
 Tests: `claim_check/sweeper_test.exs` (`lease blocks sweep`),
 `queue/deliveries_test.exs` (the sink-down drill), `store_upgrade_test.exs`
 (`the claim leases migration (format 5 -> 6)`).
+
+#### Segment rows: how an archived segment is stored
+
+Store format 7 added `format`, `codec`, `node`, `dt` and `sha256` to the
+catalogue's segment rows (`?S`). Its migration marks every row of a format 6
+store `format: 0` (bare frames under `seg/`, no node or day; `codec: nil` reads
+as the configured codec), 500 rows a batch and resumable. Segments written by a
+format 7 node are `format: 1` (header and sha256, the dated layout). A format 7
+store cannot be opened by a format 6 image: it would read the dated segments'
+frames at offsets that include a header it does not know.
+
+Tests: `store_upgrade_test.exs` (`the segment rows migration (format 6 -> 7)`),
+`codec_test.exs` (`versioned header`).
 
 ### `:none`: no queue, no store hooks
 
@@ -441,8 +480,10 @@ is the hooks acked since the last backup.
   segments in the bucket: hooks acked after the backup may already be
   archived. Before the queue writer starts, `m:next_seq` moves past the
   highest archived seq, so no new segment key overwrites one, and every
-  segment without a catalogue row is catalogued from its `.idx` object (with
-  the restored hooks' archive obligations it settles), so `Ankusa.Storage.fetch/2`
+  of this node's segments without a catalogue row is catalogued from its
+  `.idx` object and its header (`Archive.reconcile/2`, see
+  [Finding a segment without the catalogue](#finding-a-segment-without-the-catalogue);
+  with the restored hooks' archive obligations it settles), so `Ankusa.Storage.fetch/2`
   finds those hooks again. Their delivery state is gone with the host. The
   restore leaves a `RESTORE-IN-PROGRESS` marker beside `CURRENT` until this
   reconcile succeeds: a boot that finds both (the node died, or the reconcile
@@ -632,11 +673,14 @@ claim PUT recorded on their way to the emulator all carry the header.
 
 One node is one local store. To scale, run **N independent all-role
 nodes behind a load balancer**. Each with its own data volume and its own
-DLQ/admin API. Segment keys are `seg/<first_seq>-<last_seq>.seg` (with the
-sibling `.idx` object), which name no instance or node, so two nodes writing
-the same keys would silently overwrite each other's segments: give each node
-its own `storage.key_prefix` (`node-a/`, `node-b/`) and they can share one
-bucket, or give each its own bucket or LocalFS root. Claims are never
+DLQ/admin API. Segment keys are `archive/v1/dt=<day>/<node>/seg-<first_seq>-<last_seq>.seg`
+(with the sibling `.idx` object and the day's `_manifest.json`), where `<node>` is
+`intake.node_id` (else the host name): nodes with distinct names never write the
+same key, and a node that has lost its catalogue can find another node's
+segments by day. Set `intake.node_id` on every node that shares a bucket (the
+host name is the fallback, and two nodes with one host name would overwrite each
+other's segments), or give each its own `storage.key_prefix` (`node-a/`,
+`node-b/`), its own bucket or LocalFS root. Claims are never
 prefixed — pack ids carry 64 random bits, so every node's claims can share
 one place and one gateway. See [`deployment.md`](deployment.md) for the
 operational shape.
@@ -650,6 +694,7 @@ whatever answers the sink) is the only shared state. See
 
 ```elixir
 @callback put(instance, key :: String.t(), data :: iodata(), opts :: keyword()) :: :ok | {:error, term()}
+@callback put_if_absent(instance, key, data, opts) :: :ok | {:error, :already_exists} | {:error, term()}
 @callback get(instance, key, opts) :: {:ok, binary()} | {:error, term()}
 @callback get_range(instance, key, offset, length, opts) :: {:ok, binary()} | {:error, term()}
 @callback delete(instance, key, opts) :: :ok
@@ -684,8 +729,9 @@ store-specific error (`:enoent`, an HTTP status). `Ankusa.ClaimCheck`
 claim consistently regardless of which store is configured.
 
 Two independent namespaces share one `BlobStore` by default and never
-collide: `seg/...` (each segment written by `Ankusa.Storage.Compactor`, plus
-its sibling `.idx` index object, under `storage.key_prefix`) and `claims/...`
+collide: `archive/v1/...` (each segment written by `Ankusa.Storage.Compactor`,
+its sibling `.idx` index object and the node-day `_manifest.json`, under
+`storage.key_prefix`; `seg/...` is where releases before DUR-8 wrote them) and `claims/...`
 (`Ankusa.ClaimCheck`, packed per tenant per dispatch batch, one object holding
 many claims under `claims/tenant=<t>/dt=<day>/<pack_id>`, or
 `claims/tenant=<t>/shard=<c>/dt=<day>/<pack_id>` with
@@ -697,22 +743,99 @@ many claims under `claims/tenant=<t>/dt=<day>/<pack_id>`, or
 | --- | --- | --- |
 | `BlobStore.LocalFS` | none | Default. Durable writes: temp file fsync, rename, directory fsync; `put` returns `{:error, reason}` instead of raising. `get_range` uses `:file.pread/3`, never slurps the whole segment. |
 | `BlobStore.S3` | `aws_signature` + `req` | SigV4 signing via [`aws_signature`](https://hex.pm/packages/aws_signature), the implementation behind the official aws-elixir SDK, with HTTP through `Req`. Path-style addressing works unmodified against AWS, MinIO, Cloudflare R2, and the [floci](https://floci.io) emulator. `list/3` parses `ListObjectsV2` XML via stdlib `:xmerl`. Credentials: `:access_key_id`/`:secret_access_key` (+ `:session_token`), else `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`, else web identity (IRSA: `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`, through STS `AssumeRoleWithWebIdentity`), else the EC2 instance profile (IMDSv2); temporary credentials are cached until shortly before they expire. |
-| `BlobStore.GCS` | `req` | GCS JSON API. `:token_provider` opt (an MFA returning `{:ok, bearer_token}`) is required against real GCS. The adapter carries no OAuth2 dependency of its own; wire up whatever your deployment already uses (Goth, ADC). Unauthenticated against the `floci-gcp` emulator. |
+| `BlobStore.GCS` | `req` | GCS JSON API. `:token_provider` opt (an MFA returning `{:ok, bearer_token}`) is required against real GCS: `{Ankusa.BlobStore.GCS.MetadataServer, :token, []}` on GCE/GKE (the metadata server's token, cached until a minute before it expires), or whatever your deployment already uses (Goth, ADC). The adapter carries no OAuth2 dependency of its own. Unauthenticated against the `floci-gcp` emulator. |
 | `BlobStore.Azure` | `req` | Azure Blob REST. Carries **no credential dependency**, the same stance as GCS: a pre-generated `:sas_token` (Shared Access Signature), or a `:token_provider` MFA, including the built-in `Ankusa.BlobStore.Azure.ManagedIdentity`, the best credential for a service running on Azure (no secret, short-lived Entra ID tokens from IMDS). No Shared-Key signing of its own. Unauthenticated against the `floci-az` emulator. |
-| `BlobStore.OCI` | none | OCI Object Storage. The one adapter that signs its own requests, OCI has no bearer/SAS shortcut covering arbitrary `put`/`get`/`list`, using OTP's `:public_key` (RSA-SHA256 *Signature version 1*), no dependency. Two credential shapes: a static API key (`:tenancy_ocid`/`:user_ocid`/`:key_fingerprint`/`:private_key`), or the instance-principal / session-token output of the OCI SDK via `:key_id: "ST$<token>"` + `:private_key`. Signing is pinned against OCI's reference vectors in `test/ankusa/blob_store_oci_signing_test.exs`; `floci-oci` parses but never verifies the signature, so any locally generated key works there. |
+| `BlobStore.OCI` | none | OCI Object Storage. The one adapter that signs its own requests, OCI has no bearer/SAS shortcut covering arbitrary `put`/`get`/`list`, using OTP's `:public_key` (RSA-SHA256 *Signature version 1*), no dependency. Two credential shapes: a static API key (`:tenancy_ocid`/`:user_ocid`/`:key_fingerprint`/`:private_key`), or an instance principal: `key_provider: {Ankusa.BlobStore.OCI.InstancePrincipal, :credentials, [[region: "us-ashburn-1"]]}` runs the certificate federation (IMDS leaf cert, `auth.<region>.oraclecloud.com/v1/x509`, a short-lived `ST$` session token and key), caches it and refreshes it before it expires. A session token from the OCI SDK still works as `:key_id: "ST$<token>"` + `:private_key`, renewed by the caller. Signing is pinned against OCI's reference vectors in `test/ankusa/blob_store_oci_signing_test.exs`; `floci-oci` parses but never verifies the signature, so any locally generated key works there. |
+
+### Conditional writes, retries, checksums, multipart, pools
+
+**`put_if_absent/4` is how claim packs are written.** It is `put/4` that refuses
+to replace: S3 and Azure send `If-None-Match: *`, GCS `ifGenerationMatch=0`,
+OCI `if-none-match: *` (so the check and the write are one atomic request) and
+the answer for an existing key is `{:error, :already_exists}`, the original
+untouched. `LocalFS` checks for the file first (one node's keys are unique by
+construction). An object that already holds *exactly* the bytes being written is
+`:ok` (`Ankusa.BlobStore.same_object/5`, one read-back on the rare collision), so a
+write whose first attempt landed and whose answer was lost is not mistaken for
+another writer's. `Ankusa.ClaimCheck.check_in/4` uses it: a refused pack is
+written again under a **fresh pack id** (at most 3 attempts, then
+`{:unavailable, :pack_id_collision}`), so a reused or colliding id can never
+overwrite claims that are already referenced
+([`claim-check.md`](claim-check.md#storage)). Segments and backups keep plain
+`put/4`: their keys are unique per node and rewritten on purpose.
 
 **The HTTP adapters retry a transient failure** (`Ankusa.BlobStore.Retry`): a
 transport error (refused, reset, timed out) or a `408`, `429`, `500`, `502`,
-`503` or `504` is sent again after 200 ms, then after 1 s — three attempts in
-all by default — and S3 and OCI re-sign each attempt. Anything else (`404`,
-`403`, another `4xx`) is answered at once. The adapter option `:retries` is
-the number of extra attempts (`2`; `0` for a single attempt); like
-`:timeout_ms` it is Elixir config only. Each call is idempotent, a `PUT`
-writing the same bytes to the same key, so a timed-out write that did land is
-safe to repeat. A worst-case call is three timeouts plus the waits. `put`
+`503` or `504` is sent again after a **full-jitter** wait (a random time from none
+to 200 ms, then to 1 s, then to 5 s), three attempts in all by default, and S3
+and OCI re-sign each attempt. Anything else (`404`, `403`, another `4xx`) is
+answered at once. The adapter option `:retries` is the number of extra attempts
+(`2`; `0` for a single attempt). A `429` or `503` that carries a `Retry-After` (seconds
+or an HTTP date) makes the wait at least that long **if it fits in the time
+left**; if it does not, nothing sleeps and the call returns
+`{:error, {:throttled, seconds}}` at once, for the caller (dispatch, which has
+its own backoff) to schedule. Each call is idempotent, a `PUT` writing the same
+bytes to the same key, so a timed-out write that did land is safe to repeat. `put`
 hands the adapter's iodata to the HTTP client as is: a segment is not copied
-into one binary first. `LocalFS` does neither: a POSIX error is not
-transient.
+into one binary first. `LocalFS` does neither: a POSIX error is not transient.
+
+**One deadline per blob operation** (`op_deadline_ms`, default 120 s): every
+attempt, every wait, every multipart part and, for `check_in/4`, every pack-id
+retry and every store tried share one absolute deadline. An attempt runs under
+the smaller of its timeout (`timeout_ms`, 10 s, for a request that carries at
+most 1 MiB; `upload_timeout_ms`, 60 s, for one that carries more) and the time
+left; nothing is sent past it (`{:error, :deadline}`). So a slow bucket costs a
+dispatch task at most the deadline, never the product of the timeout, the retries,
+the pack-id retries and an uncapped `Retry-After`. A claim read stops at
+`claim_check.read_deadline_ms` instead.
+
+**A breaker per `{endpoint, bucket}`** (`Ankusa.BlobStore.Breaker`, shared by every
+store of the node that talks to that bucket) opens after `breaker_failures`
+(5) consecutive failures **or** when the p99 of the last 100 metadata-sized
+requests passes `breaker_slow_ms` (5 s), answers `{:error, :breaker_open}` without
+a request for `breaker_open_ms` (30 s), then lets one probe through. A throttle
+is an answer from a reachable store and never opens it; neither does a failure of
+this node (its connection pool gone or exhausted). `breaker_failures: 0` turns it
+off. Each transition emits `[:ankusa, :blob_store, :breaker]`.
+
+**Checksums.** Every `PUT` carries a digest the store validates (S3
+`x-amz-checksum-sha256`, GCS `x-goog-hash: md5=…`, Azure `Content-MD5` and
+`x-ms-blob-content-md5`, OCI `Content-MD5`), and a whole-object `GET` compares the
+digest the store sends back with the bytes received: a mismatch is `{:error,
+:integrity}`. A response with no digest (or an S3 composite one) is not checked; a
+range read is not (`Ankusa.BlobStore.Checksum`). The GCS header is the
+documented way to have GCS validate an upload; only the floci emulator has
+exercised it here.
+
+**Multipart above `multipart_threshold_bytes`** (8 MiB): a `put` of more bytes is
+cut into `multipart_part_bytes` (8 MiB; at least 5 MiB, a multiple of 256 KiB)
+pieces: an S3 or OCI multipart upload (create, parts each with `Content-MD5`,
+complete or commit, abort on failure), Azure Put Block per piece and one Put
+Block List, a GCS resumable upload in chunks. Each part has its own
+`upload_timeout_ms` inside the operation's one deadline, so a 16 MiB pack on a
+1 MiB/s link is two 8 MiB requests, not one that outlives a 10 s timeout
+(`test/ankusa/blob_store_multipart_test.exs`). A conditional upload that loses
+the race is aborted.
+
+**A connection pool per endpoint** (`Ankusa.BlobStore.Pool`): the instance
+starts one Finch pool for each distinct endpoint of `storage.blob_store`,
+`backup.blob_store`, `backup.secondary` and `claim_check.blob_stores`, sized by
+`pool_size` (32 connections), `pool_count` (1) and `pool_timeout` (5 s to check
+one out), instead of Req's shared default, which is the throughput ceiling and
+lets one slow bucket take connections from every other client. It verifies
+peers (TLS 1.2/1.3, the system trust store, or the store's `cacertfile`). A store
+with its own transport (`req_options: [finch: [name: MyFinch]]`) gets none.
+
+**Refreshing credentials.** On a `401` the adapter asks the `:token_provider` /
+`:key_provider` module to drop its cached token (`invalidate/n`, when it exports
+one) and sends the request once more with a fresh one. The built-in providers
+are `Ankusa.BlobStore.GCS.MetadataServer`, `Azure.ManagedIdentity` and
+`OCI.InstancePrincipal`; each also refreshes before the token expires.
+
+The transport options are Elixir config on the store (see the table in
+[`configuration.md`](configuration.md#library-configuration-elixir)) and, for `s3`
+and `gcs`, YAML keys of the same names under `storage.s3`, `storage.gcs` and the
+`s3`/`gcs` block of `claim_check.store(s)` and `backup.store`.
 
 **The HTTP adapters take `sse:`** — server-side encryption on every `put/4`
 (`%{type: :aes256}`, or `%{type: :kms, key_id: key}`): see
@@ -803,12 +926,45 @@ Or `mise run test:integration`, which does all three.
 ```elixir
 @callback encode([%{key: String.t(), payload: binary()}]) :: {segment :: binary(), index :: [index_entry]}
 @callback decode_record(binary()) :: {:ok, binary()} | {:error, term()}
+@callback id() :: 1..255   # optional
 ```
 
-`Codec.Raw` (the only shipped codec) frames each record length-prefixed with
-a per-record CRC32; `encode/1` packs many into one segment binary and
-returns the byte offset + length of each, which is exactly what
-the `get_range` callback needs.
+`Codec.Raw` (the only shipped codec, id `1`) frames each record length-prefixed
+with a per-record CRC32; `encode/1` packs many into one binary and returns the
+byte offset + length of each, which is exactly what the `get_range` callback
+needs. A codec only frames records: the object around them is
+`Ankusa.Storage.Segment`.
+
+**Segment object, format 1** (written since store format 7):
+
+```text
+"ANKSEG" <> <<version::8, codec_id::8, count::32>>      12 bytes
+<codec frames, back to back>
+sha256(everything above)                                32 bytes
+```
+
+`codec_id` is the codec's `id/0` (`0` when it has none; the catalogue row then
+names the module), `count` the number of frames. The index offsets are
+positions in the object, header included, so a range read of
+`[offset, offset + length)` is still exactly one frame. `Storage.fetch/2` reads
+one frame and relies on its CRC; whoever reads the whole object (archive
+replay, `Segment.verify/2`) checks the sha256 too, and a segment that does not
+verify is `{:error, _}` — a replay logs it and skips the segment.
+**Format 0**, the bare frames earlier releases wrote under `seg/`, has no header
+and stays readable; a format newer than this release is `unsupported_format`.
+Version N reads N−1: the catalogue row's `format` field says which one a segment
+is.
+
+**Index object** (`….idx`, `Ankusa.Storage.Index`): `%{event_id => {offset,
+length, seq}}` as `"ANKIDX" <> <<version::8, count::32>>`, `term_to_binary`, and
+a sha256 trailer. It is decoded with `binary_to_term(bin, [:safe])` and its
+shape checked (binary ids, three non-negative integers each, `count` entries),
+so an index that names an atom this node has never seen, or anything that is not
+an index, is `{:error, :bad_index}` instead of being interned or executed.
+Format 0 indexes (a bare term) are read the same way.
+
+Golden vectors of both formats are in `test/ankusa/codec_test.exs`
+(`versioned header`, `safe idx`); a format change adds its vectors there.
 
 ## `Ankusa.Storage.Compactor`: how segments get written
 
@@ -820,15 +976,25 @@ obligation*. Each tick (default every `storage.interval_ms`, 1s) clears some:
    16 MiB) — always at least one, so a hook larger than a segment still gets
    one. Sizes come from the obligation keys, so nothing is read and discarded
    to find out how much fits. A long backlog produces **several segments in
-   one tick**: the tick repeats while obligations remain.
-2. Encode those hooks into one segment via the configured `Codec`.
-3. `PUT` the segment to the blob store under a deterministic key:
-   `seg/<zero-padded first_seq>-<zero-padded last_seq>.seg`.
-4. `PUT` the segment's index object, the same key with `.idx`, mapping each
-   event id to `{offset, length, seq}` for range reads.
-5. Write the segment's catalogue row to the store: key, index key, seq and id
-   ranges, count and byte size.
-6. Clear the batch's obligations. Each cleared obligation leaves a marker; when
+   one tick** (at most `storage.max_segments_per_tick`, default 16, the rest
+   wait for the next tick). What is left after the full ones is a *partial*
+   segment: it is written once its first obligation has waited
+   `storage.roll_ms` (default 30 s; `0` writes every tick), so an idle trickle
+   becomes one segment per `roll_ms` instead of one per tick. `tick/1`
+   (tests, `Compactor.tick/1`) writes a partial segment at once.
+2. Encode those hooks into one segment via the configured `Codec`, wrapped in
+   the header and sha256 (above).
+3. `PUT` the segment to the blob store under a deterministic key in the dated
+   layout: `archive/v1/dt=<yyyy-mm-dd>/<node>/seg-<first_seq>-<last_seq>.seg`
+   (seqs zero-padded to 20 digits; `dt` is the UTC day of the segment's oldest
+   hook, from its UUIDv7 id; `<node>` is `intake.node_id`, else the host name).
+4. `PUT` the segment's index object, the same key with `.idx`.
+5. Rewrite the node-day's `_manifest.json`: segment count, bytes, seq and id
+   range, a constant-size summary that lets a reader skip a node whose ids
+   cannot hold the one it wants.
+6. Write the segment's catalogue row to the store: key, index key, seq and id
+   ranges, count and byte size, and `format`, `codec`, `node`, `dt`, `sha256`.
+7. Clear the batch's obligations. Each cleared obligation leaves a marker; when
    a hook's last obligation is gone, the hook is deleted.
 
 A failed blob write ends the tick without crashing: nothing moves, and the
@@ -837,6 +1003,40 @@ doubled per consecutive failure (jittered, capped at 60 s). This is why
 segments are never one-object-per-hook: PUT cost amortizes over however many
 records landed in one tick, and archive-tier storage (which bills a minimum
 object size) stays cheap at scale.
+
+### Finding a segment without the catalogue
+
+The day comes before the node in the key, so a node that lost its catalogue (a
+fresh node, a restore) or never had it (another node's segment in a shared
+bucket) can still find a hook whose id carries a time:
+
+- **`Storage.fetch/2` falls back to a day-prefix scan** when the catalogue has no
+  segment for the id: it lists the id's day and the day before under
+  `storage.key_prefix`, skips every node whose manifest says its ids cannot
+  include the id, and bisects the remaining node's segments (by the highest id
+  in each index) to the one or two that can hold it. That is a listing plus
+  `O(log n)` index reads per fetch, not a lookup: use it for the tail, and
+  `reconcile` to make it a lookup. A segment lives in the directory of its
+  *oldest* hook, so a backlog segment that spans more than a day is found only
+  for hooks in the first two days of it (the catalogue finds them all); an id
+  that carries no time has no day and is found only through the catalogue.
+- **`Queue.Archive.reconcile/2`** rebuilds catalogue rows from the
+  prefix: every dated segment (`node: :all`, the default, or `:own`, or one
+  node's name) and every legacy `seg/` segment that has no row at its first seq
+  gets one, built from its index object and the first bytes of the segment, and
+  the archive obligations it settles are cleared — only those whose hook is the
+  one the segment holds for that seq, so another node's segment never clears
+  this node's own obligations. A segment whose index or object is missing or
+  does not decode is logged and left out. Rows are keyed by first seq, so a
+  segment that starts at the same seq as a catalogued one of another node is
+  counted in `conflicts` and left to the day scan; reconcile a node into a
+  store before it archives, or accept the scan. The restore at boot is
+  `reconcile(config, node: :own, advance_seq: true)`.
+
+Tests: `storage_test.exs` (`dated layout`, `versioned header`, `safe idx`,
+`time roll`, `storage.max_segments_per_tick`, `reconcile other node`,
+`legacy seg/ layout`), `codec_test.exs` (golden vectors, tamper cases),
+`store_upgrade_test.exs` (`the segment rows migration (format 6 -> 7)`).
 
 ## Replay by id
 

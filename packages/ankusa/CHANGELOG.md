@@ -27,6 +27,76 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `[:ankusa, :commit]` now measures the write of a group into the store. ADR 0002
   amendment 17 states the invariant and the crash order.
 
+- **Segment format header, safe index decode, dated archive layout, time-based roll
+  (DUR-8).** A segment is now `"ANKSEG" <> <<version, codec_id, count::32>>`, the
+  codec's frames and a sha256 trailer (`Ankusa.Storage.Segment`); its `.idx` is
+  `"ANKIDX"` + version + count + `term_to_binary` + sha256 and is decoded with
+  `binary_to_term(_, [:safe])` and a shape check (`Ankusa.Storage.Index`), so a
+  tampered or hostile index or segment is `{:error, _}` (`Storage.fetch/2` answers
+  `:error`, archive replay logs and skips it). Segments go under
+  `archive/v1/dt=<yyyy-mm-dd>/<node>/seg-<first>-<last>.seg` (+ `.idx` and the
+  node-day `_manifest.json`; `<node>` is `intake.node_id`, else the host name), so a
+  node without the catalogue can find another node's segments: `Storage.fetch/2`
+  falls back to a day-prefix scan on a catalogue miss, and the new
+  `Queue.Archive.reconcile/2` rebuilds catalogue rows from the prefix (the
+  boot restore reconcile now runs through it). `storage.roll_ms` is no longer dead:
+  a partial segment is written once its oldest hook has waited that long, and
+  `storage.max_segments_per_tick` (16) caps what one compactor tick writes.
+  `Ankusa.Codec` gains an optional `id/0` callback. Segments written by earlier
+  releases (`seg/…`, bare frames) stay readable. **Store format 7** (the catalogue's
+  segment rows record `format`, `codec`, `node`, `dt`, `sha256`; migration
+  `SegmentRows`, fixture `store-v7.tar.zst`): a format 7 store cannot be opened by an
+  earlier image, and an earlier node cannot read segments of format 1. See
+  [`storage.md`](../../docs/storage.md#ankusacodec-and-segment-format).
+
+- **Store failure telemetry, `/ready` reasons and a reopen backoff (DUR-5).**
+  `[:ankusa, :store, :write_failed]` (one per failed write a process reported and
+  per failed readiness probe, with a `class` from the fixed set
+  `Ankusa.Store.failure_class/1` returns), `[:ankusa, :store, :reopened]` (one
+  per reopen attempt: `:duration` is the WAL replay, `:unavailable_ms` the outage so
+  far) and `[:ankusa, :store, :unavailable]` (`:seconds`, `0` at boot and once
+  open) feed `ankusa_store_write_failures_total{class}`,
+  `ankusa_store_reopen_total{result}`, `ankusa_store_unavailable_seconds` and
+  `ankusa_store_wal_replay_seconds`. `/ready`'s `503` body gains `reason`
+  (`no_space`, `io_error`, `read_only`, `corruption`, `busy`, `timeout`,
+  `not_running`, `other`). A store that fails to reopen retries by itself after
+  5 s, then twice as long each time up to 60 s, each wait jittered down by up to a
+  quarter (`retry_open_ms`, `retry_open_max_ms` store options). **Changed:**
+  `Ankusa.Store.ready/1` answers `{:error, {:store_unavailable | :write_failed,
+  class}}` instead of `{:error, :store_unavailable | :write_failed | raw_reason}`.
+  **Also:** the reopen a failed write asks for now waits until a synced write of
+  a small file next to the database works (`ankusa_store_reopen_total{result="deferred"}`)
+  instead of closing a database that still answers reads while the disk still
+  fails. The crash drills' EIO windows fail only the file data area (journal and
+  metadata stay up), their harness logs to stderr (it was silent), and they
+  check `/ready`'s `reason` and the `ankusa_store_*` series.
+  See `docs/storage.md#durability-corruption-full-disk`.
+- **Object-store adapters: conditional puts, jittered retries, checksums, multipart,
+  pools, credential refresh (DUR-7).** `Ankusa.BlobStore.put_if_absent/4` (a new
+  callback every store implements; S3 and Azure `If-None-Match: *`, GCS
+  `ifGenerationMatch=0`, OCI `if-none-match: *`, `LocalFS` a file check) answers
+  `{:error, :already_exists}` and leaves the original alone; claim packs are written
+  with it, and `ClaimCheck.check_in/4` writes a refused pack again under a fresh pack
+  id (3 attempts, `[:ankusa, :claim_check, :pack_collision]`). **One absolute deadline
+  per blob operation** (`op_deadline_ms`, 120 s) covers every attempt, wait, multipart
+  part, pack-id retry and store tried. Retries use full jitter, honour `Retry-After`
+  when it fits the deadline and otherwise return `{:error, {:throttled, seconds}}` at
+  once (claim check-ins surface it as `{:unavailable, {:throttled, seconds}}`); a
+  breaker per `{endpoint, bucket}` (`breaker_failures`, `breaker_open_ms`,
+  `breaker_slow_ms`: it also opens on p99 latency) answers `{:error, :breaker_open}`
+  (`[:ankusa, :blob_store, :breaker]`). `upload_timeout_ms` (60 s) governs a request
+  that carries over 1 MiB, and a body over `multipart_threshold_bytes` (8 MiB) goes up
+  as an S3/OCI multipart upload, an Azure block list or a GCS resumable upload in
+  `multipart_part_bytes` pieces. Every `PUT` carries a digest (`x-amz-checksum-sha256`,
+  `x-goog-hash`, `Content-MD5`) and a `GET` verifies the one the store returns:
+  `{:error, :integrity}`. `pool_size`, `pool_count` and `pool_timeout` size a Finch
+  pool per endpoint that the instance starts (`Ankusa.BlobStore.Pool`), instead of
+  Req's shared default. New token providers `Ankusa.BlobStore.GCS.MetadataServer` and
+  `Ankusa.BlobStore.OCI.InstancePrincipal` (`key_provider:`), and on a `401` every
+  adapter drops the provider's cached token (`invalidate/n`) and retries once with a
+  fresh one. All options are range-checked at boot. Custom `Ankusa.BlobStore`
+  implementations must add `put_if_absent/4`. See
+  [`storage.md`](../../docs/storage.md#conditional-writes-retries-checksums-multipart-pools).
 - **Cross-partition group commit (DUR-4).** `Ankusa.Queue.Writer` takes every batch
   the batcher partitions have queued and commits them as one group: one synced
   store write (and, under `wal: :dual`, one intake publish), seqs dense across it,
@@ -698,6 +768,23 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- **The quarantine pen no longer serializes every flagged hook (DUR-9).** A
+  source's bucket is one ETS row updated with a compare-and-swap
+  (`RateLimiter.hit_bucket/4`), the pen's byte count and the number of writes
+  waiting for it are `:ets.update_counter/3`, and `Quarantine.put/3` and `hit/3`
+  run in the request's process; a refusal after the token was taken gives it
+  back. The pen process keeps recovery, the bucket sweep, retention and
+  `purge/3`, and commits the writes that queued meanwhile in **one** synced
+  `Store.write` (a group commit), so a forged flood costs one fsync per group
+  and never holds more than one dirty-IO scheduler. At most 1 000 writes may
+  wait: the next is `{:error, :overload}` (`503`, `Retry-After: 1`), spending
+  nothing (`ankusa_quarantine_pending` is the gauge; `Quarantine.held/1` gains
+  `pending`). `Quarantine.hit/3` answers `{:error, :store_unavailable}` only
+  while the pen restarts (its tables are gone), no longer when its process is
+  busy. A refusal's `Retry-After` is now the GCRA wait for the bucket rather
+  than the token-bucket arithmetic it replaced. `bench/quarantine_bench.exs`: 5 000 forged hooks/s over 500
+  sources, p99 under 50 ms, a clean source's p99 within 2× of its solo p99.
+  Docs: `delivery.md#quarantine`, `architecture.md`, `configuration.md`.
 - `routes.max_routes` defaults to 1 000 000 (was 10 000, TEN-9); the cap is
   still hard and nothing is evicted, and it is checked against the new
   `routes.memory_budget_bytes`. The snapshot's `:pattern` rows are replaced by
@@ -771,8 +858,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `Ankusa.ClaimCheck.Stores`.
 - **Breaking:** `Ankusa.ClaimCheck.Ref`'s `object_key/2` and `key/1` take a
   layout: `Ankusa.ClaimCheck.Ref.object_key/3`, `Ankusa.ClaimCheck.Ref.key/2`.
-  `Ankusa.BlobStore.Retry`'s `run/2` is `Ankusa.BlobStore.Retry.run/3`, the
-  instance first.
+  `Ankusa.BlobStore.Retry`'s `run/2` became `run/3` (a later release added the
+  breaker scope and request kind: `Ankusa.BlobStore.Retry.run/5`), the instance
+  first.
 - `Ankusa.BlobStore.Retry` jitters each delay to between half and all of
   200 ms / 1 s / 5 s, so nodes throttled together don't retry in lockstep.
 - Metric labels with integer values (an HTTP status, a store index) are

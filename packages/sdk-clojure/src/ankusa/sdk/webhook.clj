@@ -13,6 +13,7 @@
   | `x-ankusa-dedupe-key` | `:dedupe-key` | `nil` (also when empty) |
   | `x-ankusa-replay-id` | `:replay-id` | `nil` (also when empty) |
   | `x-ankusa-idempotency-key` | `:idempotency-key` | `nil` (also when empty) |
+  | `x-ankusa-verification` / `x-ankusa-verification-flagged` | `:verification` | `nil` (also when the status header is empty) |
 
   The result also carries every request header under `:headers`, lowercased, so
   a receiver can read the provider's own headers the sink forwarded."
@@ -29,14 +30,22 @@
   (let [v (get headers n)]
     (when-not (= "" v) v)))
 
+(defn- parse-verification
+  "`{:status :flagged}` from the verification headers, or `nil` when
+  `x-ankusa-verification` is absent or empty."
+  [h]
+  (let [status (non-empty h "x-ankusa-verification")]
+    (when status
+      {:status status :flagged (= "true" (get h "x-ankusa-verification-flagged"))})))
+
 (defn parse-headers
   "Parse the Ankusa headers out of `headers`: a map (Ring's `:headers`) or a
   seq of `[name value]` pairs. Names are strings or keywords and are matched
   case-insensitively; values may be strings, numbers, booleans, or keywords.
 
   Returns `{:id :source :tenant :content-type :dedupe-key :replay-id
-  :idempotency-key :headers}`, or throws `:ankusa.sdk/MissingHookIdError` when
-  `x-ankusa-id` is absent or empty."
+  :idempotency-key :verification :headers}`, or throws
+  `:ankusa.sdk/MissingHookIdError` when `x-ankusa-id` is absent or empty."
   [headers]
   (let [h (normalize headers)
         id (get h "x-ankusa-id")]
@@ -49,6 +58,7 @@
      :dedupe-key (non-empty h "x-ankusa-dedupe-key")
      :replay-id (non-empty h "x-ankusa-replay-id")
      :idempotency-key (non-empty h "x-ankusa-idempotency-key")
+     :verification (parse-verification h)
      :headers h}))
 
 (defn receive-delivery
@@ -66,7 +76,8 @@
   that), `:allow-unsigned` (accept a delivery when no secret is configured,
   unverified), `:tolerance-seconds` and `:now` (as for `verify`).
 
-  Returns what `parse-headers` returns plus `:verified` (`false` only for an
+  Returns what `parse-headers` returns (including `:verification`) plus
+  `:verified` (`false` only for an
   unsigned delivery `:allow-unsigned` let through). Throws
   `:ankusa.sdk/InvalidSignatureError` (answer `401`) when there is no valid
   signature, `\"invalid_secret\"` when no secret is configured and

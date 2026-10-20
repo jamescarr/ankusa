@@ -18,9 +18,10 @@ framework is downstream of that one sentence.
   [`dedupe:`](configuration.md#sources) setting, that retry is a new hook: a fresh `id`, stored and delivered again. Delivery
   is at-least-once; consumers are idempotent receivers.
 - **Store slow or down:** `503` with `Retry-After`. Under `wal.type: disk` that
-  is the store refusing a commit; under `wal.type: none` it is a sink refusing
-  the publish — same answer, because in that mode the sink *is* the store.
-  Never ack what wasn't saved, ever, under any load condition.
+  is the store refusing a commit; under `dual` it is the store or the intake
+  log (`intake_unavailable`, `intake_pending`); under `wal.type: none` it is a
+  sink refusing the publish — same answer, because in that mode the sink *is*
+  the store. Never ack what wasn't saved, ever, under any load condition.
 
 The one loss window this can't close is a provider that doesn't retry on a
 timeout or `5xx`. That's their contract, not a bug here. Document it to
@@ -105,10 +106,10 @@ delivery row per sink in one store batch; dispatch is a scheduler over the
 due rows, and the compactor works over the archive obligations that same
 commit wrote. Neither is an RPC caller of the other, and neither is an RPC
 target of the edge. Take the compactor down: ingest keeps acking, the
-obligations pile up, nothing is lost — though no alarm fires either, because
-there is no store-size or cursor-lag metric yet. Take dispatch down: same
-story, deliveries just wait as due rows, and a row it had already claimed is
-put back as due at the next start. This is
+obligations pile up, nothing is lost — watch `ankusa_queue_archive_pending`
+and the store's size. Take dispatch down: same story, deliveries just wait as
+due rows, `ankusa_queue_oldest_due_age_seconds` climbs, and a row it had
+already claimed is put back as due at the next start. This is
 the "durable state, not RPC" rule and it
 holds at every boundary in the system, including across separate adapter
 packages (see [`packaging.md`](packaging.md)) and across independent nodes,
@@ -263,74 +264,51 @@ From here, ingest is done. Two independent consumers work off the same store:
 | --- | --- |
 | `Ankusa.Store` (the `wal.type: disk` queue) | One RocksDB database per instance. A commit is one synced batch: the hook, one pending delivery row per sink, an archive obligation while `:storage` runs, the seq marker, and, for a hook with a dedupe key, the dedupe key and its expiry key. A torn tail (an unacked write) is dropped on open; damage before it refuses to start (`{:store_open_failed, …}`) rather than silently shortening a read. LocalFS blob writes are fsynced (temp file, rename, directory). |
 | Group-commit batcher | One process per partition (`batcher.partitions`, 4 by default) that holds its callers' bodies, encodes their delivery rows and reads their dedupe keys in a supervised commit task (up to `batcher.max_commits`, 64, in flight per partition, so the writer finds every waiting caller in its mailbox), then hands the prepared batch to the queue writer. The writer merges every batch queued from every partition into one **group** (`batcher.group_commit_max_bytes`, 4 MiB, and `batcher.group_commit_max_records`): one synced store write and, under `wal.type: dual`, one intake publish, with seqs dense across the group, while the next group accumulates behind it. Because a caller's dedupe read can predate another partition's commit, the writer re-validates it before it assigns seqs: the first occurrence of a key wins, and later ones answer `duplicate` with its hook id (and, under `dual`, a retry that meets an unconfirmed original is `503 intake_pending`). Callers block until their own group returns; bounded queue (buffered + in-flight) sheds load as `503` rather than queuing unboundedly. Every record carries a deadline (15 s by default) for its batch to *start* committing: a record still buffered at its deadline behind a stalled commit is answered `503` and dropped, and the writer refuses a batch that missed its deadline. A batch the writer has started is never abandoned, so a stall never answers `503` for a hook it then commits; a process dying while the writer is mid-commit (the commit task, the batcher, or the writer after its sync) still can, and the provider's retry stores that hook again. |
-| Ingest | Every accepted POST is durably accepted and answered `201 accepted`, and `201` is the only committed response. There is no `200`. Under the default `wal.type: disk` that accept is the store commit; under `wal.type: none` it is every sink's confirm. A source with [`dedupe:`](configuration.md#sources) collapses hooks sharing a provider event key within the TTL (default 72 h): the repeat gets `201` with the original `id` and `"duplicate": true`, and nothing new is stored. Without it, a provider retry after a lost ack is a new hook with a new `id`, stored and delivered again. The dedupe index is bounded: `dedupe.max_entries` live keys on the node and `dedupe.max_entries_per_tenant` for one tenant; a hook whose key would pass either is refused `503 dedupe_quota` (`Retry-After: 60`), never stored without its key, and keys are expired by `Ankusa.Queue.DedupeSweeper`, never inside the writer ([`storage.md`](storage.md#ingest-dedupe-keys-bounded-expired-outside-the-writer); tests `test/ankusa/dedupe_test.exs`: `dedupe bucket sweep`, `dedupe.max_entries refuses a new key`, `a key refreshed after the sweeper read it survives its stale delete`). Consumer contract in [`delivery.md`](delivery.md#idempotent-receivers). |
+| Ingest | Every accepted POST is durably accepted and answered `201 accepted`, and `201` is the only committed response. There is no `200`. Under the default `wal.type: disk` that accept is the store commit; under `dual` it is the store commit plus a confirmed intake-log publish; under `wal.type: none` it is every sink's confirm. A source with [`dedupe:`](configuration.md#sources) collapses hooks sharing a provider event key within the TTL (default 72 h): the repeat gets `201` with the original `id` and `"duplicate": true`, and nothing new is stored. Without it, a provider retry after a lost ack is a new hook with a new `id`, stored and delivered again. The dedupe index is bounded: `dedupe.max_entries` live keys on the node and `dedupe.max_entries_per_tenant` for one tenant; a hook whose key would pass either is refused `503 dedupe_quota` (`Retry-After: 60`), never stored without its key, and keys are expired by `Ankusa.Queue.DedupeSweeper`, never inside the writer ([`storage.md`](storage.md#ingest-dedupe-keys-bounded-expired-outside-the-writer); tests `test/ankusa/dedupe_test.exs`: `dedupe bucket sweep`, `dedupe.max_entries refuses a new key`, `a key refreshed after the sweeper read it survives its stale delete`). Consumer contract in [`delivery.md`](delivery.md#idempotent-receivers). |
 | Fleet scope (`rate_limits.scope: :fleet`, `dedupe.scope: :fleet`) | The tenant quota and the provider event key are counted in `fleet.store` (Redis), one call per hook, so N nodes enforce one limit and one dedupe window. The event key is claimed *pending* before the commit and made *committed* only after it (`Ankusa.Dedupe.Store`): another node meeting a committed key answers `201` with the first hook's `id`, meeting a pending one `409 dedupe_pending` (a `2xx` for a hook whose commit then fails would lose it), and a failed commit releases the claim. Each call has a hard budget (`fleet.timeout_ms`) and a breaker takes a slow or dead store out of the path: the node then limits and dedupes alone and `ankusa_fleet_limiter_degraded` reads `1`, never a `503`. Proof: `edge_fleet_test.exs` and, against Redis, `ankusa_redis`'s `rate_limiter/store/redis_test.exs`. See [`configuration.md#fleet-scope`](configuration.md#fleet-scope). |
 | `wal: :none` (direct ack) | Ingest publishes to every sink concurrently in the request, under one deadline (`direct_publish_timeout_ms`, default 8 s), and answers `201` only after each confirmed; any sink failure, crash or timeout is a `503` with `Retry-After`, with no internal retry, and sinks that confirmed keep their copy. No queue, no batcher, no dispatch pipeline, no compactor, no DLQ: the provider is the retry and the sink's destination is the durable store. `c:Ankusa.Sink.durable?/1` is the per-sink promise, checked at boot for every static source. The local state this mode keeps is the quarantine pen (rows appear only for a source that asks for it), API-managed sources and rate-limit overrides, all in the store. |
 | `wal: :dual` (intake log) | A hook is acked when its synced local write **and** the intake log's confirm (`required_acks: -1`, every in-sync replica, at least `min.insync.replicas`) are both done; the batch's two halves run concurrently, so the ack is the larger of the two. The writer's reply is a message, not a wait: the next batch commits while the previous one waits for its confirm. A half-persisted hook (one half failed) is `503` to the provider and **carried**: the pending set holds it and the reconciler completes the missing half, with the fleet dedupe claim held pending and promoted only when both halves are confirmed, so the provider's retry is `503 intake_pending`, then `201 duplicate` with the first id, never a second hook. An open breaker (`intake.breaker_failures` failed publishes) answers `503 intake_unavailable` **before** either half is touched. Boot recovery replays the log from `m:intake_offset` through one seq-and-hook-id rule (a duplicate or reordered record changes nothing), republishes the local hooks above the watermark, and the node serves nothing until it is done. Kafka has no idempotent producer here (`brod`), so every reader dedupes. Proven by `queue_dual_test.exs`, `intake/{reconciler,recovery}_test.exs`, `ankusa_kafka`'s `intake/kafka_test.exs` and the fleet drill. |
 | Compactor | Never writes one object per hook: it takes archive obligations byte-sized up to `storage.roll_bytes` and packs them into one immutable segment plus one index object. A failed blob write ends the tick and the same hooks are retried next tick. |
 | Dispatch | At-least-once to every sink, concurrent up to `dispatch.concurrency` and bounded by `dispatch.max_inflight`/`max_inflight_bytes`, exponential backoff with jitter, dead-letter on give-up, a raising sink retried rather than fatal. Not ordered: ordering lanes are gone, and a consumer that needs order has to rebuild it from data it receives. A scan claims from the tenants with work due by deficit round-robin (each gets an equal share of a page, a tenant with less leaves the rest to the others, a tenant the page did not reach goes first next time), and each tenant is held to its own window (`dispatch.tenants`: `max_inflight`, `max_inflight_bytes`, `concurrency`), so a tenant whose sink is slow fills its own window and nobody else's: `tenant fairness` in `test/ankusa/dispatch/isolation_test.exs` runs 99:1 load behind a slow sink and holds the light tenant's p99 delivery lag within 2x of its solo p99 (`bench/tenant_fairness_bench.exs` prints both tenants' p99). Breakers and `dispatch.sink_concurrency` are per tenant (the sink key carries it). The scan costs the tenants with work due, not the backlog or the tenant count (`bench/dispatch_tick_bench.exs`). DLQ entries are dead delivery rows; a replay moves them back to pending, so a replayed hook leaves the DLQ. |
-| Quarantine | A durable pen in the store, bounded twice: a token bucket per source (`quarantine.burst`/`rate`, default 100 / 20 per s; over it, `429 quarantine_rate_limited`) and a cap on its total bytes (`quarantine.max_bytes`, default 1 GiB; a full pen answers `503 quarantine_full` and never evicts a held hook). It survives a restart, its byte count too, and a store that cannot write is a `503` that spends no token. A `quarantine` replay job re-verifies held hooks against the source's current verifier and commits the ones that pass with their original `id`; `DELETE /v1/quarantine` purges the rest. A secret list (`secret: [new, old]`) keeps a rotation out of the pen in the first place. |
+| Quarantine | A durable pen in the store, bounded three times: a token bucket per source (`quarantine.burst`/`rate`, default 100 / 20 per s; over it, `429 quarantine_rate_limited`), a cap on its total bytes (`quarantine.max_bytes`, default 1 GiB; a full pen answers `503 quarantine_full` and never evicts a held hook) and at most 1 000 writes waiting for its disk write (`503 overload`, `ankusa_quarantine_pending`). The bucket, the byte count and the waiting count are ETS operations in the request's own process, so a forged flood never queues another source's hook (or an `accept_flag` hook's charge) behind it; the writes are one group commit per pen tick (`bench/quarantine_bench.exs`: 5 000 forged hooks/s over 500 sources, p99 < 50 ms, a clean source's p99 within 2× of its solo p99). It survives a restart, its byte count too, and a store that cannot write is a `503` that spends no token. A `quarantine` replay job re-verifies held hooks against the source's current verifier and commits the ones that pass with their original `id`; `DELETE /v1/quarantine` purges the rest. A secret list (`secret: [new, old]`) keeps a rotation out of the pen in the first place. |
 | Audit trail | Every change an operator (or code) makes to a source, a route, the global IP rules, a rate-limit override, the quarantine pen or a replay job leaves one row in the store's `audit` column family, with the actor (`Ankusa.Principal`), the client address, the request id, a keyed hash of the subject before and after, and the subject's `revision`. Rows are in **commit order** (`<<?a, seq, at>>`: `Ankusa.Audit` hands out `seq` and commits the batch, so a reader that remembers a `seq` never misses a later row, whatever the clock does) and never hold a secret. A change that lives in this node's store (API-managed sources, rate-limit overrides, quarantine, replay jobs) is committed **in the same synced batch** as its row: both survive `kill -9`, or neither. A change that lives elsewhere (route definitions and the Redis source store: the route store is pluggable and shared by a fleet) is a **dual write**: the row goes in first as a synced *pending* row, the change is applied, and the row is finished with the outcome. A node killed between the two leaves the pending row. For a source or a route the next boot settles it by reading the subject: its state hashes to the row's `after_hash` (the change happened: `"ok"`), to `before_hash` (it did not: `"failed"`), or to neither (someone changed it meanwhile: `"interrupted"`, with the current state announced); for anything else the row is recorded `"interrupted"` — the change **may or may not** have been applied. The trail never loses a change that was applied. A change whose row cannot be written is not made (`503`). A request that changes nothing writes no row. `GET /v1/audit` (scope `audit:read`; a tenant-scoped reader sees only its tenants' rows); `audit.retention_days` (default 365) prunes. Tests: `test/ankusa/admin/audit_test.exs` (`audit row survives kill`, `no secret in audit`, `filters`). |
 | Lifecycle events | When `lifecycle.sinks` is set, the audit row of a source or route change is flagged for publication and committed in the same synced batch as the change, with its redacted entity beside it (an audit row never holds a spec). `Ankusa.Lifecycle.Publisher` reads the flagged rows in commit order and keeps its place in `m:lifecycle_cursor` (synced on every advance), so a `kill -9` right after the change still delivers its event after the restart, and events of one instance arrive in `seq` order, each with the subject's `revision`. Delivery is **at least once**: an event's `id` is derived from its row, so a redelivery after a crash, and a replay (`POST /v1/replays {"kind":"lifecycle"}`), are the same event and a consumer dedupes on `id`. A sink whose retries run out loses the event *for that sink* (counted; replayable). **Retention never passes the outbox**: `audit.retention_days` does not delete a row, or its entity, at or above `m:lifecycle_cursor`, so a sink that is down for longer than the retention does not lose the events it has not seen; `ankusa_audit_retention_blocked_by_cursor` counts the expired rows held back. Tests: `test/ankusa/lifecycle_test.exs` (`survives kill`, `ordered by revision`, same id twice, pending-row verdicts), `test/ankusa/admin/audit_test.exs` (`a lifecycle sink that never confirms keeps every row at or above the cursor`), `test/ankusa/replay_test.exs` (`lifecycle replay`), `ankusa_redis`'s `redis_lifecycle_test.exs` (a `kill -9` on the Redis route and source stores). |
 | Tenant erase | `DELETE /v1/tenants/{tenant}?confirm={tenant}` (`tenants:write` + `tenant:*`) closes the tenant (its hooks are `503 tenant_erasing`, dispatch stops claiming its rows), waits for its running attempts, then removes its sources, routes, override, delivery rows, archive obligations, quarantine rows, claim objects (`claims/tenant=<t>/`), dedupe keys and lifecycle entities, and commits the tombstone `m:erased:<tenant>` with one `tenant.delete` audit row (the lifecycle event `io.ankusa.tenant.deleted`) in one synced batch. The job's progress is synced after each stage, so a `kill -9` resumes it at the next boot. After it, `Storage.fetch/2` answers `{:error, :gone}` (`410` where served) for the tenant's archived hooks, which stay in their multi-tenant segments until the bucket's lifecycle expires them; a backup older than the erase brings the tenant back. With `rate_limits.scope: fleet` the tenant's Redis buckets are deleted; its fleet dedupe claims expire on their own TTL. Tests: `tenant_test.exs` (`erase leaves no trace`, `resumes after kill -9`, `a running attempt cannot put a row back`, `a fetch of an erased hook is gone`), `tenant_s3_integration_test.exs` (claims prefix on S3). |
 
-## Archive: a retention window, by design (planned)
+## Archive retention
 
-> **Planned, not shipped.** Designed in
-> [`reliability-fixes.md`](https://github.com/jamescarr/ankusa/blob/main/reliability-fixes.md)
-> (Phase 1). Today the compactor writes `seg/` segments indexed on the node;
-> see [`storage.md`](storage.md).
+The archive is a set of immutable segment objects in the node's `storage`
+bucket (or on LocalFS): the compactor writes
+`archive/v1/dt=<yyyy-mm-dd>/<node>/seg-<first_seq>-<last_seq>.seg` plus its index
+and the node-day's `_manifest.json`, and catalogues the segment in the store
+([`storage.md`](storage.md#ankusacodec-and-segment-format)). It is a recovery
+buffer for replay, not a system of record.
 
-The archive holds every accepted hook for a fixed **window**: a day, a week,
-ninety days. The window is the archive bucket's lifecycle policy, not an Ankusa
-setting. The archive is a recovery buffer for replay, not a system of record:
-a replay reaches back as far as the window, and older hooks are gone on
-purpose.
+`archive.retention_days` is the whole retention policy, and it is off by
+default. When set, the compactor deletes a segment object, its index and its
+catalogue row through the blob store once the newest hook in it is that old;
+the value cannot exceed `storage.catalogue_retention_days`, which is when the
+catalogue would hide the hook from `Storage.fetch/2` anyway. Until a segment is
+deleted, `Storage.fetch/2` can find its hooks for replay by id. Claims keep
+their own retention ([`claim-check.md#retention`](claim-check.md#retention));
+segments hold full bodies, never claim refs.
 
-```mermaid
-flowchart LR
-    S[(Store)] -->|archive obligations| C[Compactor\narchive writer]
-    C -->|"segments + manifests\narchive/v1/dt=/hr=/m=/writer/"| A[("ankusa-archive\nbucket")]
-    C -->|"watermark\narchive/v1/_writers/"| A
-    LC{{"lifecycle rule\nexpire archive/v1/dt= after N days"}} -.->|deletes whole days| A
-    R[Replay / fetch by id] -->|"window within the last N days"| A
-```
+Size the window to your recovery horizon: the longest a consumer outage can go
+unnoticed, plus the time to replay it. A replay cannot reach past it.
 
-- **The store owns the window.** One lifecycle rule on the `archive/v1/dt=`
-  prefix (S3 or R2 lifecycle configuration, GCS Object Lifecycle Management,
-  Azure lifecycle management, an OCI lifecycle policy) expires archived hooks.
-  Ankusa never expires an archived hook from a cloud store and has no
-  retention setting for one.
-- **The window is a floor.** Lifecycle rules count days from an object's
-  creation, and a segment is written after its hooks arrive, so every hook is
-  held for at least the window. Stores expire asynchronously, so it may live
-  somewhat longer. A replay over a window older than that delivers nothing.
-- **Size it to your recovery horizon**: the longest a consumer outage can go
-  unnoticed, plus the time to replay it. Claims (`claims/`) keep their own
-  rule ([`claim-check.md#retention`](claim-check.md#retention)); archive
-  segments hold full bodies, never claim refs, so the two windows are
-  independent.
-- **Watermarks never expire.** `archive/v1/_writers/` sits outside the `dt=`
-  prefix, so the rule never touches it.
-- **Its own bucket.** `archive.store` (YAML) / the archive's `blob_store`
-  (Elixir) names the archive's store; unset, it is `storage`'s. Give it a
-  dedicated bucket, `ankusa-archive` in these docs, so its lifecycle rule
-  describes the archive and nothing else. The name takes a hyphen, unlike the
-  `ankusa.events` exchange: Azure container names allow no dots, and GCS
-  requires domain verification for dotted bucket names.
-- **LocalFS is the exception.** A directory has no lifecycle policy, so with a
-  LocalFS archive `archive.retention_days` has Ankusa's sweeper delete whole
-  `dt=` days past the window, the same sweeper behind
-  `claim_check.retention_days`. Unset, a LocalFS archive keeps everything; set
-  with any other store, boot fails.
-
-A one-week window on S3:
-
-```sh
-aws s3api put-bucket-lifecycle-configuration --bucket ankusa-archive \
-  --lifecycle-configuration '{"Rules":[{"ID":"ankusa-archive-window","Status":"Enabled",
-    "Filter":{"Prefix":"archive/v1/dt="},"Expiration":{"Days":7}}]}'
-```
+**Dated layout.** Segments sit under `archive/v1/dt=<yyyy-mm-dd>/<node>/`, the
+day of a segment's oldest hook first, so one day is one prefix (`dt=2026-10-19/`
+holds every node's segments for that day) and a bucket lifecycle rule can expire
+whole days. A cloud lifecycle rule on `archive/v1/` is therefore possible next
+to Ankusa's own retention, with a catch: the catalogue keeps a segment's row
+until `storage.catalogue_retention_days` (or `archive.retention_days`) and does
+not know the object expired, so set the rule's age at least that long. Past it, a
+replay skips a segment whose objects are gone and `Storage.fetch/2` answers
+`:error` (unverified: no test removes a segment object behind the catalogue's
+back). Retention through `archive.retention_days` is Ankusa's own delete, and it
+works for every blob store, not only LocalFS. Segments always go to
+`storage.blob_store`: a separate archive store and per-writer watermarks are not
+part of DUR-8 and are not implemented.
 
 ## Instance model
 
@@ -440,8 +418,8 @@ flowchart LR
     Disp --> SK[Sinks]
 ```
 
-`mix run --no-halt` / `iex -S mix`, or the single-container image in
-[`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/). Durable to
+`mix run --no-halt` / `iex -S mix`, or the single-container
+[`examples/quickstart/`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/). Durable to
 process crash and power loss on that box; not to losing the box.
 
 ### 2. Splitting roles across nodes is not supported
@@ -479,8 +457,9 @@ for the shape).
 Each ingest node here is an ordinary all-role node, the topology-1 shape, with
 its own store, and the nodes share nothing but the broker, the provider's
 traffic, and — if you like — one bucket. Segment keys are
-`seg/<first_seq>-<last_seq>.seg`, so nodes sharing a bucket each set their
-own `storage.key_prefix` (`node-a/`, …) or they overwrite each other's
+`archive/v1/dt=<day>/<node>/seg-<first_seq>-<last_seq>.seg`, so nodes sharing a bucket
+each set their own `intake.node_id` (or their own `storage.key_prefix`, `node-a/`, …)
+or they overwrite each other's
 segments. Claim keys are never prefixed — claim ids are unique across nodes —
 so the claim store (the bucket, or a dedicated `claim_check.store`, or a list
 of them with failover, `claim_check.stores`) is shared by every node and one
@@ -568,7 +547,7 @@ dispatch reports its scheduler on every housekeeping tick, so `/metrics`
 carries `ankusa_store_hooks`, `ankusa_queue_pending` / `_scheduled` /
 `_inflight` / `_dead` / `_archive_pending`, `ankusa_queue_oldest_due_age_seconds`,
 `ankusa_tenants`, `ankusa_tenant_pending{tenant}` (the 100 tenants with the
-most first attempts waiting), `ankusa_quarantine_bytes`, `ankusa_disk_free_bytes`,
+most first attempts waiting), `ankusa_quarantine_bytes`, `ankusa_quarantine_pending`, `ankusa_disk_free_bytes`,
 `ankusa_dispatch_running` / `_claimed` / `_runnable` / `_active_tenants`,
 `ankusa_dispatch_tenant_inflight{tenant}` (the claimed rows of the 100 tenants
 holding the most, against their windows) and
@@ -582,3 +561,11 @@ belongs on `ankusa_queue_oldest_due_age_seconds`. Per-delivery counters carry th
 `ankusa_backup_age_seconds` (since the last successful backup — the data a
 lost host would take with it), `ankusa_backup_runs_total{result}` and
 `ankusa_backup_verify_failed_total{target}`.
+
+A store that fails is visible without logs: `ankusa_store_write_failures_total{class}`
+(`no_space`, `io_error`, `read_only`, `corruption`, `busy`, `other`),
+`ankusa_store_reopen_total{result}`, `ankusa_store_unavailable_seconds` (how
+long the store has been closed; alert on it staying above 0) and
+`ankusa_store_wal_replay_seconds`, and `/ready` names the same `reason` in its
+`503` body. A closed store retries its open after 5 s, then 10, 20, 40 and 60 s
+(jittered), until it works ([`storage.md`](storage.md#durability-corruption-full-disk)).

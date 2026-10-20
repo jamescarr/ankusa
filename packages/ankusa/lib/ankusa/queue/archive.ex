@@ -7,7 +7,10 @@ defmodule Ankusa.Queue.Archive do
   #                 ordinal. The hook must be written to a segment before it can be deleted.
   #                 Written in the commit
   #                 batch, only while the `:storage` role runs.
-  #   ?S(first_seq) one row per segment: key, index key, seq/id ranges, count.
+  #   ?S(first_seq) one row per segment: key, index key, seq/id ranges, count, bytes,
+  #                 and (format 7) `format` (0 = bare frames, 1 = `Storage.Segment`
+  #                 header + sha256), `codec` (module), `node`, `dt` (day dir), `sha256`.
+  #                 A row without `format` is a format 0 segment.
   #   ?L(event_id)  where a hook archived by a 0.3 node lives: `{segment, offset,
   #                 length, seq}`, imported once from `segments/index.log`.
   #
@@ -270,4 +273,25 @@ defmodule Ankusa.Queue.Archive do
 
   def delete_rows(instance, keys),
     do: Store.write(instance, Enum.map(keys, &{:delete, :archive, &1}), sync: false)
+
+  @doc """
+  Rebuild catalogue rows from the segments in the object store: every segment of
+  the dated layout (`archive/v1/dt=…/<node>/`) and of the legacy `seg/` prefix
+  that has no row at its first seq gets one, built from its index object and the
+  first bytes of the segment, and the archive obligations it settles are cleared
+  (only those whose hook is the one the segment holds for that seq, so another
+  node's segment never clears this node's obligations).
+
+  Options: `node: :all | :own | name` (default `:all`: every node that archives
+  under this `storage.key_prefix`), `advance_seq: boolean()` (move `m:next_seq`
+  past the segments found; only safe before the queue writer starts, i.e. at
+  boot). A segment whose first seq already has a row for a different segment (two
+  nodes' seqs overlap) is counted in `conflicts` and left out; `Storage.fetch/2`
+  finds it by day instead.
+
+  `{:ok, %{catalogued:, present:, conflicts:, skipped:}}`.
+  """
+  @spec reconcile(Ankusa.Config.t() | atom(), keyword()) ::
+          {:ok, Ankusa.Storage.Reconcile.summary()} | {:error, term()}
+  defdelegate reconcile(target, opts \\ []), to: Ankusa.Storage.Reconcile, as: :run
 end

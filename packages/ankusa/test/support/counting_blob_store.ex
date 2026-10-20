@@ -27,7 +27,15 @@ defmodule Ankusa.Test.CountingBlobStore do
   alias Ankusa.BlobStore.LocalFS
 
   @impl true
-  def put(instance, key, data, opts) do
+  def put(instance, key, data, opts), do: write(instance, key, data, opts, &LocalFS.put/4)
+
+  # An object already under `key` is `{:error, :already_exists}` and stays as it
+  # was (unless it holds exactly `data`).
+  @impl true
+  def put_if_absent(instance, key, data, opts),
+    do: write(instance, key, data, opts, &LocalFS.put_if_absent/4)
+
+  defp write(instance, key, data, opts, writer) do
     if pid = Keyword.get(opts, :pid), do: send(pid, {:blob_put, key})
     if delay = Keyword.get(opts, :put_delay_ms), do: Process.sleep(delay)
 
@@ -36,10 +44,10 @@ defmodule Ankusa.Test.CountingBlobStore do
         {:error, :injected_failure}
 
       lost_ack?(key, opts) ->
-        with(:ok <- LocalFS.put(instance, key, data, local(opts)), do: {:error, :timeout})
+        with(:ok <- writer.(instance, key, data, local(opts)), do: {:error, :timeout})
 
       true ->
-        LocalFS.put(instance, key, data, local(opts))
+        writer.(instance, key, data, local(opts))
     end
   end
 
