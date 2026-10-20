@@ -1281,7 +1281,7 @@ defmodule Ankusa.Store.Backup do
   Square a store that started over (restored, or created empty with a backup
   configured) with the archive segments already in the segment store. Called
   by `Ankusa.Store` once the database is open, before the queue writer starts.
-  It is `Ankusa.Queue.Archive.reconcile/2` over this node's own segments (the
+  It is `Queue.Archive.reconcile/2` over this node's own segments (the
   dated layout's `<node>` directory and the legacy `seg/` prefix):
 
     * `m:next_seq` moves past the highest archived seq, so no new segment key

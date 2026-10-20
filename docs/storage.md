@@ -981,7 +981,7 @@ bucket) can still find a hook whose id carries a time:
   *oldest* hook, so a backlog segment that spans more than a day is found only
   for hooks in the first two days of it (the catalogue finds them all); an id
   that carries no time has no day and is found only through the catalogue.
-- **`Ankusa.Queue.Archive.reconcile/2`** rebuilds catalogue rows from the
+- **`Queue.Archive.reconcile/2`** rebuilds catalogue rows from the
   prefix: every dated segment (`node: :all`, the default, or `:own`, or one
   node's name) and every legacy `seg/` segment that has no row at its first seq
   gets one, built from its index object and the first bytes of the segment, and

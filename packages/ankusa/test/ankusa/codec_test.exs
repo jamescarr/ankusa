@@ -114,7 +114,7 @@ defmodule Ankusa.Storage.SegmentTest do
 
       # the trailer flipped
       size = byte_size(object) - 1
-      <<body::binary-size(size), last>> = object
+      <<body::binary-size(^size), last>> = object
       assert {:error, :sha_mismatch} = Segment.verify(<<body::binary, Bitwise.bxor(last, 1)>>, 1)
 
       # cut anywhere

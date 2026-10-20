@@ -375,7 +375,17 @@ The always-on tests cover:
   clear, in either order; without the `:storage` role a delivered hook is
   reclaimed straight away (W5); `roll_bytes` caps a segment's size; a failing
   blob store fails the tick without crashing it and the next tick retries; and
-  the catalogue lives in the store, so fetch survives an instance restart.
+  the catalogue lives in the store, so fetch survives an instance restart. The
+  segment format and archive layout (DUR-8): `codec_test.exs` holds golden
+  vectors of the segment (formats 0 and 1) and index (formats 0 and 1) objects
+  and refuses tampered, truncated, newer and hostile ones (`versioned header`,
+  `safe idx`: an index naming an atom the node never saw is refused, not
+  interned); `storage_test.exs` pins the `archive/v1/dt=<day>/<node>/` layout and
+  its manifest, a segment or index altered on disk (not served), `time roll` (a
+  partial segment waits `storage.roll_ms`, a backlog of `roll_bytes` does not,
+  `tick/1` flushes), `storage.max_segments_per_tick`, `reconcile other node` (a
+  second node serves the first's segments by day and reconciles them, never
+  settling its own obligations) and the legacy `seg/` layout.
 - **Claim Check** (`test/ankusa/claim_check/`, `test/ankusa/dispatch/claim_check_test.exs`):
   reference parsing (URN grammar, tenant and ULID claim-id rejection, date
   partitions from the pack id's timestamp, claim ids locating their pack and

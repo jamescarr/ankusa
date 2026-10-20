@@ -13,7 +13,7 @@ defmodule Ankusa.Storage.Layout do
   written), `<node>` is `intake.node_id` or, without one, the host name, and the
   seqs are zero-padded to 20 digits. The day comes before the node so a node that
   has lost its catalogue can list one day's prefix and find every node's segments
-  for it (`Ankusa.Queue.Archive.reconcile/2`, the `Ankusa.Storage.fetch/2`
+  for it (`Queue.Archive.reconcile/2`, the `Ankusa.Storage.fetch/2`
   fallback) instead of needing the catalogue to say where to look.
 
   `_manifest.json` is a constant-size summary of one node's day: how many segments,
@@ -56,10 +56,8 @@ defmodule Ankusa.Storage.Layout do
     do: sanitize(id)
 
   def node_name(%Config{}) do
-    case :inet.gethostname() do
-      {:ok, host} -> sanitize(List.to_string(host))
-      _ -> "node"
-    end
+    {:ok, host} = :inet.gethostname()
+    sanitize(List.to_string(host))
   end
 
   defp sanitize(name) do

@@ -24,7 +24,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   node-day `_manifest.json`; `<node>` is `intake.node_id`, else the host name), so a
   node without the catalogue can find another node's segments: `Storage.fetch/2`
   falls back to a day-prefix scan on a catalogue miss, and the new
-  `Ankusa.Queue.Archive.reconcile/2` rebuilds catalogue rows from the prefix (the
+  `Queue.Archive.reconcile/2` rebuilds catalogue rows from the prefix (the
   boot restore reconcile now runs through it). `storage.roll_ms` is no longer dead:
   a partial segment is written once its oldest hook has waited that long, and
   `storage.max_segments_per_tick` (16) caps what one compactor tick writes.

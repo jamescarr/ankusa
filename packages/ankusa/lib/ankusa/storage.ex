@@ -17,7 +17,7 @@ defmodule Ankusa.Storage do
   before, are listed in the object store, every node's `_manifest.json` that can
   hold the id is kept, and each such node's segments are searched by a bisection
   over their index objects. That is a handful of object reads per fetch, not a
-  catalogue lookup: `Ankusa.Queue.Archive.reconcile/2` puts the segments in the
+  catalogue lookup: `Queue.Archive.reconcile/2` puts the segments in the
   catalogue.
 
   Nothing read from the object store is trusted: an index that does not decode

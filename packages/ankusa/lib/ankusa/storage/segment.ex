@@ -137,7 +137,7 @@ defmodule Ankusa.Storage.Segment do
 
   defp check_digest(object) do
     body = byte_size(object) - @trailer_bytes
-    <<covered::binary-size(body), digest::binary-size(@trailer_bytes)>> = object
+    <<covered::binary-size(^body), digest::binary-size(@trailer_bytes)>> = object
 
     if :crypto.hash_equals(:crypto.hash(:sha256, covered), digest),
       do: :ok,

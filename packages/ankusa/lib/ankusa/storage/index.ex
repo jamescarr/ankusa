@@ -43,7 +43,7 @@ defmodule Ankusa.Storage.Index do
   def decode(<<@magic, @version::8, count::32, rest::binary>> = object)
       when byte_size(rest) > @trailer_bytes do
     body = byte_size(object) - @trailer_bytes
-    <<covered::binary-size(body), digest::binary-size(@trailer_bytes)>> = object
+    <<covered::binary-size(^body), digest::binary-size(@trailer_bytes)>> = object
 
     if :crypto.hash_equals(:crypto.hash(:sha256, covered), digest) do
       <<_head::binary-size(@header_bytes), term::binary>> = covered

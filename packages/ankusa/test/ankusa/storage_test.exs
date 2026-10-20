@@ -771,7 +771,11 @@ defmodule Ankusa.StorageTest do
     test "time roll: roll_ms: 0 writes every tick" do
       config = start(roles: [:edge, :storage], storage: %{interval_ms: 20, roll_ms: 0})
       [original] = commit!(config.instance, [envelope(~s({"n":1}))])
-      assert eventually(fn -> match?({:ok, _}, Storage.fetch(config.instance, original.id)) end, 3_000)
+
+      assert eventually(
+               fn -> match?({:ok, _}, Storage.fetch(config.instance, original.id)) end,
+               3_000
+             )
     end
   end
 
