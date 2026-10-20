@@ -146,6 +146,7 @@ defmodule Ankusa.LossTest do
       args: [@harness, "serve"],
       env: [
         {~c"ERL_LIBS", String.to_charlist(Mix.Project.build_path() <> "/lib")},
+        {~c"LOG_LEVEL", ~c"none"},
         {~c"DATA_DIR", String.to_charlist(data_dir)} | extra_env
       ]
     ])

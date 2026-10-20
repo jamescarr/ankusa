@@ -156,7 +156,8 @@ defmodule Ankusa.SDK.Routes do
        field: field(decoded, "field"),
        message: field(decoded, "message"),
        conflicting_id: field(decoded, "conflicting_id"),
-       max_routes: field(decoded, "max_routes")
+       max_routes: field(decoded, "max_routes"),
+       scope: field(decoded, "scope")
      }}
   end
 

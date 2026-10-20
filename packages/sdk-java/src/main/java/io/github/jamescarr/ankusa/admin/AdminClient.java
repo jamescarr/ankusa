@@ -269,6 +269,57 @@ public final class AdminClient {
   }
 
   /**
+   * Lists the first page of the audit trail.
+   *
+   * @return one page of audit rows, newest first
+   * @throws RoleNotEnabledError when the listener refuses the call for a missing role
+   * @throws AdminRejectedError when the listener refuses the call with another 4xx, including a
+   *     {@code 403} for naming a {@code tenant} the caller cannot see
+   * @throws AdminUnavailableError when the listener is unreachable, answers anything but 2xx, or
+   *     answers with a body that is not an audit page
+   */
+  public AuditPage listAudit() {
+    return listAudit(ListAuditParams.builder().build());
+  }
+
+  /**
+   * Lists a filtered page of the audit trail.
+   *
+   * @param params the filters, cursor, and page size to list with
+   * @return one page of audit rows, newest first
+   * @throws RoleNotEnabledError when the listener refuses the call for a missing role
+   * @throws AdminRejectedError when the listener refuses the call with another 4xx, including a
+   *     {@code 403} for naming a {@code tenant} the caller cannot see
+   * @throws AdminUnavailableError when the listener is unreachable, answers anything but 2xx, or
+   *     answers with a body that is not an audit page
+   */
+  public AuditPage listAudit(ListAuditParams params) {
+    LinkedHashMap<String, String> query = new LinkedHashMap<>();
+    if (params.since() != null) {
+      query.put("since", params.since().toString());
+    }
+    if (params.until() != null) {
+      query.put("until", params.until().toString());
+    }
+    if (params.actor() != null) {
+      query.put("actor", params.actor());
+    }
+    if (params.tenant() != null) {
+      query.put("tenant", params.tenant());
+    }
+    if (params.action() != null) {
+      query.put("action", params.action());
+    }
+    if (params.limit() != null) {
+      query.put("limit", params.limit().toString());
+    }
+    if (params.cursor() != null) {
+      query.put("cursor", params.cursor());
+    }
+    return decode(send("GET", HttpCore.withQuery("/v1/audit", query), null), AuditPage.class);
+  }
+
+  /**
    * Deletes quarantined hooks.
    *
    * <p>The filters are ANDed, and the listener clamps {@code limit} to 1..10000, default 1000, so
@@ -342,7 +393,7 @@ public final class AdminClient {
       throw new RoleNotEnabledError(stringField(body, "role"));
     }
     if (status >= 400 && status <= 499) {
-      throw new AdminRejectedError(status, stringField(body, "error"));
+      throw new AdminRejectedError(status, stringField(body, "error"), stringField(body, "scope"));
     }
     throw new AdminUnavailableError("admin listener error (" + status + ")", null);
   }

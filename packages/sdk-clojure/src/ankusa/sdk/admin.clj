@@ -9,7 +9,7 @@
   | Error | `:retryable` | Cause |
   | --- | --- | --- |
   | `RoleNotEnabledError` | false | `409 role_not_enabled`: ask another node (`:role` names it) |
-  | `AdminRejectedError` | false | any other `4xx` (`:status`, `:code`) |
+  | `AdminRejectedError` | false | any other `4xx` (`:status`, `:code`, `:scope`) |
   | `AdminUnavailableError` | true | `5xx`, a redirect, a non-JSON body, or unreachable |
 
   Every call is one request: no retry, no followed redirect."
@@ -47,7 +47,9 @@
   [status decoded]
   (error/error "AdminRejectedError"
                (str "admin listener rejected the request (" status "): " (pr-str decoded))
-               {:status status :code (when (map? decoded) (:error decoded))}))
+               {:status status
+                :code (when (map? decoded) (:error decoded))
+                :scope (when (map? decoded) (:scope decoded))}))
 
 (defn- response-body
   "The body bytes of a 2xx response, or the error `response` classifies as."
@@ -155,3 +157,13 @@
   `params` may carry `:limit`; `nil` values are left out of the query string."
   ([client] (list-quarantined client nil))
   ([client params] (call-json client "GET" "/v1/quarantine" {:query params})))
+
+(defn list-audit
+  "The audit trail, newest first: `GET /v1/audit`.
+
+  `params` may carry `:cursor`, `:limit`, `:since`, `:until`, `:actor`,
+  `:action` and `:tenant` (a map, or a seq of `[k v]` pairs when the order
+  must be exact); `nil` values are left out of the query string rather than
+  sent as `=`."
+  ([client] (list-audit client nil))
+  ([client params] (call-json client "GET" "/v1/audit" {:query params})))

@@ -2,7 +2,7 @@
 #
 # Run the crash-consistency drill in a container:
 #
-#   scripts/drills/crash.sh tmpfs   ENOSPC on a 96 MiB tmpfs, then kill -9 under load
+#   scripts/drills/crash.sh tmpfs   ENOSPC on a 192 MiB tmpfs, then kill -9 under load
 #   scripts/drills/crash.sh dm      I/O error windows and a power-loss cut on ext4
 #                                   over device-mapper (docker --privileged; exit 2
 #                                   when the host kernel cannot do that)
@@ -36,7 +36,7 @@ args=(--rm --init
   -e "KILL_AT=${KILL_AT:-20}")
 
 case $mode in
-  tmpfs) args+=(--tmpfs /data:size=96m -e FAULT=enospc) ;;
+  tmpfs) args+=(--tmpfs /data:size=192m -e FAULT=enospc) ;;
   dm) args+=(--privileged -e FAULT=eio) ;;
   *)
     echo "usage: crash.sh tmpfs|dm" >&2

@@ -18,6 +18,9 @@ follows [Semantic Versioning](https://semver.org/).
 - `Ankusa.SDK.Webhook.receive_delivery/3`, the receiver-side decision on one
   HTTP-sink delivery (signature, then headers) without Plug. Options
   `:secrets`, `:allow_unsigned`, `:tolerance_seconds`, `:now`.
+- `verification` on parsed headers, decoded messages and received deliveries: how Ankusa verified the hook at ingest (`{status, flagged}`, `null` from a node older than the field).
+- `scope` on `AdminRejectedError` and `RoutesRejectedError`: the scope a `403 forbidden` says the credential lacks (control planes require a credential since Ankusa 0.6).
+- `Ankusa.SDK.Admin.list_audit/2`: `GET /v1/audit`, the audit trail (newest first, paged by `cursor`/`limit`, filtered by `since`, `until`, `actor`, `action`, `tenant`).
 
 ### Changed
 

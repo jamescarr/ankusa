@@ -95,6 +95,7 @@ type RejectedBody = {
   message?: string;
   conflicting_id?: string;
   max_routes?: number;
+  scope?: string;
 };
 
 /**
@@ -151,7 +152,7 @@ export function createRoutesClient(options: RoutesClientOptions): RoutesClient {
   function rejected(status: number, body: unknown): RoutesRejectedError {
     if (body && typeof body === "object") {
       const e = body as RejectedBody;
-      return new RoutesRejectedError(status, e.error, e.field, e.message, e.conflicting_id, e.max_routes);
+      return new RoutesRejectedError(status, e.error, e.field, e.message, e.conflicting_id, e.max_routes, e.scope ?? null);
     }
     return new RoutesRejectedError(status);
   }

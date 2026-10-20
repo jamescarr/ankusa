@@ -17,10 +17,10 @@
   | `InvalidSignatureError` | false | `:code`, `:field` |
   | `InvalidRouteIdError` | false | |
   | `RouteNotFoundError` | false | |
-  | `RoutesRejectedError` | false | `:status`, `:code`, `:field`, `:message`, `:conflicting-id`, `:max-routes` |
+  | `RoutesRejectedError` | false | `:status`, `:code`, `:field`, `:message`, `:conflicting-id`, `:max-routes`, `:scope` |
   | `RoutesUnavailableError` | true | `:status`, `:reason` |
   | `RoleNotEnabledError` | false | `:role` |
-  | `AdminRejectedError` | false | `:status`, `:code` |
+  | `AdminRejectedError` | false | `:status`, `:code`, `:scope` |
   | `AdminUnavailableError` | true | `:status`, `:reason` |
   | `InvalidMessageError` | false | `:code`, `:field` |
   | `SourceNotFoundError`, `SourceConflictError`, `SourceStoreReadOnlyError`, `SourceInvalidError`, `VersionMismatchError` | false | `:status`, `:body` |

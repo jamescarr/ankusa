@@ -125,7 +125,9 @@ synced write in the last second and no write has failed in the last 5 s
 (`200`, `{"status":"ready","store":"ok",…}`), or not (`503`,
 `Retry-After: 1`, `store` = `write_failed` or
 `store_unavailable` — a full volume, a latched RocksDB error, a store that is
-reopening). A node with no store (`wal.type: none`, a gateway) is ready while
+reopening — and `reason`, why: `no_space`, `io_error`, `read_only`,
+`corruption`, `busy`, `timeout`, `not_running` or `other`). A node with no
+store (`wal.type: none`, a gateway) is ready while
 it runs (`store: "none"`). Both
 are on the ingest port and on the admin port. Point a Kubernetes
 `livenessProbe` at `/health` and the `readinessProbe` at `:4000/ready` (a

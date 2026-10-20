@@ -21,6 +21,8 @@ import org.jspecify.annotations.Nullable;
  * @param idempotencyKey the tenant-scoped key Ankusa computed for the hook, from {@code
  *     x-ankusa-idempotency-key}, or null when the header is absent or empty; read it through {@link
  *     #idempotencyKey(boolean)}
+ * @param verification how Ankusa verified the hook at ingest, from {@code x-ankusa-verification}
+ *     and {@code x-ankusa-verification-flagged}, or null when the header is absent or empty
  */
 public record HookHeaders(
     String id,
@@ -29,7 +31,8 @@ public record HookHeaders(
     @Nullable String contentType,
     @Nullable String dedupeKey,
     @Nullable String replayId,
-    @Nullable String idempotencyKey) {
+    @Nullable String idempotencyKey,
+    @Nullable Verification verification) {
 
   /**
    * Reads the headers through a lookup function.
@@ -58,7 +61,18 @@ public record HookHeaders(
         lookup.apply("content-type"),
         nonEmpty(lookup.apply("x-ankusa-dedupe-key")),
         nonEmpty(lookup.apply("x-ankusa-replay-id")),
-        nonEmpty(lookup.apply("x-ankusa-idempotency-key")));
+        nonEmpty(lookup.apply("x-ankusa-idempotency-key")),
+        parseVerification(lookup));
+  }
+
+  /** Reads {@code x-ankusa-verification}/{@code x-ankusa-verification-flagged}, or null. */
+  private static @Nullable Verification parseVerification(
+      Function<String, @Nullable String> lookup) {
+    String status = nonEmpty(lookup.apply("x-ankusa-verification"));
+    if (status == null) {
+      return null;
+    }
+    return new Verification(status, "true".equals(lookup.apply("x-ankusa-verification-flagged")));
   }
 
   /**

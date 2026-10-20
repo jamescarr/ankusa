@@ -1,6 +1,12 @@
 # frozen_string_literal: true
 
 module Ankusa
+  # How Ankusa verified the hook at ingest. `status` is `ok`, `failed` or
+  # `skipped`, but other values pass through untouched (forward-compatible).
+  # `flagged` is true when a failed check was accepted
+  # (`on_verify_failure: accept_flag`): treat the delivery as unverified.
+  Verification = Data.define(:status, :flagged)
+
   # The identity of one HTTP-sink delivery: the headers Ankusa's HTTP sink
   # attaches to every delivery.
   #
@@ -8,9 +14,10 @@ module Ankusa
   # nil when the delivery had no such header (a tenant only travels when the
   # source has one; `dedupe_key` only when the source declared a dedupe key;
   # `replay_id` only when the delivery is a replay; `idempotency_key` is
-  # missing only from a sender that predates the header).
+  # missing only from a sender that predates the header). `verification` is nil
+  # when `x-ankusa-verification` is absent or empty.
   HookHeaders = Data.define(
-    :id, :source, :tenant, :content_type, :dedupe_key, :replay_id, :idempotency_key
+    :id, :source, :tenant, :content_type, :dedupe_key, :replay_id, :idempotency_key, :verification
   ) do
     # `Data.define` made `idempotency_key` the reader of the parsed header; keep
     # that value reachable here and let the helper below take over the name.
@@ -62,7 +69,8 @@ module Ankusa
       content_type: lowered["content-type"],
       dedupe_key: presence(lowered["x-ankusa-dedupe-key"]),
       replay_id: presence(lowered["x-ankusa-replay-id"]),
-      idempotency_key: presence(lowered["x-ankusa-idempotency-key"])
+      idempotency_key: presence(lowered["x-ankusa-idempotency-key"]),
+      verification: parse_verification(lowered)
     )
   end
 
@@ -72,6 +80,17 @@ module Ankusa
     (value.nil? || value.empty?) ? nil : value
   end
   private_class_method :presence
+
+  # `nil` when `x-ankusa-verification` is absent or empty; otherwise the
+  # header's value as `status`, and `flagged` true exactly when
+  # `x-ankusa-verification-flagged` is the literal string "true".
+  def self.parse_verification(lowered)
+    status = presence(lowered["x-ankusa-verification"])
+    return nil if status.nil?
+
+    Verification.new(status: status, flagged: lowered["x-ankusa-verification-flagged"] == "true")
+  end
+  private_class_method :parse_verification
 
   # An accepted delivery: its identity (`HookHeaders`), and whether its
   # signature verified (`false` only for an unsigned delivery `allow_unsigned`
