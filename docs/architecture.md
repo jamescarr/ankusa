@@ -278,9 +278,11 @@ From here, ingest is done. Two independent consumers work off the same store:
 ## Archive retention
 
 The archive is a set of immutable segment objects in the node's `storage`
-bucket (or on LocalFS): the compactor writes `seg/<first_seq>-<last_seq>.seg`
-plus its index, and catalogues both in the store. It is a recovery buffer for
-replay, not a system of record.
+bucket (or on LocalFS): the compactor writes
+`archive/v1/dt=<yyyy-mm-dd>/<node>/seg-<first_seq>-<last_seq>.seg` plus its index
+and the node-day's `_manifest.json`, and catalogues the segment in the store
+([`storage.md`](storage.md#ankusacodec-and-segment-format)). It is a recovery
+buffer for replay, not a system of record.
 
 `archive.retention_days` is the whole retention policy, and it is off by
 default. When set, the compactor deletes a segment object, its index and its
@@ -294,13 +296,19 @@ segments hold full bodies, never claim refs.
 Size the window to your recovery horizon: the longest a consumer outage can go
 unnoticed, plus the time to replay it. A replay cannot reach past it.
 
-**Planned, not shipped.** A dated `archive/v1/dt=` layout with one bucket
-lifecycle rule per window, per-writer watermarks, and an `archive.store` of its
-own (`DUR-8` in `ANKUSA_HARDENING_PLAN.md`). Until that lands, do not put a
-cloud lifecycle rule on the archive prefix: Ankusa's catalogue cannot tell that
-an object expired, so a replay would find a catalogue row whose segment is
-gone. Retention is Ankusa's own delete, and it works for every blob store, not
-only LocalFS.
+**Dated layout.** Segments sit under `archive/v1/dt=<yyyy-mm-dd>/<node>/`, the
+day of a segment's oldest hook first, so one day is one prefix (`dt=2026-10-19/`
+holds every node's segments for that day) and a bucket lifecycle rule can expire
+whole days. A cloud lifecycle rule on `archive/v1/` is therefore possible next
+to Ankusa's own retention, with a catch: the catalogue keeps a segment's row
+until `storage.catalogue_retention_days` (or `archive.retention_days`) and does
+not know the object expired, so set the rule's age at least that long. Past it, a
+replay skips a segment whose objects are gone and `Storage.fetch/2` answers
+`:error` (unverified: no test removes a segment object behind the catalogue's
+back). Retention through `archive.retention_days` is Ankusa's own delete, and it
+works for every blob store, not only LocalFS. Segments always go to
+`storage.blob_store`: a separate archive store and per-writer watermarks are not
+part of DUR-8 and are not implemented.
 
 ## Instance model
 
@@ -449,8 +457,9 @@ for the shape).
 Each ingest node here is an ordinary all-role node, the topology-1 shape, with
 its own store, and the nodes share nothing but the broker, the provider's
 traffic, and — if you like — one bucket. Segment keys are
-`seg/<first_seq>-<last_seq>.seg`, so nodes sharing a bucket each set their
-own `storage.key_prefix` (`node-a/`, …) or they overwrite each other's
+`archive/v1/dt=<day>/<node>/seg-<first_seq>-<last_seq>.seg`, so nodes sharing a bucket
+each set their own `intake.node_id` (or their own `storage.key_prefix`, `node-a/`, …)
+or they overwrite each other's
 segments. Claim keys are never prefixed — claim ids are unique across nodes —
 so the claim store (the bucket, or a dedicated `claim_check.store`, or a list
 of them with failover, `claim_check.stores`) is shared by every node and one

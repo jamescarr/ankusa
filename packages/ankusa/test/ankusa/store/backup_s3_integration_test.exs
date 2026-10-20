@@ -159,7 +159,7 @@ defmodule Ankusa.Store.BackupS3IntegrationTest do
       seen |> Agent.get(& &1) |> Enum.filter(fn {method, _path, _headers} -> method == "PUT" end)
 
     for {kind, marker} <- [
-          segment: "/" <> prefix <> "seg/",
+          segment: "/" <> prefix <> "archive/v1/",
           backup: "/" <> prefix <> "backup/",
           claim: "/claims/"
         ] do

@@ -12,12 +12,16 @@ defmodule Ankusa.Codec.Raw do
   of `{key, offset, length}` — `offset` is the frame start byte within the
   segment and `length` is the full frame length (payload plus the 8-byte header),
   exactly the byte range `Ankusa.BlobStore.get_range/5` must fetch for
-  `decode_record/1`.
+  `decode_record/1`. The offsets are relative to the first frame; the segment
+  header (`Ankusa.Storage.Segment`) shifts them when it wraps the frames.
   """
 
   @behaviour Ankusa.Codec
 
   @header_bytes 8
+
+  @impl true
+  def id, do: 1
 
   @impl true
   def encode(records) do

@@ -342,6 +342,19 @@ Tests: `claim_check/sweeper_test.exs` (`lease blocks sweep`),
 `queue/deliveries_test.exs` (the sink-down drill), `store_upgrade_test.exs`
 (`the claim leases migration (format 5 -> 6)`).
 
+#### Segment rows: how an archived segment is stored
+
+Store format 7 added `format`, `codec`, `node`, `dt` and `sha256` to the
+catalogue's segment rows (`?S`). Its migration marks every row of a format 6
+store `format: 0` (bare frames under `seg/`, no node or day; `codec: nil` reads
+as the configured codec), 500 rows a batch and resumable. Segments written by a
+format 7 node are `format: 1` (header and sha256, the dated layout). A format 7
+store cannot be opened by a format 6 image: it would read the dated segments'
+frames at offsets that include a header it does not know.
+
+Tests: `store_upgrade_test.exs` (`the segment rows migration (format 6 -> 7)`),
+`codec_test.exs` (`versioned header`).
+
 ### `:none`: no queue, no store hooks
 
 `wal: :none` is the other ack path: no hook queue, no batcher, no compactor, no
@@ -454,8 +467,10 @@ is the hooks acked since the last backup.
   segments in the bucket: hooks acked after the backup may already be
   archived. Before the queue writer starts, `m:next_seq` moves past the
   highest archived seq, so no new segment key overwrites one, and every
-  segment without a catalogue row is catalogued from its `.idx` object (with
-  the restored hooks' archive obligations it settles), so `Ankusa.Storage.fetch/2`
+  of this node's segments without a catalogue row is catalogued from its
+  `.idx` object and its header (`Archive.reconcile/2`, see
+  [Finding a segment without the catalogue](#finding-a-segment-without-the-catalogue);
+  with the restored hooks' archive obligations it settles), so `Ankusa.Storage.fetch/2`
   finds those hooks again. Their delivery state is gone with the host. The
   restore leaves a `RESTORE-IN-PROGRESS` marker beside `CURRENT` until this
   reconcile succeeds: a boot that finds both (the node died, or the reconcile
@@ -645,11 +660,14 @@ claim PUT recorded on their way to the emulator all carry the header.
 
 One node is one local store. To scale, run **N independent all-role
 nodes behind a load balancer**. Each with its own data volume and its own
-DLQ/admin API. Segment keys are `seg/<first_seq>-<last_seq>.seg` (with the
-sibling `.idx` object), which name no instance or node, so two nodes writing
-the same keys would silently overwrite each other's segments: give each node
-its own `storage.key_prefix` (`node-a/`, `node-b/`) and they can share one
-bucket, or give each its own bucket or LocalFS root. Claims are never
+DLQ/admin API. Segment keys are `archive/v1/dt=<day>/<node>/seg-<first_seq>-<last_seq>.seg`
+(with the sibling `.idx` object and the day's `_manifest.json`), where `<node>` is
+`intake.node_id` (else the host name): nodes with distinct names never write the
+same key, and a node that has lost its catalogue can find another node's
+segments by day. Set `intake.node_id` on every node that shares a bucket (the
+host name is the fallback, and two nodes with one host name would overwrite each
+other's segments), or give each its own `storage.key_prefix` (`node-a/`,
+`node-b/`), its own bucket or LocalFS root. Claims are never
 prefixed — pack ids carry 64 random bits, so every node's claims can share
 one place and one gateway. See [`deployment.md`](deployment.md) for the
 operational shape.
@@ -698,8 +716,9 @@ store-specific error (`:enoent`, an HTTP status). `Ankusa.ClaimCheck`
 claim consistently regardless of which store is configured.
 
 Two independent namespaces share one `BlobStore` by default and never
-collide: `seg/...` (each segment written by `Ankusa.Storage.Compactor`, plus
-its sibling `.idx` index object, under `storage.key_prefix`) and `claims/...`
+collide: `archive/v1/...` (each segment written by `Ankusa.Storage.Compactor`,
+its sibling `.idx` index object and the node-day `_manifest.json`, under
+`storage.key_prefix`; `seg/...` is where releases before DUR-8 wrote them) and `claims/...`
 (`Ankusa.ClaimCheck`, packed per tenant per dispatch batch, one object holding
 many claims under `claims/tenant=<t>/dt=<day>/<pack_id>`, or
 `claims/tenant=<t>/shard=<c>/dt=<day>/<pack_id>` with
@@ -894,12 +913,45 @@ Or `mise run test:integration`, which does all three.
 ```elixir
 @callback encode([%{key: String.t(), payload: binary()}]) :: {segment :: binary(), index :: [index_entry]}
 @callback decode_record(binary()) :: {:ok, binary()} | {:error, term()}
+@callback id() :: 1..255   # optional
 ```
 
-`Codec.Raw` (the only shipped codec) frames each record length-prefixed with
-a per-record CRC32; `encode/1` packs many into one segment binary and
-returns the byte offset + length of each, which is exactly what
-the `get_range` callback needs.
+`Codec.Raw` (the only shipped codec, id `1`) frames each record length-prefixed
+with a per-record CRC32; `encode/1` packs many into one binary and returns the
+byte offset + length of each, which is exactly what the `get_range` callback
+needs. A codec only frames records: the object around them is
+`Ankusa.Storage.Segment`.
+
+**Segment object, format 1** (written since store format 7):
+
+```text
+"ANKSEG" <> <<version::8, codec_id::8, count::32>>      12 bytes
+<codec frames, back to back>
+sha256(everything above)                                32 bytes
+```
+
+`codec_id` is the codec's `id/0` (`0` when it has none; the catalogue row then
+names the module), `count` the number of frames. The index offsets are
+positions in the object, header included, so a range read of
+`[offset, offset + length)` is still exactly one frame. `Storage.fetch/2` reads
+one frame and relies on its CRC; whoever reads the whole object (archive
+replay, `Segment.verify/2`) checks the sha256 too, and a segment that does not
+verify is `{:error, _}` — a replay logs it and skips the segment.
+**Format 0**, the bare frames earlier releases wrote under `seg/`, has no header
+and stays readable; a format newer than this release is `unsupported_format`.
+Version N reads N−1: the catalogue row's `format` field says which one a segment
+is.
+
+**Index object** (`….idx`, `Ankusa.Storage.Index`): `%{event_id => {offset,
+length, seq}}` as `"ANKIDX" <> <<version::8, count::32>>`, `term_to_binary`, and
+a sha256 trailer. It is decoded with `binary_to_term(bin, [:safe])` and its
+shape checked (binary ids, three non-negative integers each, `count` entries),
+so an index that names an atom this node has never seen, or anything that is not
+an index, is `{:error, :bad_index}` instead of being interned or executed.
+Format 0 indexes (a bare term) are read the same way.
+
+Golden vectors of both formats are in `test/ankusa/codec_test.exs`
+(`versioned header`, `safe idx`); a format change adds its vectors there.
 
 ## `Ankusa.Storage.Compactor`: how segments get written
 
@@ -911,15 +963,25 @@ obligation*. Each tick (default every `storage.interval_ms`, 1s) clears some:
    16 MiB) — always at least one, so a hook larger than a segment still gets
    one. Sizes come from the obligation keys, so nothing is read and discarded
    to find out how much fits. A long backlog produces **several segments in
-   one tick**: the tick repeats while obligations remain.
-2. Encode those hooks into one segment via the configured `Codec`.
-3. `PUT` the segment to the blob store under a deterministic key:
-   `seg/<zero-padded first_seq>-<zero-padded last_seq>.seg`.
-4. `PUT` the segment's index object, the same key with `.idx`, mapping each
-   event id to `{offset, length, seq}` for range reads.
-5. Write the segment's catalogue row to the store: key, index key, seq and id
-   ranges, count and byte size.
-6. Clear the batch's obligations. Each cleared obligation leaves a marker; when
+   one tick** (at most `storage.max_segments_per_tick`, default 16, the rest
+   wait for the next tick). What is left after the full ones is a *partial*
+   segment: it is written once its first obligation has waited
+   `storage.roll_ms` (default 30 s; `0` writes every tick), so an idle trickle
+   becomes one segment per `roll_ms` instead of one per tick. `tick/1`
+   (tests, `Compactor.tick/1`) writes a partial segment at once.
+2. Encode those hooks into one segment via the configured `Codec`, wrapped in
+   the header and sha256 (above).
+3. `PUT` the segment to the blob store under a deterministic key in the dated
+   layout: `archive/v1/dt=<yyyy-mm-dd>/<node>/seg-<first_seq>-<last_seq>.seg`
+   (seqs zero-padded to 20 digits; `dt` is the UTC day of the segment's oldest
+   hook, from its UUIDv7 id; `<node>` is `intake.node_id`, else the host name).
+4. `PUT` the segment's index object, the same key with `.idx`.
+5. Rewrite the node-day's `_manifest.json`: segment count, bytes, seq and id
+   range, a constant-size summary that lets a reader skip a node whose ids
+   cannot hold the one it wants.
+6. Write the segment's catalogue row to the store: key, index key, seq and id
+   ranges, count and byte size, and `format`, `codec`, `node`, `dt`, `sha256`.
+7. Clear the batch's obligations. Each cleared obligation leaves a marker; when
    a hook's last obligation is gone, the hook is deleted.
 
 A failed blob write ends the tick without crashing: nothing moves, and the
@@ -928,6 +990,40 @@ doubled per consecutive failure (jittered, capped at 60 s). This is why
 segments are never one-object-per-hook: PUT cost amortizes over however many
 records landed in one tick, and archive-tier storage (which bills a minimum
 object size) stays cheap at scale.
+
+### Finding a segment without the catalogue
+
+The day comes before the node in the key, so a node that lost its catalogue (a
+fresh node, a restore) or never had it (another node's segment in a shared
+bucket) can still find a hook whose id carries a time:
+
+- **`Storage.fetch/2` falls back to a day-prefix scan** when the catalogue has no
+  segment for the id: it lists the id's day and the day before under
+  `storage.key_prefix`, skips every node whose manifest says its ids cannot
+  include the id, and bisects the remaining node's segments (by the highest id
+  in each index) to the one or two that can hold it. That is a listing plus
+  `O(log n)` index reads per fetch, not a lookup: use it for the tail, and
+  `reconcile` to make it a lookup. A segment lives in the directory of its
+  *oldest* hook, so a backlog segment that spans more than a day is found only
+  for hooks in the first two days of it (the catalogue finds them all); an id
+  that carries no time has no day and is found only through the catalogue.
+- **`Queue.Archive.reconcile/2`** rebuilds catalogue rows from the
+  prefix: every dated segment (`node: :all`, the default, or `:own`, or one
+  node's name) and every legacy `seg/` segment that has no row at its first seq
+  gets one, built from its index object and the first bytes of the segment, and
+  the archive obligations it settles are cleared — only those whose hook is the
+  one the segment holds for that seq, so another node's segment never clears
+  this node's own obligations. A segment whose index or object is missing or
+  does not decode is logged and left out. Rows are keyed by first seq, so a
+  segment that starts at the same seq as a catalogued one of another node is
+  counted in `conflicts` and left to the day scan; reconcile a node into a
+  store before it archives, or accept the scan. The restore at boot is
+  `reconcile(config, node: :own, advance_seq: true)`.
+
+Tests: `storage_test.exs` (`dated layout`, `versioned header`, `safe idx`,
+`time roll`, `storage.max_segments_per_tick`, `reconcile other node`,
+`legacy seg/ layout`), `codec_test.exs` (golden vectors, tamper cases),
+`store_upgrade_test.exs` (`the segment rows migration (format 6 -> 7)`).
 
 ## Replay by id
 
