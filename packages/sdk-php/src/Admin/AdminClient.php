@@ -12,7 +12,8 @@ use Psr\Http\Message\ResponseInterface;
 /**
  * Operate against the operator API (`admin.port`, default 4002) —
  * `Ankusa.Admin.Router`: health, Prometheus metrics, the redacted
- * configuration, the dead-letter queue, replay jobs, and the quarantine list.
+ * configuration, the dead-letter queue, replay jobs, the quarantine list, and
+ * the audit trail.
  * Responses are node-local by design, so a fleet operator scrapes every node's
  * admin port.
  *
@@ -153,6 +154,20 @@ final class AdminClient
     }
 
     /**
+     * `GET /v1/audit` -> the audit trail, newest first.
+     *
+     * `$params` may carry `since`, `until`, `actor`, `action`, `tenant`,
+     * `cursor` and `limit`; `null` values are omitted from the query string
+     * rather than sent as `=null`.
+     *
+     * @param array<string, scalar|null> $params
+     */
+    public function listAudit(array $params = []): AuditPage
+    {
+        return AuditPage::fromArray($this->json($this->request('GET', '/v1/audit', $params)));
+    }
+
+    /**
      * @param array<string, scalar|null> $params
      * @param array<string, mixed>|null  $json
      */
@@ -204,6 +219,7 @@ final class AdminClient
                 "admin listener rejected the request ({$status}): " . HttpTransport::describe($body),
                 $status,
                 $code,
+                self::stringField($body, 'scope'),
             );
         }
 

@@ -24,9 +24,22 @@ defmodule Ankusa.BlobStore.OCI do
     * `:tenancy_ocid`    — required for API-key auth
     * `:user_ocid`       — required for API-key auth
     * `:key_fingerprint` — required for API-key auth; the signing key fingerprint
-    * `:private_key`     — required; the PEM private key (PKCS#1 or PKCS#8)
+    * `:private_key`     — required unless `:key_provider` is set; the PEM private key
+                           (PKCS#1 or PKCS#8)
+    * `:key_provider`    — `{module, fun, args}` returning `{:ok, %{key_id: key_id,
+                           private_key: pem}} | :error`, applied per request, in place of
+                           `:key_id`/`:private_key`: the identity of an instance principal
+                           (`{Ankusa.BlobStore.OCI.InstancePrincipal, :credentials, [[region: …]]}`).
+                           On a `401` the adapter calls the module's `invalidate/n` (same
+                           arguments) and sends the request once more with fresh credentials
     * `:endpoint`        — default `"https://objectstorage.\#{region}.oraclecloud.com"`
-    * `:timeout_ms`      — default `10_000`, for both connect and response
+    * `:timeout_ms`      — default `10_000`, for both connect and response of
+                           one request that carries at most 1 MiB
+    * `:upload_timeout_ms`, `:op_deadline_ms`, `:multipart_threshold_bytes`,
+      `:multipart_part_bytes`, `:breaker_*`, `:pool_*` — one deadline per
+                           operation, multipart above a size, a breaker per
+                           bucket and a connection pool per endpoint. See
+                           `Ankusa.BlobStore.Options`
     * `:req_options`     — transport options for the HTTP client. See
                            `Ankusa.HttpClient` for the accepted keys
     * `:retries`         — default `2`: extra attempts after a transport error
@@ -43,12 +56,20 @@ defmodule Ankusa.BlobStore.OCI do
 
     * **API key** — `:tenancy_ocid`/`:user_ocid`/`:key_fingerprint`/`:private_key`,
       the default. The right shape off-OCI (CI, laptops, another cloud).
-    * **Instance principal / session token** — on OCI compute or OKE, the best
-      credential is the instance's own identity. That flow is a two-stage cert
-      federation the OCI SDK owns — IMDS leaf cert → `auth.<region>.oraclecloud.com/v1/x509`
-      → a short-lived `ST$` session token plus a session key — and this adapter
-      does not re-implement it by hand. Feed it the SDK's output instead:
-      `key_id: "ST$<token>"` with the session key as `:private_key`.
+    * **Instance principal** — on OCI compute or OKE, the best credential is the
+      instance's own identity: `key_provider: {Ankusa.BlobStore.OCI.InstancePrincipal,
+      :credentials, [[region: "us-ashburn-1"]]}` runs the certificate federation
+      (IMDS leaf cert → `auth.<region>.oraclecloud.com/v1/x509` → a short-lived
+      `ST$` session token plus a session key), caches it and refreshes it before
+      it expires and on a `401`. A session token from another source (the OCI SDK,
+      a sidecar) still works as `key_id: "ST$<token>"` with its session key as
+      `:private_key`; it is the caller's to renew.
+
+  `put_if_absent/4` sends `if-none-match: *` (a `412` is `:already_exists`); every
+  `PUT` carries `Content-MD5` and a `GET` verifies `opc-content-md5`
+  (`Ankusa.BlobStore.Checksum`); a body over `multipart_threshold_bytes` is a
+  multipart upload (create, parts each with `Content-MD5`, commit, abort on
+  failure).
 
   ## Local dev
 
@@ -73,46 +94,51 @@ defmodule Ankusa.BlobStore.OCI do
 
   @behaviour Ankusa.BlobStore
 
-  alias Ankusa.BlobStore.{Retry, SSE}
-  alias Ankusa.HttpClient
-
-  @generic_headers ["date", "(request-target)", "host"]
-  @body_headers ["content-length", "content-type", "x-content-sha256"]
+  alias Ankusa.BlobStore
+  alias Ankusa.BlobStore.{Checksum, HTTP, Options, SSE}
+  alias Ankusa.BlobStore.OCI.Signer
 
   @impl true
-  def put(instance, key, data, opts) do
-    url = object_url(opts, key)
+  def put(instance, key, data, opts), do: write(instance, key, data, opts, false)
 
-    extra =
-      SSE.headers(opts, :oci) ++
-        [
-          {"content-type", "application/octet-stream"},
-          {"x-content-sha256", sha256_base64(data)}
-        ]
-
-    case request(instance, opts, :put, url, data, extra) do
-      {:ok, _body} -> :ok
-      {:error, reason} -> {:error, reason}
+  @impl true
+  def put_if_absent(instance, key, data, opts) do
+    case write(instance, key, data, opts, true) do
+      {:error, :already_exists} -> BlobStore.same_object(__MODULE__, instance, key, data, opts)
+      other -> other
     end
   end
 
   @impl true
-  def get(instance, key, opts),
-    do: request(instance, opts, :get, object_url(opts, key), nil, [])
+  def get(instance, key, opts) do
+    opts = Options.with_deadline(opts)
+
+    case request(instance, opts, :small, :get, object_url(opts, key), nil, []) do
+      {:ok, status, headers, body} when status in 200..299 ->
+        Checksum.check_response(headers, body, :md5, ["opc-content-md5"])
+
+      other ->
+        HTTP.reply(other)
+    end
+  end
 
   @impl true
   def get_range(instance, key, offset, length, opts) do
+    opts = Options.with_deadline(opts)
     range = "bytes=#{offset}-#{offset + length - 1}"
-    request(instance, opts, :get, object_url(opts, key), nil, [{"range", range}])
+    headers = [{"range", range}]
+    HTTP.reply(request(instance, opts, :small, :get, object_url(opts, key), nil, headers))
   end
 
   @impl true
   def delete(instance, key, opts) do
-    _ = request(instance, opts, :delete, object_url(opts, key), nil, [])
+    opts = Options.with_deadline(opts)
+    _ = request(instance, opts, :small, :delete, object_url(opts, key), nil, [])
     :ok
   end
 
-  # Every page (`nextStartWith` → `start`), and a failed page fails the listing.
+  # Every page (`nextStartWith` → `start`), each under a deadline of its own, and
+  # a failed page fails the listing.
   @impl true
   def list(instance, prefix, opts), do: list_pages(instance, opts, prefix, nil, [])
 
@@ -128,7 +154,9 @@ defmodule Ankusa.BlobStore.OCI do
         "/o" <>
         "?" <> URI.encode_query(query, :rfc3986)
 
-    with {:ok, body} <- request(instance, opts, :get, url, nil, []),
+    page_opts = Options.with_deadline(opts)
+
+    with {:ok, body} <- HTTP.reply(request(instance, page_opts, :small, :get, url, nil, [])),
          {:ok, page} when is_map(page) <- JSON.decode(body) do
       acc = [page |> Map.get("objects", []) |> Enum.map(& &1["name"]) | acc]
 
@@ -145,74 +173,172 @@ defmodule Ankusa.BlobStore.OCI do
     end
   end
 
-  # ── requests ──────────────────────────────────────────────────────────────
+  # ── writes ────────────────────────────────────────────────────────────────
 
-  defp request(instance, opts, method, url, body, extra_headers) do
-    timeout = Keyword.get(opts, :timeout_ms, 10_000)
-    req_options = Keyword.get(opts, :req_options, [])
+  defp write(instance, key, data, opts, conditional?) do
+    opts = Options.with_deadline(opts)
+    size = IO.iodata_length(data)
 
-    # Signed per attempt: the signature covers the `date` header.
-    result =
-      Retry.run(instance, opts, fn ->
-        headers = [{"date", rfc1123_date(:calendar.universal_time())} | extra_headers]
-        authorization = sign(opts, method, url, headers, body)
+    if size > Options.get(opts, :multipart_threshold_bytes),
+      do: multipart(instance, opts, key, IO.iodata_to_binary(data), conditional?),
+      else: single(instance, opts, key, data, size, conditional?)
+  end
 
-        HttpClient.request(
-          method,
-          url,
-          [{"authorization", authorization} | headers],
-          body,
-          timeout,
-          req_options
-        )
-      end)
+  defp single(instance, opts, key, data, size, conditional?) do
+    headers =
+      SSE.headers(opts, :oci) ++
+        [
+          {"content-type", "application/octet-stream"},
+          {"x-content-sha256", Signer.sha256_base64(data)},
+          {"content-md5", Checksum.md5_base64(data)}
+        ] ++ precondition(conditional?)
 
-    case result do
-      # Keep the status visible so 404 can mean :not_found.
-      {:ok, status, body} when status in 200..299 -> {:ok, body}
-      {:ok, 404, _body} -> {:error, :not_found}
-      {:ok, status, body} -> {:error, {:status, status, body}}
-      {:error, reason} -> {:error, reason}
+    instance
+    |> request(opts, Options.kind(size), :put, object_url(opts, key), data, headers)
+    |> HTTP.write_reply(exists_statuses(conditional?))
+  end
+
+  # A failed `if-none-match: *` is a 412.
+  defp precondition(true), do: [{"if-none-match", "*"}]
+  defp precondition(false), do: []
+  defp exists_statuses(true), do: [412]
+  defp exists_statuses(false), do: []
+
+  # Create the upload, PUT each part (its own `Content-MD5`; an
+  # `upload_timeout_ms` per part, all inside the operation's one deadline),
+  # commit; abort on any failure so no orphan parts are kept.
+  defp multipart(instance, opts, key, data, conditional?) do
+    url = upload_url(opts, key)
+    parts = HTTP.chunks(data, Options.get(opts, :multipart_part_bytes))
+
+    case create_upload(instance, opts, key) do
+      {:ok, upload_id} ->
+        with {:ok, etags} <- upload_parts(instance, opts, url, upload_id, parts),
+             :ok <- commit_upload(instance, opts, url, upload_id, etags, conditional?) do
+          :ok
+        else
+          {:error, _reason} = error ->
+            abort_upload(instance, opts, url, upload_id)
+            error
+        end
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
-  # ── signing (OCI Signature version 1) ─────────────────────────────────────
+  defp json_headers(body) do
+    [{"content-type", "application/json"}, {"x-content-sha256", Signer.sha256_base64(body)}]
+  end
 
-  defp sign(opts, method, url, headers, body) do
-    signing_headers =
-      if body == nil, do: @generic_headers, else: @generic_headers ++ @body_headers
+  # `POST /n/<ns>/b/<bucket>/u` names the object in the body; every later call
+  # names it in the path (`upload_url/2`).
+  defp create_upload(instance, opts, key) do
+    url = endpoint(opts) <> "/n/" <> namespace(opts) <> "/b/" <> bucket(opts) <> "/u"
+    body = JSON.encode!(%{"object" => key})
+    headers = SSE.headers(opts, :oci) ++ json_headers(body)
 
-    signing_string =
-      Enum.map_join(signing_headers, "\n", fn name ->
-        "#{name}: #{header_value(name, method, url, headers, body)}"
-      end)
+    with {:ok, response} <- HTTP.reply(request(instance, opts, :small, :post, url, body, headers)),
+         {:ok, %{"uploadId" => upload_id}} when is_binary(upload_id) <- JSON.decode(response) do
+      {:ok, upload_id}
+    else
+      {:error, reason} -> {:error, reason}
+      _unreadable -> {:error, :upload_unreadable}
+    end
+  end
 
-    signature =
+  defp upload_parts(instance, opts, url, upload_id, parts) do
+    parts
+    |> Enum.with_index(1)
+    |> Enum.reduce_while({:ok, []}, fn {part, number}, {:ok, etags} ->
+      query = URI.encode_query([{"uploadId", upload_id}, {"uploadPartNum", number}], :rfc3986)
+
+      headers = [
+        {"content-type", "application/octet-stream"},
+        {"x-content-sha256", Signer.sha256_base64(part)},
+        {"content-md5", Checksum.md5_base64(part)}
+      ]
+
+      case request(instance, opts, :bulk, :put, url <> "?" <> query, part, headers) do
+        {:ok, status, headers, _body} when status in 200..299 ->
+          case Checksum.first(headers, "etag") do
+            nil -> {:halt, {:error, :part_without_etag}}
+            etag -> {:cont, {:ok, [%{"partNum" => number, "etag" => etag} | etags]}}
+          end
+
+        other ->
+          {:halt, HTTP.write_reply(other, [])}
+      end
+    end)
+    |> case do
+      {:ok, etags} -> {:ok, Enum.reverse(etags)}
+      error -> error
+    end
+  end
+
+  defp commit_upload(instance, opts, url, upload_id, etags, conditional?) do
+    body = JSON.encode!(%{"partsToCommit" => etags})
+    headers = json_headers(body) ++ precondition(conditional?)
+    commit_url = url <> "?" <> URI.encode_query([{"uploadId", upload_id}], :rfc3986)
+
+    instance
+    |> request(opts, :small, :post, commit_url, body, headers)
+    |> HTTP.write_reply(exists_statuses(conditional?))
+  end
+
+  # Best effort, under a short deadline of its own: the operation's may be spent.
+  defp abort_upload(instance, opts, url, upload_id) do
+    opts =
       opts
-      |> private_key!()
-      |> then(&:public_key.sign(signing_string, :sha256, &1))
-      |> Base.encode64()
+      |> Keyword.put(:deadline, System.monotonic_time(:millisecond) + 5_000)
+      |> Keyword.put(:retries, 0)
 
-    ~s(Signature version="1",keyId="#{key_id(opts)}",algorithm="rsa-sha256",) <>
-      ~s(headers="#{Enum.join(signing_headers, " ")}",signature="#{signature}")
+    abort_url = url <> "?" <> URI.encode_query([{"uploadId", upload_id}], :rfc3986)
+    _ = request(instance, opts, :small, :delete, abort_url, nil, [])
+    :ok
   end
 
-  defp header_value("(request-target)", method, url, _headers, _body) do
-    method = method |> Atom.to_string() |> String.downcase()
+  # ── requests ──────────────────────────────────────────────────────────────
 
-    %URI{path: path, query: query} = URI.parse(url)
-    target = if query in [nil, ""], do: path, else: path <> "?" <> query
-    method <> " " <> target
+  # Signed per attempt (the signature covers the `date` header) with the identity
+  # `identity/1` has at that moment; a `401` drops a provider's cached
+  # credentials and sends once more.
+  defp request(instance, opts, kind, method, url, body, extra_headers) do
+    HTTP.with_refresh(Keyword.get(opts, :key_provider), fn ->
+      with {:ok, {key_id, private_key}} <- identity(opts) do
+        HTTP.request(instance, opts, {endpoint(opts), bucket_scope(opts)}, kind, fn ->
+          headers = [{"date", Signer.rfc1123_date(:calendar.universal_time())} | extra_headers]
+
+          authorization =
+            Signer.authorization(
+              key_id,
+              private_key,
+              method,
+              url,
+              headers,
+              body,
+              Signer.headers(body != nil)
+            )
+
+          {method, url, [{"authorization", authorization} | headers], body}
+        end)
+      end
+    end)
   end
 
-  defp header_value("host", _method, url, _headers, _body), do: authority(url)
+  # `{key_id, pem}` to sign with: a provider's, else the configured API key (or
+  # session token and key).
+  defp identity(opts) do
+    case Keyword.get(opts, :key_provider) do
+      {mod, fun, args} ->
+        case apply(mod, fun, args) do
+          {:ok, %{key_id: key_id, private_key: pem}} -> {:ok, {key_id, pem}}
+          _error -> {:error, :no_credentials}
+        end
 
-  defp header_value("content-length", _method, _url, _headers, body),
-    do: Integer.to_string(IO.iodata_length(body))
-
-  defp header_value(name, _method, _url, headers, _body) do
-    {^name, value} = List.keyfind(headers, name, 0)
-    value
+      nil ->
+        {:ok, {key_id(opts), private_key!(opts)}}
+    end
   end
 
   defp key_id(opts) do
@@ -224,18 +350,12 @@ defmodule Ankusa.BlobStore.OCI do
 
   defp private_key!(opts) do
     case Keyword.fetch(opts, :private_key) do
-      {:ok, pem} ->
-        pem
-        |> :public_key.pem_decode()
-        |> hd()
-        |> :public_key.pem_entry_decode()
-
-      :error ->
-        raise ArgumentError, "Ankusa.BlobStore.OCI requires :private_key (PEM)"
+      {:ok, pem} -> pem
+      :error -> raise ArgumentError, "Ankusa.BlobStore.OCI requires :private_key (PEM)"
     end
   end
 
-  defp sha256_base64(body), do: Base.encode64(:crypto.hash(:sha256, body))
+  defp bucket_scope(opts), do: namespace(opts) <> "/" <> bucket(opts)
 
   # ── URL building ──────────────────────────────────────────────────────────
 
@@ -254,48 +374,22 @@ defmodule Ankusa.BlobStore.OCI do
       "/n/" <> namespace(opts) <> "/b/" <> bucket(opts) <> "/o/" <> encode_path(key)
   end
 
+  defp upload_url(opts, key) do
+    endpoint(opts) <>
+      "/n/" <> namespace(opts) <> "/b/" <> bucket(opts) <> "/u/" <> encode_path(key)
+  end
+
   defp namespace(opts), do: Keyword.fetch!(opts, :namespace)
 
   defp bucket(opts), do: Keyword.fetch!(opts, :bucket)
 
-  defp endpoint(opts) do
+  @doc false
+  @spec endpoint(keyword()) :: String.t()
+  def endpoint(opts) do
     Keyword.get(
       opts,
       :endpoint,
       "https://objectstorage.#{Keyword.fetch!(opts, :region)}.oraclecloud.com"
     )
   end
-
-  defp authority(url) do
-    %URI{host: host, port: port, scheme: scheme} = URI.parse(url)
-    default = if scheme == "https", do: 443, else: 80
-    if port == default, do: host, else: "#{host}:#{port}"
-  end
-
-  # RFC 1123 GMT: "Sun, 06 Nov 1994 08:49:37 GMT"
-  defp rfc1123_date({{y, mo, d}, {h, mi, s}}) do
-    "#{day_name(y, mo, d)}, #{pad(d)} #{month_name(mo)} #{y} #{pad(h)}:#{pad(mi)}:#{pad(s)} GMT"
-  end
-
-  # `:calendar.day_of_the_week/1` → 1 (Monday) .. 7 (Sunday)
-  @days %{1 => "Mon", 2 => "Tue", 3 => "Wed", 4 => "Thu", 5 => "Fri", 6 => "Sat", 7 => "Sun"}
-  defp day_name(y, mo, d), do: Map.fetch!(@days, :calendar.day_of_the_week({y, mo, d}))
-
-  @months %{
-    1 => "Jan",
-    2 => "Feb",
-    3 => "Mar",
-    4 => "Apr",
-    5 => "May",
-    6 => "Jun",
-    7 => "Jul",
-    8 => "Aug",
-    9 => "Sep",
-    10 => "Oct",
-    11 => "Nov",
-    12 => "Dec"
-  }
-  defp month_name(mo), do: Map.fetch!(@months, mo)
-
-  defp pad(n), do: n |> Integer.to_string() |> String.pad_leading(2, "0")
 end

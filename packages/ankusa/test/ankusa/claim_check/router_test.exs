@@ -337,6 +337,8 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     @impl true
     def put(_, _, _, _), do: {:error, :econnrefused}
     @impl true
+    def put_if_absent(_, _, _, _), do: {:error, :econnrefused}
+    @impl true
     def get(_, _, _), do: {:error, :econnrefused}
     @impl true
     def get_range(_, _, _, _, _), do: {:error, :econnrefused}
@@ -350,6 +352,10 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     @behaviour Ankusa.BlobStore
     @impl true
     def put(_, _, _, _), do: {:error, {:status, 403, "<Error><Code>AccessDenied</Code></Error>"}}
+    @impl true
+    def put_if_absent(_, _, _, _),
+      do: {:error, {:status, 403, "<Error><Code>AccessDenied</Code></Error>"}}
+
     @impl true
     def get(_, _, _), do: {:error, {:status, 403, "<Error><Code>AccessDenied</Code></Error>"}}
     @impl true

@@ -9,6 +9,7 @@ import io.github.jamescarr.ankusa.ClientOptions;
 import io.github.jamescarr.ankusa.admin.AdminClient;
 import io.github.jamescarr.ankusa.admin.AdminRejectedError;
 import io.github.jamescarr.ankusa.admin.AdminUnavailableError;
+import io.github.jamescarr.ankusa.admin.ListAuditParams;
 import io.github.jamescarr.ankusa.admin.ListDeadLettersParams;
 import io.github.jamescarr.ankusa.admin.ListQuarantinedParams;
 import io.github.jamescarr.ankusa.admin.ReplayPatch;
@@ -298,6 +299,15 @@ public final class ConformanceTest {
                     optional(vector, "params", ListDeadLettersParams.class);
                 return params == null ? admin.listDeadLetters() : admin.listDeadLetters(params);
               });
+      case "admin_audit_list" ->
+          withClient(
+              vector,
+              recorder,
+              AdminClient::new,
+              admin -> {
+                ListAuditParams params = optional(vector, "params", ListAuditParams.class);
+                return params == null ? admin.listAudit() : admin.listAudit(params);
+              });
       case "admin_replay_create" ->
           withClient(
               vector,
@@ -535,6 +545,8 @@ public final class ConformanceTest {
           return rejected.conflictingId();
         case "max_routes":
           return rejected.maxRoutes();
+        case "scope":
+          return rejected.scope();
         default:
           break;
       }
@@ -544,6 +556,8 @@ public final class ConformanceTest {
           return rejected.status();
         case "code":
           return rejected.code();
+        case "scope":
+          return rejected.scope();
         default:
           break;
       }

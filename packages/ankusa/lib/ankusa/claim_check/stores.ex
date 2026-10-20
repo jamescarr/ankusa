@@ -116,15 +116,43 @@ defmodule Ankusa.ClaimCheck.Stores do
   # ── writes ──────────────────────────────────────────────────────────────────
 
   @doc """
-  Write a pack's bytes under `key`: the home store first, then the next ones,
-  skipping stores whose breaker is open (unless all are). Returns the index of
-  the store that took it. When every attempt fails: `{:unavailable, reason}`
-  after a single attempt, else `{:unavailable, [{index, reason}, ...]}` in
-  attempt order.
+  The absolute deadline (`System.monotonic_time(:millisecond)`) of one check-in:
+  the largest `op_deadline_ms` among the claim stores
+  (`Ankusa.BlobStore.Options`) from now. It covers every store tried, every
+  attempt and multipart part of each, and every pack-id retry of
+  `Ankusa.ClaimCheck.check_in/4` together.
   """
-  @spec write(atom(), Config.t(), String.t(), String.t(), iodata()) ::
-          {:ok, non_neg_integer()} | {:error, {:unavailable, term()}}
-  def write(instance, %Config{} = config, pack_id, key, data) do
+  @spec write_deadline(Config.t()) :: integer()
+  def write_deadline(%Config{} = config) do
+    longest =
+      config
+      |> list()
+      |> Enum.map(fn {_index, _mod, opts} ->
+        Ankusa.BlobStore.Options.get(opts, :op_deadline_ms)
+      end)
+      |> Enum.max()
+
+    System.monotonic_time(:millisecond) + longest
+  end
+
+  @doc """
+  Write a pack's bytes under `key`, **only if nothing is there**
+  (`Ankusa.BlobStore.put_if_absent/4`): the home store first, then the next ones,
+  skipping stores whose breaker is open (unless all are). Returns the index of
+  the store that took it. A store that already holds an object under `key` is
+  `{:error, :already_exists}` at once, with no failover: the pack id collides,
+  and the caller mints a fresh one. When every attempt fails:
+  `{:unavailable, reason}` after a single attempt, else
+  `{:unavailable, [{index, reason}, ...]}` in attempt order; a store that
+  throttled (`{:throttled, seconds}`) is a reachable store and does not open
+  its breaker.
+
+  opts: `:deadline`, the absolute deadline every store's operation stays under
+  (see `write_deadline/1`).
+  """
+  @spec write(atom(), Config.t(), String.t(), String.t(), iodata(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, :already_exists | {:unavailable, term()}}
+  def write(instance, %Config{} = config, pack_id, key, data, write_opts \\ []) do
     order = order(config, pack_id)
 
     candidates =
@@ -135,10 +163,18 @@ defmodule Ankusa.ClaimCheck.Stores do
 
     candidates
     |> Enum.reduce_while([], fn {index, mod, opts}, failures ->
-      case attempt(mod, instance, key, data, opts) do
+      case attempt(mod, instance, key, data, with_deadline(opts, write_opts)) do
         :ok ->
           mark_up(instance, index)
           {:halt, {:ok, index}}
+
+        {:error, :already_exists} ->
+          mark_up(instance, index)
+          {:halt, :already_exists}
+
+        {:error, {:throttled, _seconds} = reason} ->
+          mark_up(instance, index)
+          {:cont, [{index, reason} | failures]}
 
         {:error, reason} ->
           mark_down(instance, config, index, :write, reason)
@@ -147,8 +183,16 @@ defmodule Ankusa.ClaimCheck.Stores do
     end)
     |> case do
       {:ok, index} -> {:ok, index}
+      :already_exists -> {:error, :already_exists}
       [{_index, reason}] -> {:error, {:unavailable, reason}}
       failures -> {:error, {:unavailable, Enum.reverse(failures)}}
+    end
+  end
+
+  defp with_deadline(opts, write_opts) do
+    case Keyword.fetch(write_opts, :deadline) do
+      {:ok, deadline} -> Keyword.put(opts, :deadline, deadline)
+      :error -> opts
     end
   end
 
@@ -157,7 +201,7 @@ defmodule Ankusa.ClaimCheck.Stores do
   # return in its write is an unavailable store, not a crashed caller. Under
   # `wal: :none` the caller is the request.
   defp attempt(mod, instance, key, data, opts) do
-    case mod.put(instance, key, data, opts) do
+    case mod.put_if_absent(instance, key, data, opts) do
       :ok -> :ok
       {:error, _reason} = error -> error
       other -> {:error, {:bad_return, other}}
@@ -229,24 +273,28 @@ defmodule Ankusa.ClaimCheck.Stores do
   end
 
   @doc """
-  Whether a read error is the store throttling this node (`429`, `503`): a
+  Whether a read error is the store throttling this node (`429`, `503`, or the
+  adapter's `{:throttled, seconds}` for one that carried a `Retry-After`): a
   reachable store asking for less load, not one that is down.
   """
   @spec throttled?(term()) :: boolean()
   def throttled?({:unavailable, {:status, status, _body}}) when status in [429, 503], do: true
+  def throttled?({:unavailable, {:throttled, _seconds}}), do: true
   def throttled?(_), do: false
 
   # One ranged read, and its verdict on the store's breaker: an answer (the
   # bytes, or no such key) closes it, a store that could not answer opens it.
   # A throttle is an answer. A 403 says nothing about whether the store is up.
-  # Reads use `claim_check.read_timeout_ms`/`read_retries`: the store's own
-  # `timeout_ms`/`retries` are sized for writes, not for a reader waiting on
-  # the answer.
+  # Reads use `claim_check.read_timeout_ms`/`read_retries`, and stop at
+  # `claim_check.read_deadline_ms`: the store's own `timeout_ms`/`retries`/
+  # `op_deadline_ms` are sized for writes, not for a reader waiting on the
+  # answer.
   defp read(instance, config, {index, mod, opts}, key, offset, length) do
     opts =
       Keyword.merge(opts,
         timeout_ms: config.claim_check.read_timeout_ms,
-        retries: config.claim_check.read_retries
+        retries: config.claim_check.read_retries,
+        op_deadline_ms: config.claim_check.read_deadline_ms
       )
 
     result = get(mod, instance, key, offset, length, opts)
@@ -260,6 +308,12 @@ defmodule Ankusa.ClaimCheck.Stores do
 
       {:error, {:unavailable, {:status, s, _body}}} when s in [429, 503] ->
         mark_up(instance, index)
+
+      {:error, {:unavailable, {:throttled, _seconds}}} ->
+        mark_up(instance, index)
+
+      {:error, {:unavailable, :integrity}} ->
+        :ok
 
       {:error, {:unavailable, reason}} ->
         mark_down(instance, config, index, :read, reason)

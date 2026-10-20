@@ -375,6 +375,12 @@ def _run_admin_quarantine(case: dict[str, Any], requests: list[RecordedRequest])
         return admin.list_quarantined(inp.get("params"))
 
 
+def _run_admin_audit_list(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.AdminClient, inp["gateway"], inp.get("client") or {}, requests) as admin:
+        return admin.list_audit(inp.get("params"))
+
+
 RUNNERS: dict[str, Runner] = {
     "parse_claim_ref": _run_parse_claim_ref,
     "parse_headers": _run_parse_headers,
@@ -403,6 +409,7 @@ RUNNERS: dict[str, Runner] = {
     "admin_replay_list": _run_admin_replay_list,
     "admin_replay_update": _run_admin_replay_update,
     "admin_quarantine": _run_admin_quarantine,
+    "admin_audit_list": _run_admin_audit_list,
 }
 
 
@@ -450,6 +457,7 @@ def test_conformance(case: dict[str, Any]) -> None:
             "conflicting_id",
             "max_routes",
             "role",
+            "scope",
         ) if hasattr(err, k)}}
 
     expect = case["expect"]

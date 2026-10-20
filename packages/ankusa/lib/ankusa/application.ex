@@ -12,6 +12,8 @@ defmodule Ankusa.Application do
     # task filled them first.
     :ok = Ankusa.AWS.Credentials.create_table()
     :ok = Ankusa.BlobStore.Azure.ManagedIdentity.create_table()
+    :ok = Ankusa.BlobStore.Breaker.create_table()
+    :ok = Ankusa.BlobStore.TokenCache.create_table()
 
     children =
       [{Registry, keys: :unique, name: Ankusa.Registry}] ++ default_instance()

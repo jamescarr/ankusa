@@ -20,7 +20,8 @@
           "content_type": "application/json",
           "dedupe_key": null,
           "replay_id": null,
-          "idempotency_key": null
+          "idempotency_key": null,
+          "verification": null
         }
       }
     },
@@ -43,7 +44,8 @@
           "content_type": "text/plain",
           "dedupe_key": null,
           "replay_id": null,
-          "idempotency_key": null
+          "idempotency_key": null,
+          "verification": null
         }
       }
     },
@@ -64,7 +66,8 @@
           "content_type": null,
           "dedupe_key": null,
           "replay_id": null,
-          "idempotency_key": null
+          "idempotency_key": null,
+          "verification": null
         }
       }
     },
@@ -119,7 +122,8 @@
           "content_type": null,
           "dedupe_key": "evt_9",
           "replay_id": "rid-1",
-          "idempotency_key": "default:demo:evt_9"
+          "idempotency_key": "default:demo:evt_9",
+          "verification": null
         }
       }
     },
@@ -141,7 +145,8 @@
           "content_type": null,
           "dedupe_key": null,
           "replay_id": null,
-          "idempotency_key": null
+          "idempotency_key": null,
+          "verification": null
         }
       }
     }

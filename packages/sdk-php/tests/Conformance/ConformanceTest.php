@@ -30,6 +30,7 @@ use Ankusa\Webhook\InvalidSignatureError;
 use Ankusa\Webhook\MissingHookIdError;
 use Ankusa\Webhook\Receiver;
 use Ankusa\Webhook\Signature;
+use Ankusa\Webhook\Verification;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
@@ -84,6 +85,7 @@ final class ConformanceTest extends TestCase
         'conflicting_id' => 'conflictingId',
         'max_routes' => 'maxRoutes',
         'role' => 'role',
+        'scope' => 'scope',
     ];
 
     private static string $dir = '';
@@ -257,6 +259,7 @@ final class ConformanceTest extends TestCase
             'admin_metrics' => ['text' => self::admin($conn)->metrics()],
             'admin_config' => self::admin($conn)->config(),
             'admin_dlq_list' => self::admin($conn)->listDeadLetters(self::scalars($inp, 'params')),
+            'admin_audit_list' => self::admin($conn)->listAudit(self::scalars($inp, 'params'))->toArray(),
             'admin_quarantine' => self::admin($conn)->listQuarantined(self::scalars($inp, 'params')),
             'admin_replay_create' => self::admin($conn)->createReplay(self::object($inp['spec'] ?? null, 'spec')),
             'admin_replay_get' => self::admin($conn)->getReplay(self::string($inp, 'id')),
@@ -295,6 +298,7 @@ final class ConformanceTest extends TestCase
             'dedupe_key' => $headers->dedupeKey,
             'replay_id' => $headers->replayId,
             'idempotency_key' => $headers->idempotencyKey,
+            'verification' => self::verificationArray($headers->verification),
         ];
     }
 
@@ -387,6 +391,7 @@ final class ConformanceTest extends TestCase
             'dedupe_key' => $headers->dedupeKey,
             'replay_id' => $headers->replayId,
             'idempotency_key' => $headers->idempotencyKey,
+            'verification' => self::verificationArray($headers->verification),
         ];
     }
 
@@ -415,7 +420,16 @@ final class ConformanceTest extends TestCase
             'replay_id' => $message->replayId,
             'idempotency_key' => $message->idempotencyKey,
             'headers' => $message->headers,
+            'verification' => self::verificationArray($message->verification),
         ];
+    }
+
+    /**
+     * @return array{status: string, flagged: bool}|null
+     */
+    private static function verificationArray(?Verification $verification): ?array
+    {
+        return $verification === null ? null : ['status' => $verification->status, 'flagged' => $verification->flagged];
     }
 
     /**

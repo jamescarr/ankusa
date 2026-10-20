@@ -96,7 +96,14 @@ The always-on tests cover:
   open while a torn tail drops cleanly; `reopen/1` republishes working handles
   and keeps every committed key, a store left closed by a failed reopen opens
   again by itself, and a reported write failure reopens the store at most once
-  per interval; the database opens with the recovery, blob and buffer
+  per interval; a reported write failure emits `[:store, :write_failed]` with a
+  class from a fixed set (`failure_class/1`) that `ready/1` and `/ready` name, a
+  store that cannot reopen emits `[:store, :reopened]` and `[:store, :unavailable]`
+  per try with the outage growing, retries on a doubling, jittered wait
+  (`reopen backoff`), and starts the backoff over once it opens
+  (`metrics_test.exs` scrapes `ankusa_store_write_failures_total`,
+  `ankusa_store_reopen_total`, `ankusa_store_unavailable_seconds` and
+  `ankusa_store_wal_replay_seconds`, and `health_test.exs` the `reason`); the database opens with the recovery, blob and buffer
   settings asked for (read back from the `OPTIONS` file RocksDB writes, since
   RocksDB keeps its default for a value it cannot parse). The queue writer
   assigns dense, strictly
@@ -509,11 +516,27 @@ The always-on tests cover:
   validates. The adapters' `*_describe_test.exs` pin what each sink advertises
   (and that no credential reaches it) without a broker.
 
-The 25 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
+The object-store transport has its own unit suites against `Req.Test` stubs, no
+emulator needed: `blob_store_retry_test.exs` (full-jitter retries, `Retry-After`
+honoured and `{:throttled, seconds}` when it does not fit, the one operation
+deadline, the per-bucket breaker on failures and on p99 latency),
+`blob_store_conditional_test.exs` (`put_if_absent` on every adapter),
+`blob_store_checksum_test.exs` (digest headers on `PUT`, `{:error, :integrity}` on a
+corrupted `GET`), `blob_store_multipart_test.exs` (a 16 MiB pack under a
+1 MiB/s-link stub that times out any single request over 10 MiB, so only parts
+get through), `blob_store_credentials_test.exs` (GCS metadata server, Azure
+managed identity and OCI instance principal tokens refreshed on a `401`),
+`blob_store_pool_test.exs` (one Finch pool per endpoint, `pool_size` and
+`pool_timeout` against a real slow endpoint, option ranges) and the "conditional
+pack writes" cases of `claim_check_test.exs` (a collision gets a fresh id with the
+original intact; `Retry-After: 3600` returns inside the deadline).
+
+The `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
 `blob_store_gcs_test.exs`, `blob_store_azure_integration_test.exs`,
 `blob_store_oci_integration_test.exs`) exercise `BlobStore.{S3,GCS,Azure,OCI}`
 against real running emulators: put/get round-trip, `get_range` byte-slicing,
-`:not_found`, `list`+`delete`. `store/backup_s3_integration_test.exs` runs a
+`:not_found`, `list`+`delete`, `put_if_absent` on an existing key, and a 16 MiB
+multipart round-trip. `store/backup_s3_integration_test.exs` runs a
 store backup and restore through floci S3, and `sse header on put`: a segment,
 a backup and a claim `PUT`, recorded on their way to the emulator, all carry
 `x-amz-server-side-encryption`. `sink/sqs_integration_test.exs`
@@ -827,7 +850,7 @@ mise run test:crash
 # acked=14940 recovered=14940 missing=0 enospc_503=1 resumed=true
 ```
 
-- **ENOSPC** (`mise run test:crash`, CI job `crash`): `/data` is a 96 MiB
+- **ENOSPC** (`mise run test:crash`, CI job `crash`): `/data` is a 192 MiB
   tmpfs. The harness ingests `RATE` (default 1000) hooks/s of `BODY_BYTES`
   (default 10 KiB) each; at +5 s a filler file takes every free byte. RocksDB
   pre-allocates its WAL (about 70 MiB here), so the node keeps acking until
@@ -837,7 +860,9 @@ mise run test:crash
   deleted, and a `201` and `/ready` `200` must come back on their own. The
   instance is `kill -9`ed under load once it has served again for 5 s and at
   least 20 s into the run, the store is reopened with `Ankusa.Store` alone,
-  and every id the harness printed as acked must read back (`missing=0`).
+  and every id the harness printed as acked must read back (`missing=0`). The
+  volume is 192 MiB because the load (10 MB/s) refilled a 96 MiB one within
+  seconds of the resume, and a node killed on a full disk cannot open its store.
 - **EIO and power loss** (`scripts/drills/flakey.sh`): `/data` is ext4 on a
   device-mapper device over a loop device. Two 2 s windows (+5 s, +10 s) where
   every I/O fails, with the same `503`/resume assertions, then at +20 s a power
@@ -854,6 +879,32 @@ mise run test:crash
   skip). Where no privileged Docker host exists, it is a manual pre-release step.
   The windows use device-mapper's `error` target rather than `dm-flakey`, a
   module some kernels lack; the fault is the same, I/O errors for 2 s.
+  A window fails the file data area, not the whole device: the volume is made
+  with `packed_meta_blocks`, which puts the journal, bitmaps and inode tables
+  in one run at the start, and only the blocks after it get the `error` target
+  (the power cut still fails everything). With the whole device failing, the
+  journal's writes failed too, and a journal that cannot be written is aborted:
+  ext4 then remounts the volume read-only for good (`Aborting journal on
+  device`, `Remounting filesystem read-only`, whatever `errors=` says), which
+  no application can reopen a store on, so `the node did not resume` depended
+  on whether a journal commit happened to land in a window. A drill that still
+  fails that way prints the kernel's filesystem lines and says the volume went
+  read-only.
+  The other half of the fix is in the store: a write failure asks for a reopen,
+  but the reopen (close, then an open whose recovery flushes the WAL to an SST)
+  now waits until a synced file write next to the database works
+  (`ankusa_store_reopen_total{result="deferred"}`). Without the wait, with the
+  fault limited to the data area, a reopen that started inside a window was
+  followed in one of two runs by a store no later open accepted (`Corruption:
+  missing start of fragmented record`), and the node never resumed; with it,
+  eight consecutive runs passed.
+- **What the drills assert about the store's failure reporting.** While the
+  fault is on, `/ready` answers `503` with a `reason` (`no_space` for the
+  tmpfs, `io_error`/`read_only` for the device), and after the node resumed the
+  metrics listener (`METRICS_PORT`, 4001 in the drill) must show
+  `ankusa_store_write_failures_total{class}` and `ankusa_store_reopen_total{result}`;
+  the drill prints every `ankusa_store_*` line, and on a failure the harness's
+  own log (`LOG_LEVEL`, stderr) and the kernel's filesystem lines.
 
 `RATE`, `BODY_BYTES`, `FAULT_AT` and `KILL_AT` (seconds) tune a run. Compiled
 deps are kept in `.cache/crash`, so only the first run builds RocksDB.

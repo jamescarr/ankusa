@@ -40,6 +40,9 @@ type Message struct {
 	ReplayID              *string           `json:"replay_id"`
 	ShippedIdempotencyKey *string           `json:"idempotency_key"`
 	Headers               map[string]string `json:"headers"`
+	// Verification is how Ankusa verified the hook at ingest; nil from a
+	// node older than the field.
+	Verification *Verification `json:"verification"`
 
 	// Body is the decoded inline body. It is nil for a claim message.
 	Body []byte `json:"-"`
@@ -142,6 +145,12 @@ func DecodeMessage(data []byte) (Message, error) {
 		return Message{}, invalidField("sha256")
 	}
 	msg.SHA256 = sha
+
+	verification, err := decodeVerification(obj["verification"])
+	if err != nil {
+		return Message{}, err
+	}
+	msg.Verification = verification
 
 	// 4. Body form.
 	bodyRaw, hasBodyKey := obj["body_base64"]
@@ -296,6 +305,29 @@ func headersValue(value any) (map[string]string, bool) {
 // invalidField builds an invalid_field error naming the offending key.
 func invalidField(field string) *InvalidMessageError {
 	return &InvalidMessageError{Code: "invalid_field", Field: &field}
+}
+
+// decodeVerification reads the message's verification field: absent or null
+// is nil; otherwise it must be an object of a non-empty string status and a
+// boolean flagged. The status value itself is never validated — unknown
+// statuses pass through untouched for forward compatibility.
+func decodeVerification(value any) (*Verification, error) {
+	if value == nil {
+		return nil, nil
+	}
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return nil, invalidField("verification")
+	}
+	status, ok := obj["status"].(string)
+	if !ok || status == "" {
+		return nil, invalidField("verification")
+	}
+	flagged, ok := obj["flagged"].(bool)
+	if !ok {
+		return nil, invalidField("verification")
+	}
+	return &Verification{Status: status, Flagged: flagged}, nil
 }
 
 // InvalidMessageError reports a queue message DecodeMessage could not decode.

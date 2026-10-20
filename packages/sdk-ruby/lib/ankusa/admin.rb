@@ -34,14 +34,16 @@ module Ankusa
   # The listener rejected the request (any other 4xx).
   #
   # `status` is the HTTP status; `code` is the body's `error` field
-  # (`invalid_filter`, ...).
+  # (`invalid_filter`, ...). `scope` is the scope a 403 forbidden says the
+  # credential lacks, nil when absent or not a 403.
   class AdminRejectedError < AdminError
-    attr_reader :status, :code
+    attr_reader :status, :code, :scope
 
-    def initialize(message, status:, code:)
+    def initialize(message, status:, code:, scope: nil)
       super(message)
       @status = status
       @code = code
+      @scope = scope
     end
   end
 
@@ -79,6 +81,15 @@ module Ankusa
     # omitted from the query string rather than sent as `=`.
     def list_dead_letters(params = nil)
       json(request("GET", "/v1/dlq", query: params))
+    end
+
+    # GET /v1/audit -> a page of the audit trail, newest first.
+    #
+    # `params` may carry `cursor`, `limit`, `since`, `until`, `actor`,
+    # `action` and `tenant`; absent keys are omitted from the query string
+    # rather than sent as `=`.
+    def list_audit(params = nil)
+      json(request("GET", "/v1/audit", query: params))
     end
 
     # POST /v1/replays -> the created Replay, as a Hash.
@@ -153,10 +164,12 @@ module Ankusa
       end
 
       if status >= 400 && status < 500
+        scope = body.is_a?(Hash) ? body["scope"] : nil
         raise AdminRejectedError.new(
           "admin listener rejected the request (#{status}): #{body.inspect}",
           status: status,
-          code: code
+          code: code,
+          scope: scope
         )
       end
 

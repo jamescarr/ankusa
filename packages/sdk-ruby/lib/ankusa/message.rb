@@ -57,7 +57,7 @@ module Ankusa
   # that predates it); see `Ankusa.decode_message` for the decode rules.
   Message = Data.define(
     :v, :id, :source_id, :tenant_id, :received_at, :content_type, :size,
-    :body, :claim, :sha256, :dedupe_key, :replay_id, :idempotency_key, :headers
+    :body, :claim, :sha256, :dedupe_key, :replay_id, :idempotency_key, :headers, :verification
   ) do
     # `Data.define` made `idempotency_key` the reader of the decoded field; keep
     # that value reachable here and let the helper below take over the name.
@@ -135,6 +135,8 @@ module Ankusa
     valid_sha256 = sha256.nil? || (sha256.is_a?(String) && SHA256_PATTERN.match?(sha256))
     invalid_field("sha256") unless valid_sha256
 
+    verification = decode_verification(parsed["verification"])
+
     body_base64 = parsed["body_base64"]
     claim = parsed["claim"]
 
@@ -185,9 +187,27 @@ module Ankusa
       dedupe_key: parsed["dedupe_key"],
       replay_id: parsed["replay_id"],
       idempotency_key: parsed["idempotency_key"],
-      headers: headers
+      headers: headers,
+      verification: verification
     )
   end
+
+  # Absent or explicit `null` is `nil` (a node that predates the field).
+  # Anything else must be `{status: <non-empty string>, flagged: <boolean>}`;
+  # the status value itself is never validated, so unknown statuses pass
+  # through untouched.
+  def self.decode_verification(value)
+    return nil if value.nil?
+    invalid_field("verification") unless value.is_a?(Hash)
+
+    status = value["status"]
+    flagged = value["flagged"]
+    valid = status.is_a?(String) && !status.empty? && [true, false].include?(flagged)
+    invalid_field("verification") unless valid
+
+    Verification.new(status: status, flagged: flagged)
+  end
+  private_class_method :decode_verification
 
   def self.invalid_field(field)
     raise InvalidMessageError.new("invalid message field: #{field}", code: "invalid_field", field: field)

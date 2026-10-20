@@ -517,6 +517,146 @@ defmodule Ankusa.ClaimCheckTest do
     end
   end
 
+  # A claim store that says every key is taken, counting the writes it refused.
+  defmodule TakenStore do
+    @moduledoc false
+    @behaviour Ankusa.BlobStore
+
+    @impl true
+    def put(_instance, _key, _data, _opts), do: :ok
+    @impl true
+    def put_if_absent(_instance, key, _data, opts) do
+      send(Keyword.fetch!(opts, :pid), {:refused, key})
+      {:error, :already_exists}
+    end
+
+    @impl true
+    def get(_instance, _key, _opts), do: {:error, :not_found}
+    @impl true
+    def get_range(_instance, _key, _offset, _length, _opts), do: {:error, :not_found}
+    @impl true
+    def delete(_instance, _key, _opts), do: :ok
+    @impl true
+    def list(_instance, _prefix, _opts), do: {:ok, []}
+  end
+
+  describe "conditional pack writes" do
+    test "a pack id that already holds an object gets a fresh id, and the original stays intact",
+         ctx do
+      attach(ctx.inst, [
+        [:ankusa, :claim_check, :pack_collision],
+        [:ankusa, :claim_check, :check_in]
+      ])
+
+      [root] = use_stores(ctx, [[]])
+      pack_id = Ref.new_pack_id()
+
+      first = item("acme", "the original")
+      assert {:ok, claims_1} = ClaimCheck.check_in(ctx.inst, "acme", [first], pack_id: pack_id)
+      original_path = Path.join(root, Ref.object_key("acme", pack_id, :flat))
+      original = File.read!(original_path)
+
+      second = item("acme", "a different body")
+      assert {:ok, claims_2} = ClaimCheck.check_in(ctx.inst, "acme", [second], pack_id: pack_id)
+
+      # The object under the colliding id is byte for byte what it was.
+      assert File.read!(original_path) == original
+      assert {:ok, "the original"} = redeem(ctx.inst, claims_1[first.id])
+
+      # The second claim went under another id, and redeems.
+      assert {:ok, new_pack_id, 0} = Ref.locate(claims_2[second.id].ref.claim_id)
+      refute new_pack_id == pack_id
+      assert {:ok, "a different body"} = redeem(ctx.inst, claims_2[second.id])
+
+      assert_received {:telemetry, [:ankusa, :claim_check, :pack_collision], %{pack_id: ^pack_id}}
+
+      assert_received {:telemetry, [:ankusa, :claim_check, :check_in],
+                       %{pack_id: ^new_pack_id, result: :ok}}
+    end
+
+    test "an id that collides on every attempt is :pack_id_collision after three", ctx do
+      config = Ankusa.config(ctx.inst)
+
+      Ankusa.put_config(%{
+        config
+        | claim_check: Map.put(config.claim_check, :blob_stores, [{TakenStore, pid: self()}])
+      })
+
+      assert {:error, {:unavailable, :pack_id_collision}} =
+               ClaimCheck.check_in(ctx.inst, "acme", [item("acme", "never lands")])
+
+      keys =
+        for _attempt <- 1..3 do
+          assert_received {:refused, key}
+          key
+        end
+
+      assert length(Enum.uniq(keys)) == 3
+      refute_received {:refused, _}
+    end
+
+    # An S3 claim store answering through a stub.
+    defp use_s3_stub(ctx, tag, extra) do
+      config = Ankusa.config(ctx.inst)
+      store = Ankusa.Test.BlobStoreAdapters.opts(Ankusa.BlobStore.S3, tag, __MODULE__, extra)
+
+      Ankusa.put_config(%{
+        config
+        | claim_check: Map.put(config.claim_check, :blob_stores, [store])
+      })
+    end
+
+    test "a Retry-After that does not fit the deadline is returned at once, not slept", ctx do
+      Req.Test.stub(__MODULE__, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("retry-after", "3600")
+        |> Plug.Conn.send_resp(503, "SlowDown")
+      end)
+
+      use_s3_stub(ctx, "cc-throttle", op_deadline_ms: 5_000)
+
+      {us, result} =
+        :timer.tc(fn -> ClaimCheck.check_in(ctx.inst, "acme", [item("acme", "throttled")]) end)
+
+      assert {:error, {:unavailable, {:throttled, 3600}}} = result
+      assert div(us, 1000) < 1_000
+
+      # The batch the dispatch pipeline packs says the same for every item, and returns.
+      items = [item("acme", "one"), item("globex", "two")]
+      results = ClaimCheck.check_in_batch(ctx.inst, items)
+
+      for it <- items do
+        assert {:error, {:unavailable, {:throttled, 3600}}} = results[it.id]
+      end
+    end
+
+    test "a store that keeps failing is given up on at the operation deadline", ctx do
+      Req.Test.stub(__MODULE__, &Plug.Conn.send_resp(&1, 500, "boom"))
+      use_s3_stub(ctx, "cc-deadline", op_deadline_ms: 1_000, retries: 10, breaker_failures: 0)
+
+      {us, result} =
+        :timer.tc(fn -> ClaimCheck.check_in(ctx.inst, "acme", [item("acme", "failing")]) end)
+
+      assert {:error, {:unavailable, {:status, 500, "boom"}}} = result
+      assert us < 1_500_000
+    end
+
+    test "a store that answers slowly cannot hold a check-in past the deadline", ctx do
+      Req.Test.stub(__MODULE__, fn conn ->
+        Process.sleep(400)
+        Plug.Conn.send_resp(conn, 500, "slow")
+      end)
+
+      use_s3_stub(ctx, "cc-slow", op_deadline_ms: 1_000, retries: 10, breaker_failures: 0)
+
+      {us, result} =
+        :timer.tc(fn -> ClaimCheck.check_in(ctx.inst, "acme", [item("acme", "slow")]) end)
+
+      assert {:error, {:unavailable, _reason}} = result
+      assert us < 2_000_000
+    end
+  end
+
   describe "stores" do
     test ":ordered writes to the first store, and to the next while it fails", ctx do
       attach(ctx.inst, [[:ankusa, :claim_check, :check_in]])

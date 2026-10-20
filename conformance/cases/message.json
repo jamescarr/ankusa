@@ -22,7 +22,10 @@
           "dedupe_key": "evt_1",
           "replay_id": null,
           "idempotency_key": "acme:demo:evt_1",
-          "headers": {"x-github-event": "push"}
+          "headers": {
+            "x-github-event": "push"
+          },
+          "verification": null
         }
       }
     },
@@ -48,7 +51,8 @@
           "dedupe_key": null,
           "replay_id": null,
           "idempotency_key": null,
-          "headers": {}
+          "headers": {},
+          "verification": null
         }
       }
     },
@@ -74,7 +78,8 @@
           "dedupe_key": null,
           "replay_id": null,
           "idempotency_key": null,
-          "headers": {}
+          "headers": {},
+          "verification": null
         }
       }
     },
@@ -100,7 +105,8 @@
           "dedupe_key": null,
           "replay_id": null,
           "idempotency_key": null,
-          "headers": {}
+          "headers": {},
+          "verification": null
         }
       }
     },
@@ -126,7 +132,8 @@
           "dedupe_key": "evt_1",
           "replay_id": "0194f4a0-0000-7000-8000-0000000000aa",
           "idempotency_key": null,
-          "headers": {}
+          "headers": {},
+          "verification": null
         }
       }
     },
@@ -134,18 +141,32 @@
       "id": "message.reject.invalid_json",
       "feature": "message.decode",
       "operation": "decode_message",
-      "input": {"message": "not json"},
+      "input": {
+        "message": "not json"
+      },
       "expect": {
-        "error": {"class": "InvalidMessageError", "retryable": false, "code": "invalid_json", "field": null}
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_json",
+          "field": null
+        }
       }
     },
     {
       "id": "message.reject.not_an_object",
       "feature": "message.decode",
       "operation": "decode_message",
-      "input": {"message": "[1,2,3]"},
+      "input": {
+        "message": "[1,2,3]"
+      },
       "expect": {
-        "error": {"class": "InvalidMessageError", "retryable": false, "code": "not_an_object", "field": null}
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "not_an_object",
+          "field": null
+        }
       }
     },
     {
@@ -156,7 +177,12 @@
         "message": "{\"v\":2,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\"}"
       },
       "expect": {
-        "error": {"class": "InvalidMessageError", "retryable": false, "code": "unsupported_version", "field": null}
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "unsupported_version",
+          "field": null
+        }
       }
     },
     {
@@ -167,7 +193,12 @@
         "message": "{\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\"}"
       },
       "expect": {
-        "error": {"class": "InvalidMessageError", "retryable": false, "code": "unsupported_version", "field": null}
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "unsupported_version",
+          "field": null
+        }
       }
     },
     {
@@ -178,7 +209,12 @@
         "message": "{\"v\":1,\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\"}"
       },
       "expect": {
-        "error": {"class": "InvalidMessageError", "retryable": false, "code": "invalid_field", "field": "id"}
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "id"
+        }
       }
     },
     {
@@ -189,7 +225,12 @@
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"content_type\":\"application/json\",\"size\":5,\"sha256\":\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\",\"dedupe_key\":\"evt_1\",\"replay_id\":null,\"idempotency_key\":7,\"headers\":{\"x-github-event\":\"push\"},\"body_base64\":\"aGVsbG8=\"}"
       },
       "expect": {
-        "error": {"class": "InvalidMessageError", "retryable": false, "code": "invalid_field", "field": "idempotency_key"}
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "idempotency_key"
+        }
       }
     },
     {
@@ -200,7 +241,12 @@
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"headers\":{\"x-n\":42}}"
       },
       "expect": {
-        "error": {"class": "InvalidMessageError", "retryable": false, "code": "invalid_field", "field": "headers"}
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "headers"
+        }
       }
     },
     {
@@ -211,7 +257,12 @@
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"claim\":\"urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002\",\"sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\"}"
       },
       "expect": {
-        "error": {"class": "InvalidMessageError", "retryable": false, "code": "ambiguous_body", "field": null}
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "ambiguous_body",
+          "field": null
+        }
       }
     },
     {
@@ -222,7 +273,12 @@
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5}"
       },
       "expect": {
-        "error": {"class": "InvalidMessageError", "retryable": false, "code": "missing_body", "field": null}
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "missing_body",
+          "field": null
+        }
       }
     },
     {
@@ -233,7 +289,12 @@
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"!not_base64!\"}"
       },
       "expect": {
-        "error": {"class": "InvalidMessageError", "retryable": false, "code": "invalid_body_base64", "field": null}
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_body_base64",
+          "field": null
+        }
       }
     },
     {
@@ -244,7 +305,12 @@
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"size\":5,\"claim\":\"urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002\"}"
       },
       "expect": {
-        "error": {"class": "InvalidMessageError", "retryable": false, "code": "invalid_field", "field": "sha256"}
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "sha256"
+        }
       }
     },
     {
@@ -255,7 +321,12 @@
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":6,\"body_base64\":\"aGVsbG8=\"}"
       },
       "expect": {
-        "error": {"class": "InvalidMessageError", "retryable": false, "code": "size_mismatch", "field": null}
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "size_mismatch",
+          "field": null
+        }
       }
     },
     {
@@ -266,7 +337,12 @@
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"sha256\":\"d9298a10d1b0735837dc4bd85dac641b0f3cef27a47e5d53a54f2f3f5b2fcffa\"}"
       },
       "expect": {
-        "error": {"class": "InvalidMessageError", "retryable": false, "code": "integrity", "field": null}
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "integrity",
+          "field": null
+        }
       }
     },
     {
@@ -277,7 +353,12 @@
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"tenant_id\":\"other\",\"received_at\":1720000000000,\"size\":5,\"claim\":\"urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002\",\"sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\"}"
       },
       "expect": {
-        "error": {"class": "InvalidMessageError", "retryable": false, "code": "tenant_mismatch", "field": null}
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "tenant_mismatch",
+          "field": null
+        }
       }
     },
     {
@@ -287,7 +368,11 @@
       "input": {
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\"}"
       },
-      "expect": {"ok": {"key": "01a0"}}
+      "expect": {
+        "ok": {
+          "key": "01a0"
+        }
+      }
     },
     {
       "id": "idempotency.dedupe_key",
@@ -296,7 +381,11 @@
       "input": {
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"stripe\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\"}"
       },
-      "expect": {"ok": {"key": "default:stripe:evt_1"}}
+      "expect": {
+        "ok": {
+          "key": "default:stripe:evt_1"
+        }
+      }
     },
     {
       "id": "idempotency.dedupe_key_tenant",
@@ -305,7 +394,11 @@
       "input": {
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"stripe\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\"}"
       },
-      "expect": {"ok": {"key": "acme:stripe:evt_1"}}
+      "expect": {
+        "ok": {
+          "key": "acme:stripe:evt_1"
+        }
+      }
     },
     {
       "id": "idempotency.shipped_wins",
@@ -314,7 +407,11 @@
       "input": {
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"other\",\"idempotency_key\":\"acme:stripe:evt_1\"}"
       },
-      "expect": {"ok": {"key": "acme:stripe:evt_1"}}
+      "expect": {
+        "ok": {
+          "key": "acme:stripe:evt_1"
+        }
+      }
     },
     {
       "id": "idempotency.shipped_empty_falls_back",
@@ -323,7 +420,11 @@
       "input": {
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"stripe\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\",\"idempotency_key\":\"\"}"
       },
-      "expect": {"ok": {"key": "default:stripe:evt_1"}}
+      "expect": {
+        "ok": {
+          "key": "default:stripe:evt_1"
+        }
+      }
     },
     {
       "id": "idempotency.replay_ignored_by_default",
@@ -332,7 +433,11 @@
       "input": {
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"stripe\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\",\"replay_id\":\"rid-1\"}"
       },
-      "expect": {"ok": {"key": "default:stripe:evt_1"}}
+      "expect": {
+        "ok": {
+          "key": "default:stripe:evt_1"
+        }
+      }
     },
     {
       "id": "idempotency.replay_included",
@@ -342,7 +447,11 @@
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"stripe\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\",\"replay_id\":\"rid-1\"}",
         "include_replay": true
       },
-      "expect": {"ok": {"key": "default:stripe:evt_1#replay:rid-1"}}
+      "expect": {
+        "ok": {
+          "key": "default:stripe:evt_1#replay:rid-1"
+        }
+      }
     },
     {
       "id": "idempotency.replay_included_id_only",
@@ -352,7 +461,11 @@
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"replay_id\":\"rid-1\"}",
         "include_replay": true
       },
-      "expect": {"ok": {"key": "01a0#replay:rid-1"}}
+      "expect": {
+        "ok": {
+          "key": "01a0#replay:rid-1"
+        }
+      }
     },
     {
       "id": "idempotency.from_headers",
@@ -365,7 +478,11 @@
           "x-ankusa-dedupe-key": "evt_1"
         }
       },
-      "expect": {"ok": {"key": "default:stripe:evt_1"}}
+      "expect": {
+        "ok": {
+          "key": "default:stripe:evt_1"
+        }
+      }
     },
     {
       "id": "idempotency.from_headers_tenant",
@@ -379,7 +496,11 @@
           "x-ankusa-dedupe-key": "evt_1"
         }
       },
-      "expect": {"ok": {"key": "acme:stripe:evt_1"}}
+      "expect": {
+        "ok": {
+          "key": "acme:stripe:evt_1"
+        }
+      }
     },
     {
       "id": "idempotency.from_headers_shipped",
@@ -393,7 +514,11 @@
           "x-ankusa-dedupe-key": "other"
         }
       },
-      "expect": {"ok": {"key": "acme:stripe:evt_1"}}
+      "expect": {
+        "ok": {
+          "key": "acme:stripe:evt_1"
+        }
+      }
     },
     {
       "id": "idempotency.from_headers_replay",
@@ -408,7 +533,11 @@
         },
         "include_replay": true
       },
-      "expect": {"ok": {"key": "default:stripe:evt_1#replay:rid-1"}}
+      "expect": {
+        "ok": {
+          "key": "default:stripe:evt_1#replay:rid-1"
+        }
+      }
     }
   ]
 }

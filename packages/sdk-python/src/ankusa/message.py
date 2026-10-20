@@ -30,7 +30,7 @@ from typing import Any, NoReturn, TypeGuard
 
 from .claim_check.errors import InvalidClaimRefError
 from .claim_check.ref import parse_claim_ref
-from .webhook import HookHeaders
+from .webhook import HookHeaders, Verification
 
 __all__ = ["InvalidMessageError", "Message", "decode_message", "idempotency_key"]
 
@@ -88,6 +88,9 @@ class Message:
     replay_id: str | None
     idempotency_key: str | None
     headers: dict[str, str]
+    # How Ankusa verified the hook at ingest; None from a node older than
+    # the field.
+    verification: Verification | None
 
 
 def _is_int(value: Any) -> TypeGuard[int]:
@@ -98,6 +101,18 @@ def _is_int(value: Any) -> TypeGuard[int]:
 
 def _invalid_field(field: str) -> NoReturn:
     raise InvalidMessageError(f"invalid or missing field: {field}", code="invalid_field", field=field)
+
+
+def _decode_verification(value: Any) -> Verification | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        _invalid_field("verification")
+    status = value.get("status")
+    flagged = value.get("flagged")
+    if not isinstance(status, str) or not status or not isinstance(flagged, bool):
+        _invalid_field("verification")
+    return Verification(status=status, flagged=flagged)
 
 
 def _optional_string(payload: dict[str, Any], name: str) -> str | None:
@@ -164,6 +179,8 @@ def decode_message(data: str | bytes) -> Message:
     if sha256 is not None and not (isinstance(sha256, str) and _HEX64.fullmatch(sha256)):
         _invalid_field("sha256")
 
+    verification = _decode_verification(payload.get("verification"))
+
     body_base64 = payload.get("body_base64")
     claim = payload.get("claim")
     if body_base64 is not None and claim is not None:
@@ -213,6 +230,7 @@ def decode_message(data: str | bytes) -> Message:
         replay_id=replay_id,
         idempotency_key=idempotency_key,
         headers=headers,
+        verification=verification,
     )
 
 
