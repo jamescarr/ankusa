@@ -193,6 +193,16 @@ defmodule Ankusa.Metrics do
           tags: [:instance]
         )
       ),
+      distribution(
+        "ankusa.wal.sync.duration.seconds",
+        scoped(own,
+          event_name: [:ankusa, :wal_sync, :stop],
+          measurement: &duration_seconds/1,
+          unit: :second,
+          tags: [:instance],
+          reporter_options: [buckets: @seconds_buckets]
+        )
+      ),
       counter(
         "ankusa.load_shed.total",
         scoped(own,

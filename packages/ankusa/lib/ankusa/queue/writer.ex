@@ -1,7 +1,8 @@
 defmodule Ankusa.Queue.Writer do
   @moduledoc """
-  The only seq assigner: commits batches of hooks to the store with
-  `sync: true`, so a `2xx` to the provider always means the bytes are on disk.
+  The only seq assigner: commits batches of hooks to the store, and answers a
+  caller only once its hooks are on disk (`Ankusa.Queue.Syncer` fsyncs the WAL),
+  so a `2xx` to the provider always means the bytes are on disk.
 
   One process per instance, under `Ankusa.via(instance, :queue_writer)`. The
   commit is a single atomic store batch: the hook, one pending delivery row and
@@ -21,9 +22,12 @@ defmodule Ankusa.Queue.Writer do
   it, from every batcher partition, up to `batcher.group_commit_max_bytes` of
   bodies and `batcher.group_commit_max_records` hooks, and commits them as one
   **group**: one tenant admission, one dedupe validation, dense seqs across all
-  of it, one synced store write and, under `wal: :dual`, one publish. Every
-  caller then gets the replies of its own hooks. While one group syncs, the
-  next one accumulates in the mailbox.
+  of it, one store write (applied with `sync: false`) and, under `wal: :dual`,
+  one publish. The writer hands every caller's reply to `Ankusa.Queue.Syncer`,
+  which fsyncs the WAL once for all the groups applied so far and then answers
+  them: while group N syncs, group N+1 is assembled and applied here. A group's
+  rows are not visible to dispatch, the archive or a retry's `201 duplicate`
+  before that fsync (`Syncer.visible/2`, ADR 0002 amendment 17).
 
   The dedupe values a caller read are a *prefetch*: the first occurrence of a key
   in the group wins, and a key this process wrote since the caller read (in an
@@ -31,12 +35,13 @@ defmodule Ankusa.Queue.Writer do
   the pending set, never from the stale read, so two partitions that saw the same
   key as absent still commit one hook.
 
-  Under `wal: :dual` (ADR 0002) the same synced local commit runs **in parallel**
-  with a confirmed publish to the intake log (`Ankusa.Intake`), and both are
-  required before the `201`. The writer does not wait: it records the batch in
-  the pending set, returns `{:noreply, _}`, and answers the batcher's call when
-  the publish task's result arrives, so the next batch's local write overlaps the
-  previous batch's publish wait. A half that fails is **carried to completion**
+  Under `wal: :dual` (ADR 0002) the local commit runs **in parallel** with a
+  confirmed publish to the intake log (`Ankusa.Intake`), and both are required
+  before the `201`. The writer does not wait: it records the batch in the
+  pending set, returns `{:noreply, _}`, and answers the batcher's call when the
+  publish task's result and the syncer's confirm of the local half have both
+  arrived, so the next batch's local write overlaps the previous batch's fsync
+  and publish wait. A half that fails is **carried to completion**
   by `Ankusa.Intake.Reconciler`, never undone; the caller's reply for such a
   hook is `{:error, {:half, reason, hook_id}}`.
   """
@@ -51,6 +56,7 @@ defmodule Ankusa.Queue.Writer do
   alias Ankusa.Intake.{Pending, Reconciler}
   alias Ankusa.Queue.Deliveries
   alias Ankusa.Queue.Deliveries.Counters
+  alias Ankusa.Queue.Syncer
   alias Ankusa.Queue.Tenants
   alias Ankusa.Store
   alias Ankusa.Store.Keys
@@ -75,6 +81,12 @@ defmodule Ankusa.Queue.Writer do
     with {:ok, next_seq} <- next_seq(instance),
          {:ok, next_ord} <- Tenants.next_free_ord(instance) do
       Logger.info("[ankusa] store next_seq=#{next_seq} tenants=#{next_ord - 1}")
+
+      # The durable watermark the syncer raises after each fsync; everything in
+      # the store at boot is durable (it survived a restart).
+      marks = Syncer.new_marks(next_seq - 1, System.system_time(:millisecond))
+      {:ok, _} = Registry.register(Ankusa.Registry, {instance, :queue_marks}, marks)
+      {:ok, syncer} = Syncer.start_link(instance: instance, marks: marks, writer: self())
 
       dedupe = config.dedupe
       mono = System.monotonic_time(:millisecond)
@@ -109,7 +121,14 @@ defmodule Ankusa.Queue.Writer do
         recent_old: :ets.new(:ankusa_dedupe_recent, [:set, :private]),
         recent_gen_at: mono,
         recent_since: mono,
-        recent_epoch: nil
+        recent_epoch: nil,
+        marks: marks,
+        syncer: syncer,
+        # after a failed fsync the writer refuses work until it has deleted the
+        # rows of the groups that were never acked (`fence/1`); `unsynced` holds
+        # what it would delete, newest group first
+        fenced: nil,
+        unsynced: []
       }
 
       {:ok, if(state.dual, do: init_dual(state), else: state)}
@@ -168,6 +187,22 @@ defmodule Ankusa.Queue.Writer do
   end
 
   @impl true
+  # Fenced after a failed fsync: nothing is written until the rows of the groups
+  # that were never acked are deleted (`fence/1`), so none of them is ever
+  # delivered, and a retry meets no trace of them.
+  def handle_call({:enqueue, _prepared, _deadline, _extra}, _from, %{fenced: f} = state)
+      when f != nil,
+      do: {:reply, {:error, :store_unavailable}, state}
+
+  def handle_call({:redrive, _entries, _extra}, _from, %{fenced: f} = state) when f != nil,
+    do: {:reply, {:error, :store_unavailable}, state}
+
+  def handle_call({:expire_dedupe, _entries}, _from, %{fenced: f} = state) when f != nil,
+    do: {:reply, {:error, :store_unavailable}, state}
+
+  def handle_call({:complete_local, _ids}, _from, %{fenced: f} = state) when f != nil,
+    do: {:reply, {:ok, [], []}, state}
+
   def handle_call({:enqueue, prepared, deadline, []}, from, state),
     do: group_commit({from, prepared, deadline}, state)
 
@@ -233,7 +268,12 @@ defmodule Ankusa.Queue.Writer do
 
           batch ->
             if local_landed?(state.instance, batch) do
-              {[id | done], Pending.local_done(t, id) ++ completed}
+              # Applied without a sync, or by a write whose sync failed: done only
+              # once an fsync has made it durable.
+              case Store.sync_wal(state.instance) do
+                :ok -> {[id | done], Pending.local_done(t, id) ++ completed}
+                {:error, _reason} -> {done, completed}
+              end
             else
               case Store.write(state.instance, batch.ops, sync: true) do
                 :ok ->
@@ -322,6 +362,12 @@ defmodule Ankusa.Queue.Writer do
     state
   end
 
+  defp commit_group(live, %{fenced: f} = state) when f != nil do
+    calls = Enum.map(live, fn {from, prepared, _deadline} -> {from, prepared.count} end)
+    reply_calls(calls, {:error, :store_unavailable})
+    state
+  end
+
   defp commit_group(live, state) do
     items = Enum.flat_map(live, fn {_from, prepared, _deadline} -> prepared.items end)
     calls = Enum.map(live, fn {from, prepared, _deadline} -> {from, prepared.count} end)
@@ -329,16 +375,38 @@ defmodule Ankusa.Queue.Writer do
 
     case commit_batch(items, merge_prefetch(live, state), [], state, calls) do
       {:reply, reply, state} ->
-        reply_calls(calls, reply)
-        state
+        settle_reply(calls, reply, state)
 
       {:noreply, state} ->
         state
     end
   end
 
+  # A reply that is not the outcome of a write of this group: refusals and errors
+  # depend on nothing and go out at once; one that carries a `201 duplicate` waits
+  # for the fsync of whatever group holds the original, unless nothing is unsynced.
+  defp settle_reply(calls, {:ok, results} = reply, state) do
+    if Syncer.unsynced?(state.marks) and Enum.any?(results, &match?({:duplicate, _}, &1)) do
+      Syncer.submit(state.syncer, %{
+        upto: Syncer.applied(state.marks),
+        at: state.last_at,
+        done: {:reply, calls, reply}
+      })
+    else
+      reply_calls(calls, reply)
+    end
+
+    state
+  end
+
+  defp settle_reply(calls, reply, state) do
+    reply_calls(calls, reply)
+    state
+  end
+
   # Each call gets the replies of its own hooks, in its own order.
-  defp reply_calls(calls, {:ok, results}) do
+  @doc false
+  def reply_calls(calls, {:ok, results}) do
     _unanswered =
       Enum.reduce(calls, results, fn {from, count}, rest ->
         {mine, rest} = Enum.split(rest, count)
@@ -349,7 +417,7 @@ defmodule Ankusa.Queue.Writer do
     :ok
   end
 
-  defp reply_calls(calls, {:error, _reason} = error),
+  def reply_calls(calls, {:error, _reason} = error),
     do: Enum.each(calls, fn {from, _count} -> GenServer.reply(from, error) end)
 
   # The newest read of a key wins. A call whose read began before the oldest
@@ -505,7 +573,7 @@ defmodule Ankusa.Queue.Writer do
             admission.ops ++ extra_ops
         )
 
-      result = commit(state.instance, ops, count, bytes)
+      result = commit(state.instance, ops, count, bytes, true)
 
       state = %{
         state
@@ -517,6 +585,7 @@ defmodule Ankusa.Queue.Writer do
       case result do
         :ok ->
           cache_put(state, admission.cache)
+          Syncer.mark_durable(state.marks, state.next_seq - 1, now)
           wake_dispatch(state.instance, now)
           {:reply, {:ok, count}, state}
 
@@ -588,10 +657,10 @@ defmodule Ankusa.Queue.Writer do
   end
 
   defp build_and_commit(tagged, extra_ops, admission, now, state, from, checked) do
-    {ops, batch_size, bytes} =
+    {built, batch_size, bytes} =
       build_ops(checked.fresh, state.next_seq, now, state.archive?, admission.ords)
 
-    ops = Deliveries.coalesce(checked.dedupe_ops ++ ops ++ admission.ops ++ extra_ops)
+    ops = Deliveries.coalesce(checked.dedupe_ops ++ built ++ admission.ops ++ extra_ops)
     published = if state.dual, do: published_records(state, checked.fresh, ops), else: []
 
     cx = %{
@@ -602,7 +671,9 @@ defmodule Ankusa.Queue.Writer do
       ops: ops,
       sizes: {batch_size, bytes},
       now: now,
-      published: published
+      published: published,
+      extra_ops: extra_ops,
+      undo: [checked.dedupe_ops, built]
     }
 
     cond do
@@ -611,7 +682,7 @@ defmodule Ankusa.Queue.Writer do
         if state.dual,
           do: IntakeGate.abort_probe(state.table, System.monotonic_time(:millisecond))
 
-        disk_commit(tagged, checked, admission, ops, batch_size, bytes, now, state)
+        disk_commit(cx, state)
 
       extra_ops == [] ->
         dual_commit(cx, state)
@@ -621,33 +692,58 @@ defmodule Ankusa.Queue.Writer do
     end
   end
 
-  defp disk_commit(tagged, checked, admission, ops, batch_size, bytes, now, state) do
-    result = commit(state.instance, ops, batch_size, bytes)
+  # A group is applied with `sync: false`, and its callers are answered by the
+  # syncer once an fsync covers `upto`, the highest seq of the group. A quarantine
+  # release (`extra_ops`) is not on the request path and keeps its own synced write.
+  defp disk_commit(cx, state) do
+    %{
+      tagged: tagged,
+      checked: checked,
+      admission: admission,
+      ops: ops,
+      sizes: {batch_size, bytes},
+      now: now
+    } = cx
 
-    state = %{
-      state
-      | next_seq: state.next_seq + length(checked.fresh),
-        next_ord: admission.next_ord,
-        last_at: now
-    }
+    pipelined? = cx.extra_ops == []
+    first_seq = state.next_seq
+    fresh = length(checked.fresh)
+    upto = first_seq + fresh - 1
+    prev = Syncer.applied(state.marks)
+
+    # Before the write: a reader that can see the rows must see them as unsynced.
+    if pipelined?, do: Syncer.set_applied(state.marks, upto)
+
+    result = commit(state.instance, ops, batch_size, bytes, not pipelined?)
+
+    state = %{state | next_seq: first_seq + fresh, next_ord: admission.next_ord, last_at: now}
 
     case result do
       :ok ->
         cache_put(state, admission.cache)
         record_recent(state, checked)
-        wake_dispatch(state.instance, now)
 
         committed =
           checked.fresh
-          |> Enum.with_index(state.next_seq - length(checked.fresh))
+          |> Enum.with_index(first_seq)
           |> Enum.map(fn {{env, _bin, _mods, _ttl, _replay_id}, seq} ->
             {:committed, %{env | seq: seq}}
           end)
 
-        results = reassemble(checked.results, committed)
-        {:reply, {:ok, with_refused(tagged, results)}, state}
+        reply = {:ok, with_refused(tagged, reassemble(checked.results, committed))}
+
+        if pipelined? do
+          Syncer.submit(state.syncer, %{upto: upto, at: now, done: {:reply, cx.from, reply}})
+          {:noreply, track(state, upto, cx.undo)}
+        else
+          Syncer.mark_durable(state.marks, upto, now)
+          wake_dispatch(state.instance, now)
+          {:reply, reply, state}
+        end
 
       {:error, reason} ->
+        if pipelined?, do: Syncer.set_applied(state.marks, prev)
+
         Logger.error(
           "[ankusa] store commit of #{length(tagged)} hook(s) failed, nothing acked: #{inspect(reason)}"
         )
@@ -773,7 +869,14 @@ defmodule Ankusa.Queue.Writer do
     task =
       Task.Supervisor.async_nolink(state.tasks, fn -> Intake.publish_batch(instance, records) end)
 
-    local = commit(instance, ops ++ meta_ops(state), batch_size, bytes)
+    # A group (`from` is its callers) is applied now and made durable by the
+    # syncer, which tells this process; a release waits for its own synced write.
+    pipelined? = from != nil
+    upto = first_seq + length(checked.fresh) - 1
+    prev = Syncer.applied(state.marks)
+    if pipelined?, do: Syncer.set_applied(state.marks, upto)
+
+    local = commit(instance, ops ++ meta_ops(state), batch_size, bytes, not pipelined?)
 
     state = %{
       state
@@ -785,13 +888,29 @@ defmodule Ankusa.Queue.Writer do
     # Carried or not, the ordinals of this batch are the ordinals of its hooks.
     cache_put(state, admission.cache)
     if local == :ok, do: record_recent(state, checked)
-    if local == :ok, do: wake_dispatch(instance, now)
+
+    {local, state} =
+      cond do
+        local != :ok ->
+          if pipelined?, do: Syncer.set_applied(state.marks, prev)
+          {local, state}
+
+        pipelined? ->
+          Syncer.submit(state.syncer, %{upto: upto, at: now, done: {:notify, self(), task.ref}})
+          {:pending, track(state, upto, cx.undo)}
+
+        true ->
+          Syncer.mark_durable(state.marks, upto, now)
+          wake_dispatch(instance, now)
+          {:ok, state}
+      end
 
     batch = %{
       from: from,
       tagged: tagged,
       checked: checked,
       local: local,
+      log: :pending,
       first_seq: first_seq,
       records: records,
       task: task,
@@ -1318,26 +1437,36 @@ defmodule Ankusa.Queue.Writer do
   # the writer only applies a batch it is handed (`{:expire_dedupe, entries}`),
   # because a refresh and a delete of one key must not race.
   @impl true
+  def handle_info({:EXIT, syncer, reason}, %{syncer: syncer} = state),
+    do: {:stop, {:syncer_down, reason}, state}
+
+  # An fsync failed: what this process cached from the groups it covered (tenant
+  # ordinals, dedupe keys written) is not known to be on disk, so it is read again.
+  def handle_info({:sync_failed, _reason}, state) do
+    :ets.delete_all_objects(state.ords)
+    :ets.delete_all_objects(state.recent_cur)
+    :ets.delete_all_objects(state.recent_old)
+    mono = System.monotonic_time(:millisecond)
+    {:noreply, fence(%{state | recent_gen_at: mono, recent_since: mono, fenced: true})}
+  end
+
+  def handle_info(:retry_fence, %{fenced: f} = state) when f != nil,
+    do: {:noreply, fence(state)}
+
+  def handle_info(:retry_fence, state), do: {:noreply, state}
+
+  # The publish task answered (or died), or the syncer says the local half is
+  # durable (or that its fsync failed): the batch is answered when both are in.
+  def handle_info({:local_synced, ref, result}, %{dual: true} = state),
+    do: {:noreply, advance(state, ref, &%{&1 | local: result})}
+
   def handle_info({ref, result}, %{dual: true} = state) when is_reference(ref) do
-    case Map.pop(state.inflight, ref) do
-      {nil, _inflight} ->
-        {:noreply, state}
-
-      {batch, inflight} ->
-        Process.demonitor(ref, [:flush])
-        {:noreply, finish_dual(batch, result, %{state | inflight: inflight})}
-    end
+    if is_map_key(state.inflight, ref), do: Process.demonitor(ref, [:flush])
+    {:noreply, advance(state, ref, &%{&1 | log: {:done, result}})}
   end
 
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{dual: true} = state) do
-    case Map.pop(state.inflight, ref) do
-      {nil, _inflight} ->
-        {:noreply, state}
-
-      {batch, inflight} ->
-        {:noreply, finish_dual(batch, {:error, :unavailable, nil}, %{state | inflight: inflight})}
-    end
-  end
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{dual: true} = state),
+    do: {:noreply, advance(state, ref, &%{&1 | log: {:done, {:error, :unavailable, nil}}})}
 
   # The watermark and offset also move without traffic.
   def handle_info(:flush_intake, %{dual: true} = state) do
@@ -1359,6 +1488,60 @@ defmodule Ankusa.Queue.Writer do
     Store.write(state.instance, meta_ops(state), sync: false)
     :ok
   end
+
+  # ── a failed fsync (DUR-4.b) ──────────────────────────────────────────────
+
+  # `undo` of a group is the ops it was built from; the group stays in `unsynced`
+  # until an fsync covers it.
+  defp track(state, upto, undo) do
+    durable = Syncer.durable(state.marks)
+    kept = Enum.take_while(state.unsynced, &(&1.upto > durable))
+    %{state | unsynced: [%{upto: upto, undo: undo} | kept]}
+  end
+
+  # Every group applied since the last fsync has been answered with an error (the
+  # syncer refuses them all while fenced), so none of its rows may survive: they
+  # were never acked and dispatch never saw them (`Syncer.visible/2`). They are
+  # deleted in one synced write, and only then does the syncer resume, with the
+  # watermark where the writer stands. A write that fails (the disk is still
+  # failing, the store is reopening) is tried again; until it lands the writer
+  # refuses every call.
+  defp fence(state) do
+    case Store.write(state.instance, undo_ops(state.unsynced), sync: true) do
+      :ok ->
+        Syncer.resume(state.syncer, Syncer.applied(state.marks), state.last_at)
+        %{state | fenced: nil, unsynced: []}
+
+      {:error, reason} ->
+        Logger.error(
+          "[ankusa] could not delete the rows of the groups a failed WAL sync left, retrying: " <>
+            inspect(reason)
+        )
+
+        Process.send_after(self(), :retry_fence, 500)
+        state
+    end
+  end
+
+  # The inverse of what the unsynced groups wrote: their rows deleted and their
+  # counters taken back. Kept: the seq marker (a seq is never reused), tenant
+  # ordinals (they are not in the lists), and the active-tenant markers, which
+  # other rows of the same second may rely on (a stale one is swept).
+  defp undo_ops(unsynced) do
+    next_seq = Keys.meta("next_seq")
+
+    for group <- unsynced,
+        list <- group.undo,
+        op <- list,
+        inverse <- invert(op, next_seq),
+        do: inverse
+  end
+
+  defp invert({:put, :default, key, _value}, next_seq) when key == next_seq, do: []
+  defp invert({:put, :index, <<?A, _::binary>>, _value}, _next_seq), do: []
+  defp invert({:put, cf, key, _value}, _next_seq), do: [{:delete, cf, key}]
+  defp invert({:merge, cf, key, delta}, _next_seq), do: [{:merge, cf, key, -delta}]
+  defp invert({:delete, _cf, _key}, _next_seq), do: []
 
   # ── batch construction ───────────────────────────────────────────────────
 
@@ -1400,15 +1583,32 @@ defmodule Ankusa.Queue.Writer do
   # batch is not durable — the span then emits `[:ankusa, :commit, :exception]`
   # (never a `:stop`), so the commit duration/batch-size series keep counting
   # only real commits.
-  defp commit(instance, ops, batch_size, bytes) do
+  defp commit(instance, ops, batch_size, bytes, sync?) do
     Ankusa.Telemetry.span([:commit], %{instance: instance}, fn ->
-      case Store.write(instance, ops, sync: true) do
+      case Store.write(instance, ops, sync: sync?) do
         :ok -> {:ok, %{batch_size: batch_size, bytes: bytes}, %{}}
         {:error, reason} -> throw({:store_commit_failed, reason})
       end
     end)
   catch
     :throw, {:store_commit_failed, reason} -> {:error, reason}
+  end
+
+  # Records what arrived for `ref`'s batch; once both halves are in, answers it.
+  defp advance(state, ref, update) do
+    case Map.pop(state.inflight, ref) do
+      {nil, _inflight} ->
+        state
+
+      {batch, inflight} ->
+        batch = update.(batch)
+
+        case batch do
+          %{local: :pending} -> %{state | inflight: Map.put(inflight, ref, batch)}
+          %{log: :pending} -> %{state | inflight: Map.put(inflight, ref, batch)}
+          %{log: {:done, result}} -> finish_dual(batch, result, %{state | inflight: inflight})
+        end
+    end
   end
 
   # The stamp tells dispatch the earliest due time this batch can have: its rows

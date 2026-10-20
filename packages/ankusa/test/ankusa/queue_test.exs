@@ -229,6 +229,135 @@ defmodule Ankusa.QueueTest do
     end
   end
 
+  describe "the WAL fsync is pipelined (DUR-4.b)" do
+    alias Ankusa.Queue.Syncer
+
+    @doc false
+    # Runs in the syncer, before its fsync: tells the test and waits to be released.
+    def hold_sync(_event, _measurements, %{instance: inst}, {inst, test_pid}) do
+      send(test_pid, {:syncing, self()})
+
+      receive do
+        :release -> :ok
+      after
+        10_000 -> :ok
+      end
+    end
+
+    def hold_sync(_event, _measurements, _metadata, _config), do: :ok
+
+    defp hold_syncs(inst) do
+      handler = "queue-hold-sync-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:ankusa, :wal_sync, :start],
+        &__MODULE__.hold_sync/4,
+        {inst, self()}
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
+    defp entry(n), do: %{envelope: envelope(n), sinks: [{Log, []}]}
+
+    test "a group is applied at once, acked only after its fsync, and not durable before it" do
+      config = config(roles: [:edge])
+      inst = config.instance
+      start_supervised!({Ankusa.Instance, config})
+      hold_syncs(inst)
+
+      task = Task.async(fn -> Queue.enqueue(inst, [entry(1)]) end)
+      assert_receive {:syncing, syncer}, 5_000
+
+      # in the store (a reader sees it), not acked, not durable, not due
+      assert {:ok, [%{seq: 1}]} = Queue.hooks(inst, 0, 10)
+      assert Task.yield(task, 100) == nil
+      assert Syncer.durable_seq(inst) == 0
+      now = System.system_time(:millisecond)
+      assert Syncer.visible(inst, now) < now
+
+      send(syncer, :release)
+      assert {:ok, [{:committed, %{seq: 1}}]} = Task.await(task)
+      assert Syncer.durable_seq(inst) == 1
+      assert Syncer.visible(inst, now) == now
+    end
+
+    test "the next group is applied while the previous one syncs, with dense seqs" do
+      config = config(roles: [:edge])
+      inst = config.instance
+      start_supervised!({Ankusa.Instance, config})
+      hold_syncs(inst)
+
+      first = Task.async(fn -> Queue.enqueue(inst, [entry(1)]) end)
+      assert_receive {:syncing, first_sync}, 5_000
+      second = Task.async(fn -> Queue.enqueue(inst, [entry(2), entry(3)]) end)
+
+      # group 2 is applied (seqs 2 and 3) with group 1's fsync still running
+      eventually(fn -> match?({:ok, [_, _, _]}, Queue.hooks(inst, 0, 10)) end)
+      assert Task.yield(first, 50) == nil
+      assert Task.yield(second, 50) == nil
+
+      send(first_sync, :release)
+      assert {:ok, [{:committed, %{seq: 1}}]} = Task.await(first)
+
+      # one fsync for group 2, which no earlier fsync covered
+      assert_receive {:syncing, second_sync}, 5_000
+      assert Task.yield(second, 50) == nil
+      send(second_sync, :release)
+
+      assert {:ok, [{:committed, %{seq: 2}}, {:committed, %{seq: 3}}]} = Task.await(second)
+      assert Syncer.durable_seq(inst) == 3
+    end
+
+    test "a failed fsync is fenced: nothing is acked, the group's rows are deleted, the retry is stored once" do
+      config = config(roles: [:edge])
+      inst = config.instance
+      start_supervised!({Ankusa.Instance, config})
+      hold_syncs(inst)
+
+      keyed = fn n ->
+        %{
+          envelope: %{envelope(n) | dedupe_key: "evt-1"},
+          sinks: [{Log, []}],
+          dedupe_ttl_ms: 60_000
+        }
+      end
+
+      task = Task.async(fn -> Queue.enqueue(inst, [keyed.(1)]) end)
+      assert_receive {:syncing, syncer}, 5_000
+
+      # the store goes away under the fsync: it fails, as a failing disk's would
+      instance_sup = Ankusa.via(inst, :instance)
+      :ok = Supervisor.terminate_child(instance_sup, {Ankusa.Store, inst})
+      send(syncer, :release)
+
+      assert {:error, _reason} = Task.await(task)
+      assert Syncer.durable_seq(inst) == 0
+
+      # reopened, the store still holds the group the failed fsync left (the WAL
+      # replays it). It was never acked, so the writer refuses work until it has
+      # deleted it: the provider's retry is not answered `201 duplicate` of it
+      {:ok, _pid} = Supervisor.restart_child(instance_sup, {Ankusa.Store, inst})
+      assert {:ok, [%{seq: 1}]} = Queue.hooks(inst, 0, 10)
+      assert {:error, _} = Queue.enqueue(inst, [keyed.(2)])
+
+      eventually(fn -> match?({:ok, []}, Queue.hooks(inst, 0, 10)) end)
+      now = System.system_time(:millisecond)
+      eventually(fn -> Syncer.visible(inst, now) == now end)
+
+      # the retry (the same provider key, a new id) is stored, once
+      retry = Task.async(fn -> Queue.enqueue(inst, [keyed.(3)]) end)
+      assert_receive {:syncing, second_sync}, 5_000
+      send(second_sync, :release)
+
+      assert {:ok, [{:committed, %{seq: seq}}]} = Task.await(retry)
+      assert seq > 1
+      assert {:ok, [%{seq: ^seq}]} = Queue.hooks(inst, 0, 10)
+      assert Syncer.durable_seq(inst) == seq
+    end
+  end
+
   test "a stored hook that does not decode is a corrupt_value error, not a crash" do
     config = config(roles: [:edge])
     inst = config.instance

@@ -39,6 +39,48 @@ defmodule Ankusa.QueueDualTest do
       assert drained(config)
     end
 
+    @doc false
+    # Runs in the queue's syncer, before its fsync: tells the test and waits.
+    def hold_sync(_event, _measurements, %{instance: inst}, {inst, test_pid}) do
+      send(test_pid, {:syncing, self()})
+
+      receive do
+        :release -> :ok
+      after
+        10_000 -> :ok
+      end
+    end
+
+    def hold_sync(_event, _measurements, _metadata, _config), do: :ok
+
+    # DUR-4.b: the local half's confirm is the syncer's, joined with the publish's.
+    test "no ack before the local fsync, even once the log has confirmed" do
+      config = start_dual()
+      handler = "dual-hold-sync-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:ankusa, :wal_sync, :start],
+        &__MODULE__.hold_sync/4,
+        {config.instance, self()}
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      task = Task.async(fn -> ingest(config, "evt-1") end)
+      assert_receive {:syncing, syncer}, 5_000
+
+      # applied locally and confirmed by the log, fsync still running: no `201`
+      assert wait_until(fn -> length(Memory.records(config.instance)) == 1 end)
+      assert Task.yield(task, 200) == nil
+
+      send(syncer, :release)
+      assert {:ok, env} = Task.await(task)
+      assert [%{id: id}] = Memory.records(config.instance)
+      assert id == env.id
+      assert drained(config)
+    end
+
     test "ack waits for both halves and costs the max, not the sum" do
       config = start_dual()
       Memory.set_latency(config.instance, 30)

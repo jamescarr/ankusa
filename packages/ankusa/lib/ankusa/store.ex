@@ -801,6 +801,29 @@ defmodule Ankusa.Store do
     end
   end
 
+  @doc """
+  Makes every write applied so far with `sync: false` durable: one fsync of the
+  WAL (`SyncWAL()`), which does not take RocksDB's write lock, so a writer
+  applying the next batch meanwhile is not held up. `:ok` means every batch whose
+  `write/3` returned before this call began is on disk. A failure is reported
+  like a failed write (`report_write_failure/2`: the store reopens to clear a
+  latched error), and the caller must treat everything it applied since its last
+  successful sync as not durable.
+  """
+  @spec sync_wal(atom()) :: :ok | {:error, term()}
+  def sync_wal(instance) do
+    with_handles(instance, fn handles ->
+      case :rocksdb.sync_wal(handles.db) do
+        :ok ->
+          :ok
+
+        {:error, reason} = error ->
+          report_write_failure(instance, reason)
+          error
+      end
+    end)
+  end
+
   defp add_op(batch, cfs, {:put, cf, k, v}) when is_binary(k) and is_binary(v),
     do: :rocksdb.batch_put(batch, Map.fetch!(cfs, cf), k, v)
 

@@ -16,7 +16,8 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :ingest]` (span) | `:duration` | `:instance`, `:source_id`, `:tenant_id`, `:route_id` (the route the guard matched, `nil` with routes off; never a metric label), `:size`, `:outcome`, `:dropped_headers` (request headers the stored-header policy removed from the hook; `0` when it was not stored) |
   | `[:ankusa, :ingest, :refused]` | — | `:instance`, `:reason` (`:unknown_source`, `:payload_too_large`, `:body_read_failed`, `:invalid_header`, `:store_unavailable`) |
   | `[:ankusa, :verify]` (span) | `:duration` | `:instance`, `:source_id`, `:tenant_id`, `:provider`, `:scheme`, `:status`, `:weak_hash` |
-  | `[:ankusa, :commit]` (span) | `:duration`, `:batch_size`, `:bytes` | `:instance` (a batch spans tenants, so it names none) |
+  | `[:ankusa, :commit]` (span) | `:duration`, `:batch_size`, `:bytes` | `:instance` (a batch spans tenants, so it names none). The span is the write of a group into the store (`sync: false`); the fsync that makes it durable is `[:ankusa, :wal_sync]` |
+  | `[:ankusa, :wal_sync]` (span) | `:duration`, `:groups` (groups this one fsync covered) | `:instance`. One WAL fsync by `Ankusa.Queue.Syncer`; a failed one emits `:exception` and acks none of its groups |
   | `[:ankusa, :load_shed]` | `:queue`, `:bytes` | `:instance` |
   | `[:ankusa, :quarantine, :rate_limited]` | — | `:instance`, `:source_id`, `:tenant_id` |
   | `[:ankusa, :quarantine, :full]` | — | `:instance`, `:source_id`, `:tenant_id` |
