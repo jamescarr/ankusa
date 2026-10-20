@@ -114,8 +114,10 @@ hook and one delivery row per sink in one store batch. Dispatch is a scheduler
 over the due rows; the compactor packs archived hooks into immutable segments
 in an object store. Neither is an RPC caller of the other, so a slow sink, a
 dead compactor, or a paused dispatch node never stops the edge from acking.
-`wal.type: none` skips the store and the retry machinery entirely: one request,
-one concurrent publish, and the provider's retry is the only retry.
+`wal.type: none` skips the hook store and the retry machinery entirely: one
+request, one concurrent publish, and the provider's retry is the only retry.
+(The store still opens for the quarantine pen, API-managed sources and
+rate-limit overrides.)
 
 ```mermaid
 flowchart LR
