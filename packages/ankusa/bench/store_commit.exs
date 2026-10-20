@@ -1,17 +1,20 @@
-# The store commit under load: what the queue writer's group commit buys, with the
-# fsync made slow and the bodies made large (DUR-4).
+# The store commit under load: what the queue writer's group commit and pipelined
+# WAL sync buy, with the fsync made slow and the bodies made large (DUR-4).
 #
 #     MIX_ENV=test mix run bench/store_commit.exs
 #
 # Both cases drive `Ankusa.Edge.Batcher.commit/4` directly (no HTTP, no verifier)
-# with 10 KB bodies over 4 partitions, and make the commit's fsync cost what a
-# disk's does by sleeping in the writer for `fsync` milliseconds on every commit
-# (a telemetry handler on `[:ankusa, :commit, :start]` runs in the writer
-# process, before the store write, so the sleep is the writer's own wait).
+# with 10 KB bodies over 4 partitions, and make the fsync cost what a disk's does
+# by sleeping for `fsync` milliseconds on every WAL sync (a telemetry handler on
+# `[:ankusa, :wal_sync, :start]` runs in `Ankusa.Queue.Syncer`, before its
+# `sync_wal`, so the sleep is the sync's own wait and the writer is free to apply
+# the next group meanwhile).
 #
 #   1. Throughput. 256 closed-loop clients for `DURATION` seconds, at a simulated
-#      fsync of 1, 5 and 10 ms: records per second, commits per second, mean
-#      group (records per synced commit) and ack p50/p99. Each cell runs grouped
+#      fsync of 1, 5 and 10 ms: records per second, groups applied per second,
+#      fsyncs per second, mean group (records per group), groups per fsync, the
+#      mean time the writer spends applying one group, and ack p50/p99. Each cell
+#      runs grouped
 #      (`batcher.group_commit_*` and `max_commits` at their defaults) and ungrouped
 #      (`group_commit_max_records: 1, max_commits: 1, group_commit_delay_ms: 0`:
 #      every partition's batch is a commit of its own, one at a time, which is what
@@ -23,8 +26,14 @@
 #      group cap protects: they queue behind the backlog, so they wait for as
 #      many groups as the backlog makes.
 #
-# Passes only if, at the 5 ms cell, grouped throughput is at least 2 x ungrouped,
-# and the burst's post-stall ack p99 is at most 50 ms (the SLO). Exits 1 otherwise.
+# Passes only if, at the 5 ms cell, grouped throughput is at least 1.5 x ungrouped
+# (ungrouped shares fsyncs across partitions too since the WAL sync is pipelined,
+# so what is left of the gap is the size of the group: 2 x before DUR-4.b, when
+# every ungrouped commit paid its own fsync), the writer applies more groups per
+# second than the disk syncs (at least 1.2 x: a writer that waits for the fsync
+# after every group applies one group per fsync, 1 / (apply + fsync): the fsync is
+# off its critical path), and the burst's post-stall ack p99 is at most 50 ms
+# (the SLO). Exits 1 otherwise.
 #
 # Env knobs: DURATION (3), CLIENTS (256), BODY_BYTES (10240), BURST_RATE (1000),
 # BURST_FSYNC_MS (2), BURST_STALL_MS (1000), BURST_MS (3000).
@@ -66,7 +75,7 @@ defmodule Bench.StoreCommit do
     IO.puts("""
 
     throughput: #{clients} closed-loop clients, #{byte_size(body)} B bodies, #{@partitions} partitions, #{seconds} s per cell
-    fsync   mode       records/s  commits/s  mean group   p50 ms   p99 ms
+    fsync   mode       records/s  groups/s  fsyncs/s  mean group  groups/fsync  apply ms   p50 ms   p99 ms
     """)
 
     rows =
@@ -88,10 +97,17 @@ defmodule Bench.StoreCommit do
 
     burst = burst(body)
 
+    five = rows[{5, :grouped}]
+    overlap = five.commits_per_s / max(five.syncs_per_s, 0.001)
+
     failures =
       [
-        {:ratio_5ms, ratios[5] >= 2.0,
-         "grouped throughput at 5 ms fsync is #{fmt(ratios[5])}x ungrouped (< 2x)"},
+        {:ratio_5ms, ratios[5] >= 1.5,
+         "grouped throughput at 5 ms fsync is #{fmt(ratios[5])}x ungrouped (< 1.5x)"},
+        {:pipelined, overlap >= 1.2,
+         "at 5 ms fsync the writer applied #{fmt(five.commits_per_s, 0)} groups/s against " <>
+           "#{fmt(five.syncs_per_s, 0)} fsyncs/s (#{fmt(overlap)} per fsync, < 1.2): " <>
+           "the fsync is still on its critical path"},
         {:burst_p99, burst.p99_ms <= 50.0,
          "burst post-stall ack p99 #{fmt(burst.p99_ms)} ms (> 50 ms)"}
       ]
@@ -101,7 +117,10 @@ defmodule Bench.StoreCommit do
 
     case failures do
       [] ->
-        IO.puts("\nPASS: grouped >= 2x ungrouped at 5 ms fsync, burst p99 <= 50 ms")
+        IO.puts(
+          "\nPASS: grouped >= 1.5x ungrouped at 5 ms fsync, #{fmt(overlap)} groups applied per " <>
+            "fsync (>= 1.2), burst p99 <= 50 ms"
+        )
 
       failures ->
         for {_name, _ok, message} <- failures, do: IO.puts("FAIL: #{message}")
@@ -134,11 +153,16 @@ defmodule Bench.StoreCommit do
       n = length(latencies)
       sorted = Enum.sort(latencies)
       c = :counters.get(commits, 1)
+      s = :counters.get(commits, 2)
+      apply_ms = :counters.get(commits, 3) / 1000 / max(c, 1)
 
       %{
         per_s: n / elapsed,
         commits_per_s: c / elapsed,
+        syncs_per_s: s / elapsed,
         mean_group: n / max(c, 1),
+        groups_per_sync: c / max(s, 1),
+        apply_ms: apply_ms,
         p50_ms: pct(sorted, 0.50),
         p99_ms: pct(sorted, 0.99)
       }
@@ -222,8 +246,9 @@ defmodule Bench.StoreCommit do
 
   # ── plumbing ──────────────────────────────────────────────────────────────
 
-  # A fresh instance (its own store) with the writer's commit slowed by `fsync` ms
-  # and the number of commits counted.
+  # A fresh instance (its own store) with every WAL sync slowed by `fsync` ms, and
+  # the groups applied, the syncs and the time spent applying groups counted
+  # (`:counters` 1, 2, 3: groups, syncs, microseconds of apply).
   defp with_instance(batcher, fsync, fun) do
     name = :"store_commit_#{System.unique_integer([:positive])}"
 
@@ -247,15 +272,23 @@ defmodule Bench.StoreCommit do
       )
 
     {:ok, sup} = Ankusa.Instance.start_link(config)
-    commits = :counters.new(1, [])
+    commits = :counters.new(3, [])
     handler = "store-commit-#{name}"
 
-    :telemetry.attach(
+    :telemetry.attach_many(
       handler,
-      [:ankusa, :commit, :start],
-      fn _event, _measurements, %{instance: ^name}, _cfg ->
-        :counters.add(commits, 1, 1)
-        if fsync > 0, do: Process.sleep(fsync)
+      [[:ankusa, :wal_sync, :start], [:ankusa, :commit, :stop]],
+      fn
+        [:ankusa, :wal_sync, :start], _measurements, %{instance: ^name}, _cfg ->
+          :counters.add(commits, 2, 1)
+          if fsync > 0, do: Process.sleep(fsync)
+
+        [:ankusa, :commit, :stop], %{duration: duration}, %{instance: ^name}, _cfg ->
+          :counters.add(commits, 1, 1)
+          :counters.add(commits, 3, System.convert_time_unit(duration, :native, :microsecond))
+
+        _event, _measurements, _metadata, _cfg ->
+          :ok
       end,
       nil
     )
@@ -288,8 +321,10 @@ defmodule Bench.StoreCommit do
   defp print(fsync, mode, r) do
     IO.puts(
       "#{String.pad_trailing("#{fsync} ms", 7)} #{String.pad_trailing("#{mode}", 10)} " <>
-        "#{String.pad_leading(fmt(r.per_s, 0), 9)}  #{String.pad_leading(fmt(r.commits_per_s, 0), 9)}  " <>
-        "#{String.pad_leading(fmt(r.mean_group), 10)}  #{String.pad_leading(fmt(r.p50_ms), 7)}  #{String.pad_leading(fmt(r.p99_ms), 7)}"
+        "#{String.pad_leading(fmt(r.per_s, 0), 9)}  #{String.pad_leading(fmt(r.commits_per_s, 0), 8)}  " <>
+        "#{String.pad_leading(fmt(r.syncs_per_s, 0), 8)}  #{String.pad_leading(fmt(r.mean_group), 10)}  " <>
+        "#{String.pad_leading(fmt(r.groups_per_sync), 12)}  #{String.pad_leading(fmt(r.apply_ms), 8)}  " <>
+        "#{String.pad_leading(fmt(r.p50_ms), 7)}  #{String.pad_leading(fmt(r.p99_ms), 7)}"
     )
   end
 

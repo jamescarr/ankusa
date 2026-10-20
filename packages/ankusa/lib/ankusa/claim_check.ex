@@ -23,6 +23,9 @@ defmodule Ankusa.ClaimCheck do
   Objects are written once under a freshly minted id and never rewritten, so
   every read is safe to cache forever.
 
+  The gateway checks what it serves against the pack's manifest
+  (`claim_check.integrity_check: :manifest`, the default): see `digest/3`.
+
   Permanent errors (`:not_found`, `:integrity_mismatch`, `:invalid_ref`,
   `:invalid_tenant`, `:invalid_id`, `:unsigned_ref`, `:bad_signature`,
   `:ref_expired`) mean retrying won't help — callers should dead-letter.
@@ -293,7 +296,9 @@ defmodule Ankusa.ClaimCheck do
   @typedoc """
   A located claim: its tenant, pack and index in the pack, the index of the
   claim store the pack was found in, its object key there, and the claim's
-  offset and length in it.
+  offset and length in it; and how many claims the pack holds (`nil` if its
+  index does not say) and the offset where its last claim ends, when the index
+  bytes read have that row (`nil` otherwise).
   """
   @type location :: %{
           tenant_id: String.t(),
@@ -302,7 +307,9 @@ defmodule Ankusa.ClaimCheck do
           store: non_neg_integer(),
           key: String.t(),
           offset: non_neg_integer(),
-          length: non_neg_integer()
+          length: non_neg_integer(),
+          claims: pos_integer() | nil,
+          claims_end: non_neg_integer() | nil
         }
 
   @doc """
@@ -408,6 +415,8 @@ defmodule Ankusa.ClaimCheck do
   defp located(pack, tenant_id, pack_id, index) do
     case Pack.locate(pack.prefix, index) do
       {:ok, offset, length} ->
+        {claims, claims_end} = extent(pack.prefix)
+
         {:ok,
          %{
            tenant_id: tenant_id,
@@ -416,11 +425,29 @@ defmodule Ankusa.ClaimCheck do
            store: pack.store,
            key: pack.key,
            offset: offset,
-           length: length
+           length: length,
+           claims: claims,
+           claims_end: claims_end
          }}
 
       :error ->
         {:error, :not_found}
+    end
+  end
+
+  # How many claims the pack holds, and where its last one ends (where the
+  # manifest's entry starts) when the index bytes read reach the last row.
+  defp extent(prefix) do
+    case Pack.count(prefix) do
+      {:ok, claims} -> {claims, last_claim_end(prefix, claims)}
+      :error -> {nil, nil}
+    end
+  end
+
+  defp last_claim_end(prefix, claims) do
+    case Pack.locate(prefix, claims - 1) do
+      {:ok, offset, length} -> offset + length
+      :error -> nil
     end
   end
 
@@ -494,6 +521,140 @@ defmodule Ankusa.ClaimCheck do
 
       result ->
         result
+    end
+  end
+
+  # The manifest's rows are about 250 bytes of JSON each: one ranged read of
+  # the entry's header and this much more usually has all of it.
+  @manifest_row_estimate 320
+  @manifest_first_read_floor 2048
+  @manifest_first_read_cap 4 * 1024 * 1024
+
+  @doc """
+  The lowercase hex sha256 of a located claim, as its pack's manifest records
+  it (`claim_check.integrity_check: :manifest`, the gateway's check).
+
+  The pack's digests come from `Ankusa.ClaimCheck.Cache` (inside the pack's
+  entry, so under `claim_check.read_cache_bytes` and aged with it), else from
+  one ranged read of the manifest where the last claim ends (a second one for
+  a manifest longer than the first guessed), shared by every concurrent caller
+  through `Ankusa.ClaimCheck.Reader` like any other read. A manifest that does
+  not parse, or does not list exactly this pack's claims, is
+  `{:error, :integrity_mismatch}`; a pack that ends before its manifest does is
+  `:not_found`. `opts[:deadline]` is as for `locate/4`.
+  """
+  @spec digest(atom(), location(), keyword()) :: {:ok, String.t()} | {:error, reason()}
+  def digest(instance, location, opts \\ []) do
+    %{tenant_id: tenant_id, pack_id: pack_id, index: index} = location
+
+    case Cache.digests(instance, tenant_id, pack_id) do
+      {:ok, digests} ->
+        Reader.emit_read(instance, :manifest, :cache, {:ok, digests}, location.store, 0)
+        digest_at(digests, index)
+
+      :error ->
+        config = Ankusa.config(instance)
+        deadline = Keyword.get_lazy(opts, :deadline, fn -> deadline(config) end)
+
+        with {:ok, digests} <- fetch_digests(instance, config, location, deadline) do
+          digest_at(digests, index)
+        end
+    end
+  end
+
+  defp digest_at(digests, index) do
+    case Pack.digest(digests, index) do
+      {:ok, digest} -> {:ok, Base.encode16(digest, case: :lower)}
+      :error -> {:error, :integrity_mismatch}
+    end
+  end
+
+  defp fetch_digests(_instance, _config, %{claims: nil}, _deadline),
+    do: {:error, :integrity_mismatch}
+
+  defp fetch_digests(instance, config, location, deadline) do
+    %{tenant_id: tenant_id, pack_id: pack_id, claims: claims} = location
+
+    with {:ok, claims_end} <- claims_end(instance, config, location, deadline) do
+      fun = fn -> read_manifest(instance, location, claims_end, claims) end
+
+      case run(instance, {:manifest, tenant_id, pack_id}, location.store, fun, deadline) do
+        {:error, :not_found} = error ->
+          Cache.forget_pack(instance, tenant_id, pack_id)
+          error
+
+        result ->
+          result
+      end
+    end
+  end
+
+  # Where the last claim ends, which is where the manifest's entry starts: from
+  # the located claim when its index read reached the last row, else the last
+  # row's own location (a pack of more than 1 024 claims).
+  defp claims_end(_instance, _config, %{claims_end: claims_end}, _deadline)
+       when is_integer(claims_end),
+       do: {:ok, claims_end}
+
+  defp claims_end(instance, config, location, deadline) do
+    %{tenant_id: tenant_id, pack_id: pack_id, claims: claims} = location
+
+    case locate_in(instance, config, tenant_id, pack_id, claims - 1, deadline) do
+      {:ok, %{claims_end: claims_end}} when is_integer(claims_end) -> {:ok, claims_end}
+      {:ok, _no_end} -> {:error, :integrity_mismatch}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # Runs in the reader's task, so it fills the cache even if its callers gave
+  # up. It reads the config itself, for the reason `fetch_index/6` does.
+  defp read_manifest(instance, location, start, claims) do
+    %{tenant_id: tenant_id, pack_id: pack_id, store: store, key: key} = location
+    config = Ankusa.config(instance)
+    header = Pack.manifest_header_bytes()
+
+    first =
+      header +
+        min(
+          max(claims * @manifest_row_estimate, @manifest_first_read_floor),
+          @manifest_first_read_cap
+        )
+
+    with {:ok, bin} <- Stores.get_range(instance, config, store, key, start, first),
+         {:ok, size} <- manifest_size(bin, header),
+         {:ok, json} <- manifest_json(instance, config, location, start, bin, header, size),
+         {:ok, digests} <- manifest_digests(json, pack_id, claims) do
+      Cache.put_digests(instance, tenant_id, pack_id, digests)
+      {:ok, digests}
+    end
+  end
+
+  # Too few bytes for the header: the pack ends before its manifest.
+  defp manifest_size(bin, header) when byte_size(bin) < header, do: {:error, :not_found}
+
+  defp manifest_size(bin, _header) do
+    case Pack.manifest_size(bin) do
+      {:ok, size} -> {:ok, size}
+      :error -> {:error, :integrity_mismatch}
+    end
+  end
+
+  defp manifest_json(_instance, _config, _location, _start, bin, header, size)
+       when byte_size(bin) >= header + size,
+       do: {:ok, binary_part(bin, header, size)}
+
+  defp manifest_json(instance, config, location, start, _bin, header, size) do
+    case Stores.get_range(instance, config, location.store, location.key, start + header, size) do
+      {:ok, json} when byte_size(json) == size -> {:ok, json}
+      {:ok, _short} -> {:error, :not_found}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp manifest_digests(json, pack_id, claims) do
+    case Pack.digests(json, pack_id, claims) do
+      {:ok, digests} -> {:ok, digests}
+      :error -> {:error, :integrity_mismatch}
     end
   end
 
@@ -850,7 +1011,9 @@ defmodule Ankusa.ClaimCheck do
   defp item_result({:ok, refs}, id), do: {:ok, Map.fetch!(refs, id)}
   defp item_result({:error, reason}, _id), do: {:error, reason}
 
-  defp sha256(bin), do: Base.encode16(:crypto.hash(:sha256, bin), case: :lower)
+  @doc false
+  @spec sha256(binary()) :: String.t()
+  def sha256(bin), do: Base.encode16(:crypto.hash(:sha256, bin), case: :lower)
 
   defp result_tag({:ok, _bin}), do: :ok
   defp result_tag({:ok, _claims, _store}), do: :ok

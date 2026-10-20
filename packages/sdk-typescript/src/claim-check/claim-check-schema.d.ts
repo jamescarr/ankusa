@@ -19,10 +19,13 @@ export interface paths {
         /**
          * Read a claim's bytes
          * @description Returns exactly the claim's bytes. Claims are written once and never
-         *     rewritten, so a response is cacheable forever. The server does not
-         *     verify integrity: the reader MUST check the bytes against the
-         *     message's `sha256` (a ranged read can only be checked once the whole
-         *     claim has been reassembled).
+         *     rewritten, so a response is cacheable forever. With the gateway's
+         *     `claim_check.integrity_check: manifest` (the default) a whole claim
+         *     is checked against its pack's manifest before it is sent, `502
+         *     integrity_mismatch` when it differs, and `200` and `206` carry the
+         *     digest as `X-Ankusa-Sha256`. The reader still MUST check the bytes
+         *     against the message's `sha256`, which is the writer's digest (a ranged
+         *     read can only be checked once the whole claim has been reassembled).
          *
          *     One `bytes` range is served as `206`; several ranges, another unit, a
          *     malformed `Range`, or any `If-Range` (claims carry no validator) are
@@ -93,7 +96,7 @@ export interface components {
         Sig: string;
         Error: {
             /** @enum {string} */
-            error: "invalid_tenant" | "invalid_id" | "bad_signature" | "unsigned_ref" | "ref_expired" | "not_found" | "store_unavailable" | "store_forbidden" | "overloaded" | "unauthenticated" | "forbidden";
+            error: "invalid_tenant" | "invalid_id" | "bad_signature" | "unsigned_ref" | "ref_expired" | "not_found" | "store_unavailable" | "store_forbidden" | "overloaded" | "integrity_mismatch" | "unauthenticated" | "forbidden";
             /**
              * @description Present on `forbidden` from the built-in check; the scope the
              *     principal lacks (`claims:read`, or `tenant:<tenant_id>`). A
@@ -124,6 +127,21 @@ export interface components {
         };
         /** @description `not_found`: no such claim (expired by retention, never written, or no such route). Permanent. Dead-letter, do not requeue. */
         NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /**
+         * @description `integrity_mismatch`: the bytes the store returned, or the pack's
+         *     manifest, do not match the sha256 the manifest records for this claim
+         *     (`claim_check.integrity_check: manifest`). The claim is damaged in the
+         *     store, so a retry reads the same bytes: dead-letter, do not requeue.
+         *     None of the bytes are sent.
+         */
+        IntegrityMismatch: {
             headers: {
                 [name: string]: unknown;
             };
@@ -208,6 +226,13 @@ export interface components {
         CacheControl: string;
         /** @description Always `bytes`. */
         AcceptRanges: "bytes";
+        /**
+         * @description The lowercase hex sha256 of the whole claim, as its pack's manifest
+         *     records it. Sent unless `claim_check.integrity_check` is `off`; on a
+         *     `206` it is the whole claim's digest, to check once the ranges are
+         *     reassembled.
+         */
+        Sha256: string;
     };
     pathItems: never;
 }
@@ -251,6 +276,7 @@ export interface operations {
                 headers: {
                     "Cache-Control": components["headers"]["CacheControl"];
                     "Accept-Ranges": components["headers"]["AcceptRanges"];
+                    "X-Ankusa-Sha256": components["headers"]["Sha256"];
                     [name: string]: unknown;
                 };
                 content: {
@@ -262,6 +288,7 @@ export interface operations {
                 headers: {
                     "Cache-Control": components["headers"]["CacheControl"];
                     "Accept-Ranges": components["headers"]["AcceptRanges"];
+                    "X-Ankusa-Sha256": components["headers"]["Sha256"];
                     /** @description `bytes first-last/length`, `length` the whole claim's size. */
                     "Content-Range"?: string;
                     [name: string]: unknown;
@@ -288,6 +315,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            502: components["responses"]["IntegrityMismatch"];
             503: components["responses"]["StoreUnavailable"];
         };
     };

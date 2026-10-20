@@ -430,7 +430,7 @@ defmodule Ankusa.MetricsTest do
           partitions_left: 2,
           duration: 1
         },
-        %{instance: inst}
+        %{instance: inst, deleted: true}
       )
 
       :ok = Ankusa.Metrics.Gauges.measure(inst)
@@ -441,6 +441,87 @@ defmodule Ankusa.MetricsTest do
       assert gauge(scrape, "ankusa_claim_check_sweep_partitions_left", inst) == 2.0
       assert scrape =~ ~r/^ankusa_claim_check_pruned_total\{instance="#{inst}"\} 4(\.0)?$/m
       assert scrape =~ ~r/^ankusa_claim_check_leases_pruned_total\{instance="#{inst}"\} 6(\.0)?$/m
+    end
+
+    test "gateway metrics: requests by status alone, a duration histogram, sweeps by whether they deleted" do
+      config = start_instance()
+      inst = config.instance
+
+      for {method, status} <- [{"GET", 200}, {"HEAD", 200}, {"GET", 502}] do
+        :telemetry.execute(
+          [:ankusa, :claim_check, :gateway],
+          %{duration: 2_000_000},
+          %{instance: inst, method: method, status: status}
+        )
+      end
+
+      for deleted <- [true, false, false] do
+        :telemetry.execute(
+          [:ankusa, :claim_check, :sweep],
+          %{
+            deleted: 0,
+            scanned: 0,
+            packs: 0,
+            kept: 0,
+            leases_pruned: 0,
+            backlog: 0,
+            partitions_left: 0,
+            duration: 1
+          },
+          %{instance: inst, deleted: deleted}
+        )
+      end
+
+      scrape = Ankusa.Metrics.scrape(inst)
+
+      assert scrape =~
+               ~r/^ankusa_claim_gateway_requests_total\{[^}]*status="200"[^}]*\} 2(\.0)?$/m
+
+      assert scrape =~
+               ~r/^ankusa_claim_gateway_requests_total\{[^}]*status="502"[^}]*\} 1(\.0)?$/m
+
+      # Status is the only label a caller's request can shape; no method, no tenant, no claim.
+      for line <- series(scrape, "ankusa_claim_gateway_requests_total") do
+        refute line =~ ~r/method=|tenant|claim=/
+      end
+
+      assert scrape =~
+               ~r/^ankusa_claim_gateway_duration_seconds_count\{instance="#{inst}"\} 3(\.0)?$/m
+
+      assert scrape =~ "ankusa_claim_gateway_duration_seconds_bucket{"
+      assert scrape =~ ~r/^ankusa_claim_sweeps_total\{[^}]*deleted="true"[^}]*\} 1(\.0)?$/m
+      assert scrape =~ ~r/^ankusa_claim_sweeps_total\{[^}]*deleted="false"[^}]*\} 2(\.0)?$/m
+    end
+
+    test "archive metrics: failures count, and the oldest unarchived age is a gauge" do
+      config = start_instance()
+      inst = config.instance
+
+      :telemetry.execute([:ankusa, :archive, :failure], %{}, %{instance: inst})
+      :telemetry.execute([:ankusa, :archive, :failure], %{}, %{instance: inst})
+
+      :telemetry.execute(
+        [:ankusa, :archive, :state],
+        %{oldest_unarchived_age_ms: 90_000},
+        %{instance: inst}
+      )
+
+      scrape = Ankusa.Metrics.scrape(inst)
+      assert scrape =~ ~r/^ankusa_archive_failures_total\{instance="#{inst}"\} 2(\.0)?$/m
+      assert gauge(scrape, "ankusa_archive_oldest_unarchived_age_seconds", inst) == 90.0
+
+      :telemetry.execute(
+        [:ankusa, :archive, :state],
+        %{oldest_unarchived_age_ms: 0},
+        %{instance: inst}
+      )
+
+      assert gauge(
+               Ankusa.Metrics.scrape(inst),
+               "ankusa_archive_oldest_unarchived_age_seconds",
+               inst
+             ) ==
+               0.0
     end
 
     test "a probe that fails emits nothing and the others still run" do

@@ -74,7 +74,7 @@ defmodule Ankusa.Config do
               # `wal: :dual` one group is one produce request
               group_commit_max_bytes: 4_194_304,
               group_commit_max_records: 1_024,
-              # how long a saturated writer (its last group held 16 or more
+              # how long a saturated writer (its last group held 64 or more
               # hooks) waits for the callers it just answered to call again, so
               # they join the next group; 0 disables it. Never at low load.
               group_commit_delay_ms: 1,
@@ -307,7 +307,12 @@ defmodule Ankusa.Config do
               # memory for cached pack indexes and claim bodies; 0 = no cache
               read_cache_bytes: 128 * 1024 * 1024,
               # a claim larger than this is served but never cached
-              read_cache_max_entry_bytes: 1024 * 1024
+              read_cache_max_entry_bytes: 1024 * 1024,
+              # `:manifest`: the gateway checks every whole-claim `GET` against the
+              # sha256 in the pack's manifest (`502 integrity_mismatch` on a
+              # difference) and sends it as `x-ankusa-sha256`; `:off` serves the
+              # store's bytes unchecked
+              integrity_check: :manifest
             },
             # continuous backup of the store to an object store, and restore into
             # an empty data_dir at boot (see Ankusa.Store.Backup). Off by default.
@@ -989,6 +994,14 @@ defmodule Ankusa.Config do
       "claim_check.accept_unsigned_refs",
       "nil, true or false",
       &(&1 == nil or is_boolean(&1))
+    )
+
+    check!(
+      config,
+      [:claim_check, :integrity_check],
+      "claim_check.integrity_check",
+      ":off or :manifest",
+      &(&1 in [:off, :manifest])
     )
 
     check!(

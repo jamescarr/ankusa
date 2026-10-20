@@ -396,6 +396,15 @@ defmodule Ankusa.Queue.Deliveries do
   end
 
   @doc """
+  Whether `op` puts an active-tenant marker (`due_ops/6`). A marker is shared by
+  every due row of its tenant in that second, so undoing a batch
+  (`Ankusa.Queue.Writer`, a failed fsync) must leave it: a stale one is swept.
+  """
+  @spec active_marker_put?(Store.op()) :: boolean()
+  def active_marker_put?({:put, :index, <<?A, _::binary>>, _value}), do: true
+  def active_marker_put?(_op), do: false
+
+  @doc """
   Everything a claimed row needs to run: its row, its hook (`nil` if gone) and
   the hook's stored claim-check ref (`nil` if none). Same order as `dues`. A
   row or hook that does not decode is `{:error, reason}` instead (see

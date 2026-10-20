@@ -725,6 +725,15 @@ defmodule Ankusa.ConfigTest do
       assert %Config{} = Config.new(claim_check: %{ref_ttl_ms: 1})
       assert %Config{} = Config.new(claim_check: %{max_concurrent_reads: 0})
 
+      assert Config.new().claim_check.integrity_check == :manifest
+      assert %Config{} = Config.new(claim_check: %{integrity_check: :off})
+
+      for bad <- [nil, true, :sha1, "manifest"] do
+        assert_raise ArgumentError,
+                     "claim_check.integrity_check must be :off or :manifest, got #{inspect(bad)}",
+                     fn -> Config.new(claim_check: %{integrity_check: bad}) end
+      end
+
       for bad <- [0, "true", :yes] do
         assert_raise ArgumentError,
                      "claim_check.accept_unsigned_refs must be nil, true or false, got #{inspect(bad)}",

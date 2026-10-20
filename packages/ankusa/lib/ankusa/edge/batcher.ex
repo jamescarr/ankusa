@@ -170,6 +170,11 @@ defmodule Ankusa.Edge.Batcher do
        # commit task ref => %{entries: [{from, record, deadline}], bytes: n}, at
        # most `max_commits` of them
        inflight: %{},
+       # the records and body bytes in `inflight`, kept as totals: summing the
+       # batches on every request cost about a thousand reductions each at
+       # `max_commits` 64
+       inflight_count: 0,
+       inflight_bytes: 0,
        timer: nil,
        # The timer that answers buffered records at their deadline, and the
        # deadline it was armed for.
@@ -186,7 +191,7 @@ defmodule Ankusa.Edge.Batcher do
   def format_status(status) do
     Map.new(status, fn
       {:state, %{buffer: _, inflight: _} = state} ->
-        {:state, %{state | buffer: state.count, inflight: inflight_size(state)}}
+        {:state, %{state | buffer: state.count, inflight: state.inflight_count}}
 
       {:message, {:enqueue, _record, deadline}} ->
         {:message, {:enqueue, :redacted, deadline}}
@@ -199,8 +204,8 @@ defmodule Ankusa.Edge.Batcher do
   @impl true
   def handle_call({:enqueue, record, deadline}, from, state) do
     size = record_bytes(record)
-    queued = state.count + inflight_size(state)
-    queued_bytes = state.bytes + inflight_bytes(state)
+    queued = state.count + state.inflight_count
+    queued_bytes = state.bytes + state.inflight_bytes
 
     # A record bigger than the byte bound on its own is still admitted into an
     # empty batcher: `max_body_bytes` is the per-record limit, this one bounds
@@ -252,8 +257,8 @@ defmodule Ankusa.Edge.Batcher do
 
   def handle_info({ref, result}, %{inflight: inflight} = state) when is_map_key(inflight, ref) do
     Process.demonitor(ref, [:flush])
-    {%{entries: entries}, inflight} = Map.pop!(inflight, ref)
-    state = %{state | inflight: inflight}
+    {%{entries: entries, bytes: batch_bytes}, inflight} = Map.pop!(inflight, ref)
+    state = settle(state, inflight, entries, batch_bytes)
 
     case result do
       {:ok, results} ->
@@ -286,13 +291,13 @@ defmodule Ankusa.Edge.Batcher do
     # already mid-commit, that batch is durable and its callers were told 503.
     Logger.warning("[ankusa] store commit task died: #{inspect(reason)}")
 
-    {%{entries: entries}, inflight} = Map.pop!(inflight, ref)
+    {%{entries: entries, bytes: batch_bytes}, inflight} = Map.pop!(inflight, ref)
 
     Enum.each(entries, fn {from, _record, _deadline} ->
       GenServer.reply(from, {:error, :store_unavailable})
     end)
 
-    state = %{state | inflight: inflight}
+    state = settle(state, inflight, entries, batch_bytes)
     {:noreply, if(state.count > 0, do: start_commit(state), else: state)}
   end
 
@@ -302,11 +307,15 @@ defmodule Ankusa.Edge.Batcher do
 
   # ── commits ───────────────────────────────────────────────────────────────
 
-  defp inflight_size(%{inflight: inflight}),
-    do: Enum.reduce(inflight, 0, fn {_ref, %{entries: entries}}, n -> n + length(entries) end)
-
-  defp inflight_bytes(%{inflight: inflight}),
-    do: Enum.reduce(inflight, 0, fn {_ref, %{bytes: bytes}}, n -> n + bytes end)
+  # A batch is out of `inflight`: its records and bytes leave the totals.
+  defp settle(state, inflight, entries, batch_bytes) do
+    %{
+      state
+      | inflight: inflight,
+        inflight_count: state.inflight_count - length(entries),
+        inflight_bytes: state.inflight_bytes - batch_bytes
+    }
+  end
 
   defp record_bytes(%{envelope: %{body: body}}) when is_binary(body), do: byte_size(body)
   defp record_bytes(_record), do: 0
@@ -354,7 +363,9 @@ defmodule Ankusa.Edge.Batcher do
         | buffer: remainder,
           count: length(remainder),
           bytes: state.bytes - batch_bytes,
-          inflight: Map.put(state.inflight, task.ref, %{entries: entries, bytes: batch_bytes})
+          inflight: Map.put(state.inflight, task.ref, %{entries: entries, bytes: batch_bytes}),
+          inflight_count: state.inflight_count + length(entries),
+          inflight_bytes: state.inflight_bytes + batch_bytes
       }
     end
   end

@@ -117,7 +117,7 @@ defmodule AnkusaServer.Config do
                        pack_max_bytes ip store stores placement key_layout store_cooldown_ms
                        read_deadline_ms read_timeout_ms read_retries read_max_inflight read_queue_max
                        read_cache_bytes read_cache_max_entry_bytes max_concurrent_reads
-                       ref_signing_keys ref_ttl_ms accept_unsigned_refs tls auth)
+                       ref_signing_keys ref_ttl_ms accept_unsigned_refs integrity_check tls auth)
   @backup_keys ~w(enabled interval_ms keep store secondary timeout_ms verify_interval_ms
                   signing_key final_timeout_ms max_age_ms require_fresh)
   @source_store_keys ~w(type url namespace tick_ms timeout_ms load_timeout_ms)
@@ -1277,6 +1277,10 @@ defmodule AnkusaServer.Config do
           int_opt(claim_check, "read_cache_max_entry_bytes", path)
         )
         |> put_opt(:max_concurrent_reads, int_opt(claim_check, "max_concurrent_reads", path))
+        |> put_opt(
+          :integrity_check,
+          atom_enum_opt(claim_check, "integrity_check", ~w(off manifest), path)
+        )
         |> put_opt(:ref_signing_keys, ref_signing_keys(claim_check, path))
         |> put_opt(:ref_ttl_ms, int_opt(claim_check, "ref_ttl_ms", path))
         |> put_opt(

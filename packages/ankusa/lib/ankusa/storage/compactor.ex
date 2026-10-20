@@ -359,6 +359,8 @@ defmodule Ankusa.Storage.Compactor do
               "(#{state.failures + 1} in a row), retried with backoff: #{inspect(reason)}"
           )
 
+          Ankusa.Telemetry.emit([:archive, :failure], %{}, %{instance: state.instance})
+
           {written, %{state | failures: state.failures + 1}}
       end
     end
@@ -394,12 +396,16 @@ defmodule Ankusa.Storage.Compactor do
 
   defp gate(state, _pending, _more?, _flush?), do: {:go, state}
 
-  defp archive_pending(state, [], _more?), do: {:ok, :none, state}
+  defp archive_pending(state, [], _more?) do
+    emit_archive_state(state.instance, [])
+    {:ok, :none, state}
+  end
 
   defp archive_pending(state, pending, more?) do
     with {:ok, hooks} <- Archive.hooks(state.instance, Enum.map(pending, &elem(&1, 0))) do
       {present, missing} = Enum.split_with(hooks, fn {_seq, bin} -> bin != nil end)
       {entries, undecodable} = decode_ids(present)
+      emit_archive_state(state.instance, entries)
       missing_seqs = Enum.map(missing, &elem(&1, 0))
 
       if missing_seqs != [] do
@@ -422,6 +428,25 @@ defmodule Ankusa.Storage.Compactor do
         {:ok, {pending |> List.last() |> elem(0), more?}, %{state | partial: nil}}
       end
     end
+  end
+
+  # How long the oldest hook still owed a segment has been waiting, for the age
+  # gauge: from the batch this tick already read (the oldest obligation is the
+  # first, and the first hook is decoded once more for its `received_at`), so
+  # it costs no scan, and it is reported before the write, so a store that
+  # refuses it shows as growth.
+  defp emit_archive_state(instance, entries) do
+    age_ms =
+      with [{_seq, _id, bin} | _] <- entries,
+           {:ok, %Envelope{received_at: received_at}} <- Envelope.from_binary(bin) do
+        max(System.system_time(:millisecond) - received_at, 0)
+      else
+        _none -> 0
+      end
+
+    Ankusa.Telemetry.emit([:archive, :state], %{oldest_unarchived_age_ms: age_ms}, %{
+      instance: instance
+    })
   end
 
   # Every hook of the batch was already gone: nothing to write, only

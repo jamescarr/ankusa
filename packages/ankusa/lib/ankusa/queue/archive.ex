@@ -26,15 +26,22 @@ defmodule Ankusa.Queue.Archive do
   Archive obligations after `after_seq`, ascending, until their sizes reach
   `roll_bytes` — always at least one, so a hook bigger than a segment still
   gets one. `more?` says whether obligations remain past the returned ones.
+  Only a hook the queue writer's fsync has covered is archived
+  (`Ankusa.Queue.Syncer.durable_seq/1`): the obligations above it are read once
+  the sync returns.
   """
   @spec pending(atom(), non_neg_integer(), non_neg_integer()) ::
           {:ok, [{pos_integer(), non_neg_integer()}], boolean()} | {:error, term()}
   def pending(instance, after_seq, roll_bytes) do
     %{hi: hi} = Keys.family(:archive_pending)
     range = {Keys.archive_pending(after_seq + 1), hi}
+    durable = Ankusa.Queue.Syncer.durable_seq(instance)
 
     result =
       Store.fold(instance, :archive_pending, range, {[], 0, false}, fn
+        <<?a, seq::64>>, _size, {taken, bytes, _more?} when seq > durable ->
+          {:halt, {taken, bytes, false}}
+
         <<?a, seq::64>>, <<size::32, _ord::32>>, {taken, bytes, _more?} ->
           if taken != [] and bytes >= roll_bytes,
             do: {:halt, {taken, bytes, true}},

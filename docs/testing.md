@@ -430,8 +430,16 @@ The always-on tests cover:
   packing per tenant per batch with `pack_max_bytes` splitting and
   failure isolation; check-in-once (a fat hook on two sinks and a failing
   retry writes one object); `validate_config!/1` boot-time rejections; the
-  `:claim_check` role's read-only HTTP API; and the `LocalFS` retention sweeper
-  deleting whole `dt=` day partitions.
+  `:claim_check` role's read-only HTTP API; the gateway's integrity check
+  (`router_test.exs`, "integrity": a flipped body byte or an unparsable
+  manifest is `502 integrity_mismatch`, `integrity_check: :off` serves and
+  sends no digest, `x-ankusa-sha256` on `200`/`206` only, 100 concurrent
+  `HEAD`s of one claim cause one store read and 100 `GET`s three — index,
+  manifest, claim — and the manifest's digests in `pack_test.exs`); and the
+  `LocalFS` retention sweeper deleting whole `dt=` day partitions. The gateway,
+  sweep and archive series are in `metrics_test.exs` ("gateway metrics",
+  "archive metrics") and the compactor's failure and age events in
+  `storage_test.exs`.
 - **Property tests** (`test/ankusa/property/`, [StreamData](https://hexdocs.pm/stream_data),
   5 000 runs per property by default; `PROPERTY_RUNS=50000 mix test
   test/ankusa/property` for a long soak; generators in
@@ -1048,18 +1056,31 @@ since the last backup, so the drill proves the difference. See
   id, whether the two calls merge into one group or commit as two; a key the sweeper
   deleted is not remembered as live. `queue_dual_test.exs` has the `wal: :dual`
   case (the retry meets an unconfirmed original: `intake_pending`).
+- `queue_test.exs` (`the WAL fsync is pipelined`): a group is in the store (a reader
+  sees it) and not acked, not durable (`Syncer.durable_seq/1`) and not due
+  (`Syncer.visible/2`) while its fsync runs; group N+1 is applied, with dense seqs,
+  while group N syncs; a failed fsync (the store taken away under it) answers the
+  group with an error, fences the writer, deletes the group's rows once the store is
+  back, and the provider's retry (same dedupe key) is stored once.
+  `dispatch_test.exs` (`a group applied but not yet fsynced is not delivered`) holds the
+  fsync with a telemetry handler on `[:ankusa, :wal_sync, :start]` and asserts the sink
+  gets nothing until it returns; `queue_dual_test.exs` (`no ack before the local
+  fsync, even once the log has confirmed`) does the same under `wal: :dual`.
 
 `bench/store_commit.exs` (`MIX_ENV=test mix run bench/store_commit.exs`) drives
 `Ankusa.Edge.Batcher.commit/4` with 10 KB bodies over 4 partitions and makes the
-writer's commit cost 1, 5 and 10 ms (a telemetry handler sleeps in the writer before
-the store write). Throughput: 256 closed-loop clients, grouped against ungrouped
-(`group_commit_max_records: 1, max_commits: 1, group_commit_delay_ms: 0`: one commit
-per partition batch, one at a time, what the writer did before cross-partition group
-commit), printing records/s, commits/s, mean group and
-ack p50/p99. Burst: 1 000 req/s open loop, the writer stalled for one second, then
-drained while arrivals continue. It passes only if grouped is at least 2 x ungrouped
-at 5 ms and the ack p99 of the requests that arrived after the stall is at most 50 ms
-(the SLO; the group cap is what keeps a backlog from becoming one 64 MiB commit).
+WAL fsync cost 1, 5 and 10 ms (a telemetry handler on `[:ankusa, :wal_sync, :start]`
+sleeps in the syncer before its `sync_wal`). Throughput: 256 closed-loop clients,
+grouped against ungrouped
+(`group_commit_max_records: 1, max_commits: 1, group_commit_delay_ms: 0`: one write
+per partition batch), printing records/s, groups applied/s, fsyncs/s, mean group,
+groups per fsync, the writer's mean apply time and ack p50/p99. Burst: 1 000 req/s
+open loop, the writer stalled for one second, then drained while arrivals continue.
+It passes only if grouped is at least 1.5 x ungrouped at 5 ms, the writer applies at
+least 1.2 groups per fsync at 5 ms (a writer that waits for each fsync cannot apply
+more than one: the fsync is off its critical path), and the ack p99 of the requests
+that arrived after the stall is at most 50 ms (the SLO; the group cap is what keeps a
+backlog from becoming one 64 MiB commit).
 
 ### Perf gate: `mise run bench:gate`
 

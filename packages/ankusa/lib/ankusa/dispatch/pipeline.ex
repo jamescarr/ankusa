@@ -91,7 +91,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   require Logger
 
   alias Ankusa.{ClaimCheck, Envelope, RetryPolicy, Sink, SourceStore, Store, Telemetry}
-  alias Ankusa.Queue.{Deliveries, Reclaim, Tenants}
+  alias Ankusa.Queue.{Deliveries, Reclaim, Syncer, Tenants}
   alias Ankusa.Sink.Message
   alias Ankusa.Store.Keys
   alias Ankusa.Tenant.Gate
@@ -121,6 +121,9 @@ defmodule Ankusa.Dispatch.Pipeline do
   # Markers read per scan.
   @active_limit 4_096
   @holdoff_ms 1_000
+  # Looks again this soon at rows that are due but wait for the queue's fsync; the
+  # syncer wakes dispatch when it returns, so this only covers an fsync that failed.
+  @unsynced_retry_ms 50
   @max_sleep_ms 30_000
 
   # ── public API ────────────────────────────────────────────────────────────
@@ -636,7 +639,11 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   defp scan(state) do
     dispatch = state.config.dispatch
-    now = now_ms()
+    # A group the queue writer has applied but the syncer has not fsynced yet is
+    # not due: the hook was not acked, and a delivery of it would outrun its
+    # durability (`Ankusa.Queue.Syncer.visible/2`). The syncer wakes this process
+    # when the fsync returns.
+    now = Syncer.visible(state.instance, now_ms())
     limit = min(dispatch.batch, dispatch.max_inflight - state.claimed)
     budget = dispatch.max_inflight_bytes - state.claimed_bytes
 
@@ -2105,11 +2112,18 @@ defmodule Ankusa.Dispatch.Pipeline do
       {:ok, at} ->
         now = now_ms()
 
-        if at <= now do
-          send(self(), :wake)
-          cancel_timer(state)
-        else
-          set_timer(state, min(at - now, @max_sleep_ms))
+        cond do
+          at > now ->
+            set_timer(state, min(at - now, @max_sleep_ms))
+
+          # Due, but the rows wait for an fsync (the syncer wakes dispatch when it
+          # returns; the timer is the fallback when that fsync failed).
+          at > Syncer.visible(state.instance, now) ->
+            set_timer(state, @unsynced_retry_ms)
+
+          true ->
+            send(self(), :wake)
+            cancel_timer(state)
         end
 
       {:error, _reason} ->
