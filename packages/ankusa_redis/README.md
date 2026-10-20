@@ -2,13 +2,16 @@
 
 Redis adapters for the Ankusa webhook ingestion framework: the multi-node
 route store (`Ankusa.Routes.Store.Redis`), the multi-node source store
-(`Ankusa.SourceStore.Redis`), and the pub/sub sink (`Ankusa.Sink.Redis`).
+(`Ankusa.SourceStore.Redis`), the fleet-scoped rate-limit and dedupe store
+(`Ankusa.RateLimiter.Store.Redis`), and the pub/sub sink
+(`Ankusa.Sink.Redis`).
 
 This package exists so `ankusa` core stays free of the `:redix` dependency. It
 is needed only by deployments that keep route definitions or API-managed
 sources in Redis so every edge node serves the same set (a single node can use
-core's in-memory route store and `SourceStore.Persistent`), or that deliver
-hooks to a Redis pub/sub channel.
+core's in-memory route store and `SourceStore.Persistent`), that share one rate
+limit or dedupe window across nodes (`fleet.store`), or that deliver hooks to a
+Redis pub/sub channel.
 
 ## Installation
 
@@ -93,6 +96,16 @@ non-default instance.
 
 See `Ankusa.Sink.Redis` moduledoc for the option list, the error contract, and
 the connection lifecycle.
+
+## Fleet store
+
+`Ankusa.RateLimiter.Store.Redis` (which also implements `Ankusa.Dedupe.Store`)
+is the shared store behind `rate_limits.scope: fleet` and
+`dedupe.scope: fleet` (`fleet.store` in YAML). It makes one tenant quota and
+one provider-event-key window cover every edge node, at one call per hook. Each
+call has a hard budget (`fleet.timeout_ms`, 20 ms by default) and a breaker, so
+a slow or dead Redis falls back to this node's own limiter and dedupe index
+(`ankusa_fleet_limiter_degraded` reads `1`) rather than refusing hooks.
 
 ## Testing
 
