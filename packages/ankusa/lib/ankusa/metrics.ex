@@ -580,6 +580,7 @@ defmodule Ankusa.Metrics do
            &oldest_due_age_seconds/1, :second},
           {"ankusa.quarantine.bytes", [:ankusa, :quarantine, :state], :bytes, :byte},
           {"ankusa.quarantine.entries", [:ankusa, :quarantine, :state], :entries, :unit},
+          {"ankusa.quarantine.pending", [:ankusa, :quarantine, :state], :pending, :unit},
           {"ankusa.disk.free.bytes", [:ankusa, :disk, :state], :free_bytes, :byte},
           {"ankusa.disk.total.bytes", [:ankusa, :disk, :state], :total_bytes, :byte},
           {"ankusa.dispatch.running", [:ankusa, :dispatch, :state], :running, :unit},

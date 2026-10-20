@@ -20,7 +20,8 @@ defmodule Ankusa.Metrics.Gauges do
     * `[:ankusa, :tenant, :state]` — one event per tenant among the 100 with the
       most `pending` rows (`pending`, and the `tenant` in the metadata), taken
       from the counters of the first 10 000 tenants of the active index.
-    * `[:ankusa, :quarantine, :state]` — the pen's `bytes` and `entries`; on an
+    * `[:ankusa, :quarantine, :state]` — the pen's `bytes`, `entries` and
+      `pending` (writes waiting for its group commit); on an
       `:edge` node.
     * `[:ankusa, :disk, :state]` — `free_bytes` and `total_bytes` of the file
       system holding `data_dir`, only while `:disksup` (`:os_mon`) runs. Core
