@@ -86,10 +86,11 @@ applied, so a group costs the larger of its CPU and its fsync, not their sum.
 A group is applied before it is durable, so until its fsync returns nothing
 external may rely on it: dispatch does not claim its rows, the archive does not
 read them, and a retry of one of its hooks is not answered `201 duplicate`
-([ADR 0002](adr/0002-dual-commit-intake-log.md), amendment 17). A failed fsync
-answers every group it covers `503`, reopens the store like a failed write, and
-is retried; the hooks of those groups are deliverable only once a later fsync
-has made them durable. Everything that needs no seq is done before
+([ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md),
+amendment 17). A failed fsync answers every group it covers `503`, reopens the
+store like a failed write, fences the writer and deletes the rows of those
+groups before it accepts work again, so a hook the provider was told `503` is
+never delivered and its retry is stored once. Everything that needs no seq is done before
 the writer is called, in the batcher's commit task: the hook's binary, its
 delivery rows, and a read of its dedupe keys. That read is a prefetch the
 writer re-validates before it assigns seqs: the first occurrence of a key in

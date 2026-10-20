@@ -59,7 +59,8 @@ defmodule Ankusa.Queue.Syncer do
   @type entry :: %{
           upto: non_neg_integer(),
           at: integer(),
-          done: {:reply, term(), term()} | {:notify, pid(), reference()}
+          # the `Task` ref of the publish a dual group is joined with: opaque
+          done: {:reply, term(), term()} | {:notify, pid(), term()}
         }
 
   # ── marks (read by the writer, dispatch and the archive scan) ─────────────

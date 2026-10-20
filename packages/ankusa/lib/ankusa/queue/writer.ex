@@ -1540,8 +1540,11 @@ defmodule Ankusa.Queue.Writer do
   end
 
   defp invert({:put, :default, key, _value}, next_seq) when key == next_seq, do: []
-  defp invert({:put, :index, <<?A, _::binary>>, _value}, _next_seq), do: []
-  defp invert({:put, cf, key, _value}, _next_seq), do: [{:delete, cf, key}]
+
+  defp invert({:put, cf, key, _value} = op, _next_seq) do
+    if Deliveries.active_marker_put?(op), do: [], else: [{:delete, cf, key}]
+  end
+
   defp invert({:merge, cf, key, delta}, _next_seq), do: [{:merge, cf, key, -delta}]
   defp invert({:delete, _cf, _key}, _next_seq), do: []
 
