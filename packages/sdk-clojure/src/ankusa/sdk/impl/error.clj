@@ -21,10 +21,11 @@
      "InvalidRouteIdError" {:retryable false}
      "RouteNotFoundError" {:retryable false}
      "RoutesRejectedError" {:retryable false :status nil :code nil :field nil
-                            :message nil :conflicting-id nil :max-routes nil}
+                            :message nil :conflicting-id nil :max-routes nil
+                            :scope nil}
      "RoutesUnavailableError" {:retryable true :status nil :reason nil}
      "RoleNotEnabledError" {:retryable false :role nil}
-     "AdminRejectedError" {:retryable false :status nil :code nil}
+     "AdminRejectedError" {:retryable false :status nil :code nil :scope nil}
      "AdminUnavailableError" {:retryable true :status nil :reason nil}
      "InvalidMessageError" {:retryable false :code nil :field nil}
      "SourceNotFoundError" rejected

@@ -46,12 +46,16 @@ class AdminRejectedError(AdminError):
     """The listener rejected the request (any other ``4xx``).
 
     ``status`` is the HTTP status; ``code`` is the body's ``error`` field
-    (``invalid_filter``, ...).
+    (``invalid_filter``, ...). ``scope`` is the credential scope a
+    ``403 forbidden`` says is missing, when the body supplies it.
     """
 
     retryable = False
 
-    def __init__(self, message: str, status: int, code: str | None) -> None:
+    def __init__(
+        self, message: str, status: int, code: str | None, scope: str | None = None
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
+        self.scope = scope

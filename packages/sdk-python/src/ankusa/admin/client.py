@@ -120,6 +120,18 @@ class AdminClient:
         """
         return self._json(self._request("GET", "/v1/quarantine", params=_query(params)))
 
+    def list_audit(
+        self,
+        params: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """``GET /v1/audit`` -> a page of audit trail entries, newest first.
+
+        ``params`` may carry ``cursor``, ``limit``, ``since``, ``until``,
+        ``actor``, ``action`` and ``tenant``; absent keys are omitted from the
+        query string rather than sent as ``=undefined``.
+        """
+        return self._json(self._request("GET", "/v1/audit", params=_query(params)))
+
     def _request(
         self,
         method: str,
@@ -163,7 +175,13 @@ def _raise_for_status(response: httpx.Response) -> None:
         role = body.get("role") if isinstance(body, dict) else None
         raise RoleNotEnabledError(f"role not enabled on this node: {role!r}", role)
     if 400 <= status < 500:
-        raise AdminRejectedError(f"admin listener rejected the request ({status}): {body!r}", status, code)
+        scope = body.get("scope") if isinstance(body, dict) else None
+        raise AdminRejectedError(
+            f"admin listener rejected the request ({status}): {body!r}",
+            status,
+            code,
+            scope if isinstance(scope, str) else None,
+        )
     # Everything else that isn't 2xx is retryable: 1xx, an unfollowed 3xx
     # redirect, and 5xx.
     raise AdminUnavailableError(f"admin listener error ({status}): {body!r}")

@@ -120,8 +120,10 @@ defmodule Ankusa.SDK.RoutesRejectedError do
   The listener rejected the request (`400` or any other non-404 `4xx`).
 
   `:code` is the body's `error` field (`invalid_route`, `duplicate_route`,
-  `too_many_routes`, ...); `:field`, `:message`, `:conflicting_id` and
-  `:max_routes` are carried through when the body supplies them.
+  `too_many_routes`, ...); `:field`, `:message`, `:conflicting_id`,
+  `:max_routes` and `:scope` are carried through when the body supplies them.
+  `:scope` is the scope a `403 forbidden` says the credential lacks (control
+  planes require a credential since Ankusa 0.6).
   """
 
   @type t :: %__MODULE__{
@@ -130,10 +132,20 @@ defmodule Ankusa.SDK.RoutesRejectedError do
           field: String.t() | nil,
           message: String.t() | nil,
           conflicting_id: String.t() | nil,
-          max_routes: non_neg_integer() | nil
+          max_routes: non_neg_integer() | nil,
+          scope: String.t() | nil
         }
 
-  defexception [:message, :status, :code, :field, :conflicting_id, :max_routes, retryable: false]
+  defexception [
+    :message,
+    :status,
+    :code,
+    :field,
+    :conflicting_id,
+    :max_routes,
+    :scope,
+    retryable: false
+  ]
 
   @impl Exception
   def message(%__MODULE__{} = error) do
@@ -170,12 +182,17 @@ defmodule Ankusa.SDK.AdminRejectedError do
   The listener rejected the request (any other `4xx`).
 
   `:status` is the HTTP status; `:code` is the body's `error` field
-  (`invalid_filter`, ...).
+  (`invalid_filter`, ...); `:scope` is the scope a `403 forbidden` says the
+  credential lacks (control planes require a credential since Ankusa 0.6).
   """
 
-  @type t :: %__MODULE__{status: non_neg_integer(), code: String.t() | nil}
+  @type t :: %__MODULE__{
+          status: non_neg_integer(),
+          code: String.t() | nil,
+          scope: String.t() | nil
+        }
 
-  defexception [:message, :status, :code, retryable: false]
+  defexception [:message, :status, :code, :scope, retryable: false]
 end
 
 defmodule Ankusa.SDK.AdminUnavailableError do
