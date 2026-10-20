@@ -1,7 +1,14 @@
 # Configuration
 
-The container reads a YAML file; the library takes a `%Ankusa.Config{}`, and
-both describe the same pipeline.
+The container reads one YAML file; the library takes an `%Ankusa.Config{}` and
+per-source `%Ankusa.Source{}` structs. Both describe the same pipeline, and the
+loader validates every key, range and cross-key rule before the node binds a
+port.
+
+This page is the reference: the YAML sections first, then the Elixir structs.
+`packages/ankusa_server/config-examples/reference.yml` carries every YAML key
+with its default and a comment, and `check-config` proves a file loads without
+starting the node.
 
 ## Container configuration (YAML)
 
@@ -58,7 +65,9 @@ sources:
 
 ### Sections
 
-Every top-level section, with its keys and defaults:
+The top-level map. Each row gives the keys you are most likely to change and
+their defaults; the exhaustive list, including every nested key and its range,
+is the [key reference](#ankusa-config) below.
 
 | Section | Keys (default) |
 | --- | --- |
@@ -75,6 +84,7 @@ Every top-level section, with its keys and defaults:
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `key_prefix` (`""`; `name/` parts prepended to every segment key, so nodes can share a bucket), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
 | `storage.s3.sse`, `storage.gcs.sse` | `type` (`aes256` \| `kms`), `key_id` (the KMS key; required for `kms` on GCS, optional on S3). Server-side encryption sent on every object this store writes; the same `sse:` key is accepted by the `s3`/`gcs` block of `claim_check.store(s)` and `backup.store`. See [Encryption at rest](storage.md#encryption-at-rest) |
 | `storage.s3.*`, `storage.gcs.*` transport options | `timeout_ms` (10000), `upload_timeout_ms` (60000), `op_deadline_ms` (120000), `multipart_threshold_bytes` (8388608), `multipart_part_bytes` (8388608), `retries` (2), `breaker_failures` (5; 0 = no breaker), `breaker_open_ms` (30000), `breaker_slow_ms` (5000), `pool_size` (32), `pool_count` (1), `pool_timeout` (5000). The same keys are accepted by the `s3`/`gcs` block of `claim_check.store(s)` and `backup.store`. Integers, range-checked when the instance starts. See [Conditional writes, retries, checksums, multipart, pools](storage.md#conditional-writes-retries-checksums-multipart-pools) |
+| `archive` | `retention_days` (`nil` keeps segment objects; an integer deletes a segment object and its index through the blob store, with the catalogue row, once the newest hook in it is that old). See the key reference for its relation to `storage.catalogue_retention_days` |
 | `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `tls` (a TLS block), `auth` (like `admin.auth`; reading a claim needs `claims:read` and the claim's tenant), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`), `stores` (a list of `store`-shaped entries, exclusive with `store`: failover between them), `placement` (`ordered` \| `hash`), `store_cooldown_ms` (30000), `key_layout` (`flat` \| `sharded`), and the gateway's reads: `read_deadline_ms` (5000), `read_timeout_ms` (3000), `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256), `read_cache_bytes` (134217728; 0 = no cache), `read_cache_max_entry_bytes` (1048576), `max_concurrent_reads` (1024; 0 = no cap), and signed refs: `ref_signing_keys` (`[]`; a list or a comma-separated string of `[current, previous…]`, each ≥ 16 bytes; use `${VAR}`), `ref_ttl_ms` (null = the retention, else 30 days), `accept_unsigned_refs` (null = only while no key is set). `claim_check.authorize` is Elixir config only. See [`claim-check.md`](claim-check.md#a-dedicated-claim-store), [Under load](claim-check.md#under-load) and [The reference](claim-check.md#the-reference) |
 | `backup` | `enabled` (`false`), `interval_ms` (60000), `keep` (3), `store` (unset = the `storage` bucket; same shape as `claim_check.store`), `secondary` (a second store of the same shape: every backup is written to both, restore falls back to it), `timeout_ms` (120000), `verify_interval_ms` (unset = never), `signing_key` (a string or a list, e.g. `["${BACKUP_SIGNING_KEY}"]`: the first signs, any verifies), `final_timeout_ms` (20000), `max_age_ms` (unset = no `/ready` label), `require_fresh` (`false`). Continuous backup of the node's store, restored at boot into an empty `data_dir`; keys go under `storage.key_prefix`. See [`storage.md`](storage.md#backup-and-restore) |
 | `routes` | `enabled` (`false`), `max_routes` (1000000), `memory_budget_bytes` (8589934592), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms`/`store.timeout_ms`/`store.load_timeout_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `admin.tls` (a TLS block), `admin.auth` (like `admin.auth` of the operator API), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
@@ -443,10 +453,12 @@ Never `Application.get_env/2` scattered through call sites:
 ### `%Ankusa.Config{}`
 
 Built with `Ankusa.Config.new/1` from a keyword list; unknown keys raise
-`ArgumentError` at boot (fail fast on a typo, not at 3am). `:batcher`,
-`:dispatch`, `:storage`, `:claim_check`, `:backup`, `:admin`, `:rate_limits`,
-`:quarantine`, `:audit`, `:tenants`, `:lifecycle` and `:egress` are maps and get **deep-merged** over the
-defaults. Pass only the keys you want to change.
+`ArgumentError` at boot (fail fast on a typo, not at 3am). Every map-valued
+section is **deep-merged** over the defaults, so pass only the keys you want to
+change: `:listener`, `:batcher`, `:dispatch`, `:storage`, `:claim_check`,
+`:backup`, `:admin`, `:metrics`, `:routes`, `:rate_limits`, `:dedupe`,
+`:fleet`, `:quarantine`, `:queue`, `:archive`, `:lifecycle`, `:audit`,
+`:tenants`, `:egress`, `:secrets` and `:intake`.
 
 The example lists the keys `Ankusa.Config.new/1` accepts, at their defaults. As `config :ankusa` app env, the autostarted default instance reads only `:autostart`, `:port`, `:data_dir`, `:roles` and `:sources`; pass the rest to `Ankusa.Config.new/1` or an `Ankusa.Instance` child spec.
 
@@ -588,12 +600,11 @@ config :ankusa,
 | `store_headers` | `%{drop: [...the six credential headers above], hash: []}` | Which request headers a hook is stored with (`Ankusa.Edge.StoredHeaders`), applied after verification. `drop` removes a header from the stored hook, `hash` keeps it with the value replaced by `"sha256:<hex>"`; names are case-insensitive and a name in both lists is dropped. An absent `drop` or `hash` keeps the default's list. See [Stored headers](#stored-headers). |
 | `route_resolver` | `{Ankusa.RouteResolver.Path, []}` | `{module, opts}` implementing `Ankusa.RouteResolver`: catch-URL scheme. See [`multi-tenancy.md`](multi-tenancy.md). |
 | `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. `SourceStore.Persistent` adds API-managed, tenant-scoped sources persisted in this node's store (the image's `source_store.type: persistent`); `Ankusa.SourceStore.Redis` (`ankusa_redis`, the image's `source_store.type: redis`) keeps them in Redis, shared across nodes; the rest is read-only. |
-| `wal` | `:disk` | The queue's mode; the name is historical. `:disk` commits every hook into this node's RocksDB store before the ack (`Ankusa.Queue`). `:none` commits nothing: ingest acks on the sink's confirm, and every statically configured source needs at least one sink whose `:ok` means durable (`c:Ankusa.Sink.durable?/1`), so boot refuses a config that cannot make that promise. Under `:none` the queue's reader roles (`:dispatch`, `:storage`) are dropped from `roles`. See [`delivery.md`](delivery.md#direct-mode). |
+| `wal` | `:disk` | The queue's durability mode; the name is historical. `:disk` fsyncs every hook in this node's RocksDB store before the ack. `:dual` fsyncs it here **and** confirms it in a replicated intake log before the ack; it needs `intake.type`, `intake.node_id`, `backup.enabled` with `backup.max_age_ms`, and the `:edge` role, and boot refuses otherwise (see [ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)). `:none` commits nothing: ingest acks on the sinks' confirm, every static source needs at least one sink whose `:ok` means durable (`c:Ankusa.Sink.durable?/1`), and the queue's reader roles (`:dispatch`, `:storage`) are dropped from `roles`. See [`delivery.md`](delivery.md#direct-mode). |
 | `direct_publish_timeout_ms` | `8_000` | `wal: :none` only: the one deadline every sink must confirm under (YAML `wal.publish_timeout_ms`). Keep it below the provider's own timeout. |
-| `wal` | `:disk` | The queue's durability mode: `:disk` (every hook fsynced on this host before the ack), `:dual` (fsynced on this host **and** confirmed in a replicated intake log; see [ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)) or `:none` (ack on the sinks' confirm). `:dual` needs `intake.type`, `intake.node_id`, `backup.enabled` with `backup.max_age_ms`, and the `:edge` role; boot refuses otherwise. |
-| `intake.type` | `nil` | `:kafka` or `:jetstream` (the adapter packages) under `wal: :dual`; `:memory` is a test double (`Ankusa.Intake.Memory`), not a production mode. |
+| `intake.type` | `nil` | `:kafka` under `wal: :dual` (the `ankusa_kafka` package, the only implemented adapter). The loader also accepts `:jetstream`, for which no adapter has shipped, and `:memory`, a test double (`Ankusa.Intake.Memory`), not a production mode. |
 | `intake.node_id` | `nil` | This node's identity in the log, `[a-z0-9._-]{1,64}`, **stable across a replacement**: the replacement node starts with the lost node's id and replays its records. A store stamped with another id refuses to boot. |
-| `intake.fleet`, `intake.topic` | `"default"`, `nil` | The log's name is `intake.topic`, else `ankusa.intake.<fleet>` (a Kafka topic, a JetStream stream). |
+| `intake.fleet`, `intake.topic` | `"default"`, `nil` | The log's name is `intake.topic`, else `ankusa.intake.<fleet>` (a Kafka topic). |
 | `intake.kafka`, `intake.jetstream`, `intake.memory` | `[]` | The adapter's own options (a keyword list, passed through whole). Redacted in `GET /v1/config`: only their keys and non-secret identifiers show. |
 | `intake.publish_timeout_ms` | `2_000` | The one publish attempt's deadline (100-60 000, and under the batcher's 15 s record deadline under `dual`). A timeout is a failure; the reconciler republishes. |
 | `intake.reconcile_deadline_ms` | `20_000` | A half-persisted hook the reconciler has not completed within this is *stuck*: its fleet dedupe claim is released and `ankusa_intake_reconcile_stuck` rises (1 000-600 000; under `dedupe.scope: :fleet` it must be below `fleet.pending_ttl_ms`). |
@@ -1422,7 +1433,7 @@ the map.
 | Behaviour | Job | Default | Also shipped |
 | --- | --- | --- | --- |
 | `Ankusa.RouteResolver` | Catch-URL scheme → `%Route{tenant_id, source_id}` | `RouteResolver.Path` (`/webhooks/:source_id`) | `RouteResolver.TenantPath` (`/webhooks/:tenant/:source`) |
-| `Ankusa.Queue` | Durable ack and seq assignment over this node's store | `wal: :disk` (one synced commit per batch) | none (`wal: :none` drops the queue entirely: ingest acks on the sinks' confirm, see [`delivery.md`](delivery.md#direct-mode)) |
+| `Ankusa.Queue` | Durable ack and seq assignment over this node's store | `wal: :disk` (one synced commit per batch) | `wal: :dual` (the same commit plus a confirmed intake-log publish), `wal: :none` (no queue: ingest acks on the sinks' confirm, see [`delivery.md`](delivery.md#direct-mode)) |
 | `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `Verifier.Hmac` (configurable HMAC engine; named schemes Stripe, GitHub, Standard Webhooks, Shopify, Slack), `Verifier.Asymmetric` (Ed25519 or RSA over the same wire templates; named scheme `standard_webhooks_asym`), `Verifier.Token` (bearer, basic, header or query credential), `Verifier.ClientCert` (mTLS client certificate pin) |
 | `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | `SourceStore.Persistent` (API-managed sources in this node's store) |
 | `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.SQS` (`SendMessage`, in core), `Sink.RabbitMQ` (exchange publish, `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce, `ankusa_kafka` package), `Sink.NATS` (JetStream subject publish, `ankusa_nats` package), `Sink.Redis` (pub/sub channel publish, `ankusa_redis` package) |
