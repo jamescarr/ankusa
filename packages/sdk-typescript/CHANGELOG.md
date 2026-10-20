@@ -8,6 +8,11 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The generated claim-check types (`src/claim-check/claim-check-schema.d.ts`)
+  follow the gateway's integrity check: `integrity_mismatch` is an `Error` code,
+  the `502` response is in `readClaim`, and `200`/`206` list the
+  `X-Ankusa-Sha256` header (the whole claim's sha256). `redeem` still checks the
+  bytes against the message's `sha256`; a `502` is retried like any `5xx`.
 - The generated admin types (`src/admin/admin-schema.d.ts`) follow the
   tenant-aware route API: `Route` has `tenant_id` and `source_id`, `RouteInput`
   takes them, and the tenant surface (`/v1/tenants/{tenant}/routes[/{id}]`) is in

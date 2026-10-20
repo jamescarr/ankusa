@@ -379,22 +379,35 @@ defmodule Ankusa.Metrics do
           tags: [:instance, :store, :state]
         )
       ),
+      # The gateway's answers by status only: a status is one of a fixed set,
+      # and nothing the caller sends (tenant, claim, method) is a label.
       counter(
-        "ankusa.claim_check.gateway.requests.total",
+        "ankusa.claim.gateway.requests.total",
         scoped(own,
           event_name: [:ankusa, :claim_check, :gateway],
-          tags: [:instance, :method, :status]
+          tags: [:instance, :status]
         )
       ),
       distribution(
-        "ankusa.claim_check.gateway.duration.seconds",
+        "ankusa.claim.gateway.duration.seconds",
         scoped(own,
           event_name: [:ankusa, :claim_check, :gateway],
           measurement: &duration_seconds/1,
           unit: :second,
-          tags: [:instance, :method],
+          tags: [:instance],
           reporter_options: [buckets: @gateway_seconds_buckets]
         )
+      ),
+      counter(
+        "ankusa.claim.sweeps.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :sweep],
+          tags: [:instance, :deleted]
+        )
+      ),
+      counter(
+        "ankusa.archive.failures.total",
+        scoped(own, event_name: [:ankusa, :archive, :failure], tags: [:instance])
       ),
       counter(
         "ankusa.claim_check.reads.total",
@@ -562,6 +575,8 @@ defmodule Ankusa.Metrics do
           {"ankusa.queue.inflight", [:ankusa, :queue, :state], :inflight, :unit},
           {"ankusa.queue.dead", [:ankusa, :queue, :state], :dead, :unit},
           {"ankusa.queue.archive_pending", [:ankusa, :queue, :state], :archive_pending, :unit},
+          {"ankusa.archive.oldest_unarchived_age.seconds", [:ankusa, :archive, :state],
+           &oldest_unarchived_age_seconds/1, :second},
           {"ankusa.dedupe.keys", [:ankusa, :queue, :state], :dedupe, :unit},
           {"ankusa.dlq.rows", [:ankusa, :queue, :state], :dead, :unit},
           {"ankusa.dlq.bytes", [:ankusa, :queue, :state], :dead_bytes, :byte},
@@ -705,6 +720,7 @@ defmodule Ankusa.Metrics do
   defp normalize_value(_other), do: :other
 
   defp oldest_due_age_seconds(%{oldest_due_age_ms: ms}), do: ms / 1000
+  defp oldest_unarchived_age_seconds(%{oldest_unarchived_age_ms: ms}), do: ms / 1000
 
   defp duration_seconds(%{duration: native}) when is_integer(native) do
     System.convert_time_unit(native, :native, :microsecond) / 1_000_000

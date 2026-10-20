@@ -695,6 +695,11 @@ claim_check:
   # Claim requests this node serves at once, cache hits included; past it a
   # request is 503 overloaded with Retry-After 1-3. 0 = no limit.
   max_concurrent_reads: 1024
+  # off | manifest. manifest: every whole-claim GET is checked against the
+  # sha256 in its pack's manifest (read once per pack, cached with the pack's
+  # index) and answers 502 integrity_mismatch on a difference; 200 and 206
+  # carry the digest as x-ankusa-sha256. off serves the store's bytes unchecked.
+  integrity_check: manifest
   # Signed, expiring refs. With keys, the claims a dispatch node checks in get
   # `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>` refs: an
   # HMAC-SHA256 over the tenant, claim and expiry, which the gateway verifies

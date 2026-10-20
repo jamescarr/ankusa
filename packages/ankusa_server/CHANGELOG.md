@@ -8,6 +8,13 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`claim_check.integrity_check` (`off` or `manifest`, default `manifest`).** The
+  claim gateway checks every whole-claim `GET` against the sha256 its pack's
+  manifest records and answers `502 integrity_mismatch` on a difference;
+  `200`/`206` carry `x-ankusa-sha256`. New on `/metrics`:
+  `ankusa_claim_sweeps_total{deleted}`, `ankusa_archive_failures_total` and
+  `ankusa_archive_oldest_unarchived_age_seconds`. See the `ankusa` changelog and
+  [`claim-check.md#integrity`](../../docs/claim-check.md#integrity).
 - **`s3` and `gcs` blocks take the object-store transport options (DUR-7).**
   `timeout_ms`, `upload_timeout_ms`, `op_deadline_ms`, `multipart_threshold_bytes`,
   `multipart_part_bytes`, `retries`, `breaker_failures`, `breaker_open_ms`,
@@ -246,8 +253,8 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   backs off a throttling store with an adaptive per-store limit, and answers
   every request within the deadline. Its `503 store_unavailable` carries a
   random `Retry-After` of 1–3 s. See the `ankusa` changelog.
-- `ankusa_claim_check_gateway_requests_total`,
-  `ankusa_claim_check_gateway_duration_seconds`,
+- `ankusa_claim_gateway_requests_total{status}`,
+  `ankusa_claim_gateway_duration_seconds`,
   `ankusa_claim_check_reads_total` and `ankusa_claim_check_read_limit`/
   `_read_inflight`/`_read_queued` on `/metrics`.
 - **`egress` section** (`allow_insecure_http`, `deny_cidrs`, `allow_cidrs`,

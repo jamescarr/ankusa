@@ -1,7 +1,7 @@
 defmodule Ankusa.ClaimCheck.Cache do
   @moduledoc """
-  The claim gateway's memory of what it has read: pack indexes and whole
-  claim bodies, so a repeat read never reaches the object store.
+  The claim gateway's memory of what it has read: pack indexes, pack digests
+  and whole claim bodies, so a repeat read never reaches the object store.
 
   ## What is cached
 
@@ -9,7 +9,11 @@ defmodule Ankusa.ClaimCheck.Cache do
       (`Ankusa.ClaimCheck.Pack`'s index), with how many bytes were asked for
       (`read`), so a short prefix (a small pack) is told apart from one that
       was never asked for that far. Every later claim of the pack is located
-      without a store read. Kept 10 minutes.
+      without a store read. Once the gateway has checked a claim of the pack
+      (`claim_check.integrity_check: :manifest`) the entry also holds the
+      sha256 of every claim in it, 32 bytes each, taken from the pack's
+      manifest: the rest of the pack's claims are checked without a store
+      read. Kept 10 minutes.
     * a claim's whole bytes, when they are at most
       `claim_check.read_cache_max_entry_bytes`; larger claims are served and
       never inserted, and ranged reads are never cached. Kept 2 minutes.
@@ -64,13 +68,15 @@ defmodule Ankusa.ClaimCheck.Cache do
   @typedoc """
   A located pack: the claim store it was found in, its key there, its first
   bytes, and how many bytes were asked for (`prefix` is shorter only when the
-  object is).
+  object is); `digests` once its manifest has been read
+  (`Ankusa.ClaimCheck.Pack.digests/3`).
   """
   @type pack :: %{
-          store: non_neg_integer(),
-          key: String.t(),
-          prefix: binary(),
-          read: pos_integer()
+          required(:store) => non_neg_integer(),
+          required(:key) => String.t(),
+          required(:prefix) => binary(),
+          required(:read) => pos_integer(),
+          optional(:digests) => binary()
         }
 
   # ── process ─────────────────────────────────────────────────────────────────
@@ -158,8 +164,30 @@ defmodule Ankusa.ClaimCheck.Cache do
   @spec put_pack(atom(), String.t(), String.t(), pack()) :: :ok
   def put_pack(instance, tenant_id, pack_id, pack) do
     pack = %{pack | prefix: own(pack.prefix)}
-    weight = byte_size(pack.prefix) + byte_size(pack.key)
+    weight = byte_size(pack.prefix) + byte_size(pack.key) + byte_size(Map.get(pack, :digests, ""))
     put(instance, {:pack, tenant_id, pack_id}, pack, weight, @index_ttl)
+  end
+
+  @doc "The sha256 of every claim of a cached pack (`Ankusa.ClaimCheck.Pack.digests/3`), if known."
+  @spec digests(atom(), String.t(), String.t()) :: {:ok, binary()} | :error
+  def digests(instance, tenant_id, pack_id) do
+    case pack(instance, tenant_id, pack_id) do
+      {:ok, %{digests: digests}} -> {:ok, digests}
+      _none -> :error
+    end
+  end
+
+  @doc """
+  Add a pack's digests to its cached entry, counted against the same budget as
+  the entry itself. Nothing happens when the pack is not cached (the next read
+  of it reads the index again, and its manifest after it).
+  """
+  @spec put_digests(atom(), String.t(), String.t(), binary()) :: :ok
+  def put_digests(instance, tenant_id, pack_id, digests) do
+    case pack(instance, tenant_id, pack_id) do
+      {:ok, pack} -> put_pack(instance, tenant_id, pack_id, Map.put(pack, :digests, digests))
+      :error -> :ok
+    end
   end
 
   @doc "Forget a pack (one that turned out to be gone), if it was cached."

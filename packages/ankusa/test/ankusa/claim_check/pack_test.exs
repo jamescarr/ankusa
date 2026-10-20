@@ -77,4 +77,71 @@ defmodule Ankusa.ClaimCheck.PackTest do
                }
              end)
   end
+
+  describe "the manifest's digests" do
+    setup do
+      claims =
+        claims([{"first", "application/json"}, {"", nil}, {:crypto.strong_rand_bytes(300), nil}])
+
+      {data, _placements} = Pack.build(claims)
+      {:ok, pack_id, 0} = Ref.locate(hd(claims).claim_id)
+      %{claims: claims, bin: IO.iodata_to_binary(data), pack_id: pack_id}
+    end
+
+    # Where the manifest's entry starts: right after the last claim.
+    defp manifest_json(bin, claims) do
+      last = length(claims) - 1
+      prefix = binary_part(bin, 0, Pack.index_prefix_bytes(last))
+      {:ok, offset, length} = Pack.locate(prefix, last)
+      header = binary_part(bin, offset + length, Pack.manifest_header_bytes())
+      {:ok, size} = Pack.manifest_size(header)
+      binary_part(bin, offset + length + Pack.manifest_header_bytes(), size)
+    end
+
+    test "count, then the manifest's place and size, then every claim's digest", %{
+      claims: claims,
+      bin: bin,
+      pack_id: pack_id
+    } do
+      assert Pack.count(binary_part(bin, 0, 64)) == {:ok, 3}
+
+      json = manifest_json(bin, claims)
+      assert {:ok, digests} = Pack.digests(json, pack_id, 3)
+      assert byte_size(digests) == 3 * 32
+
+      for {claim, index} <- Enum.with_index(claims) do
+        assert {:ok, digest} = Pack.digest(digests, index)
+        assert Base.encode16(digest, case: :lower) == claim.sha256
+      end
+
+      assert Pack.digest(digests, 3) == :error
+    end
+
+    test "bytes that are not a pack's index or manifest header are refused", %{bin: bin} do
+      assert Pack.count("not a pack at all, but long enough to hold a header or two") == :error
+      assert Pack.count(binary_part(bin, 0, 10)) == :error
+      assert Pack.manifest_size(binary_part(bin, 0, Pack.manifest_header_bytes())) == :error
+      assert Pack.manifest_size("short") == :error
+    end
+
+    test "a manifest that is not exactly this pack's claims is refused", %{
+      claims: claims,
+      bin: bin,
+      pack_id: pack_id
+    } do
+      json = manifest_json(bin, claims)
+
+      assert Pack.digests(json, pack_id, 2) == :error
+      assert Pack.digests(json, Ref.new_pack_id(), 3) == :error
+      assert Pack.digests("{", pack_id, 3) == :error
+      assert Pack.digests(~s({"claims": 5}), pack_id, 3) == :error
+      assert Pack.digests(:binary.replace(json, ~s("sha256"), ~s("sha257")), pack_id, 3) == :error
+
+      assert Pack.digests(
+               :binary.replace(json, claims |> hd() |> Map.fetch!(:sha256), "XYZ"),
+               pack_id,
+               3
+             ) == :error
+    end
+  end
 end

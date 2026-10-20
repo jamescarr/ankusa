@@ -53,10 +53,13 @@ paths:
       summary: Read a claim's bytes
       description: |
         Returns exactly the claim's bytes. Claims are written once and never
-        rewritten, so a response is cacheable forever. The server does not
-        verify integrity: the reader MUST check the bytes against the
-        message's `sha256` (a ranged read can only be checked once the whole
-        claim has been reassembled).
+        rewritten, so a response is cacheable forever. With the gateway's
+        `claim_check.integrity_check: manifest` (the default) a whole claim
+        is checked against its pack's manifest before it is sent, `502
+        integrity_mismatch` when it differs, and `200` and `206` carry the
+        digest as `X-Ankusa-Sha256`. The reader still MUST check the bytes
+        against the message's `sha256`, which is the writer's digest (a ranged
+        read can only be checked once the whole claim has been reassembled).
 
         One `bytes` range is served as `206`; several ranges, another unit, a
         malformed `Range`, or any `If-Range` (claims carry no validator) are
@@ -108,6 +111,8 @@ paths:
               $ref: '#/components/headers/CacheControl'
             Accept-Ranges:
               $ref: '#/components/headers/AcceptRanges'
+            X-Ankusa-Sha256:
+              $ref: '#/components/headers/Sha256'
           content:
             application/octet-stream:
               schema:
@@ -120,6 +125,8 @@ paths:
               $ref: '#/components/headers/CacheControl'
             Accept-Ranges:
               $ref: '#/components/headers/AcceptRanges'
+            X-Ankusa-Sha256:
+              $ref: '#/components/headers/Sha256'
             Content-Range:
               description: '`bytes first-last/length`, `length` the whole claim''s size.'
               schema:
@@ -148,6 +155,8 @@ paths:
               schema:
                 type: string
                 pattern: '^bytes \*/\d+$'
+        '502':
+          $ref: '#/components/responses/IntegrityMismatch'
         '503':
           $ref: '#/components/responses/StoreUnavailable'
   /health:
@@ -189,6 +198,15 @@ components:
       schema:
         type: string
         const: bytes
+    Sha256:
+      description: |
+        The lowercase hex sha256 of the whole claim, as its pack's manifest
+        records it. Sent unless `claim_check.integrity_check` is `off`; on a
+        `206` it is the whole claim's digest, to check once the ranges are
+        reassembled.
+      schema:
+        type: string
+        pattern: '^[0-9a-f]{64}$'
   parameters:
     TenantId:
       name: tenant_id
@@ -261,6 +279,7 @@ components:
             - store_unavailable
             - store_forbidden
             - overloaded
+            - integrity_mismatch
             - unauthenticated
             - forbidden
         scope:
@@ -289,6 +308,17 @@ components:
             $ref: '#/components/schemas/Error'
     NotFound:
       description: '`not_found`: no such claim (expired by retention, never written, or no such route). Permanent. Dead-letter, do not requeue.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    IntegrityMismatch:
+      description: |
+        `integrity_mismatch`: the bytes the store returned, or the pack's
+        manifest, do not match the sha256 the manifest records for this claim
+        (`claim_check.integrity_check: manifest`). The claim is damaged in the
+        store, so a retry reads the same bytes: dead-letter, do not requeue.
+        None of the bytes are sent.
       content:
         application/json:
           schema:

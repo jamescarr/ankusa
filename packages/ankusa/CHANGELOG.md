@@ -13,6 +13,30 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Claim gateway integrity check, and gateway, sweep and archive metrics
+  (CLM-1).** `claim_check.integrity_check` (`:manifest`, the default, or
+  `:off`): the gateway holds every whole-claim `GET` to the sha256 its pack's
+  manifest records, answers `502 integrity_mismatch` rather than send bytes
+  that differ (or from a pack whose manifest does not parse or does not list
+  its claims), and sends the digest on `200` and `206` as `x-ankusa-sha256`.
+  The manifest is read once per pack (one ranged read at the end of the last
+  claim), coalesced by `Ankusa.ClaimCheck.Reader` like any read
+  (`[:ankusa, :claim_check, :read]` gains `kind: :manifest` and
+  `result: :integrity_mismatch`) and kept in the pack's `Ankusa.ClaimCheck.Cache`
+  entry, so it counts against `read_cache_bytes` (32 bytes a claim) and ages with
+  the pack's index. `Ankusa.ClaimCheck.digest/3` is new; the location
+  `locate/4` returns gains `:claims` and `:claims_end`; `Pack.count/1`,
+  `manifest_header_bytes/0`, `manifest_size/1`, `digests/3` and `digest/2` are new.
+  Metrics: `ankusa_claim_gateway_requests_total{status}` and
+  `ankusa_claim_gateway_duration_seconds` (these replace the unreleased
+  `ankusa_claim_check_gateway_*`: status is the only label, no method),
+  `ankusa_claim_sweeps_total{deleted}`, `ankusa_archive_failures_total` (one per
+  compactor tick that could not write a segment) and
+  `ankusa_archive_oldest_unarchived_age_seconds` (from the batch the compactor
+  already reads, no scan). Telemetry: `[:ankusa, :archive, :failure]`,
+  `[:ankusa, :archive, :state]` (`:oldest_unarchived_age_ms`), and `:deleted`
+  metadata on `[:ankusa, :claim_check, :sweep]`. See
+  [`claim-check.md#integrity`](../../docs/claim-check.md#integrity).
 - **Store failure telemetry, `/ready` reasons and a reopen backoff (DUR-5).**
   `[:ankusa, :store, :write_failed]` (one per failed write a process reported and
   per failed readiness probe, with a `class` from the fixed set
@@ -701,8 +725,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `Ankusa.ClaimCheck.Stores.throttled?/1` are new. Telemetry:
   `[:ankusa, :claim_check, :gateway]`, `:read`, `:read_limit` and
   `:read_state`; on `/metrics`,
-  `ankusa_claim_check_gateway_requests_total{method,status}`,
-  `ankusa_claim_check_gateway_duration_seconds` (buckets up to 10 s, past
+  `ankusa_claim_gateway_requests_total{status}`,
+  `ankusa_claim_gateway_duration_seconds` (buckets up to 10 s, past
   the deadline), `ankusa_claim_check_reads_total{kind,source,result}` and
   `ankusa_claim_check_read_limit`/`_read_inflight`/`_read_queued{store}`.
 - **Egress policy: `Sink.Http` can no longer be pointed at loopback, the cloud

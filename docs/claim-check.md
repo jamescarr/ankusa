@@ -228,8 +228,8 @@ The gateway keeps answering fast while an object store throttles or hangs:
   never change, so nothing cached is wrong while the claim exists; a claim
   swept by retention can still answer `HEAD` for up to 10 minutes, and `GET`
   for up to 2.
-- **One store read per claim.** Concurrent requests for one claim, or one
-  pack's index, share one store read.
+- **One store read per claim.** Concurrent requests for one claim, one
+  pack's index, or one pack's manifest share one store read.
 - **An adaptive limit.** Per store, concurrent reads are capped at a limit
   that starts at `read_max_inflight`, halves when the store throttles (`429`,
   `503 SlowDown`) or doesn't answer, and grows back by one per round of
@@ -262,12 +262,16 @@ A throttling store never opens its breaker: it answered, and the limit is what
 backs off. Every `503 store_unavailable` carries a `Retry-After` of 1 to 3
 seconds, picked at random, so the clients one throttle turned away don't come
 back together. On `/metrics`:
-`ankusa_claim_check_gateway_requests_total{method,status}` and
-`ankusa_claim_check_gateway_duration_seconds`;
-`ankusa_claim_check_reads_total{kind,source,result}`, where `source` is
+`ankusa_claim_gateway_requests_total{status}` and
+`ankusa_claim_gateway_duration_seconds` (the status is the only label: no
+tenant, claim or method); `ankusa_claim_sweeps_total{deleted}` (one per sweep
+tick, `deleted="true"` when it removed a partition, a pack or a lease row);
+`ankusa_claim_check_reads_total{kind,source,result}`, where `kind` is `index`,
+`manifest`, `bytes` or `range`, `source` is
 `cache`, `store`, `coalesced`, `shed` or `direct` (a node reading without
 the gateway's reader) and `result` tells `throttled`, `unavailable`,
-`overloaded` (shed by the queue) and `deadline` (shed at the deadline) apart; and
+`overloaded` (shed by the queue), `deadline` (shed at the deadline) and
+`integrity_mismatch` apart; and
 `ankusa_claim_check_read_limit`, `_read_inflight` and `_read_queued` per
 store.
 
@@ -294,13 +298,35 @@ whole claim (`200`). The sha256 covers the whole claim, so check it once the
 ranges are reassembled. Responses are not streamed: each is read into memory
 whole, which a claim's `max_body_bytes` bound keeps finite.
 
-**The gateway doesn't check integrity**: the path carries no digest, so only
-the holder of the message can. Compare the bytes' sha256 against the
-message's `sha256` before you use them, and treat a mismatch as permanent.
+### Integrity
+
+Every pack carries a manifest with each claim's sha256, and the gateway
+(`claim_check.integrity_check: manifest`, the default) holds what it serves
+to it. A whole-claim `GET` whose bytes don't match is `502 integrity_mismatch`
+and sends none of them; so is any `GET` from a pack whose manifest doesn't
+parse or doesn't list exactly the pack's claims. `200` and `206` carry the
+digest as `x-ankusa-sha256` (lowercase hex of the whole claim), so a client
+that reassembles ranges can check what it assembled. A `Range` is not checked
+by the gateway, only handed the digest; `HEAD` reads only the pack's index
+and carries none.
+
+The manifest is read once per pack, the first time one of its claims is
+requested (one ranged read, a second for a manifest larger than the first
+read guessed), shared by every concurrent request, and kept in the pack's
+cache entry: 32 bytes a claim, inside `read_cache_bytes`, aging out with the
+pack's index. With `read_cache_bytes: 0` there is nowhere to keep it, so
+every `GET` reads it again; set `integrity_check: off` there, which serves
+the store's bytes unchecked and sends no digest.
+
+The manifest is the store's own record of the bytes, so this catches
+damage in the store or on the way back, not a body replaced together with
+its manifest. The message's `sha256` is the writer's digest of the bytes and
+covers that too: compare the bytes' sha256 against it before you use them,
+and treat a mismatch as permanent.
 
 ```sh
 curl -fsS http://claim-check:4001/v1/claims/acme/01M39VMD8RA3C5HR4RBV67Y002 -o body.bin
-shasum -a 256 body.bin    # must equal the message's sha256
+shasum -a 256 body.bin    # must equal the message's sha256 (and x-ankusa-sha256)
 ```
 
 ### Responses
@@ -323,6 +349,7 @@ Errors are JSON: `{"error": "not_found"}`.
 | `503` | `store_unavailable` | the object store is unreachable, throttling, or slower than the gateway's deadline, or the gateway is shedding load; `Retry-After` 1–3, random | Yes |
 | `503` | `overloaded` | this node already serves `claim_check.max_concurrent_reads` requests; `Retry-After` 1–3, random | Yes |
 | `503` | `store_forbidden` | the object store refused the gateway's credential; `Retry-After: 60` | Yes, after fixing the policy |
+| `502` | `integrity_mismatch` | the bytes the store returned (or the pack's manifest) don't match the sha256 the pack's manifest records for this claim; see [Integrity](#integrity) | No, dead-letter: the claim is damaged in the store (the SDKs retry any `5xx` a few times before they give up) |
 |  |  | bytes don't match the message's sha256 (your check) | No, dead-letter |
 
 The `503` body is only the `error` code; the store's own error (which can name
