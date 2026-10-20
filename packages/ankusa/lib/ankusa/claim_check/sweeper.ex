@@ -168,11 +168,15 @@ defmodule Ankusa.ClaimCheck.Sweeper do
     Telemetry.emit(
       [:claim_check, :sweep],
       Map.put(report, :duration, System.monotonic_time() - started),
-      %{instance: instance}
+      %{instance: instance, deleted: deleted?(report)}
     )
 
     {report, %{state | cursor: cursor}}
   end
+
+  # Whether the tick removed anything at all: a partition directory, a pack
+  # object, or a lease row.
+  defp deleted?(report), do: report.deleted + report.packs + report.leases_pruned > 0
 
   # ── leases ────────────────────────────────────────────────────────────────
 

@@ -51,6 +51,7 @@ defmodule Ankusa.ClaimCheck.Reader do
   @typedoc "What a fetch reads: coalescing is by key."
   @type key ::
           {:index, tenant_id :: String.t(), pack_id :: String.t()}
+          | {:manifest, String.t(), String.t()}
           | {:bytes, String.t(), String.t(), index :: non_neg_integer()}
           | {:range, String.t(), String.t(), non_neg_integer(), first :: non_neg_integer(),
              length :: pos_integer()}
@@ -200,6 +201,7 @@ defmodule Ankusa.ClaimCheck.Reader do
   defp result_tag({:ok, _value}), do: :ok
   defp result_tag({:error, :not_found}), do: :not_found
   defp result_tag({:error, :forbidden}), do: :forbidden
+  defp result_tag({:error, :integrity_mismatch}), do: :integrity_mismatch
   defp result_tag({:error, {:unavailable, :overloaded}}), do: :overloaded
   defp result_tag({:error, {:unavailable, :deadline}}), do: :deadline
 

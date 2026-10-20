@@ -45,7 +45,11 @@ defmodule Ankusa.ClaimCheck.Pack do
   @index_name byte_size(@index)
   @index_row 8
   @manifest "manifest.json"
+  @manifest_name byte_size(@manifest)
   @local_header 30
+  # A manifest bigger than this is a damaged pack, not a pack of claims.
+  @max_manifest_bytes 256 * 1024 * 1024
+  @digest_bytes 32
   @central_header 46
   @end_record 22
   # 0xFFFF in the end record's entry count is ZIP64's "look elsewhere" marker, and
@@ -146,6 +150,91 @@ defmodule Ankusa.ClaimCheck.Pack do
 
       _ ->
         :error
+    end
+  end
+
+  @doc """
+  How many claims a pack holds, from its first bytes (the index entry's header
+  is enough). `:error` when the bytes don't start with a pack's index.
+  """
+  @spec count(binary()) :: {:ok, pos_integer()} | :error
+  def count(prefix) do
+    case prefix do
+      <<0x04034B50::little-32, _::binary-14, size::little-32, _::binary-4, @index_name::little-16,
+        0::little-16, @index, _::binary>>
+      when size >= @index_row and rem(size, @index_row) == 0 ->
+        {:ok, div(size, @index_row)}
+
+      _ ->
+        :error
+    end
+  end
+
+  @doc """
+  Bytes of the manifest entry's local header: where its JSON starts, from the
+  entry's offset. The entry follows the last claim, so its offset is that
+  claim's offset plus length.
+  """
+  @spec manifest_header_bytes() :: pos_integer()
+  def manifest_header_bytes, do: @local_header + @manifest_name
+
+  @doc """
+  The manifest's JSON size, from the entry's local header
+  (`manifest_header_bytes/0` bytes read where the last claim ends). `:error`
+  when those bytes are not the manifest's header, or claim an absurd size.
+  """
+  @spec manifest_size(binary()) :: {:ok, non_neg_integer()} | :error
+  def manifest_size(header) do
+    case header do
+      <<0x04034B50::little-32, _::binary-14, size::little-32, _::binary-4,
+        @manifest_name::little-16, 0::little-16, @manifest, _::binary>>
+      when size <= @max_manifest_bytes ->
+        {:ok, size}
+
+      _ ->
+        :error
+    end
+  end
+
+  @doc """
+  The sha256 of every claim of pack `pack_id`, from its manifest's JSON: the
+  raw 32-byte digests concatenated in claim order (`digest/2` takes one out).
+  `:error` unless the manifest lists exactly `count` claims, in order, each
+  under the claim id `Ankusa.ClaimCheck.Ref.claim_id/2` gives it and with a
+  lowercase hex sha256.
+  """
+  @spec digests(binary(), String.t(), pos_integer()) :: {:ok, binary()} | :error
+  def digests(json, pack_id, count) do
+    with {:ok, %{"claims" => rows}} when is_list(rows) and length(rows) == count <-
+           JSON.decode(json),
+         {:ok, digests} <- digest_rows(rows, pack_id, 0, []) do
+      {:ok, digests}
+    else
+      _ -> :error
+    end
+  end
+
+  defp digest_rows([], _pack_id, _index, acc),
+    do: {:ok, acc |> Enum.reverse() |> IO.iodata_to_binary()}
+
+  defp digest_rows([row | rest], pack_id, index, acc) do
+    with %{"claim_id" => claim_id, "sha256" => hex} <- row,
+         true <- claim_id == Ankusa.ClaimCheck.Ref.claim_id(pack_id, index),
+         {:ok, <<_::binary-size(@digest_bytes)>> = digest} <- Base.decode16(hex, case: :lower) do
+      digest_rows(rest, pack_id, index + 1, [digest | acc])
+    else
+      _ -> :error
+    end
+  end
+
+  @doc "The digest of the claim at `index`, from `digests/3`'s bytes."
+  @spec digest(binary(), non_neg_integer()) :: {:ok, binary()} | :error
+  def digest(digests, index) do
+    skip = index * @digest_bytes
+
+    case digests do
+      <<_::binary-size(^skip), digest::binary-size(@digest_bytes), _::binary>> -> {:ok, digest}
+      _ -> :error
     end
   end
 

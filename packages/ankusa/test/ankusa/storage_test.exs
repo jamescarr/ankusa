@@ -441,6 +441,47 @@ defmodule Ankusa.StorageTest do
     assert fetched.seq == env.seq
   end
 
+  test "a failed tick counts one archive failure, and the oldest unarchived hook's age is reported" do
+    agent = start_supervised!({Agent, fn -> 1 end})
+
+    config =
+      start(roles: [:edge, :storage], storage: %{blob_store: {FailingBlobStore, [agent: agent]}})
+
+    inst = config.instance
+    test = self()
+    handler = "archive-telemetry-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach_many(
+      handler,
+      [[:ankusa, :archive, :failure], [:ankusa, :archive, :state]],
+      fn event, measurements, meta, _ ->
+        if meta.instance == inst, do: send(test, {:archive, event, measurements})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    commit!(inst, [envelope("old")])
+    Process.sleep(30)
+
+    # The write fails: one failure, and the age is reported all the same.
+    assert {:ok, 0} == Compactor.tick(inst)
+    assert_received {:archive, [:ankusa, :archive, :state], %{oldest_unarchived_age_ms: age}}
+    assert age >= 20
+    assert_received {:archive, [:ankusa, :archive, :failure], _}
+    refute_received {:archive, [:ankusa, :archive, :failure], _}
+
+    assert {:ok, 1} == Compactor.tick(inst)
+    assert_received {:archive, [:ankusa, :archive, :state], %{oldest_unarchived_age_ms: older}}
+    assert older >= age
+    refute_received {:archive, [:ankusa, :archive, :failure], _}
+
+    # Nothing is owed any more.
+    assert {:ok, 0} == Compactor.tick(inst)
+    assert_received {:archive, [:ankusa, :archive, :state], %{oldest_unarchived_age_ms: 0}}
+  end
+
   test "consecutive failures back the timer off instead of retrying every interval" do
     agent = start_supervised!({Agent, fn -> 5 end})
 

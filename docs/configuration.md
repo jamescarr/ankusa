@@ -665,6 +665,7 @@ config :ankusa,
 | `claim_check.read_cache_bytes` | `134_217_728` | Memory for the gateway's cached pack indexes and claims; `0` turns the cache off. |
 | `claim_check.read_cache_max_entry_bytes` | `1_048_576` | A claim larger than this is served but never cached. |
 | `claim_check.max_concurrent_reads` | `1_024` | Gateway requests this node serves at once, cache hits included. A request past it is `503 overloaded` with `Retry-After` 1–3 before anything is read; `0` is no limit. The count is a set of request processes the reader sweeps every second, so a request process that dies never keeps a slot. |
+| `claim_check.integrity_check` | `manifest` | `manifest`: the gateway checks every whole-claim `GET` against the sha256 its pack's manifest records for that claim, and answers `502 integrity_mismatch` rather than send bytes that differ (a damaged claim, or a manifest that does not parse). The manifest is read once per pack, the first time one of its claims is read, and kept in the pack's cache entry (`claim_check.read_cache_bytes`, 32 bytes a claim); `200` and `206` carry the digest as `x-ankusa-sha256`. `off` serves the store's bytes unchecked and sends no digest. With `read_cache_bytes: 0` the manifest is read again for every `GET`: set `off` there. See [`claim-check.md`](claim-check.md#integrity). |
 | `claim_check.ref_signing_keys` | `[]` | `[current \| previous]`: strings of at least 16 bytes. With a key, every claim a node checks in gets a **v2 ref**, `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`, an HMAC-SHA256 under the first key over the tenant, claim and expiry, and the gateway holds each request to it before it reads anything (`400 bad_signature`; `410 ref_expired`). A ref signed with any listed key is served, so a rotation is: put the new key first, drop the old one once every ref it signed has expired. Set the same keys on every claim-writing node, the gateway, and any node calling `redeem/3`. `/v1/config` shows each as `[REDACTED]`. `[]` mints v1 refs. See [`claim-check.md`](claim-check.md#the-reference). |
 | `claim_check.ref_ttl_ms` | `nil` | How long a v2 ref is good for, from the moment it is minted; positive. `nil` is the retention (`claim_check.retention_days`), else 30 days. |
 | `claim_check.accept_unsigned_refs` | `nil` | Whether the gateway (and `redeem/3`) still serves a v1 ref, which carries no expiry. `nil` means only while `ref_signing_keys` is empty, so setting keys refuses every v1 ref (`400 unsigned_ref`); `true` keeps the refs already in queues working while keys roll out. `false` with no keys is a boot error. |
@@ -756,8 +757,8 @@ with a `cacertfile`), non-empty `versions` from `tlsv1.2`/`tlsv1.3` and known
 `0` (no linger, roll at once, a compactor that runs only when asked, no read
 retry, no waiting for a slot, no claim cache, no request cap);
 `claim_check.ref_ttl_ms` is `nil` or ≥ 1, `claim_check.accept_unsigned_refs` is
-`nil`, `true` or `false`, and every `claim_check.ref_signing_keys` entry is at
-least 16 bytes;
+`nil`, `true` or `false`, every `claim_check.ref_signing_keys` entry is at
+least 16 bytes, and `claim_check.integrity_check` is `off` or `manifest`;
 `claim_check.retention_days` and `claim_check.bucket_expiry_days` are `nil` or ≥ 1; `audit.retention_days` is ≥ 1; `tenants.max` is an integer from 1 to 4294967294; every `queue.rocksdb` key is in the range its row names (`write_buffer_bytes` per family, ≥ 65536, an unknown family refused); `storage.key_prefix` is `""` or
 `name/` parts; `dispatch.sink_concurrency` is `nil` or ≥ 1,
 every `dispatch.tenants.default` key and every key of a `dispatch.tenants` entry is

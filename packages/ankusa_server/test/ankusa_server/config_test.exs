@@ -132,7 +132,8 @@ defmodule AnkusaServer.ConfigTest do
              ref_signing_keys: [],
              ref_ttl_ms: nil,
              accept_unsigned_refs: nil,
-             authorize: nil
+             authorize: nil,
+             integrity_check: :manifest
            } = config.claim_check
   end
 
@@ -296,6 +297,18 @@ defmodule AnkusaServer.ConfigTest do
     assert {cc.placement, cc.key_layout, cc.store_cooldown_ms} == {:hash, :sharded, 5000}
   end
 
+  test "claim_check.integrity_check takes off or manifest" do
+    for {value, expected} <- [{"off", :off}, {"manifest", :manifest}] do
+      path =
+        tmp_config("""
+        claim_check: {integrity_check: #{value}}
+        sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+        """)
+
+      assert Config.load!(path: path, env: %{}).config.claim_check.integrity_check == expected
+    end
+  end
+
   test "unset or null, claim_check keeps core's store, placement, layout and cooldown defaults" do
     for section <- ["", "claim_check: {store: null, stores: null}\n"] do
       path =
@@ -442,7 +455,9 @@ defmodule AnkusaServer.ConfigTest do
           {"claim_check: {placement: nope}",
            ~s(claim_check.placement: unknown value "nope"; expected one of ordered, hash)},
           {"claim_check: {key_layout: hashed}",
-           ~s(claim_check.key_layout: unknown value "hashed"; expected one of flat, sharded)}
+           ~s(claim_check.key_layout: unknown value "hashed"; expected one of flat, sharded)},
+          {"claim_check: {integrity_check: sha1}",
+           ~s(claim_check.integrity_check: unknown value "sha1"; expected one of off, manifest)}
         ] do
       path =
         tmp_config(yaml <> "\nsources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n")

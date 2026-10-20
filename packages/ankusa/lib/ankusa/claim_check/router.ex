@@ -30,7 +30,8 @@ defmodule Ankusa.ClaimCheck.Router do
       the store is unavailable, throttling, or slower than the deadline, or
       this node is shedding load, `503 store_forbidden` + `Retry-After: 60`
       when the store refused this node's credential. A 503 body never carries
-      the store's error; it is logged.
+      the store's error; it is logged. `502 integrity_mismatch` when the bytes
+      read (or the pack's manifest) are not what the manifest records.
     * The same `GET` with one `Range: bytes=a-b`, `bytes=a-` or `bytes=-n` —
       `206` with those bytes and `Content-Range: bytes a-b/length` (`b`
       clamped to the claim's end), read from the store as one ranged read; a
@@ -40,7 +41,7 @@ defmodule Ankusa.ClaimCheck.Router do
       whole claim.
     * `HEAD /v1/claims/:tenant_id/:claim_id` — the same status and headers,
       `content-length` included, without the body; it reads only the pack's
-      index, never the claim. `Range` is ignored.
+      index, never the claim or its manifest. `Range` is ignored.
     * `GET /health` — liveness.
 
   ## Signed refs
@@ -56,10 +57,21 @@ defmodule Ankusa.ClaimCheck.Router do
   flight on this node a request is `503 overloaded` + `Retry-After` (random
   1–3 seconds) before anything is read.
 
-  No integrity check happens here: the path carries no digest. The reader
-  checks the bytes against the sha256 its queue message carried
-  (`Ankusa.ClaimCheck.redeem/3` does this in-process). The whole response is
-  one binary, not a stream: a claim is at most `max_body_bytes`.
+  ## Integrity
+
+  With `claim_check.integrity_check: :manifest` (the default) a whole-claim
+  `GET` is checked against the sha256 the pack's manifest records for that
+  claim (`Ankusa.ClaimCheck.digest/3`: read once per pack and cached with the
+  pack's index, shared by every concurrent request): the bytes that don't
+  match are `502 integrity_mismatch`, never sent. A `200` or `206` carries the
+  digest as `x-ankusa-sha256` (lowercase hex of the whole claim), so a client
+  reassembling ranges can check what it assembled; `HEAD` reads only the
+  index, so it sends none. `:off` serves the store's bytes as they are, with
+  no header. The reader still holds the bytes to the sha256 its queue message
+  carried (`Ankusa.ClaimCheck.redeem/3` does this in-process): the manifest
+  is the store's own record of the bytes, the message's digest is the
+  writer's. The whole response is one binary, not a stream: a claim is at
+  most `max_body_bytes`.
 
   ## Under load
 
@@ -146,7 +158,7 @@ defmodule Ankusa.ClaimCheck.Router do
     with :ok <- check_ref(conn, config, tenant_id, claim_id),
          :ok <- admit(instance, config) do
       try do
-        serve(conn, instance, tenant_id, claim_id, ClaimCheck.deadline(config))
+        serve(conn, config, instance, tenant_id, claim_id, ClaimCheck.deadline(config))
       after
         Reader.release(instance)
       end
@@ -181,7 +193,7 @@ defmodule Ankusa.ClaimCheck.Router do
 
   # A HEAD response carries the claim's length and no body: the server keeps a
   # `content-length` the plug set when the body it is handed is empty.
-  defp serve(%Plug.Conn{method: "HEAD"} = conn, instance, tenant_id, claim_id, deadline) do
+  defp serve(%Plug.Conn{method: "HEAD"} = conn, _config, instance, tenant_id, claim_id, deadline) do
     case ClaimCheck.locate(instance, tenant_id, claim_id, deadline: deadline) do
       {:ok, location} ->
         conn
@@ -194,15 +206,37 @@ defmodule Ankusa.ClaimCheck.Router do
     end
   end
 
-  defp serve(conn, instance, tenant_id, claim_id, deadline) do
+  defp serve(conn, config, instance, tenant_id, claim_id, deadline) do
     with {:ok, location} <- ClaimCheck.locate(instance, tenant_id, claim_id, deadline: deadline),
+         {:ok, digest} <- digest(instance, config, location, deadline),
          range = range(conn, location.length),
-         {:ok, bin} <- read_range(instance, location, range, deadline) do
-      send_range(conn, range, bin, location.length)
+         {:ok, bin} <- read_range(instance, location, range, deadline),
+         :ok <- verify(range, bin, digest) do
+      conn |> put_digest(range, digest) |> send_range(range, bin, location.length)
     else
       {:error, reason} -> error_response(conn, reason, tenant_id, claim_id)
     end
   end
+
+  defp digest(_instance, %{claim_check: %{integrity_check: :off}}, _location, _deadline),
+    do: {:ok, nil}
+
+  defp digest(instance, _config, location, deadline),
+    do: ClaimCheck.digest(instance, location, deadline: deadline)
+
+  # Only a whole claim is checked here; a range's digest is the whole claim's,
+  # sent in the header for whoever reassembles them.
+  defp verify(:all, bin, digest) when is_binary(digest) do
+    if ClaimCheck.sha256(bin) == digest, do: :ok, else: {:error, :integrity_mismatch}
+  end
+
+  defp verify(_range, _bin, _digest), do: :ok
+
+  defp put_digest(conn, :unsatisfiable, _digest), do: conn
+  defp put_digest(conn, _range, nil), do: conn
+
+  defp put_digest(conn, _range, digest),
+    do: Plug.Conn.put_resp_header(conn, "x-ankusa-sha256", digest)
 
   # `:all`, `{first, last}` (inclusive, inside the claim) or `:unsatisfiable`.
   # Only a single `bytes` range is served; anything else is ignored, which RFC
@@ -304,6 +338,17 @@ defmodule Ankusa.ClaimCheck.Router do
 
   defp error_response(conn, :ref_expired, _tenant_id, _claim_id),
     do: Http.send_json(conn, 410, %{error: "ref_expired"})
+
+  # The store's bytes (or the pack's manifest) are not what the manifest
+  # records: the claim is damaged in the store, so a retry reads the same
+  # bytes. Permanent, and worth a log line an operator can find.
+  defp error_response(conn, :integrity_mismatch, tenant_id, claim_id) do
+    Logger.warning(
+      "[ankusa] claim gateway: #{tenant_id}/#{claim_id} does not match its pack's manifest"
+    )
+
+    Http.send_json(conn, 502, %{error: "integrity_mismatch"})
+  end
 
   # This node is at `claim_check.max_concurrent_reads`: expected under load,
   # counted on `[:ankusa, :claim_check, :gateway]` by its status.

@@ -410,8 +410,16 @@ The always-on tests cover:
   packing per tenant per batch with `pack_max_bytes` splitting and
   failure isolation; check-in-once (a fat hook on two sinks and a failing
   retry writes one object); `validate_config!/1` boot-time rejections; the
-  `:claim_check` role's read-only HTTP API; and the `LocalFS` retention sweeper
-  deleting whole `dt=` day partitions.
+  `:claim_check` role's read-only HTTP API; the gateway's integrity check
+  (`router_test.exs`, "integrity": a flipped body byte or an unparsable
+  manifest is `502 integrity_mismatch`, `integrity_check: :off` serves and
+  sends no digest, `x-ankusa-sha256` on `200`/`206` only, 100 concurrent
+  `HEAD`s of one claim cause one store read and 100 `GET`s three — index,
+  manifest, claim — and the manifest's digests in `pack_test.exs`); and the
+  `LocalFS` retention sweeper deleting whole `dt=` day partitions. The gateway,
+  sweep and archive series are in `metrics_test.exs` ("gateway metrics",
+  "archive metrics") and the compactor's failure and age events in
+  `storage_test.exs`.
 - **Property tests** (`test/ankusa/property/`, [StreamData](https://hexdocs.pm/stream_data),
   5 000 runs per property by default; `PROPERTY_RUNS=50000 mix test
   test/ankusa/property` for a long soak; generators in

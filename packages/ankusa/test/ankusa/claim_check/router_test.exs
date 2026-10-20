@@ -780,4 +780,164 @@ defmodule Ankusa.ClaimCheck.RouterTest do
       assert call(inst, :get, path).status == 200
     end
   end
+
+  describe "integrity" do
+    setup %{inst: inst} do
+      root = Path.join(System.tmp_dir!(), "ankusa_claims_#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf(root) end)
+
+      start_reader(inst, %{
+        blob_stores: [
+          {CountingBlobStore, root: root, notify_range: {self(), 0}, range_delay_ms: 100}
+        ]
+      })
+
+      %{root: root}
+    end
+
+    defp sha(bin), do: Base.encode16(:crypto.hash(:sha256, bin), case: :lower)
+
+    # The store reads since the last call: one `0` per ranged read.
+    defp ranges(acc \\ []) do
+      receive do
+        {:blob_range, tag} -> ranges([tag | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+
+    # The one pack object `check_in/2` wrote under `root`.
+    defp pack_file(root) do
+      [file] = root |> Path.join("**/*") |> Path.wildcard() |> Enum.filter(&File.regular?/1)
+      file
+    end
+
+    defp flip_byte_of(file, body) do
+      data = File.read!(file)
+      {pos, _length} = :binary.match(data, body)
+      at = pos + div(byte_size(body), 2)
+      <<head::binary-size(^at), byte, tail::binary>> = data
+      File.write!(file, [head, Bitwise.bxor(byte, 0xFF), tail])
+    end
+
+    @tag :capture_log
+    test "integrity mismatch: a flipped body byte is 502, never sent; its pack's other claims are 200",
+         %{inst: inst, root: root} do
+      body = :crypto.strong_rand_bytes(2048)
+      ref = check_in(inst, body)
+      flip_byte_of(pack_file(root), body)
+
+      conn = call(inst, :get, Ref.path(ref))
+      assert {conn.status, error(conn)} == {502, "integrity_mismatch"}
+      assert header(conn, "x-ankusa-sha256") == []
+
+      {:ok, pack_id, 1} = Ref.locate(ref.claim_id)
+      conn = call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(pack_id, 0)}")
+      assert {conn.status, conn.resp_body} == {200, "x"}
+      assert header(conn, "x-ankusa-sha256") == [sha("x")]
+    end
+
+    @tag :capture_log
+    test "integrity mismatch: a manifest that does not parse fails every claim of its pack", %{
+      inst: inst,
+      root: root
+    } do
+      ref = check_in(inst, "some bytes")
+      file = pack_file(root)
+      File.write!(file, :binary.replace(File.read!(file), ~s("claims"), ~s("claimz")))
+
+      {:ok, pack_id, 1} = Ref.locate(ref.claim_id)
+
+      for path <- [Ref.path(ref), "/v1/claims/acme/#{Ref.claim_id(pack_id, 0)}"] do
+        conn = call(inst, :get, path)
+        assert {conn.status, error(conn)} == {502, "integrity_mismatch"}
+      end
+    end
+
+    @tag :capture_log
+    test "integrity_check: :off serves the store's bytes unchecked, with no digest", %{
+      inst: inst,
+      root: root
+    } do
+      body = :crypto.strong_rand_bytes(2048)
+      ref = check_in(inst, body)
+      flip_byte_of(pack_file(root), body)
+
+      config = Ankusa.config(inst)
+      Ankusa.put_config(%{config | claim_check: %{config.claim_check | integrity_check: :off}})
+
+      conn = call(inst, :get, Ref.path(ref))
+      assert conn.status == 200
+      assert byte_size(conn.resp_body) == 2048 and conn.resp_body != body
+      assert header(conn, "x-ankusa-sha256") == []
+      # No manifest was read: the index and the bytes were.
+      assert ranges() == [0, 0]
+    end
+
+    test "a good claim carries its sha256: 200 and 206 do, HEAD and 416 do not", %{inst: inst} do
+      body = :crypto.strong_rand_bytes(4096)
+      path = Ref.path(check_in(inst, body))
+
+      conn = call(inst, :get, path)
+      assert {conn.status, conn.resp_body} == {200, body}
+      assert header(conn, "x-ankusa-sha256") == [sha(body)]
+
+      conn = get_range(inst, path, "bytes=0-9")
+      assert {conn.status, conn.resp_body} == {206, binary_part(body, 0, 10)}
+      assert header(conn, "x-ankusa-sha256") == [sha(body)]
+
+      conn = get_range(inst, path, "bytes=99999-")
+      assert conn.status == 416
+      assert header(conn, "x-ankusa-sha256") == []
+
+      conn = call(inst, :head, path)
+      assert conn.status == 200
+      assert header(conn, "x-ankusa-sha256") == []
+    end
+
+    test "single flight: 100 concurrent HEADs of one claim cause one store read", %{inst: inst} do
+      path = Ref.path(check_in(inst, "shared"))
+
+      conns =
+        1..100
+        |> Enum.map(fn _ -> Task.async(fn -> call(inst, :head, path) end) end)
+        |> Task.await_many(10_000)
+
+      assert Enum.all?(conns, &(&1.status == 200))
+      assert ranges() == [0]
+    end
+
+    test "single flight: 100 concurrent GETs read the index, the manifest and the claim once each",
+         %{inst: inst} do
+      body = :crypto.strong_rand_bytes(1024)
+      ref = check_in(inst, body)
+      path = Ref.path(ref)
+
+      conns =
+        1..100
+        |> Enum.map(fn _ -> Task.async(fn -> call(inst, :get, path) end) end)
+        |> Task.await_many(10_000)
+
+      assert Enum.all?(conns, &(&1.status == 200 and &1.resp_body == body))
+      assert Enum.all?(conns, &(header(&1, "x-ankusa-sha256") == [sha(body)]))
+      assert ranges() == [0, 0, 0]
+
+      # The pack's digests are cached now: another claim of it costs its bytes only.
+      {:ok, pack_id, 1} = Ref.locate(ref.claim_id)
+      assert call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(pack_id, 0)}").status == 200
+      assert ranges() == [0]
+    end
+
+    test "digest: a pack of more than 1 024 claims is checked from its last row", %{inst: inst} do
+      items = for i <- 1..1100, do: %{id: UUIDv7.generate(), body: "body #{i}"}
+      {:ok, claims} = ClaimCheck.check_in(inst, "acme", items)
+
+      for item <- [hd(items), List.last(items)] do
+        %{ref: ref, sha256: expected} = claims[item.id]
+        assert {:ok, location} = ClaimCheck.locate(inst, "acme", ref.claim_id)
+        assert {:ok, ^expected} = ClaimCheck.digest(inst, location)
+        assert call(inst, :get, Ref.path(ref)).status == 200
+      end
+    end
+  end
 end
