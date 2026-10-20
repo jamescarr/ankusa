@@ -79,9 +79,10 @@ The dispatch pipeline then delivers it, visible in the server log:
 [info] hook delivered id=01a0... source=demo attempt=1
 ```
 
-Under `wal.type: none` the same `201` means the sinks confirmed inside the
-request instead: there is no queue, no dispatch pipeline, and the provider's
-retry is the retry.
+Under `wal.type: dual` it also means the hook was confirmed in the Kafka
+intake log, and under `wal.type: none` the same `201` means the sinks confirmed
+inside the request instead: there is no queue, no dispatch pipeline, and the
+provider's retry is the retry.
 
 ### 3. Without `dedupe`, every accepted POST is stored
 
@@ -133,7 +134,7 @@ The ingest listener serves the catch URL, plus one read-only endpoint:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/webhooks/:source_id`; `TenantPath` gives `/webhooks/:tenant/:source`, see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified inline; the `2xx` is returned only after the durable accept — the store commit, or every sink's confirm under `wal.type: none`: `201 accepted` is the only committed response (there is no `200`). Without a source [`dedupe:`](configuration.md#sources) setting every accepted POST is a new hook with a new `id`, so a provider retry after a lost ack is stored and delivered again; with it, a repeat inside the TTL gets `201` with the original `id` and `"duplicate": true`. `201` accepted (or duplicate) / `202` quarantined / `400` body unreadable / `400 invalid_header` / `401` verification failed / `403` route guard (when `routes.ip_denied_status` is `403`) / `404` unknown source / `413` too large / `429` `rate_limited` or `quarantine_rate_limited` (with `Retry-After`) / `503` overloaded, undeliverable or `quarantine_full`. |
+| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/webhooks/:source_id`; `TenantPath` gives `/webhooks/:tenant/:source`, see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified inline; the `2xx` is returned only after the durable accept — the store commit (`wal.type: disk`), the store commit plus a confirmed intake-log publish (`dual`), or every sink's confirm (`none`): `201 accepted` is the only committed response (there is no `200`). Without a source [`dedupe:`](configuration.md#sources) setting every accepted POST is a new hook with a new `id`, so a provider retry after a lost ack is stored and delivered again; with it, a repeat inside the TTL gets `201` with the original `id` and `"duplicate": true`. `201` accepted (or duplicate) / `202` quarantined / `400` body unreadable / `400 invalid_header` / `401` verification failed / `403` route guard (when `routes.ip_denied_status` is `403`) / `404` unknown source / `413` too large / `429` `rate_limited` or `quarantine_rate_limited` (with `Retry-After`) / `503` overloaded, undeliverable or `quarantine_full`. |
 | `GET` | `/health` | Liveness. Always `200` while the listener is up. |
 
 The operator API on its own port, `/metrics`, the dead-letter queue, replay,
@@ -155,7 +156,9 @@ defp store_children(config, opts) do
   end
 end
 
-defp writer_children(%Config{wal: :disk}, opts), do: [{Ankusa.Queue.Writer, opts}]
+defp writer_children(%Config{wal: wal}, opts) when wal in [:disk, :dual],
+  do: [{Ankusa.Queue.Writer, opts}]
+
 defp writer_children(_config, _opts), do: []
 
 defp claim_check_children(config) do
@@ -169,7 +172,8 @@ end
 ```
 
 The writer is not role-checked itself: it lives in the `:edge` subtree, which
-only starts when the `edge` role is on, and only under `wal: :disk`. The
+only starts when the `edge` role is on, and only under `wal: :disk` or
+`wal: :dual`. The
 `edge`, `dispatch`, `storage` and `claim_check` children follow the same
 `if Config.role?(config, role)` shape.
 
@@ -193,7 +197,8 @@ whatever `config.exs` sets, see
 
 ## The queue from code
 
-The default `wal: :disk` commits every accepted hook to `Ankusa.Queue`; the
+The default `wal: :disk` commits every accepted hook to `Ankusa.Queue`;
+`wal: :dual` runs the same commit and a confirmed intake-log publish. The
 batcher does it on the ingest path, and you can read the queue and manage the
 DLQ directly:
 
