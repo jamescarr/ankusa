@@ -6,3 +6,4 @@ A change to the ack path, the store key layout, a wire format, the isolation mod
 | --- | --- |
 | [`0001-tenant-key-layout.md`](0001-tenant-key-layout.md) | tenant ordinals in the index keys, per-tenant counters kept by merge operands, an active-tenant index, and the store format 2 → 3 migration |
 | [`0002-dual-commit-intake-log.md`](0002-dual-commit-intake-log.md) | `wal.type: dual`: ack after local fsync and a confirmed publish to a replicated intake log (Kafka first, JetStream second), parallel halves, a half-persisted hook is carried to completion by a live reconciler, boot and offline recovery by seq and hook id |
+| [`0003-segment-format-and-archive-layout.md`](0003-segment-format-and-archive-layout.md) | the segment header and sha256, the versioned safe-decoded index, the dated `archive/v1/dt=<day>/<node>/` layout with its day manifest, catalogue reconcile and the day-prefix fetch fallback, time-based roll, and the store format 6 → 7 migration |

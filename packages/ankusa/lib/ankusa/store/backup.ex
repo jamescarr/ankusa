@@ -101,7 +101,7 @@ defmodule Ankusa.Store.Backup do
   require Logger
 
   alias Ankusa.{BlobStore, Config, Store}
-  alias Ankusa.Queue.{Archive, Reclaim}
+  alias Ankusa.Queue.Archive
   alias Ankusa.Store.{Keys, Migrate}
 
   # 2 adds `format_version`, `intake_offset` and the signature; 1 is still read.
@@ -118,7 +118,6 @@ defmodule Ankusa.Store.Backup do
 
   @id_re ~r/\A[0-9A-HJKMNP-TV-Z]{26}\z/
   @sha256_re ~r/\A[0-9a-f]{64}\z/
-  @segment_re ~r"seg/(\d{20})-(\d{20})\.seg\z"
 
   @typedoc "One object store a backup is written to and read from."
   @type target :: %{
@@ -1282,151 +1281,23 @@ defmodule Ankusa.Store.Backup do
   Square a store that started over (restored, or created empty with a backup
   configured) with the archive segments already in the segment store. Called
   by `Ankusa.Store` once the database is open, before the queue writer starts.
+  It is `Ankusa.Queue.Archive.reconcile/2` over this node's own segments (the
+  dated layout's `<node>` directory and the legacy `seg/` prefix):
 
     * `m:next_seq` moves past the highest archived seq, so no new segment key
       overwrites an archived one;
     * a segment the store has no catalogue row for is catalogued from its
-      `.idx` object, and the archive obligations it settles are cleared, so
-      the compactor does not write those hooks again under the same first seq.
+      `.idx` object and its header, and the archive obligations it settles are
+      cleared, so the compactor does not write those hooks again under the same
+      first seq.
 
-  A segment whose index object is missing (its writer died between the two
-  PUTs) is logged and skipped. Any other read failure is an error: the store
-  must not start with seqs it may hand out twice.
+  A segment whose index object is missing or does not decode (its writer died
+  between the two PUTs) is logged and skipped. Any other read failure is an
+  error: the store must not start with seqs it may hand out twice.
   """
   @spec reconcile_archive(Config.t()) :: :ok | {:error, term()}
-  def reconcile_archive(%Config{instance: instance} = config) do
-    {mod, opts, prefix} = BlobStore.resolve_config(config, :segments)
-
-    with {:ok, keys} <- call(fn -> mod.list(instance, prefix <> "seg/", opts) end) do
-      segments =
-        for key <- keys, [_, first, last] <- [Regex.run(@segment_re, key)] do
-          {key, String.to_integer(first), String.to_integer(last)}
-        end
-
-      if segments == [] do
-        :ok
-      else
-        with {:ok, n} <- recatalogue(instance, {mod, opts}, segments),
-             :ok <- advance_seq(instance, segments) do
-          if n > 0, do: Logger.warning("[ankusa] #{n} archived segment(s) re-catalogued")
-          :ok
-        end
-      end
-    end
-  end
-
-  defp recatalogue(instance, store, segments) do
-    Enum.reduce_while(segments, {:ok, 0}, fn {key, first, _last} = segment, {:ok, n} ->
-      case Store.get(instance, :archive, Keys.segment(first)) do
-        {:ok, _row} ->
-          {:cont, {:ok, n}}
-
-        :not_found ->
-          case catalogue(instance, store, segment) do
-            :ok -> {:cont, {:ok, n + 1}}
-            :skipped -> {:cont, {:ok, n}}
-            {:error, reason} -> {:halt, {:error, {key, reason}}}
-          end
-
-        {:error, reason} ->
-          {:halt, {:error, {key, reason}}}
-      end
-    end)
-  end
-
-  defp catalogue(instance, {mod, opts}, {key, first, last}) do
-    idx_key = String.replace_suffix(key, ".seg", ".idx")
-
-    case call(fn -> mod.get(instance, idx_key, opts) end) do
-      {:ok, bin} ->
-        with {:ok, idx} <- decode_idx(bin) do
-          settle(instance, segment_row(key, idx_key, first, last, idx), idx)
-        end
-
-      {:error, :not_found} ->
-        Logger.warning("[ankusa] segment #{key} has no index object; not catalogued")
-        :skipped
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  # Trusted: the operator's own backup artifact, never request input.
-  # sobelow_skip ["Misc.BinToTerm"]
-  defp decode_idx(bin) do
-    case :erlang.binary_to_term(bin, [:safe]) do
-      idx when is_map(idx) and map_size(idx) > 0 -> {:ok, idx}
-      _ -> {:error, :bad_index}
-    end
-  rescue
-    ArgumentError -> {:error, :bad_index}
-  end
-
-  # The fields `Ankusa.Storage.Compactor` records.
-  defp segment_row(key, idx_key, first, last, idx) do
-    ids = Map.keys(idx)
-
-    %{
-      key: key,
-      idx_key: idx_key,
-      first_seq: first,
-      last_seq: last,
-      min_id: Enum.min(ids),
-      max_id: Enum.max(ids),
-      count: map_size(idx),
-      bytes:
-        idx
-        |> Map.values()
-        |> Enum.map(fn {offset, length, _seq} -> offset + length end)
-        |> Enum.max()
-    }
-  end
-
-  # The row, and every obligation of this store the segment already settles,
-  # in one batch, exactly as the compactor records a segment it wrote.
-  defp settle(instance, row, idx) do
-    seqs = idx |> Map.values() |> Enum.map(fn {_offset, _length, seq} -> seq end) |> Enum.sort()
-
-    with {:ok, results} <-
-           Store.multi_get(instance, :index, Enum.map(seqs, &Keys.archive_pending/1)),
-         owed = for({seq, {:ok, _}} <- Enum.zip(seqs, results), do: seq),
-         :ok <- Archive.archived(instance, row, owed) do
-      markers = Enum.map(owed, &{&1, Keys.cleared(&1, 1, 0)})
-
-      # A failed reclaim only defers: the markers stay and the sweep finds them.
-      with {:error, reason} <- Reclaim.run(instance, markers) do
-        Logger.warning("[ankusa] hook reclaim deferred to the next sweep: #{inspect(reason)}")
-      end
-
-      :ok
-    end
-  end
-
-  # Synced, after every catalogue row: the batches before it are durable once
-  # it is, and the queue writer starts only after the store's init returns.
-  defp advance_seq(instance, segments) do
-    next = (segments |> Enum.map(&elem(&1, 2)) |> Enum.max()) + 1
-
-    marker =
-      case Store.get(instance, :default, Keys.meta("next_seq")) do
-        {:ok, <<n::64>>} -> {:ok, n}
-        :not_found -> {:ok, 1}
-        {:error, reason} -> {:error, reason}
-      end
-
-    with {:ok, current} <- marker,
-         :ok <-
-           Store.write(
-             instance,
-             [{:put, :default, Keys.meta("next_seq"), <<max(current, next)::64>>}],
-             sync: true
-           ) do
-      if next > current,
-        do: Logger.warning("[ankusa] next_seq advanced to #{next} past archived segments")
-
-      :ok
-    end
+  def reconcile_archive(%Config{} = config) do
+    with {:ok, _summary} <- Archive.reconcile(config, node: :own, advance_seq: true), do: :ok
   end
 
   # ── helpers ───────────────────────────────────────────────────────────────
@@ -1465,8 +1336,6 @@ defmodule Ankusa.Store.Backup do
   # restores from its `init/1`) and must not see an `EXIT` per call. The result
   # travels as the exit reason, which shares large binaries rather than copying
   # them.
-  defp call(fun, timeout \\ :infinity)
-
   defp call(fun, :infinity), do: guarded(fun)
 
   defp call(fun, timeout) do

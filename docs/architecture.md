@@ -278,7 +278,7 @@ From here, ingest is done. Two independent consumers work off the same store:
 
 > **Planned, not shipped.** Designed in
 > [`reliability-fixes.md`](https://github.com/jamescarr/ankusa/blob/main/reliability-fixes.md)
-> (Phase 1). Today the compactor writes `seg/` segments indexed on the node;
+> (Phase 1). Today the compactor writes `archive/v1/` segments indexed on the node;
 > see [`storage.md`](storage.md).
 
 The archive holds every accepted hook for a fixed **window**: a day, a week,
@@ -479,8 +479,9 @@ for the shape).
 Each ingest node here is an ordinary all-role node, the topology-1 shape, with
 its own store, and the nodes share nothing but the broker, the provider's
 traffic, and — if you like — one bucket. Segment keys are
-`seg/<first_seq>-<last_seq>.seg`, so nodes sharing a bucket each set their
-own `storage.key_prefix` (`node-a/`, …) or they overwrite each other's
+`archive/v1/dt=<day>/<node>/seg-<first_seq>-<last_seq>.seg`, so nodes sharing a bucket
+each set their own `intake.node_id` (or their own `storage.key_prefix`, `node-a/`, …)
+or they overwrite each other's
 segments. Claim keys are never prefixed — claim ids are unique across nodes —
 so the claim store (the bucket, or a dedicated `claim_check.store`, or a list
 of them with failover, `claim_check.stores`) is shared by every node and one

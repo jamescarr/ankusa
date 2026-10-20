@@ -8,6 +8,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`storage.max_segments_per_tick` (DUR-8).** The most segments one compactor tick
+  writes (default 16); `storage.roll_ms` now bounds how long a partial segment waits.
+  Segments are written under `archive/v1/dt=<day>/<node>/` (the node is
+  `intake.node_id`, else the host name) with a header and a sha256, and the store is
+  format 7. See [`storage.md`](../../docs/storage.md#ankusacodec-and-segment-format).
+
 - **`s3` and `gcs` blocks take the object-store transport options (DUR-7).**
   `timeout_ms`, `upload_timeout_ms`, `op_deadline_ms`, `multipart_threshold_bytes`,
   `multipart_part_bytes`, `retries`, `breaker_failures`, `breaker_open_ms`,
