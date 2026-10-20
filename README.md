@@ -134,18 +134,18 @@ flowchart LR
 The control plane is the admin API on `admin.port` (4002 in the image), and it
 is authenticated: bearer tokens with scopes, OIDC/JWT, or mTLS. It serves
 `/health`, `/metrics`, the redacted effective config, source management, the
-dead-letter queue, replay jobs, quarantine release/purge, and the audit trail
-written in the same store transaction as each change. Secrets in the config
-(provider and sink secrets, URLs, headers) are encrypted at rest; `check-config`
-and `print-config` validate and show the effective config without starting the
-node.
+dead-letter queue, replay jobs, quarantine release/purge, and a durable audit
+trail of every change and replay. When `source_store` keeps sources in the
+store or Redis, their secrets are encrypted at rest with `secrets.kek`;
+`check-config` and `print-config` validate and show the effective config
+without starting the node.
 
 Backups are off by default and worth turning on. With `backup.enabled`, a
 checkpoint of the store and its `intake_offset` goes to an object store every
-`backup.interval_ms`, with a signed manifest; a node starting on an empty
-`data_dir` restores the latest checkpoint before opening the store, verifies
-it, and refuses to start on a corrupt or unreadable backup rather than starting
-empty. A clean stop writes a final checkpoint.
+`backup.interval_ms`, with a manifest that `backup.signing_key` signs; a node
+starting on an empty `data_dir` restores the latest checkpoint before opening
+the store, checks it, and refuses to start on a corrupt or unreadable backup
+rather than starting empty. A clean stop writes a final checkpoint.
 
 Tenants are a first-class scope: the tenant id is in the store key, rate
 limits and dispatch fairness are per tenant, routes and source definitions can
