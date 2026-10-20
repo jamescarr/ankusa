@@ -426,10 +426,24 @@ queue:
       counters: 1048576
 
 batcher:
-  # The queue writer serializes commits itself, so partitions beyond a couple only
-  # add contention.
-  partitions: 2
+  # One process per partition holds its callers' request bodies and prepares
+  # their commit (rows, dedupe read). The queue writer merges every partition's
+  # queued batches into one group commit, so more partitions are not more fsyncs.
+  partitions: 4
   max_batch: 256
+  # Commits one partition keeps in flight: a batch goes to the writer without
+  # waiting for the one ahead, so the writer finds every waiting caller in its
+  # mailbox and merges them. 1 is the old one-commit-at-a-time behaviour.
+  max_commits: 64
+  # A group is cut at whichever cap comes first. Every caller in a group waits
+  # for the whole group, so the byte cap bounds the ack latency a backlog adds
+  # (default 4 MiB); under wal.type dual one group is one produce request.
+  group_commit_max_bytes: 4194304
+  group_commit_max_records: 1024
+  # How long a saturated writer (its last group held 16 or more hooks) waits for
+  # the callers it just answered to call again, so they join the next group.
+  # Never delays a request at low load; 0 disables it.
+  group_commit_delay_ms: 1
   # 0 = commit as soon as a batch is ready; the store commit runs in a task, so
   # raising this trades a little ack latency for larger batches.
   max_delay_ms: 0

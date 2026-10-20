@@ -13,6 +13,24 @@ defmodule Ankusa.Queue.Writer do
   whose tenant would pass `tenants.max` is refused with `{:error,
   :tenant_limit}` in its place of the reply, and nothing of it is written.
 
+  ## Group commit
+
+  A call carries what needs no seq, prepared by its caller (`Ankusa.Queue`: the
+  hook's binary, its encoded delivery rows, the dedupe keys read from the store).
+  The writer takes the call that woke it and every `:enqueue` call queued behind
+  it, from every batcher partition, up to `batcher.group_commit_max_bytes` of
+  bodies and `batcher.group_commit_max_records` hooks, and commits them as one
+  **group**: one tenant admission, one dedupe validation, dense seqs across all
+  of it, one synced store write and, under `wal: :dual`, one publish. Every
+  caller then gets the replies of its own hooks. While one group syncs, the
+  next one accumulates in the mailbox.
+
+  The dedupe values a caller read are a *prefetch*: the first occurrence of a key
+  in the group wins, and a key this process wrote since the caller read (in an
+  earlier group, or in flight under `wal: :dual`) is answered from `recent_*` and
+  the pending set, never from the stale read, so two partitions that saw the same
+  key as absent still commit one hook.
+
   Under `wal: :dual` (ADR 0002) the same synced local commit runs **in parallel**
   with a confirmed publish to the intake log (`Ankusa.Intake`), and both are
   required before the `201`. The writer does not wait: it records the batch in
@@ -59,6 +77,7 @@ defmodule Ankusa.Queue.Writer do
       Logger.info("[ankusa] store next_seq=#{next_seq} tenants=#{next_ord - 1}")
 
       dedupe = config.dedupe
+      mono = System.monotonic_time(:millisecond)
 
       state = %{
         instance: instance,
@@ -79,7 +98,18 @@ defmodule Ankusa.Queue.Writer do
         table: nil,
         tasks: nil,
         inflight: %{},
-        incarnation: "0"
+        incarnation: "0",
+        # group commit: the caps of one group, and the dedupe keys this process
+        # wrote lately (two generations, `recent_since` is when the older began)
+        group_max_bytes: config.batcher.group_commit_max_bytes,
+        group_max_records: config.batcher.group_commit_max_records,
+        group_delay_ms: config.batcher.group_commit_delay_ms,
+        last_group: 0,
+        recent_cur: :ets.new(:ankusa_dedupe_recent, [:set, :private]),
+        recent_old: :ets.new(:ankusa_dedupe_recent, [:set, :private]),
+        recent_gen_at: mono,
+        recent_since: mono,
+        recent_epoch: nil
       }
 
       {:ok, if(state.dual, do: init_dual(state), else: state)}
@@ -138,7 +168,13 @@ defmodule Ankusa.Queue.Writer do
   end
 
   @impl true
-  def handle_call({:enqueue, items, deadline, extra_ops}, {caller, _tag} = from, state) do
+  def handle_call({:enqueue, prepared, deadline, []}, from, state),
+    do: group_commit({from, prepared, deadline}, state)
+
+  # A quarantine release (`extra_ops`: the pen deletes and the job cursor) is a
+  # group of its own: it waits for its outcome and carries ops that must commit
+  # with exactly its hooks.
+  def handle_call({:enqueue, prepared, deadline, extra_ops}, {caller, _tag} = from, state) do
     cond do
       expired?(deadline) ->
         # Not started, so nothing to undo: no seq consumed, no store touched.
@@ -152,7 +188,7 @@ defmodule Ankusa.Queue.Writer do
         {:reply, {:error, :caller_gone}, state}
 
       true ->
-        commit_batch(items, extra_ops, state, from)
+        commit_batch(prepared.items, prepared.prefetch, extra_ops, begin_group(state), from)
     end
   end
 
@@ -177,7 +213,7 @@ defmodule Ankusa.Queue.Writer do
   # refresh that landed since is never undone, and its counter goes down in the
   # same batch. Not synced: a lost batch is found again by the next sweep.
   def handle_call({:expire_dedupe, entries}, _from, state) do
-    {:reply, expire_dedupe(state.instance, entries), state}
+    {:reply, expire_dedupe(state, entries), state}
   end
 
   # The local half of carried batches, from `Ankusa.Intake.Reconciler`: one point
@@ -221,6 +257,205 @@ defmodule Ankusa.Queue.Writer do
 
   defp expired?(:infinity), do: false
   defp expired?(deadline), do: System.monotonic_time(:millisecond) >= deadline
+
+  # ── group commit ──────────────────────────────────────────────────────────
+
+  @recent_ms 2_000
+  @recent_max 100_000
+  @busy_records 16
+
+  # `first` and every `:enqueue` call already queued (no `extra_ops`), as long as
+  # the group stays within its caps; the call that would pass one starts the next
+  # group (`handle_continue/2`). The first call is always taken, however large.
+  defp group_commit({_from, prepared, _deadline} = first, state) do
+    state = state |> begin_group() |> linger()
+    {calls, leftover} = drain([first], prepared.count, prepared.bytes, state)
+
+    live =
+      Enum.filter(calls, fn {{caller, _tag} = from, _prepared, deadline} ->
+        cond do
+          expired?(deadline) ->
+            GenServer.reply(from, {:error, :deadline_exceeded})
+            false
+
+          not Process.alive?(caller) ->
+            GenServer.reply(from, {:error, :caller_gone})
+            false
+
+          true ->
+            true
+        end
+      end)
+
+    state = if live == [], do: state, else: commit_group(live, state)
+
+    if leftover,
+      do: {:noreply, state, {:continue, {:group, leftover}}},
+      else: {:noreply, state}
+  end
+
+  defp drain(calls, count, bytes, state) do
+    receive do
+      {:"$gen_call", from, {:enqueue, prepared, deadline, []}} ->
+        call = {from, prepared, deadline}
+
+        if count + prepared.count > state.group_max_records or
+             bytes + prepared.bytes > state.group_max_bytes do
+          {Enum.reverse(calls), call}
+        else
+          drain([call | calls], count + prepared.count, bytes + prepared.bytes, state)
+        end
+    after
+      0 -> {Enum.reverse(calls), nil}
+    end
+  end
+
+  # A writer whose last group held at least `@busy_records` hooks is saturated,
+  # and the callers it just answered are about to call again: a short wait lets
+  # them join the next group instead of forming the one after it (without it a
+  # closed loop of clients splits into two cohorts that commit alternately, each
+  # half the size it could be). Never at low load, where it would only add latency.
+  defp linger(%{group_delay_ms: 0} = state), do: state
+
+  defp linger(state) do
+    if state.last_group >= @busy_records, do: Process.sleep(state.group_delay_ms)
+    state
+  end
+
+  defp commit_group(live, state) do
+    items = Enum.flat_map(live, fn {_from, prepared, _deadline} -> prepared.items end)
+    calls = Enum.map(live, fn {from, prepared, _deadline} -> {from, prepared.count} end)
+    state = %{state | last_group: length(items)}
+
+    case commit_batch(items, merge_prefetch(live, state), [], state, calls) do
+      {:reply, reply, state} ->
+        reply_calls(calls, reply)
+        state
+
+      {:noreply, state} ->
+        state
+    end
+  end
+
+  # Each call gets the replies of its own hooks, in its own order.
+  defp reply_calls(calls, {:ok, results}) do
+    _unanswered =
+      Enum.reduce(calls, results, fn {from, count}, rest ->
+        {mine, rest} = Enum.split(rest, count)
+        GenServer.reply(from, {:ok, mine})
+        rest
+      end)
+
+    :ok
+  end
+
+  defp reply_calls(calls, {:error, _reason} = error),
+    do: Enum.each(calls, fn {from, _count} -> GenServer.reply(from, error) end)
+
+  # The newest read of a key wins. A call whose read began before the oldest
+  # generation of `recent_*` may have missed a write the window no longer
+  # remembers, so its values are dropped and the keys are read here.
+  defp merge_prefetch(live, state) do
+    live
+    |> Enum.sort_by(fn {_from, prepared, _deadline} -> prepared.read_at end)
+    |> Enum.reduce(%{}, fn {_from, prepared, _deadline}, acc ->
+      if prepared.read_at >= state.recent_since, do: Map.merge(acc, prepared.prefetch), else: acc
+    end)
+  end
+
+  defp begin_group(state), do: state |> sync_recent() |> rotate_recent()
+
+  # A tenant closed or opened (`Ankusa.Tenant.Gate`) may have deleted dedupe keys
+  # behind this process: forget what it wrote, and every read older than now.
+  defp sync_recent(state) do
+    epoch = Gate.state(state.instance).epoch
+
+    case state.recent_epoch do
+      ^epoch ->
+        state
+
+      nil ->
+        %{state | recent_epoch: epoch}
+
+      _moved ->
+        :ets.delete_all_objects(state.recent_cur)
+        :ets.delete_all_objects(state.recent_old)
+        mono = System.monotonic_time(:millisecond)
+        %{state | recent_epoch: epoch, recent_gen_at: mono, recent_since: mono}
+    end
+  end
+
+  defp rotate_recent(state) do
+    mono = System.monotonic_time(:millisecond)
+
+    if mono - state.recent_gen_at >= @recent_ms or
+         :ets.info(state.recent_cur, :size) >= @recent_max do
+      :ets.delete_all_objects(state.recent_old)
+
+      %{
+        state
+        | recent_cur: state.recent_old,
+          recent_old: state.recent_cur,
+          recent_since: state.recent_gen_at,
+          recent_gen_at: mono
+      }
+    else
+      state
+    end
+  end
+
+  defp recent_get(state, key) do
+    case :ets.lookup(state.recent_cur, key) do
+      [{_, value}] ->
+        {:ok, value}
+
+      [] ->
+        case :ets.lookup(state.recent_old, key) do
+          [{_, value}] -> {:ok, value}
+          [] -> nil
+        end
+    end
+  end
+
+  # The `?u` keys a committed batch wrote, by their value `<<expires_at::64, id>>`.
+  defp record_recent(state, checked) do
+    case for(
+           {:put, :index, key, <<_::64, _::binary>> = value} <- checked.dedupe_ops,
+           do: {key, value}
+         ) do
+      [] -> :ok
+      entries -> :ets.insert(state.recent_cur, entries)
+    end
+  end
+
+  defp recent_forget(state, keys) do
+    Enum.each(keys, fn key ->
+      :ets.delete(state.recent_cur, key)
+      :ets.delete(state.recent_old, key)
+    end)
+  end
+
+  # The stored value of each dedupe key, as `Store.multi_get/3` returns it: what
+  # this process wrote lately, else the caller's prefetch, else a read here.
+  defp stored_for(state, keys, prefetch) do
+    {known, missing} =
+      Enum.reduce(keys, {%{}, []}, fn key, {known, missing} ->
+        case recent_get(state, key) do
+          {:ok, value} ->
+            {Map.put(known, key, {:ok, value}), missing}
+
+          nil ->
+            case Map.fetch(prefetch, key) do
+              {:ok, result} -> {Map.put(known, key, result), missing}
+              :error -> {known, [key | missing]}
+            end
+        end
+      end)
+
+    with {:ok, fetched} <- read_stored(state.instance, missing) do
+      {:ok, missing |> Enum.zip(fetched) |> Enum.into(known)}
+    end
+  end
 
   defp redrive_batch(entries, extra_ops, state) do
     now = max(System.system_time(:millisecond), state.last_at)
@@ -300,7 +535,7 @@ defmodule Ankusa.Queue.Writer do
   # `extra_ops` (a quarantine release's pen deletes and job cursor) ride in the
   # same synced batch as the hooks, and commit even when every item was a
   # duplicate.
-  defp commit_batch(items, extra_ops, state, from) do
+  defp commit_batch(items, prefetch, extra_ops, state, from) do
     # Never behind a previous batch, even if the wall clock steps back: dispatch
     # keeps its scan floor just under the stamps it has seen, and relies on
     # stamps never going down.
@@ -316,7 +551,7 @@ defmodule Ankusa.Queue.Writer do
           # item: refusing one would lose it, so refuse the call.
           {:reply, {:error, refusal(tenants, admission)}, state}
         else
-          commit_admitted(tagged, extra_ops, admission, now, state, from)
+          commit_admitted(tagged, prefetch, extra_ops, admission, now, state, from)
         end
 
       {:error, reason} ->
@@ -324,10 +559,10 @@ defmodule Ankusa.Queue.Writer do
     end
   end
 
-  defp commit_admitted(tagged, extra_ops, admission, now, state, from) do
+  defp commit_admitted(tagged, prefetch, extra_ops, admission, now, state, from) do
     admitted = for {item, true} <- tagged, do: item
 
-    case dedupe_check(state, admitted, now, admission.ords, extra_ops == []) do
+    case dedupe_check(state, admitted, now, admission.ords, extra_ops == [], prefetch) do
       {:error, reason} ->
         # The dedupe read failed: no seq consumed, nothing written, nothing
         # acked. Callers see the store error, not a guessed commit.
@@ -399,6 +634,7 @@ defmodule Ankusa.Queue.Writer do
     case result do
       :ok ->
         cache_put(state, admission.cache)
+        record_recent(state, checked)
         wake_dispatch(state.instance, now)
 
         committed =
@@ -548,6 +784,7 @@ defmodule Ankusa.Queue.Writer do
 
     # Carried or not, the ordinals of this batch are the ordinals of its hooks.
     cache_put(state, admission.cache)
+    if local == :ok, do: record_recent(state, checked)
     if local == :ok, do: wake_dispatch(instance, now)
 
     batch = %{
@@ -609,7 +846,7 @@ defmodule Ankusa.Queue.Writer do
 
     if local_ok? and log_ok? do
       Pending.confirm(t, seqs, position)
-      GenServer.reply(batch.from, {:ok, committed_replies(batch)})
+      reply_calls(batch.from, {:ok, committed_replies(batch)})
     else
       first = if log_ok?, do: max(position - length(seqs) + 1, 0), else: nil
 
@@ -632,7 +869,7 @@ defmodule Ankusa.Queue.Writer do
           "intake #{if log_ok?, do: "ok", else: "failed"}; nothing acked, carried to completion"
       )
 
-      GenServer.reply(batch.from, {:ok, half_replies(batch, local_ok?)})
+      reply_calls(batch.from, {:ok, half_replies(batch, local_ok?)})
     end
 
     state
@@ -852,21 +1089,17 @@ defmodule Ankusa.Queue.Writer do
   # counted up as the batch's new keys are admitted; refreshing an expired key
   # adds none. A call that carries `extra_ops` (a quarantine release) is never
   # refused: its hooks were acked long ago.
-  defp dedupe_check(state, items, now, ords, enforce?) do
+  defp dedupe_check(state, items, now, ords, enforce?, prefetch) do
     instance = state.instance
-    keyed = Enum.filter(items, fn {env, _bin, _mods, ttl, _replay_id} -> dedupe?(env, ttl) end)
+    keyed = Enum.filter(items, fn {env, _bin, _rows, ttl, _replay_id} -> dedupe?(env, ttl) end)
 
-    keys = Enum.map(keyed, fn {env, _bin, _mods, _ttl, _replay_id} -> u_key(env) end)
+    keys =
+      keyed
+      |> Enum.map(fn {env, _bin, _rows, _ttl, _replay_id} -> u_key(env) end)
+      |> Enum.uniq()
 
-    with {:ok, stored_results} <- read_stored(instance, keys),
+    with {:ok, stored} <- stored_for(state, keys, prefetch),
          {:ok, usage} <- read_usage(instance, keyed, ords) do
-      stored =
-        keyed
-        |> Enum.zip(stored_results)
-        |> Map.new(fn {{env, _bin, _mods, _ttl, _replay_id}, result} ->
-          {u_key(env), result}
-        end)
-
       {_seen, results, fresh, dedupe_ops, fresh_count, _usage, deltas} =
         Enum.reduce(items, {%{}, [], [], [], 0, usage, []}, fn item,
                                                                {seen, results, fresh, ops, n,
@@ -988,7 +1221,8 @@ defmodule Ankusa.Queue.Writer do
   # `{:expired, expiry_key, u_key, at, ord | nil}` (`ord` is the tenant's
   # ordinal, `nil` when the tenant has none) and `{:undecodable, expiry_key}`.
   # Returns `{:ok, deleted}`, the live keys it removed.
-  defp expire_dedupe(instance, entries) do
+  defp expire_dedupe(state, entries) do
+    instance = state.instance
     expired = for {:expired, _expiry, _u_key, _at, _ord} = entry <- entries, do: entry
 
     with {:ok, stored} <- read_stored(instance, Enum.map(expired, &elem(&1, 2))) do
@@ -1019,7 +1253,17 @@ defmodule Ankusa.Queue.Writer do
           ops ++ undecodable ++ Counters.ops(deltas) ++ Counters.node_ops(dedupe: -node_only)
         )
 
-      with :ok <- Store.write(instance, all, sync: false), do: {:ok, deleted}
+      with :ok <- Store.write(instance, all, sync: false) do
+        # Only the keys that were deleted: a refreshed one is still live.
+        u_keys = MapSet.new(expired, &elem(&1, 2))
+
+        recent_forget(
+          state,
+          for({:delete, :index, key} <- ops, MapSet.member?(u_keys, key), do: key)
+        )
+
+        {:ok, deleted}
+      end
     end
   end
 
@@ -1037,6 +1281,11 @@ defmodule Ankusa.Queue.Writer do
   defp tenant_ok?(tenant), do: is_binary(tenant) and :binary.match(tenant, <<0>>) == :nomatch
 
   defp u_key(env), do: Keys.dedupe(tenant_of(env), env.source_id, env.dedupe_key)
+
+  @doc false
+  # The `?u` key of a hook that dedupes (`nil` if it does not), for the prefetch
+  # `Ankusa.Queue` does before it calls the writer.
+  def dedupe_key(env, ttl), do: if(dedupe?(env, ttl), do: u_key(env))
 
   defp expiry_key(at, env),
     do: Keys.dedupe_expiry(at, tenant_of(env), env.source_id, env.dedupe_key)
@@ -1100,6 +1349,9 @@ defmodule Ankusa.Queue.Writer do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
+  def handle_continue({:group, call}, state), do: group_commit(call, state)
+
+  @impl true
   def terminate(_reason, %{dual: true} = state), do: flush_meta(state)
   def terminate(_reason, _state), do: :ok
 
@@ -1113,30 +1365,16 @@ defmodule Ankusa.Queue.Writer do
   defp build_ops(items, first_seq, now, archive?, ords) do
     items
     |> Enum.with_index(first_seq)
-    |> Enum.reduce({[], 0, 0}, fn {{env, bin, mods, _ttl, replay_id}, seq}, {ops, count, bytes} ->
+    |> Enum.reduce({[], 0, 0}, fn {{env, bin, rows, _ttl, _replay_id}, seq},
+                                  {ops, count, bytes} ->
       size = byte_size(bin)
       ord = Map.fetch!(ords, Tenants.normalize(env.tenant_id))
 
-      # A row without `:replay` is a live delivery; a released quarantine hook's
-      # rows carry the job's id, like a replayed dead letter's.
-      base = %{
-        module: nil,
-        state: :pending,
-        attempts: 0,
-        at: now,
-        error: nil,
-        size: size,
-        source_id: env.source_id
-      }
-
-      base = if is_binary(replay_id), do: Map.put(base, :replay, replay_id), else: base
-
+      # `rows` are the delivery rows `Ankusa.Queue` encoded, one per sink
       row_ops =
-        mods
+        rows
         |> Enum.with_index()
-        |> Enum.flat_map(fn {mod, i} ->
-          Deliveries.new_ops(ord, now, seq, i, size, Deliveries.encode_row(%{base | module: mod}))
-        end)
+        |> Enum.flat_map(fn {row, i} -> Deliveries.new_ops(ord, now, seq, i, size, row) end)
 
       archive_ops = if archive?, do: Deliveries.archive_ops(ord, seq, size), else: []
 

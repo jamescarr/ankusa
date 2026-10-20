@@ -135,6 +135,100 @@ defmodule Ankusa.QueueTest do
     refute_receive {:telemetry, [:ankusa, :commit, :stop], _, %{instance: ^inst}}, 200
   end
 
+  describe "group commit" do
+    # Three calls queued behind a suspended writer (as three batcher partitions
+    # would be), two hooks each; `config` overrides the batcher caps.
+    defp queued_calls(config, calls \\ 3) do
+      inst = config.instance
+      start_supervised!({Ankusa.Instance, config})
+
+      test_pid = self()
+      handler = "queue-group-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:ankusa, :commit, :stop],
+        &__MODULE__.handle_commit_telemetry/4,
+        test_pid
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      writer = Ankusa.whereis(inst, :queue_writer)
+      :ok = :sys.suspend(writer)
+
+      tasks =
+        for call <- 1..calls do
+          Task.async(fn ->
+            entries =
+              for n <- 1..2, do: %{envelope: envelope(call * 10 + n), sinks: [{Log, []}]}
+
+            Queue.enqueue(inst, entries)
+          end)
+        end
+
+      # every call has prepared its entries and reached the writer's mailbox
+      eventually(fn ->
+        Process.info(writer, :message_queue_len) == {:message_queue_len, calls}
+      end)
+
+      :ok = :sys.resume(writer)
+
+      {inst, Enum.map(tasks, &Task.await(&1, 10_000))}
+    end
+
+    defp eventually(fun, tries \\ 200) do
+      cond do
+        fun.() -> :ok
+        tries == 0 -> flunk("condition never held")
+        true -> Process.sleep(10) && eventually(fun, tries - 1)
+      end
+    end
+
+    test "calls queued behind the writer are one synced commit with dense seqs" do
+      {inst, replies} = queued_calls(config(roles: [:edge], batcher: %{partitions: 3}))
+
+      assert_receive {:telemetry, [:ankusa, :commit, :stop], %{batch_size: 6}, %{instance: ^inst}}
+      refute_receive {:telemetry, [:ankusa, :commit, :stop], _, %{instance: ^inst}}, 100
+
+      # each caller got its own two hooks, in order, and together they are 1..6
+      assert Enum.all?(replies, &match?({:ok, [{:committed, _}, {:committed, _}]}, &1))
+
+      seqs = for {:ok, results} <- replies, {:committed, env} <- results, do: env.seq
+      assert Enum.sort(seqs) == [1, 2, 3, 4, 5, 6]
+
+      {:ok, hooks} = Queue.hooks(inst, 0, 100)
+      assert Enum.map(hooks, & &1.seq) == [1, 2, 3, 4, 5, 6]
+    end
+
+    test "a call that would pass the record cap starts the next group" do
+      {inst, replies} =
+        queued_calls(
+          config(roles: [:edge], batcher: %{partitions: 3, group_commit_max_records: 4})
+        )
+
+      assert_receive {:telemetry, [:ankusa, :commit, :stop], %{batch_size: 4}, %{instance: ^inst}}
+      assert_receive {:telemetry, [:ankusa, :commit, :stop], %{batch_size: 2}, %{instance: ^inst}}
+
+      seqs = for {:ok, results} <- replies, {:committed, env} <- results, do: env.seq
+      assert Enum.sort(seqs) == [1, 2, 3, 4, 5, 6]
+    end
+
+    test "a call that would pass the byte cap starts the next group" do
+      {inst, _replies} =
+        queued_calls(
+          config(roles: [:edge], batcher: %{partitions: 3, group_commit_max_bytes: 30})
+        )
+
+      # a call is several hundred bytes: the first is always taken, and the
+      # second would pass 30, so every call is a group of its own
+      for _ <- 1..3 do
+        assert_receive {:telemetry, [:ankusa, :commit, :stop], %{batch_size: 2},
+                        %{instance: ^inst}}
+      end
+    end
+  end
+
   test "a stored hook that does not decode is a corrupt_value error, not a crash" do
     config = config(roles: [:edge])
     inst = config.instance

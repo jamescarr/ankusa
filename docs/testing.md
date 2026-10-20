@@ -963,6 +963,31 @@ secondary backup alone with `recover`: `missing=0`, `duplicate_hooks=0`.
 since the last backup, so the drill proves the difference. See
 [`examples/fleet-e2e/README.md`](https://github.com/jamescarr/ankusa/blob/main/examples/fleet-e2e/README.md).
 
+### Group commit
+
+- `queue_test.exs` (`group commit`): calls queued behind a suspended writer are one
+  synced commit (`[:ankusa, :commit, :stop]` `batch_size`) with dense seqs and each
+  caller's replies in its own order; a call that would pass
+  `batcher.group_commit_max_records` or `group_commit_max_bytes` starts the next group.
+- `dedupe_test.exs` (`the same key on two batcher partitions`): the same dedupe key
+  posted at once to two partitions, with the writer suspended so both read it as
+  absent, yields one hook, one delivery row and a `duplicate` with the first hook's
+  id, whether the two calls merge into one group or commit as two; a key the sweeper
+  deleted is not remembered as live. `queue_dual_test.exs` has the `wal: :dual`
+  case (the retry meets an unconfirmed original: `intake_pending`).
+
+`bench/store_commit.exs` (`MIX_ENV=test mix run bench/store_commit.exs`) drives
+`Ankusa.Edge.Batcher.commit/4` with 10 KB bodies over 4 partitions and makes the
+writer's commit cost 1, 5 and 10 ms (a telemetry handler sleeps in the writer before
+the store write). Throughput: 256 closed-loop clients, grouped against ungrouped
+(`group_commit_max_records: 1, max_commits: 1, group_commit_delay_ms: 0`: one commit
+per partition batch, one at a time, what the writer did before cross-partition group
+commit), printing records/s, commits/s, mean group and
+ack p50/p99. Burst: 1 000 req/s open loop, the writer stalled for one second, then
+drained while arrivals continue. It passes only if grouped is at least 2 x ungrouped
+at 5 ms and the ack p99 of the requests that arrived after the stall is at most 50 ms
+(the SLO; the group cap is what keeps a backlog from becoming one 64 MiB commit).
+
 ### Perf gate: `mise run bench:gate`
 
 A hot-path change must not make ingest slower unnoticed, so

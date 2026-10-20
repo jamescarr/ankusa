@@ -384,7 +384,7 @@ defmodule Ankusa.EdgeTest do
 
     # The first 8 KB body is the commit in flight (stuck on the writer)...
     batcher = Ankusa.whereis(inst, {:batcher, 0})
-    eventually(fn -> :sys.get_state(batcher).inflight != nil end)
+    eventually(fn -> map_size(:sys.get_state(batcher).inflight) > 0 end)
 
     # ...so a second one would hold 16 KB: refused, though one record is far
     # below `max_queue`.
@@ -451,8 +451,13 @@ defmodule Ankusa.EdgeTest do
         roles: [:edge],
         source_store:
           {Ankusa.SourceStore.Static, sources: %{"demo" => [sinks: [{Ankusa.Sink.Log, []}]]}},
+        # one commit at a time: these tests stall the writer and watch what a
+        # partition does with the records behind the commit that is stuck
         batcher:
-          Map.merge(%{partitions: 1, max_batch: 1, max_delay_ms: 0, max_queue: 10_000}, batcher)
+          Map.merge(
+            %{partitions: 1, max_batch: 1, max_commits: 1, max_delay_ms: 0, max_queue: 10_000},
+            batcher
+          )
       )
 
     start_supervised!({Ankusa.Instance, config})
@@ -496,7 +501,7 @@ defmodule Ankusa.EdgeTest do
     Task.async(fn -> Batcher.commit(inst, 0, entry, timeout) end)
   end
 
-  defp inflight?(batcher), do: :sys.get_state(batcher).inflight != nil
+  defp inflight?(batcher), do: map_size(:sys.get_state(batcher).inflight) > 0
 
   @tag :capture_log
   test "a record still buffered at its deadline is answered 503 while the commit ahead of it is stuck" do

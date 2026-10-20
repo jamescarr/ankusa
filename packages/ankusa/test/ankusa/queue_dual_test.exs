@@ -323,4 +323,66 @@ defmodule Ankusa.QueueDualTest do
       refute scrape =~ ~r/ankusa_intake_[a-z_]+\{[^}]*tenant/
     end
   end
+
+  describe "group commit" do
+    defp keyed_direct(config, key) do
+      env = %Ankusa.Envelope{
+        id: Ankusa.UUIDv7.generate(),
+        source_id: "load",
+        tenant_id: "default",
+        received_at: System.system_time(:millisecond),
+        method: "POST",
+        path: "/webhooks/load",
+        headers: [],
+        body: "{}",
+        size: 2,
+        dedupe_key: key
+      }
+
+      Queue.enqueue(config.instance, [
+        %{
+          envelope: env,
+          sinks: [{Ankusa.Test.Dual.CollectSink, [pid: self()]}],
+          dedupe_ttl_ms: 60_000
+        }
+      ])
+    end
+
+    test "the same key from two partitions is one hook, answered only after the log confirms" do
+      config = start_dual()
+      inst = config.instance
+      writer = Ankusa.whereis(inst, :queue_writer)
+      Memory.hold(inst)
+      :ok = :sys.suspend(writer)
+
+      tasks = for _ <- 1..2, do: Task.async(fn -> keyed_direct(config, "same-key") end)
+
+      assert wait_until(fn ->
+               Process.info(writer, :message_queue_len) == {:message_queue_len, 2}
+             end)
+
+      :ok = :sys.resume(writer)
+
+      # both prefetches read the key as absent; the group committed one hook, and
+      # nothing is acked while the log has not confirmed it
+      assert wait_until(fn -> length(hook_ids(config)) == 1 end)
+      assert Enum.all?(tasks, &(Task.yield(&1, 100) == nil))
+      assert Memory.records(inst) == []
+
+      Memory.release(inst)
+      replies = Enum.map(tasks, &Task.await(&1, 5_000))
+
+      assert [{:ok, [{:committed, committed}]}] =
+               Enum.filter(replies, &match?({:ok, [{:committed, _}]}, &1))
+
+      assert [{:ok, [{:duplicate, duplicate}]}] =
+               Enum.filter(replies, &match?({:ok, [{:duplicate, _}]}, &1))
+
+      assert duplicate.id == committed.id
+
+      assert [%{id: id}] = Memory.records(inst)
+      assert id == committed.id
+      assert drained(config)
+    end
+  end
 end
