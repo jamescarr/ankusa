@@ -52,6 +52,7 @@ export class RoutesRejectedError extends RoutesError {
     message?: string,
     readonly conflicting_id?: string,
     readonly max_routes?: number,
+    readonly scope: string | null = null,
   ) {
     super(message ?? `routes rejected (${status})${code ? `: ${code}` : ""}`);
   }

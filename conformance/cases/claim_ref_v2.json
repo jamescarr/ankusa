@@ -409,7 +409,8 @@
           "dedupe_key": null,
           "replay_id": null,
           "idempotency_key": null,
-          "headers": {}
+          "headers": {},
+          "verification": null
         }
       }
     },

@@ -300,10 +300,11 @@ public final class RoutesClient {
           string(map.get("field")),
           string(map.get("message")),
           string(map.get("conflicting_id")),
-          integral(map.get("max_routes")));
+          integral(map.get("max_routes")),
+          string(map.get("scope")));
     }
 
-    return new RoutesRejectedError(response.status(), null, null, null, null, null);
+    return new RoutesRejectedError(response.status(), null, null, null, null, null, null);
   }
 
   /** The value as a string, or null when it is anything else. */

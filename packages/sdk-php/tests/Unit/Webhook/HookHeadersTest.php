@@ -6,6 +6,7 @@ namespace Ankusa\Tests\Unit\Webhook;
 
 use Ankusa\Webhook\HookHeaders;
 use Ankusa\Webhook\MissingHookIdError;
+use Ankusa\Webhook\Verification;
 use GuzzleHttp\Psr7\ServerRequest;
 use PHPUnit\Framework\TestCase;
 
@@ -193,6 +194,26 @@ final class HookHeadersTest extends TestCase
 
         self::assertSame('acme:stripe:evt_1', $headers->idempotencyKey());
         self::assertSame('acme:stripe:evt_1#replay:rid-1', $headers->idempotencyKey(true));
+    }
+
+    public function testVerificationIsNullWhenAbsent(): void
+    {
+        $headers = HookHeaders::fromHeaders(['x-ankusa-id' => '01a0', 'x-ankusa-source' => 'stripe']);
+
+        self::assertNull($headers->verification);
+    }
+
+    public function testVerificationFlaggedHeaderIsTrue(): void
+    {
+        $headers = HookHeaders::fromHeaders([
+            'x-ankusa-id' => '01a0',
+            'x-ankusa-verification' => 'failed',
+            'x-ankusa-verification-flagged' => 'true',
+        ]);
+
+        self::assertInstanceOf(Verification::class, $headers->verification);
+        self::assertSame('failed', $headers->verification->status);
+        self::assertTrue($headers->verification->flagged);
     }
 
     /* --- helpers ------------------------------------------------------------ */

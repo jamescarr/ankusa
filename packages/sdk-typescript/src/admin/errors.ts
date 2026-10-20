@@ -36,6 +36,7 @@ export class AdminRejectedError extends AdminError {
     message: string,
     readonly status: number,
     readonly code?: string,
+    readonly scope: string | null = null,
   ) {
     super(message);
   }

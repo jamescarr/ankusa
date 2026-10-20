@@ -57,8 +57,8 @@ class RoutesRejectedError(RoutesError):
 
     ``code`` is the body's ``error`` field (``invalid_route``,
     ``duplicate_route``, ``too_many_routes``, ...); ``field``, ``message``,
-    ``conflicting_id`` and ``max_routes`` are carried through when the body
-    supplies them.
+    ``conflicting_id``, ``max_routes`` and ``scope`` are carried through when
+    the body supplies them.
     """
 
     retryable = False
@@ -73,6 +73,7 @@ class RoutesRejectedError(RoutesError):
         detail: Any = None,
         conflicting_id: Any = None,
         max_routes: Any = None,
+        scope: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
@@ -81,3 +82,4 @@ class RoutesRejectedError(RoutesError):
         self.message = detail
         self.conflicting_id = conflicting_id
         self.max_routes = max_routes
+        self.scope = scope

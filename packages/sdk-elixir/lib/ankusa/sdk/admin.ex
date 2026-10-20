@@ -105,6 +105,17 @@ defmodule Ankusa.SDK.Admin do
   def list_quarantined(%__MODULE__{} = client, params \\ []),
     do: json(client, :get, "/v1/quarantine", query: params)
 
+  @doc """
+  The audit trail, newest first: `GET /v1/audit`.
+
+  `params` may carry `cursor`, `limit`, `since`, `until`, `actor`, `action` and
+  `tenant`; `nil` values are left out of the query string rather than sent as
+  `=`.
+  """
+  @spec list_audit(t(), term()) :: {:ok, term()} | {:error, Exception.t()}
+  def list_audit(%__MODULE__{} = client, params \\ []),
+    do: json(client, :get, "/v1/audit", query: params)
+
   defp json(client, method, path, opts \\ []) do
     case request(client, method, path, opts) do
       {:ok, body} ->
@@ -161,12 +172,14 @@ defmodule Ankusa.SDK.Admin do
 
   defp rejected(status, decoded) do
     code = if is_map(decoded), do: decoded["error"]
+    scope = if is_map(decoded), do: decoded["scope"]
 
     {:error,
      %AdminRejectedError{
        message: "admin listener rejected the request (#{status}): #{inspect(decoded)}",
        status: status,
-       code: code
+       code: code,
+       scope: scope
      }}
   end
 

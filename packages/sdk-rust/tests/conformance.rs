@@ -23,11 +23,11 @@ use ankusa::bytes::Bytes;
 use ankusa::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use ankusa::{
     AdminClient, AdminError, ClaimCheckClient, ClaimCheckError, ClientBuilder, DryRunRequest,
-    InvalidClaimRefError, InvalidMessageError, InvalidSignatureError, IpRules,
+    InvalidClaimRefError, InvalidMessageError, InvalidSignatureError, IpRules, ListAuditParams,
     ListDeadLettersParams, ListQuarantinedParams, ListRoutesParams, Message, MissingHookIdError,
     ReceiveError, ReceiveOptions, ReplayPatch, ReplaySpec, RouteInput, RoutePatch, RoutesClient,
-    RoutesError, Transport, TransportError, VerifyOptions, decode_message, parse_claim_ref,
-    parse_headers, receive_delivery, verify_signature,
+    RoutesError, Transport, TransportError, Verification, VerifyOptions, decode_message,
+    parse_claim_ref, parse_headers, receive_delivery, verify_signature,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -304,6 +304,7 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
                 "dedupe_key": parsed.dedupe_key,
                 "replay_id": parsed.replay_id,
                 "idempotency_key": parsed.idempotency_key,
+                "verification": verification_json(parsed.verification.as_ref()),
             }))
         }
         "parse_headers" => {
@@ -317,6 +318,7 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
                 "dedupe_key": parsed.dedupe_key,
                 "replay_id": parsed.replay_id,
                 "idempotency_key": parsed.idempotency_key,
+                "verification": verification_json(parsed.verification.as_ref()),
             }))
         }
         "decode_message" => {
@@ -491,6 +493,13 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
                     .map_err(OpError::Admin)?,
             ))
         }
+        "admin_audit_list" => {
+            let client = admin(builder);
+            let params: ListAuditParams = input_or_default(case, "params");
+            Ok(to_value(
+                &client.list_audit(&params).await.map_err(OpError::Admin)?,
+            ))
+        }
         other => panic!("case {}: unknown operation {other:?}", case.id),
     }
 }
@@ -570,6 +579,7 @@ fn error_json(err: &OpError) -> Value {
                     map.insert("message".to_owned(), json!(rejection.message));
                     map.insert("conflicting_id".to_owned(), json!(rejection.conflicting_id));
                     map.insert("max_routes".to_owned(), json!(rejection.max_routes));
+                    map.insert("scope".to_owned(), json!(rejection.scope));
                 }
                 RoutesError::Unavailable(_) => {
                     entry(&mut map, "RoutesUnavailableError", retryable);
@@ -584,10 +594,15 @@ fn error_json(err: &OpError) -> Value {
                     entry(&mut map, "RoleNotEnabledError", retryable);
                     map.insert("role".to_owned(), json!(role));
                 }
-                AdminError::Rejected { status, code } => {
+                AdminError::Rejected {
+                    status,
+                    code,
+                    scope,
+                } => {
                     entry(&mut map, "AdminRejectedError", retryable);
                     map.insert("status".to_owned(), json!(status.as_u16()));
                     map.insert("code".to_owned(), json!(code));
+                    map.insert("scope".to_owned(), json!(scope));
                 }
                 AdminError::Unavailable(_) => {
                     entry(&mut map, "AdminUnavailableError", retryable);
@@ -768,7 +783,19 @@ fn message_json(message: &Message) -> Value {
         "replay_id": message.replay_id,
         "idempotency_key": message.idempotency_key,
         "headers": message.headers,
+        "verification": verification_json(message.verification.as_ref()),
     })
+}
+
+/// `Verification` as the vectors shape it: `{status, flagged}` or `null`.
+fn verification_json(verification: Option<&Verification>) -> Value {
+    match verification {
+        Some(verification) => json!({
+            "status": verification.status,
+            "flagged": verification.flagged,
+        }),
+        None => Value::Null,
+    }
 }
 
 fn json_or_null(bytes: &[u8]) -> Value {
