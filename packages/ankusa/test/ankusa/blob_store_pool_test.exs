@@ -11,7 +11,7 @@ defmodule Ankusa.BlobStore.PoolTest do
   alias Ankusa.BlobStore.{GCS, LocalFS, Options, Pool, S3}
   alias Ankusa.Config
 
-  # An endpoint that takes 400 ms to answer.
+  # An endpoint that takes 1.5 s to answer.
   defmodule SlowPlug do
     @moduledoc false
     @behaviour Plug
@@ -19,7 +19,7 @@ defmodule Ankusa.BlobStore.PoolTest do
     def init(opts), do: opts
     @impl true
     def call(conn, _opts) do
-      Process.sleep(400)
+      Process.sleep(1_500)
       Plug.Conn.send_resp(conn, 200, "ok")
     end
   end
@@ -151,7 +151,7 @@ defmodule Ankusa.BlobStore.PoolTest do
     {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
     endpoint = "http://127.0.0.1:#{port}"
 
-    store = s3(endpoint, pool_size: 1, pool_timeout: 100, retries: 0)
+    store = s3(endpoint, pool_size: 1, pool_timeout: 500, retries: 0)
     config = config(store, [])
     Enum.each(Pool.child_specs(config), &start_supervised!/1)
     {S3, opts} = store
@@ -161,8 +161,8 @@ defmodule Ankusa.BlobStore.PoolTest do
       |> Task.async_stream(fn _ -> S3.get(config.instance, "k", opts) end, timeout: 10_000)
       |> Enum.map(fn {:ok, result} -> result end)
 
-    # One connection: one request is answered, the other cannot check one out in 100 ms.
-    assert Enum.count(results, &match?({:ok, "ok"}, &1)) == 1
+    # One connection: one request is answered, the other cannot check one out in 500 ms.
+    assert Enum.count(results, &match?({:ok, "ok"}, &1)) == 1, inspect(results)
     assert [{:error, reason}] = Enum.reject(results, &match?({:ok, _}, &1))
     refute match?({:status, _, _}, reason)
   end
