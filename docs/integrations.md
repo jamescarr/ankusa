@@ -19,7 +19,8 @@ constructed in memory doesn't. `{:error, reason}` triggers the source's
 [`delivery.md`](delivery.md)). A sink never talks to a job framework's SDK
 directly unless it's your own in-process sink (see the Oban section below);
 the shipped sinks (`Sink.Log`, `Sink.Http`, `Sink.RabbitMQ`, `Sink.Kafka`,
-`Sink.NATS`, `Sink.Redis`, `Sink.SQS`) are all framework-neutral.
+`Sink.NATS`, `Sink.Redis`, `Sink.SQS`, `Sink.GooglePubSub`) are all
+framework-neutral.
 
 ## HTTP handoff (any language)
 
@@ -405,11 +406,10 @@ while it was away, and a publish no live subscriber receives is an error
 rather than a stored job — use it for consumers that may miss messages, not
 for durable work. See
 [`delivery.md`](delivery.md) for the full
-message contract and reconnection/confirm semantics, and the three existing
-worked examples,
+message contract and reconnection/confirm semantics, and the worked examples
 [`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/),
-[`examples/nats-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/nats-consumer/)
-and
-[`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/),
+[`examples/nats-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/nats-consumer/),
+[`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/)
+and [`examples/jetstream-k8s/`](https://github.com/jamescarr/ankusa/tree/main/examples/jetstream-k8s/),
 for end-to-end deployments where the worker is itself the consumer (rather
 than a job-framework broker in between).
