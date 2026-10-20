@@ -29,6 +29,9 @@ defmodule Ankusa.Metrics.Gauges do
     * `[:ankusa, :sink_http, :state]` — `origins`, how many receivers have an
       open connection pool in `Ankusa.Sink.Http.Pool` (computed `Sink.Http`
       destinations); a constant-time read.
+    * `[:ankusa, :sink_batch, :state]` — `batchers`, `queued` and `queued_bytes`
+      across the `Ankusa.Sink.Batcher`s (SQS, Pub/Sub) of the instance; summed
+      from counters each batcher keeps, no queue is scanned.
 
   Each probe runs on its own: one that fails (the store is reopening) emits
   nothing, so its gauges keep their last value, and logs at `:debug`; the
@@ -78,6 +81,7 @@ defmodule Ankusa.Metrics.Gauges do
     if Config.role?(config, :edge), do: probe(instance, :quarantine, &quarantine/1)
     probe(instance, :disk, &disk(&1, config))
     probe(instance, :sink_http, &sink_http/1)
+    probe(instance, :sink_batch, &sink_batch/1)
     if config.wal == :dual, do: probe(instance, :intake, &intake/1)
     :ok
   end
@@ -114,6 +118,14 @@ defmodule Ankusa.Metrics.Gauges do
   defp skipped(name, reason) do
     Logger.debug("[ankusa] #{name} gauge skipped: #{inspect(reason)}")
     :ok
+  end
+
+  # Zeros once the last batcher idles out, so the series fall back instead of
+  # holding their last value.
+  defp sink_batch(instance) do
+    if Ankusa.Sink.Batcher.available?(instance),
+      do: emit(instance, :sink_batch, Ankusa.Sink.Batcher.stats(instance)),
+      else: :ok
   end
 
   defp sink_http(instance) do

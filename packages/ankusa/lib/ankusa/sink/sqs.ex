@@ -7,12 +7,14 @@ defmodule Ankusa.Sink.SQS do
   `Ankusa.Sink.NATS` publish: inline up to `:inline_max_bytes`, a claim ticket
   above it.
 
-  Each delivery is one SigV4-signed `SendMessage` `POST` through
-  `Ankusa.HttpClient` (Req's connection pool, no hidden retries or redirects).
-  The sink starts no processes and needs nothing beyond core's `req` and
-  `aws_signature`. Credentials come from `Ankusa.AWS.Credentials`: static
-  opts, then the `AWS_*` environment, web identity (IRSA), then the EC2
-  instance role (IMDSv2).
+  Dispatch's deliveries are **batched** (see "Batching"): up to 10 of them to one
+  queue go out as one SigV4-signed `SendMessageBatch` `POST`. Anything else
+  (direct publishing, `batch: false`) is one `SendMessage` per delivery. Both go
+  through `Ankusa.HttpClient` (Req's connection pool, no hidden retries or
+  redirects). The sink needs nothing beyond core's `req` and `aws_signature`;
+  its batchers are started by `Ankusa.Instance`. Credentials come from
+  `Ankusa.AWS.Credentials`: static opts, then the `AWS_*` environment, web
+  identity (IRSA), then the EC2 instance role (IMDSv2).
 
   This sink **never creates a queue**. A queue's type, retention, visibility
   timeout, redrive policy and encryption are an operator's contract, not
@@ -24,7 +26,8 @@ defmodule Ankusa.Sink.SQS do
 
   ## Publishing is confirmed
 
-  `deliver/3` returns `:ok` only on a `200` from `SendMessage` whose
+  `deliver/3` returns `:ok` only on a `200` from `SendMessage` (or, batched, an
+  entry of a `SendMessageBatch` reply under `Successful`) whose
   `MD5OfMessageBody` matches the MD5 of the body sent. SQS answers `200` once
   it has stored the message redundantly, so the sink keeps the default
   `c:Ankusa.Sink.durable?/1` of `true`. Everything else is an error (see
@@ -33,10 +36,15 @@ defmodule Ankusa.Sink.SQS do
     * `{:permanent, {:message_too_large, size, max}}` — body plus message
       attributes over `:max_message_bytes`, refused before any request.
     * `{:permanent, {:sqs, status, code, message}}` — SQS refused the message
-      itself: `InvalidMessageContents` (characters outside SQS's allowed set)
-      or `InvalidParameterValue`. Dead-lettered at once.
+      itself: `InvalidMessageContents` (characters outside SQS's allowed set),
+      `InvalidParameterValue`, `MissingParameter`, `InvalidAttributeName` or
+      `InvalidAttributeValue`. Dead-lettered at once.
+    * `{:retry_after, ms, {:sqs, status, code, message}}` — SQS asked for less
+      traffic (`ThrottlingException`, `RequestThrottled`, `ServiceUnavailable`,
+      `KmsThrottled`), or a proxy answered `429`/`503` (`{:status, status,
+      body}`): the next attempt waits `ms`, full jitter, or the policy's backoff.
     * `{:sqs, status, code, message}` — any other SQS error
-      (`QueueDoesNotExist`, `AccessDenied`, throttling, a 5xx): an operator
+      (`QueueDoesNotExist`, `AccessDenied`, a 5xx): an operator
       can fix these, so they get the retry policy, then the DLQ.
     * `{:status, status, body}` — a non-2xx response that is not an SQS error
       document (a proxy, a load balancer).
@@ -63,6 +71,38 @@ defmodule Ankusa.Sink.SQS do
 
   On a standard queue `MessageGroupId` is sent only when `:message_group_id`
   is set (fair queues), and `MessageDeduplicationId` never is.
+
+  ## Batching
+
+  A delivery from dispatch waits in its queue's `Ankusa.Sink.Batcher` (one per
+  queue and set of credentials) and is sent in a `SendMessageBatch` with up to 9
+  others, 20 ms after the first arrived or as soon as the batch is full (10
+  entries, 256 KiB). `deliver/3` returns when the batch's response is known: the
+  hook's row stays claimed until then, so a batcher that dies loses nothing and
+  the attempt is retried. The response is read entry by entry:
+
+    * `Successful` with the MD5 of the body sent: `:ok`. A different MD5 is
+      `{:md5_mismatch, expected, got}`.
+    * `Failed`: classified on its own, as above, so a batch with one refused
+      message dead-letters exactly that message. A throttled entry
+      (`ThrottlingException`, `RequestThrottled`, `ServiceUnavailable`,
+      `KmsThrottled`) is `{:retry_after, ms, reason}`, `ms` full jitter.
+    * a `Failed` or a missing entry never fails its neighbours; a request that
+      fails as a whole (a `5xx`, a timeout, a `429`) fails every entry the way a
+      single `SendMessage` would, and each retries on its own schedule.
+
+  Entry `Id`s are positions in the request (`"0"` to `"9"`), not hook ids; the
+  `MessageDeduplicationId` is unchanged. A batch may hold hooks of several
+  tenants and sources; the batcher takes entries round-robin across tenants, and
+  refuses, with `{:retry_after, ms, {:batch_queue_full, reason}}`, a delivery that
+  would pass its queue's ceilings (see `Ankusa.Sink.Batcher`).
+
+  On a FIFO queue a `MessageGroupId` has one request in flight at a time, and its
+  entries leave in the order they were admitted; SQS enqueues a batch's messages
+  in the order they are sent. With the default group (`tenant/source`) that
+  means a source's messages to one FIFO queue go out as fast as SQS answers,
+  up to 10 to a request. A message that fails and is retried is a later send,
+  as it always was.
 
   ## What each message carries
 
@@ -96,20 +136,38 @@ defmodule Ankusa.Sink.SQS do
     * `:req_options`       — transport options for the HTTP client (a Finch
                              pool, a proxy via `:connect_options`, `plug:` for
                              `Req.Test`); see `Ankusa.HttpClient`.
+    * `:batch`             — default `true`; `false` sends every delivery in its
+                             own `SendMessage` and counts it against
+                             `dispatch.sink_concurrency` as before
+    * `:batch_linger_ms`   — default 20, how long a batch waits to fill
+    * `:batch_max_entries` — default and maximum 10
+    * `:batch_max_bytes`   — default 262,144, at most 1,048,576 (SQS's limit
+                             for a batch's messages together)
+    * `:batch_queue_max`, `:batch_queue_max_bytes`, `:batch_queue_tenant_max`
+                           — the queue's ceilings, default 4,096 entries,
+                             128 MiB and 1,024 entries a tenant
+    * `:batch_max_inflight` — requests in flight per queue; default the
+                             instance's `dispatch.sink_concurrency` (8)
   """
 
   @behaviour Ankusa.Sink
 
-  alias Ankusa.{Envelope, HttpClient}
-  alias Ankusa.Sink.{Description, Message}
+  alias Ankusa.Envelope
+  alias Ankusa.Sink.{Batcher, Description, Message}
 
+  @codec Ankusa.Sink.SQS.Batcher
   @default_max_message_bytes 1_048_576
-  @default_timeout_ms 5_000
 
   # SQS refusing the message itself: no retry changes the answer. Both spellings
   # of the parameter error, because the JSON protocol's `__type` for it is not
   # pinned down.
-  @permanent_codes ~w(InvalidMessageContents InvalidParameterValue InvalidParameterValueException)
+  @permanent_codes ~w(InvalidMessageContents InvalidParameterValue InvalidParameterValueException
+                      MissingParameter InvalidAttributeName InvalidAttributeValue)
+
+  # SQS asking for less traffic: the next attempt waits (with full jitter) as
+  # long as the policy's own backoff or longer.
+  @throttle_codes ~w(Throttling ThrottlingException RequestThrottled ServiceUnavailable
+                     KmsThrottled)
 
   @impl true
   def deliver(%Envelope{} = env, ctx, opts) do
@@ -117,18 +175,36 @@ defmodule Ankusa.Sink.SQS do
 
     with {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)),
          attributes = attributes(env, ctx),
-         :ok <- fits(payload, attributes, max),
-         {:ok, creds} <- Ankusa.AWS.Credentials.get(opts) do
-      body = request_body(env, ctx, opts, payload, attributes)
+         {:ok, size} <- fits(payload, attributes, max) do
+      entry = message_entry(env, ctx, opts, payload, attributes)
 
-      opts
-      |> send_message(creds, body)
-      |> reply(payload)
+      if batch?(ctx, opts) do
+        # One of up to 10 entries of a `SendMessageBatch`; the batch's reply is
+        # mapped back to this one.
+        Batcher.deliver(@codec, ctx.instance, opts, %{
+          tenant: env.tenant_id || "",
+          bytes: size,
+          group: ordered_group(entry, opts),
+          attempt: ctx[:attempt] || 1,
+          item: %{entry: entry, md5: md5(payload), attempt: ctx[:attempt] || 1}
+        })
+      else
+        with {:ok, creds} <- Ankusa.AWS.Credentials.get(opts) do
+          body = entry |> Map.put("QueueUrl", Keyword.fetch!(opts, :queue_url)) |> JSON.encode!()
+
+          opts
+          |> send_message(creds, body)
+          |> reply(payload, ctx[:attempt] || 1)
+        end
+      end
     end
   end
 
   @impl true
   def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
+
+  @impl true
+  def batched?(opts), do: Keyword.get(opts, :batch, true) == true
 
   @impl true
   def describe(_subject, opts) do
@@ -137,7 +213,7 @@ defmodule Ankusa.Sink.SQS do
 
     %Description{
       protocol: "sqs",
-      host: authority(endpoint(opts) <> "/"),
+      host: @codec.authority(@codec.endpoint(opts) <> "/"),
       address: name,
       channel_bindings: %{
         "sqs" => %{
@@ -153,6 +229,63 @@ defmodule Ankusa.Sink.SQS do
     }
   end
 
+  @doc """
+  The `{:error, reason}` for an SQS error `code`, whether it answered a whole
+  request (`status` is the HTTP status) or one entry of a batch (`400` for a
+  sender's fault, `500` otherwise).
+
+    * a refused message (`InvalidMessageContents`, `InvalidParameterValue`, …):
+      `{:permanent, {:sqs, status, code, message}}`
+    * throttling (`ThrottlingException`, `RequestThrottled`,
+      `ServiceUnavailable`, `KmsThrottled`): `{:retry_after, ms, reason}`, `ms`
+      full jitter for `attempt`
+    * anything else: `{:sqs, status, code, message}`, transient
+  """
+  @spec classify_error(integer(), String.t(), String.t() | nil, pos_integer()) ::
+          {:error, term()}
+  def classify_error(status, code, message, attempt) do
+    reason = {:sqs, status, code, message}
+
+    cond do
+      code in @permanent_codes -> {:error, {:permanent, reason}}
+      code in @throttle_codes -> {:error, {:retry_after, Batcher.jitter_ms(attempt), reason}}
+      true -> {:error, reason}
+    end
+  end
+
+  @doc false
+  # A non-`200` answer to a whole request. `{"__type": "com.amazonaws.sqs#QueueDoesNotExist",
+  # "message": "..."}` is an SQS error; any other body came from something in
+  # front of it (a `429` or `503` from it is throttling all the same).
+  @spec error_reply(integer(), term(), pos_integer()) :: {:error, term()}
+  def error_reply(status, body, attempt) do
+    case decode(body) do
+      {:ok, %{"__type" => type} = error} when is_binary(type) ->
+        code = type |> String.split("#") |> List.last()
+        classify_error(status, code, error["message"] || error["Message"], attempt)
+
+      _ when status in [429, 503] ->
+        {:error, {:retry_after, Batcher.jitter_ms(attempt), {:status, status, body}}}
+
+      _ ->
+        {:error, {:status, status, body}}
+    end
+  end
+
+  # A delivery waits in its destination's batcher only when dispatch says so
+  # (`ctx.batch`), the sink has not opted out (`batch: false`), and the instance
+  # runs batchers; direct publishing and the lifecycle publisher send at once.
+  defp batch?(ctx, opts),
+    do: ctx[:batch] == true and batched?(opts) and Batcher.available?(ctx[:instance])
+
+  # Only an ordered group serializes a destination's requests: FIFO's
+  # `MessageGroupId`. A standard queue's group id (fair queues) orders nothing.
+  defp ordered_group(entry, opts) do
+    if fifo?(Keyword.fetch!(opts, :queue_url)), do: Map.get(entry, "MessageGroupId")
+  end
+
+  defp md5(payload), do: Base.encode16(:crypto.hash(:md5, payload), case: :lower)
+
   # SQS counts every attribute's name, data type and value toward the message
   # size limit, alongside the body.
   defp fits(payload, attributes, max) do
@@ -164,7 +297,7 @@ defmodule Ankusa.Sink.SQS do
 
     if size > max,
       do: {:error, {:permanent, {:message_too_large, size, max}}},
-      else: :ok
+      else: {:ok, size}
   end
 
   defp attributes(env, ctx) do
@@ -173,12 +306,11 @@ defmodule Ankusa.Sink.SQS do
     |> Map.new(fn {name, value} -> {name, %{"DataType" => "String", "StringValue" => value}} end)
   end
 
-  defp request_body(env, ctx, opts, payload, attributes) do
-    queue_url = Keyword.fetch!(opts, :queue_url)
-
-    %{"QueueUrl" => queue_url, "MessageBody" => payload, "MessageAttributes" => attributes}
-    |> put_ordering(env, ctx, opts, fifo?(queue_url))
-    |> JSON.encode!()
+  # What one message is, in a `SendMessage` request and as an entry of a
+  # `SendMessageBatch`.
+  defp message_entry(env, ctx, opts, payload, attributes) do
+    %{"MessageBody" => payload, "MessageAttributes" => attributes}
+    |> put_ordering(env, ctx, opts, fifo?(Keyword.fetch!(opts, :queue_url)))
   end
 
   defp put_ordering(request, env, ctx, opts, true = _fifo?) do
@@ -211,46 +343,11 @@ defmodule Ankusa.Sink.SQS do
     end
   end
 
-  defp send_message(opts, creds, body) do
-    url = endpoint(opts) <> "/"
+  defp send_message(opts, creds, body),
+    do: @codec.post(opts, creds, "AmazonSQS.SendMessage", body)
 
-    # The signature covers the host header, so it is derived from the same URL
-    # handed to the signer. Temporary credentials add their session token as a
-    # signed header.
-    headers =
-      [
-        {"host", authority(url)},
-        {"content-type", "application/x-amz-json-1.0"},
-        {"x-amz-target", "AmazonSQS.SendMessage"}
-      ] ++
-        if(creds.session_token, do: [{"x-amz-security-token", creds.session_token}], else: [])
-
-    signed =
-      :aws_signature.sign_v4(
-        creds.access_key_id,
-        creds.secret_access_key,
-        Keyword.fetch!(opts, :region),
-        "sqs",
-        :calendar.universal_time(),
-        "POST",
-        url,
-        headers,
-        body,
-        []
-      )
-
-    HttpClient.request(
-      :post,
-      url,
-      signed,
-      body,
-      Keyword.get(opts, :timeout_ms, @default_timeout_ms),
-      Keyword.get(opts, :req_options, [])
-    )
-  end
-
-  defp reply({:ok, 200, body}, payload) do
-    expected = Base.encode16(:crypto.hash(:md5, payload), case: :lower)
+  defp reply({:ok, 200, body}, payload, _attempt) do
+    expected = md5(payload)
 
     case decode(body) do
       {:ok, %{"MessageId" => id, "MD5OfMessageBody" => ^expected}} when is_binary(id) ->
@@ -265,24 +362,9 @@ defmodule Ankusa.Sink.SQS do
     end
   end
 
-  # `{"__type": "com.amazonaws.sqs#QueueDoesNotExist", "message": "..."}` is an
-  # SQS error; any other body came from something in front of it.
-  defp reply({:ok, status, body}, _payload) do
-    case decode(body) do
-      {:ok, %{"__type" => type} = error} when is_binary(type) ->
-        code = type |> String.split("#") |> List.last()
-        reason = {:sqs, status, code, error["message"] || error["Message"]}
+  defp reply({:ok, status, body}, _payload, attempt), do: error_reply(status, body, attempt)
 
-        if code in @permanent_codes,
-          do: {:error, {:permanent, reason}},
-          else: {:error, reason}
-
-      _ ->
-        {:error, {:status, status, body}}
-    end
-  end
-
-  defp reply({:error, reason}, _payload), do: {:error, reason}
+  defp reply({:error, reason}, _payload, _attempt), do: {:error, reason}
 
   defp decode(body) when is_binary(body), do: JSON.decode(body)
   defp decode(_body), do: :error
@@ -294,22 +376,5 @@ defmodule Ankusa.Sink.SQS do
     (URI.parse(queue_url).path || "")
     |> String.split("/", trim: true)
     |> List.last()
-  end
-
-  defp endpoint(opts) do
-    case Keyword.get(opts, :endpoint) do
-      nil ->
-        url = Keyword.fetch!(opts, :queue_url)
-        URI.parse(url).scheme <> "://" <> authority(url)
-
-      endpoint ->
-        String.trim_trailing(endpoint, "/")
-    end
-  end
-
-  defp authority(url) do
-    %URI{host: host, port: port, scheme: scheme} = URI.parse(url)
-    default = if scheme == "https", do: 443, else: 80
-    if port == default, do: host, else: "#{host}:#{port}"
   end
 end

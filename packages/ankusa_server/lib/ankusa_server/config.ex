@@ -188,8 +188,11 @@ defmodule AnkusaServer.Config do
   @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth idle_timeout_ms)
   @nats_auth_keys ~w(username password token nkey_seed jwt)
   @redis_sink_keys ~w(type url channel inline_max_bytes publish_timeout_ms idle_timeout_ms)
-  @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token)
-  @google_pubsub_sink_keys ~w(type project topic endpoint ordering_key inline_max_bytes max_message_bytes timeout_ms auth token)
+  @batch_sink_keys ~w(batch batch_linger_ms batch_max_entries batch_max_bytes batch_queue_max batch_queue_max_bytes batch_queue_tenant_max batch_max_inflight)
+  @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token) ++
+                   @batch_sink_keys
+  @google_pubsub_sink_keys ~w(type project topic endpoint ordering_key inline_max_bytes max_message_bytes timeout_ms auth token) ++
+                             @batch_sink_keys
 
   @roles ~w(edge dispatch storage claim_check)
   @routes_store_types ~w(ets redis)
@@ -2580,7 +2583,8 @@ defmodule AnkusaServer.Config do
          |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))
          |> put_opt(:access_key_id, string_opt(sink, "access_key_id", path))
          |> put_opt(:secret_access_key, string_opt(sink, "secret_access_key", path))
-         |> put_opt(:session_token, string_opt(sink, "session_token", path))}
+         |> put_opt(:session_token, string_opt(sink, "session_token", path))
+         |> Kernel.++(batch_opts(sink, path))}
 
       "google_pubsub" ->
         check_keys!(sink, @google_pubsub_sink_keys, path)
@@ -2594,7 +2598,26 @@ defmodule AnkusaServer.Config do
           |> put_opt(:ordering_key, string_opt(sink, "ordering_key", path))
           |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
           |> put_opt(:max_message_bytes, int_opt(sink, "max_message_bytes", path))
-          |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))) ++ gcp_auth!(sink, path)}
+          |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))) ++
+           batch_opts(sink, path) ++ gcp_auth!(sink, path)}
+    end
+  end
+
+  # The batching options of `Ankusa.Sink.SQS` and `Ankusa.Sink.GooglePubSub`
+  # (`Ankusa.Sink.Batcher`).
+  defp batch_opts(sink, path) do
+    [
+      batch: bool_opt(sink, "batch", path),
+      batch_linger_ms: int_opt(sink, "batch_linger_ms", path),
+      batch_max_entries: int_opt(sink, "batch_max_entries", path),
+      batch_max_bytes: int_opt(sink, "batch_max_bytes", path),
+      batch_queue_max: int_opt(sink, "batch_queue_max", path),
+      batch_queue_max_bytes: int_opt(sink, "batch_queue_max_bytes", path),
+      batch_queue_tenant_max: int_opt(sink, "batch_queue_tenant_max", path),
+      batch_max_inflight: int_opt(sink, "batch_max_inflight", path)
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
     end
   end
 

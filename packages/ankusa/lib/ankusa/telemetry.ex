@@ -39,6 +39,9 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :quarantine, :state]` | `:bytes`, `:entries` | `:instance` |
   | `[:ankusa, :disk, :state]` | `:free_bytes`, `:total_bytes` | `:instance` |
   | `[:ankusa, :sink_http, :state]` | `:origins` (receivers with an open connection pool in `Ankusa.Sink.Http.Pool`) | `:instance` |
+  | `[:ankusa, :sink_batch, :flush]` | `:entries`, `:bytes`, `:requests` (HTTP requests the batch took), `:bisections` (extra requests spent isolating a message Pub/Sub refused), `:duration_ms` | `:instance`, `:sink` (`Ankusa.Sink.SQS`, `Ankusa.Sink.GooglePubSub`). One per batch a `Ankusa.Sink.Batcher` sent |
+  | `[:ankusa, :sink_batch, :refused]` | — | `:instance`, `:sink`, `:reason` (`:entries`, `:bytes`, `:tenant`: the batcher's queue ceiling the delivery would pass) |
+  | `[:ankusa, :sink_batch, :state]` | `:batchers`, `:queued`, `:queued_bytes` | `:instance` |
   | `[:ankusa, :compact, :stop]` | `:records`, `:bytes`, `:duration` | `:instance` |
   | `[:ankusa, :backup, :stop]` | `:duration`, `:files`, `:bytes` | `:instance`, `:result` (`:ok`, `:error`), `:reason` (on `:error`) |
   | `[:ankusa, :backup, :state]` | `:age_seconds` (since the last successful backup, or since the uploader started) | `:instance` |

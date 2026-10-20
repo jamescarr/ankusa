@@ -337,6 +337,37 @@ defmodule Ankusa.Metrics do
         )
       ),
       sum(
+        "ankusa.sink_batch.requests.total",
+        scoped(own,
+          event_name: [:ankusa, :sink_batch, :flush],
+          measurement: :requests,
+          tags: [:instance, :sink]
+        )
+      ),
+      sum(
+        "ankusa.sink_batch.entries.total",
+        scoped(own,
+          event_name: [:ankusa, :sink_batch, :flush],
+          measurement: :entries,
+          tags: [:instance, :sink]
+        )
+      ),
+      sum(
+        "ankusa.sink_batch.bisections.total",
+        scoped(own,
+          event_name: [:ankusa, :sink_batch, :flush],
+          measurement: :bisections,
+          tags: [:instance, :sink]
+        )
+      ),
+      counter(
+        "ankusa.sink_batch.refused.total",
+        scoped(own,
+          event_name: [:ankusa, :sink_batch, :refused],
+          tags: [:instance, :sink, :reason]
+        )
+      ),
+      sum(
         "ankusa.replay.moved.total",
         scoped(own,
           event_name: [:ankusa, :replay, :moved],
@@ -614,6 +645,10 @@ defmodule Ankusa.Metrics do
           {"ankusa.dispatch.runnable", [:ankusa, :dispatch, :state], :runnable, :unit},
           {"ankusa.dispatch.breakers_open", [:ankusa, :dispatch, :state], :breakers_open, :unit},
           {"ankusa.sink_http.pool.origins", [:ankusa, :sink_http, :state], :origins, :unit},
+          {"ankusa.sink_batch.batchers", [:ankusa, :sink_batch, :state], :batchers, :unit},
+          {"ankusa.sink_batch.queued", [:ankusa, :sink_batch, :state], :queued, :unit},
+          {"ankusa.sink_batch.queued.bytes", [:ankusa, :sink_batch, :state], :queued_bytes,
+           :byte},
           {"ankusa.dispatch.active_tenants", [:ankusa, :dispatch, :state], :active_tenants,
            :unit},
           {"ankusa.backup.age.seconds", [:ankusa, :backup, :state], :age_seconds, :second}

@@ -220,4 +220,253 @@ defmodule Ankusa.Sink.GooglePubSubTest do
                opts(endpoint: "http://localhost:4588/", ordering_key: "k")
              )
   end
+  describe "batched (a delivery from dispatch: ctx batch: true, an instance's batchers)" do
+    setup do
+      instance = :"pubsub_batch_#{System.unique_integer([:positive])}"
+      start_supervised!({Ankusa.Sink.Batcher.Workers, instance: instance})
+      %{instance: instance}
+    end
+
+    defp ctx(instance, extra \\ %{}),
+      do: Map.merge(%{instance: instance, batch: true, attempt: 1}, extra)
+
+    # A poison message is one whose ordering key is POISON; the topic refuses a
+    # whole request that carries one, as Pub/Sub does for an invalid message.
+    defp poison_key(env), do: if(String.starts_with?(env.id, "poison"), do: "POISON")
+
+    defp batch_opts(extra \\ []) do
+      opts(Keyword.merge([batch_linger_ms: 200, ordering_key: &poison_key/1], extra))
+    end
+
+    defp stub_publish(capture, fun) do
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        request = JSON.decode!(body)
+        Agent.update(capture, &[{conn.request_path, Map.new(conn.req_headers), request} | &1])
+        fun.(conn, request)
+      end)
+    end
+
+    defp accept(conn, request) do
+      ids = request["messages"] |> Enum.with_index(1) |> Enum.map(&Integer.to_string(elem(&1, 1)))
+      Plug.Conn.send_resp(conn, 200, JSON.encode!(%{"messageIds" => ids}))
+    end
+
+    # The topic refuses a request holding a poison message, accepts any other.
+    defp refuse_poison(conn, request) do
+      if Enum.any?(request["messages"], &(&1["orderingKey"] == "POISON")),
+        do: error(conn, 400, "INVALID_ARGUMENT", "Invalid message."),
+        else: accept(conn, request)
+    end
+
+    defp deliver_all(envs, ctx, opts) do
+      envs
+      |> Enum.map(fn env -> Task.async(fn -> {env.id, GooglePubSub.deliver(env, ctx, opts)} end) end)
+      |> Map.new(&Task.await(&1, 15_000))
+    end
+
+    test "deliveries are one publish with one message each, the way a single publish builds it",
+         %{capture: capture, instance: instance} do
+      stub_publish(capture, &accept/2)
+      envs = for _ <- 1..50, do: envelope()
+
+      results = deliver_all(envs, ctx(instance), batch_opts(batch_max_entries: 50))
+
+      assert Map.values(results) == List.duplicate(:ok, 50)
+      assert [{path, headers, request}] = Agent.get(capture, & &1)
+      assert path == "/v1/projects/p/topics/hooks:publish"
+      assert headers["authorization"] == "Bearer tok"
+      assert length(request["messages"]) == 50
+
+      ids = for m <- request["messages"], do: m["attributes"]["ankusa_id"]
+      assert Enum.sort(ids) == envs |> Enum.map(& &1.id) |> Enum.sort()
+      refute Enum.any?(request["messages"], &Map.has_key?(&1, "orderingKey"))
+    end
+
+    test "one invalid message among 999 good ones: 999 delivered, one dead, a bounded number of requests",
+         %{capture: capture, instance: instance} do
+      stub_publish(capture, &refuse_poison/2)
+
+      envs = for(n <- 1..999, do: envelope(%{id: "good-#{n}"})) ++ [envelope(%{id: "poison-1"})]
+
+      # the batch is full at 1 000, so it leaves at once, not after the linger
+      results = deliver_all(envs, ctx(instance), batch_opts(batch_linger_ms: 30_000))
+
+      assert results["poison-1"] ==
+               {:error, {:permanent, {:pubsub, 400, "INVALID_ARGUMENT", "Invalid message."}}}
+
+      delivered = results |> Map.delete("poison-1") |> Map.values()
+      assert delivered == List.duplicate(:ok, 999)
+
+      # 1 request for the batch, then `2 * ceil(log2 1000)` to isolate the one
+      requests = length(Agent.get(capture, & &1))
+      assert requests <= 1 + 2 * 10
+      assert requests > 1
+    end
+
+    test "a refused batch is bisected in order: the good halves are published, in order",
+         %{capture: capture, instance: instance} do
+      stub_publish(capture, &refuse_poison/2)
+
+      envs =
+        for n <- 1..8, do: envelope(%{id: if(n == 5, do: "poison-5", else: "good-#{n}")})
+
+      results =
+        deliver_all(envs, ctx(instance), batch_opts(batch_max_entries: 8, batch_linger_ms: 5_000))
+
+      assert {:error, {:permanent, _}} = results["poison-5"]
+      assert results |> Map.delete("poison-5") |> Map.values() == List.duplicate(:ok, 7)
+
+      published =
+        Agent.get(capture, & &1)
+        |> Enum.reverse()
+        |> Enum.reject(fn {_, _, request} ->
+          Enum.any?(request["messages"], &(&1["orderingKey"] == "POISON"))
+        end)
+        |> Enum.flat_map(fn {_, _, request} ->
+          Enum.map(request["messages"], & &1["attributes"]["ankusa_id"])
+        end)
+
+      # halves are published left then right: the accepted ids keep their order
+      assert published == published |> Enum.sort_by(&elem(Integer.parse(&1 |> String.split("-") |> List.last()), 0))
+    end
+
+    test "bisection is bounded: a batch of nothing but bad messages does not cost n requests",
+         %{capture: capture, instance: instance} do
+      stub_publish(capture, &refuse_poison/2)
+      envs = for n <- 1..64, do: envelope(%{id: "poison-#{n}"})
+
+      results =
+        deliver_all(envs, ctx(instance), batch_opts(batch_max_entries: 64, batch_linger_ms: 5_000))
+
+      # `2 * (ceil(log2 64) + 1)` splits at most, two requests each, plus the first
+      assert length(Agent.get(capture, & &1)) <= 1 + 2 * 2 * 7
+
+      assert Enum.all?(Map.values(results), fn
+               {:error, {:permanent, {:pubsub, 400, "INVALID_ARGUMENT", _}}} -> true
+               {:error, {:batch_rejected, {:pubsub, 400, "INVALID_ARGUMENT", _}}} -> true
+               _ -> false
+             end)
+
+      # the ones left over are transient: they retry, in other batches
+      assert Enum.any?(Map.values(results), &match?({:error, {:batch_rejected, _}}, &1))
+
+      assert {:transient, _} =
+               Sink.classify(
+                 results |> Map.values() |> Enum.find(&match?({:error, {:batch_rejected, _}}, &1)) |> elem(1)
+               )
+    end
+
+    test "a request that fails as a whole fails every message the way a single publish would",
+         %{capture: capture, instance: instance} do
+      envs = fn -> for _ <- 1..3, do: envelope() end
+
+      stub_publish(capture, fn conn, _ -> Plug.Conn.send_resp(conn, 500, "kaboom") end)
+      results = envs.() |> deliver_all(ctx(instance), batch_opts()) |> Map.values()
+      assert results == List.duplicate({:error, {:status, 500, "kaboom"}}, 3)
+      # not bisected: a transient error is not about one message
+      assert length(Agent.get(capture, & &1)) == 1
+
+      Agent.update(capture, fn _ -> [] end)
+      stub_publish(capture, fn conn, _ -> error(conn, 404, "NOT_FOUND", "no topic") end)
+      results = envs.() |> deliver_all(ctx(instance), batch_opts()) |> Map.values()
+      assert results == List.duplicate({:error, {:pubsub, 404, "NOT_FOUND", "no topic"}}, 3)
+      assert length(Agent.get(capture, & &1)) == 1
+    end
+
+    test "RESOURCE_EXHAUSTED and a 429/503 are retry_after, each message with its own jitter",
+         %{capture: capture, instance: instance} do
+      stub_publish(capture, fn conn, _ ->
+        error(conn, 429, "RESOURCE_EXHAUSTED", "Quota exceeded")
+      end)
+
+      results =
+        for(_ <- 1..3, do: envelope())
+        |> deliver_all(ctx(instance, %{attempt: 2}), batch_opts())
+        |> Map.values()
+
+      assert Enum.all?(
+               results,
+               &match?({:error, {:retry_after, _, {:pubsub, 429, "RESOURCE_EXHAUSTED", _}}}, &1)
+             )
+
+      stub_publish(capture, fn conn, _ -> Plug.Conn.send_resp(conn, 503, "busy") end)
+      assert {:error, {:retry_after, _, {:status, 503, "busy"}}} =
+               GooglePubSub.deliver(envelope(), ctx(instance), batch_opts())
+    end
+
+    test "a reply that does not name one id per message fails every message",
+         %{capture: capture, instance: instance} do
+      stub_publish(capture, fn conn, _ ->
+        Plug.Conn.send_resp(conn, 200, ~s({"messageIds":["1"]}))
+      end)
+
+      results =
+        for(_ <- 1..3, do: envelope())
+        |> deliver_all(ctx(instance), batch_opts())
+        |> Map.values()
+
+      assert Enum.all?(results, &match?({:error, {:unexpected_reply, _}}, &1))
+    end
+
+    test "a token provider that answers :error fails the batch without a request",
+         %{capture: capture, instance: instance} do
+      stub_publish(capture, &accept/2)
+      opts = batch_opts(token_provider: {__MODULE__, :no_token, []})
+
+      assert {:error, :no_credentials} = GooglePubSub.deliver(envelope(), ctx(instance), opts)
+      assert Agent.get(capture, & &1) == []
+    end
+
+    test "an ordering key has one request in flight; its messages keep their order",
+         %{capture: capture, instance: instance} do
+      test = self()
+
+      stub_publish(capture, fn conn, request ->
+        send(test, {:request, Enum.map(request["messages"], & &1["attributes"]["ankusa_id"])})
+        accept(conn, request)
+      end)
+
+      opts = opts(ordering_key: "k", batch_linger_ms: 20, batch_max_inflight: 4)
+
+      for n <- 1..6 do
+        Task.async(fn ->
+          GooglePubSub.deliver(envelope(%{id: "m#{n}"}), ctx(instance), opts)
+        end)
+        |> tap(fn _ -> Process.sleep(5) end)
+      end
+      |> Enum.each(&Task.await/1)
+
+      order =
+        Stream.repeatedly(fn ->
+          receive do
+            {:request, ids} -> ids
+          after
+            300 -> nil
+          end
+        end)
+        |> Enum.take_while(& &1)
+        |> List.flatten()
+
+      assert order == ["m1", "m2", "m3", "m4", "m5", "m6"]
+    end
+
+    test "batch: false (or no batch ctx) publishes one message per request", %{
+      capture: capture,
+      instance: instance
+    } do
+      assert :ok = GooglePubSub.deliver(envelope(), ctx(instance), opts(batch: false))
+      assert {_, _, _, %{"messages" => [_]}} = sent(capture)
+
+      Agent.update(capture, fn _ -> [] end)
+      assert :ok = GooglePubSub.deliver(envelope(), %{instance: instance, attempt: 1}, opts())
+      assert {_, _, _, %{"messages" => [_]}} = sent(capture)
+    end
+
+    test "batched?/1 follows the batch option" do
+      assert GooglePubSub.batched?(topic: "t")
+      refute GooglePubSub.batched?(topic: "t", batch: false)
+      assert Sink.batched?(GooglePubSub, topic: "t")
+    end
+  end
 end

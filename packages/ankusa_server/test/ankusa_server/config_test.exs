@@ -2374,9 +2374,12 @@ defmodule AnkusaServer.ConfigTest do
             - {type: redis, url: "redis://redis:6379", channel: ankusa.full,
                inline_max_bytes: 2048, publish_timeout_ms: 300, idle_timeout_ms: "60000"}
             - {type: sqs, queue_url: "https://sqs.us-east-1.amazonaws.com/1/h.fifo",
-               region: us-east-1, message_group_id: g, max_message_bytes: 262144}
+               region: us-east-1, message_group_id: g, max_message_bytes: 262144,
+               batch_linger_ms: 5, batch_max_entries: 4, batch_max_bytes: 100000,
+               batch_queue_max: 100, batch_queue_max_bytes: 1000000,
+               batch_queue_tenant_max: 10, batch_max_inflight: "2"}
             - {type: google_pubsub, project: p, topic: t, ordering_key: k,
-               max_message_bytes: 1000}
+               max_message_bytes: 1000, batch: false}
       """)
 
     env = %{"NATS_SERVERS" => "n1:4222,n2:4222"}
@@ -2433,11 +2436,21 @@ defmodule AnkusaServer.ConfigTest do
     assert sqs[:region] == "us-east-1"
     assert sqs[:message_group_id] == "g"
     assert sqs[:max_message_bytes] == 262_144
+    assert sqs[:batch_linger_ms] == 5
+    assert sqs[:batch_max_entries] == 4
+    assert sqs[:batch_max_bytes] == 100_000
+    assert sqs[:batch_queue_max] == 100
+    assert sqs[:batch_queue_max_bytes] == 1_000_000
+    assert sqs[:batch_queue_tenant_max] == 10
+    assert sqs[:batch_max_inflight] == 2
+    refute Keyword.has_key?(sqs, :batch)
 
     assert pubsub[:project] == "p"
     assert pubsub[:topic] == "t"
     assert pubsub[:ordering_key] == "k"
     assert pubsub[:max_message_bytes] == 1000
+    assert pubsub[:batch] == false
+    refute Keyword.has_key?(pubsub, :batch_linger_ms)
     assert pubsub[:token_provider] == {AnkusaServer.GcpToken, :metadata, []}
   end
 

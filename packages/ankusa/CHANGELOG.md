@@ -13,6 +13,39 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **`Sink.SQS` and `Sink.GooglePubSub` batch (DEL-4).** Dispatch's deliveries to
+  one queue or topic wait in an `Ankusa.Sink.Batcher` (one per destination and set
+  of credentials, under `Ankusa.Instance`) and go out as one `SendMessageBatch`
+  (10 entries, 256 KiB) or `topics.publish` (1 000 messages, 7.5 MB of data), 20 ms
+  after the first arrived or when the batch is full: about 10× and 1 000× fewer
+  requests at 10 k messages a second (`mix run bench/sqs_batch_bench.exs`). A
+  delivery is answered when *its* entry is: an SQS `Failed` entry is classified
+  alone (`InvalidParameterValue`, `MissingParameter`, … permanent; throttling a
+  jittered `{:retry_after, ms, _}`; the rest transient), and the entry `Id` is the
+  position in the request, never the hook id, so a hook twice in a batch is fine.
+  Pub/Sub's `publish` has no per-message results, so `INVALID_ARGUMENT` bisects the
+  request (at most `2 · (⌈log₂ n⌉ + 1)` splits) until the one refused message is
+  `{:permanent, _}` and the rest are delivered. A FIFO `MessageGroupId` or Pub/Sub
+  `ordering_key` has one request in flight and keeps admission order. The queue
+  is bounded (`batch_queue_max` 4 096, `batch_queue_max_bytes` 128 MiB,
+  `batch_queue_tenant_max` 1 024; a delivery past one is
+  `{:retry_after, ms, {:batch_queue_full, reason}}`) and entries are taken
+  round-robin across tenants. New sink options `batch`, `batch_linger_ms`,
+  `batch_max_entries`, `batch_max_bytes`, `batch_queue_max`,
+  `batch_queue_max_bytes`, `batch_queue_tenant_max`, `batch_max_inflight`; new
+  optional callback `c:Ankusa.Sink.batched?/1` and `Sink.batched?/2`; new
+  `Ankusa.Sink.SQS.classify_error/4`, `Ankusa.Sink.GooglePubSub.classify_error/4`
+  (a throttle, `RESOURCE_EXHAUSTED` or a `429`/`503`, is now `{:retry_after, ms, _}`
+  on the single-message path too). New series
+  `ankusa_sink_batch_{requests,entries,bisections,refused}_total` and
+  `ankusa_sink_batch_{batchers,queued,queued_bytes}`; events
+  `[:ankusa, :sink_batch, :flush | :refused | :state]`. **Behaviour change:** for a
+  batching sink dispatch no longer counts an attempt against
+  `dispatch.sink_concurrency`, a tenant's `concurrency` or `dispatch.concurrency`
+  (those would cap a batch at 8); the claimed-row windows bound the attempts and
+  `sink_concurrency` counts the batcher's requests. `batch: false` restores the
+  old one-request-per-message behaviour for a sink.
+
 - **Claim gateway integrity check, and gateway, sweep and archive metrics
   (CLM-1).** `claim_check.integrity_check` (`:manifest`, the default, or
   `:off`): the gateway holds every whole-claim `GET` to the sha256 its pack's

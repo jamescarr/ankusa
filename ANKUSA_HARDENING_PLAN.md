@@ -493,7 +493,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/http_client.ex`, `application.ex`, `sink/reaper.ex`, `docs/deployment.md:197-214`.
   *Evidence:* —
 
-- [ ] **DEL-4 — SQS and Pub/Sub batching workers** · P1 · Deps: —
+- [x] **DEL-4 — SQS and Pub/Sub batching workers** · P1 · Deps: —
   *Why:* one HTTP request per message (`sink/sqs.ex:214-250`, `sink/google_pubsub.ex:107-130`); `SendMessageBatch` (10) and Pub/Sub's 1 000-message `publish` are unused.
   *Change:* `Sink.SQS.Batcher` (linger 20 ms, max 10 entries / 256 KiB, bounded queue) and `Sink.GooglePubSub.Batcher` (max 1 000 / 10 MB); per-entry results mapped back (`Successful`/`Failed`, each classified); a delivery is answered only after its batch's response; rows stay claimed so a worker crash retries them.
   *Done when:* 10 k messages/s make ~10× / ~1 000× fewer requests; a partial failure dead-letters exactly the failed entries; a killed batcher loses nothing.
