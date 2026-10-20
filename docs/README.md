@@ -1,43 +1,37 @@
 # Ankusa documentation
 
-New here? Start with the [quickstart](quickstart.md).
+If you read one page, read [architecture.md](architecture.md): it states the
+guarantee, the request path, and the failure modes every other page assumes.
+If you want to run it first, start with [quickstart.md](quickstart.md).
 
-## Start
+## Using it
 
-| Doc | Read it when |
+| Doc | What it answers |
 | --- | --- |
-| [`quickstart.md`](quickstart.md) | run it with a worker, break the worker, replay |
-| [`configuration.md`](configuration.md) | every YAML key, and the Elixir config |
-| [`deployment.md`](deployment.md) | roles, the container, fleets |
+| [quickstart.md](quickstart.md) | How do I run it with a worker, break the worker, and replay? |
+| [configuration.md](configuration.md) | What does every YAML key (and the Elixir config) mean, and what is its default? |
+| [deployment.md](deployment.md) | Which roles and topologies exist, and how do I run the container? |
+| [architecture.md](architecture.md) | What is the guarantee, and what happens on the request path when a component fails? |
+| [delivery.md](delivery.md) | Which sinks exist, how do retries and dead letters work, and how is delivery verified? |
+| [storage.md](storage.md) | Where does a hook live — the node store, the archive, backup, and restore? |
+| [claim-check.md](claim-check.md) | How do large payloads reach queue workers without giving them storage credentials? |
+| [multi-tenancy.md](multi-tenancy.md) | How do I serve many customers from one instance, and isolate or erase one? |
+| [integrations.md](integrations.md) | How do I hand deliveries to Oban, Celery, or a queue consumer, and verify signatures? |
+| [asyncapi.md](asyncapi.md) | What AsyncAPI document and lifecycle events does an instance serve? |
+| [elixir.md](elixir.md) | How do I embed Ankusa in an Elixir application? |
 
-## How it works
+## Working on Ankusa
 
-| Doc | Read it when |
+| Doc | What it answers |
 | --- | --- |
-| [`architecture.md`](architecture.md) | the guarantees |
-| [`delivery.md`](delivery.md) | sinks, retries, DLQ, quarantine |
-| [`storage.md`](storage.md) | the store and object stores |
-| [`claim-check.md`](claim-check.md) | large payloads to queue workers |
-| [`multi-tenancy.md`](multi-tenancy.md) | catch URLs per customer |
+| [testing.md](testing.md) | Which suites exist, what does each cover, and what local infrastructure do they need? |
+| [packaging.md](packaging.md) | Why are adapters separate packages, and how do I add one? |
+| [releasing.md](releasing.md) | How do I release a package, an SDK, or the server image? |
+| [critical-review.md](critical-review.md) | What did the 2026-10 end-to-end review find, by root cause, and what is fixed? |
+| [adr/](adr/README.md) | Why is the tenant key layout, or the dual-commit intake log, the way it is? |
+| [CONTRIBUTING.md](https://github.com/jamescarr/ankusa/blob/main/CONTRIBUTING.md) | What must a PR include? |
+| [AGENTS.md](https://github.com/jamescarr/ankusa/blob/main/AGENTS.md) | Repo map, commands, and the rules an agent or maintainer works under. |
 
-## Integrate
-
-| Doc | Read it when |
-| --- | --- |
-| [`integrations.md`](integrations.md) | Oban, Celery, queues |
-| [`asyncapi.md`](asyncapi.md) | the AsyncAPI document of an instance's channels, and lifecycle events |
-| [`elixir.md`](elixir.md) | embed the library |
-
-## Contributing
-
-| Doc | Read it when |
-| --- | --- |
-| [`testing.md`](testing.md) | running the suites, local infra, what each one covers |
-| [`packaging.md`](packaging.md) | why adapters are separate packages, and how to add one |
-| [`critical-review.md`](critical-review.md) | the 2026-10 end-to-end review: findings by root cause, and which are fixed |
-| [`releasing.md`](releasing.md) | releasing any package: Hex (core, adapters, and the Elixir SDK), the server image, npm, PyPI, crates.io, RubyGems, Go, Packagist, Maven Central, or Clojars |
-| [`adr/`](adr/README.md) | the design records ground rule 14 requires before a change to the ack path, the store key layout, a wire format, the isolation model or the durability mode |
-| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | before opening a PR |
-
-Exact callback signatures and options: the module docs on
-[HexDocs](https://hexdocs.pm/ankusa).
+Module docs, callback signatures, and options are on
+[HexDocs](https://hexdocs.pm/ankusa). Package changelogs are beside the code:
+`packages/*/CHANGELOG.md`.

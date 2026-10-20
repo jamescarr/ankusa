@@ -11,6 +11,12 @@ defmodule Ankusa.Intake.KafkaTest do
   use ExUnit.Case, async: false
 
   @moduletag capture_log: true
+  # The outage test stops brokers and waits (bounded) for the cluster to come
+  # back: 60 s for the one-down confirm, 90 s for the confirm after the restart,
+  # and as much again for restores. ExUnit's default 60 s would kill it between
+  # the stop and the restore; an `on_exit` that has to restart brokers needs the
+  # same room, and it runs on this budget too.
+  @moduletag timeout: 480_000
 
   require Record
 
@@ -30,6 +36,11 @@ defmodule Ankusa.Intake.KafkaTest do
            [h, p] = String.split(b, ":")
            {String.to_charlist(h), String.to_integer(p)}
          end)
+  @broker_ids [1, 2, 3]
+  # Broker restarts and a KRaft leader election take longer than a container's
+  # healthcheck; a test that needs a healthy cluster gets a bounded wait. Two
+  # such waits fit inside the module timeout with room for the test's own.
+  @cluster_timeout_ms 90_000
 
   @max_age_ms 60_000
   @good_topic [
@@ -46,13 +57,23 @@ defmodule Ankusa.Intake.KafkaTest do
   setup do
     instance = :"intake_kafka_#{System.unique_integer([:positive])}"
     on_exit(fn -> :persistent_term.erase({Ankusa, :config, instance}) end)
+
+    # Every test asserts the cluster instead of inheriting it: the outage test
+    # restores what it stops, and a cluster left short a broker fails here on a
+    # bounded readiness wait rather than 30 s later inside `create_topic`.
+    wait_for_cluster("the three brokers to answer and know each other")
+
     %{instance: instance}
   end
 
   # ── helpers ───────────────────────────────────────────────────────────────
 
   defp create_topic(opts \\ @good_topic) do
-    topic = "ankusa.intake.test.#{System.unique_integer([:positive])}"
+    # `unique_integer/1` restarts with each VM, so a suite run after another
+    # would reuse names the brokers still hold deletion state (and topic ids)
+    # for; a wall-clock component keeps every run's topics distinct.
+    topic =
+      "ankusa.intake.test.#{System.system_time(:microsecond)}.#{System.unique_integer([:positive])}"
 
     configs =
       for {name, value} <- Keyword.fetch!(opts, :configs), do: %{name: name, value: value}
@@ -68,25 +89,28 @@ defmodule Ankusa.Intake.KafkaTest do
     :ok = :brod.create_topics(@hosts, [spec], %{timeout: 15_000})
     on_exit(fn -> :brod.delete_topics(@hosts, [topic], 5_000) end)
 
-    # every broker has to know the topic before a test asks one of them about it
+    # Every broker has to know the topic before a test asks one of them about
+    # it, and every replica has to be in the in-sync set before a test
+    # produces with `acks=all`: a fresh topic's followers fetch asynchronously,
+    # and a produce that beats them is `not_enough_replicas` (unavailable).
     for host <- @hosts do
-      wait(fn -> topic_visible?(host, topic) end, 30_000, "#{topic} to reach #{inspect(host)}")
+      wait(
+        fn -> topic_replicated?(host, topic, Keyword.fetch!(opts, :replication_factor)) end,
+        30_000,
+        "#{topic} to have every replica in sync on #{inspect(host)}"
+      )
     end
 
     topic
   end
 
-  defp topic_visible?(host, topic) do
-    with {:ok, metadata} <- :brod.get_metadata([host], [topic]),
-         [t] <- :kpro.find(:topics, metadata),
-         :no_error <- :kpro.find(:error_code, t) do
-      Enum.all?(:kpro.find(:partitions, t), fn p ->
-        leader = :kpro.find(:leader_id, p, nil) || :kpro.find(:leader, p, nil)
-        is_integer(leader) and leader >= 0
-      end)
-    else
-      _ -> false
-    end
+  # `brod` throws `{:failed_to_connect, ...}` when no broker answers instead of
+  # returning. For a readiness poll that is simply "not yet", so a throw must
+  # not abort the poll.
+  defp get_metadata(hosts, topics) do
+    :brod.get_metadata(hosts, topics)
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   defp configure(instance, topic, node_id \\ "node-a", intake \\ %{}) do
@@ -132,16 +156,32 @@ defmodule Ankusa.Intake.KafkaTest do
     start_adapter_without_ready(instance)
   end
 
-  defp wait(fun, timeout_ms, what) do
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
-    do_wait(fun, deadline, what)
+  # For a broker list that can never be reached the brod client is not
+  # expected to stay registered (it dies on connect); `verify/1` uses a
+  # connection of its own, so the adapter process is all this needs.
+  defp restart_adapter_without_client(instance) do
+    _ = stop_supervised({Kafka, instance})
+    start_supervised!(Kafka.child_spec(instance: instance))
   end
 
-  defp do_wait(fun, deadline, what) do
+  defp wait(fun, timeout_ms, what) do
+    case wait_until(fun, timeout_ms) do
+      :ok -> :ok
+      :timeout -> flunk("timed out waiting for #{what}")
+    end
+  end
+
+  # A bounded poll of a real readiness signal; only the caller decides whether
+  # running out of time is an assertion failure.
+  defp wait_until(fun, timeout_ms) do
+    do_wait_until(fun, System.monotonic_time(:millisecond) + timeout_ms)
+  end
+
+  defp do_wait_until(fun, deadline) do
     cond do
       fun.() -> :ok
-      System.monotonic_time(:millisecond) > deadline -> flunk("timed out waiting for #{what}")
-      true -> Process.sleep(250) && do_wait(fun, deadline, what)
+      System.monotonic_time(:millisecond) > deadline -> :timeout
+      true -> Process.sleep(250) && do_wait_until(fun, deadline)
     end
   end
 
@@ -202,7 +242,85 @@ defmodule Ankusa.Intake.KafkaTest do
     assert status == 0, "docker compose #{Enum.join(args, " ")}: #{out}"
   end
 
-  defp restart_brokers, do: compose(["up", "-d", "--wait", "kafka-1", "kafka-2", "kafka-3"])
+  # `docker compose up --wait` only proves each container's own healthcheck, a
+  # round-trip to its local listener. A broker that has not rejoined KRaft, and
+  # a replica that has not joined the in-sync set, still break the next test,
+  # so an outage is over only on those real signals. If the containers do not
+  # settle in time, a restart of the whole cluster re-forms the controller
+  # quorum once; the same bounded wait is then the assertion.
+  defp restore_brokers(brokers, topic) do
+    services = Enum.map(brokers, &"kafka-#{&1}")
+    compose(["up", "-d", "--wait" | services])
+
+    if wait_until(fn -> restored?(topic) end, @cluster_timeout_ms) == :ok do
+      :ok
+    else
+      # `up` starts a stopped container and waits for its healthcheck, but a
+      # container that is already up can be healthy while the host's port
+      # forward is stale; `restart` gives every broker a fresh process (and
+      # proxy registration). Do both, then the bounded wait is the assertion.
+      all = Enum.map(@broker_ids, &"kafka-#{&1}")
+      compose(["up", "-d", "--wait" | all])
+      compose(["restart" | all])
+      wait(fn -> restored?(topic) end, @cluster_timeout_ms, restored_message(topic))
+    end
+  end
+
+  defp restored?(topic) do
+    cluster_ready?() and Enum.all?(@hosts, &topic_replicated?(&1, topic, 3))
+  end
+
+  defp restored_message(topic) do
+    "the cluster to report every broker, one controller and every replica of #{topic} in sync"
+  end
+
+  defp topic_replicated?(host, topic, replicas) do
+    with {:ok, metadata} <- get_metadata([host], [topic]),
+         [t] <- :kpro.find(:topics, metadata),
+         :no_error <- :kpro.find(:error_code, t) do
+      Enum.all?(:kpro.find(:partitions, t), fn p ->
+        leader = :kpro.find(:leader_id, p, nil) || :kpro.find(:leader, p, nil)
+        in_sync = :kpro.find(:isr_nodes, p, nil) || :kpro.find(:isr, p, [])
+
+        is_integer(leader) and leader >= 0 and length(in_sync) >= replicas
+      end)
+    else
+      _ -> false
+    end
+  end
+
+  defp wait_for_cluster(what) do
+    wait(fn -> cluster_ready?() end, @cluster_timeout_ms, what)
+  end
+
+  # Every broker must answer and report the whole cluster, and every one must
+  # name the same elected controller. A broker can pass its own healthcheck
+  # while the controller quorum is still electing (`controller_id` -1), and a
+  # topic created in that window, or its config read, lands half-applied.
+  defp cluster_ready? do
+    replies =
+      Enum.map(@hosts, fn host ->
+        with {:ok, metadata} <- get_metadata([host], []),
+             brokers when is_list(brokers) <- :kpro.find(:brokers, metadata) do
+          ids =
+            brokers
+            |> Enum.map(&:kpro.find(:node_id, &1, nil))
+            |> Enum.filter(&is_integer/1)
+            |> Enum.sort()
+
+          if ids == @broker_ids,
+            do: {:ok, :kpro.find(:controller_id, metadata, nil)},
+            else: :error
+        else
+          _ -> :error
+        end
+      end)
+
+    case Enum.uniq(replies) do
+      [{:ok, controller}] when is_integer(controller) -> controller in @broker_ids
+      _ -> false
+    end
+  end
 
   defp leader_of(topic, partition) do
     {:ok, metadata} = :brod.get_metadata(@hosts, [topic])
@@ -264,12 +382,17 @@ defmodule Ankusa.Intake.KafkaTest do
       topic = create_topic()
       configure(instance, topic)
       start_adapter(instance)
-      on_exit(fn -> restart_brokers() end)
 
       assert {:ok, _} = Kafka.publish_batch(instance, [record(1)], opts(topic, 0))
 
       leader = leader_of(topic, 0)
       [follower_a, follower_b] = Enum.reject([1, 2, 3], &(&1 == leader))
+
+      # Registered before the first stop: if this test is killed (ExUnit's
+      # timeout, a failed assertion) the cluster must still come back whole,
+      # and `on_exit` blocks until it has. Restarting a running broker is a
+      # no-op, so both candidates are named rather than tracking the stops.
+      on_exit(fn -> restore_brokers([follower_a, follower_b], topic) end)
 
       # One follower down: the in-sync set shrinks to two (min.insync.replicas=2),
       # so the produce confirms once the broker has dropped the stopped replica.
@@ -291,7 +414,7 @@ defmodule Ankusa.Intake.KafkaTest do
                  Kafka.publish_batch(instance, [record(3)], opts(topic, 0))
       end
 
-      restart_brokers()
+      restore_brokers([follower_a, follower_b], topic)
 
       wait(
         fn -> match?({:ok, _}, Kafka.publish_batch(instance, [record(4)], opts(topic, 0))) end,
@@ -513,7 +636,7 @@ defmodule Ankusa.Intake.KafkaTest do
         kafka: [brokers: ["127.0.0.1:1"]]
       })
 
-      restart_adapter(instance)
+      restart_adapter_without_client(instance)
       assert {:error, {:intake_topic, :unavailable}} = Kafka.verify(instance)
       refute Kafka.ready?(instance)
     end

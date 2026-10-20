@@ -47,11 +47,15 @@ packages/
                               Sink.{Log,Http,SQS,GooglePubSub}, RetryPolicy.Exponential,
                               RouteResolver.{Path,TenantPath})
   ankusa_rabbitmq             path-dep on ankusa + amqp. Ankusa.Sink.RabbitMQ.
-  ankusa_kafka                path-dep on ankusa + brod. Ankusa.Sink.Kafka.
+  ankusa_kafka                path-dep on ankusa + brod. Ankusa.Sink.Kafka and
+                              Ankusa.Intake.Kafka (the wal.type: dual log).
   ankusa_nats                 path-dep on ankusa + gnat. Ankusa.Sink.NATS.
   ankusa_redis                path-dep on ankusa + redix.
                               Ankusa.Routes.Store.Redis (route definitions in
-                              Redis, shared across edge nodes) and
+                              Redis, shared across edge nodes),
+                              Ankusa.SourceStore.Redis, the fleet-scoped
+                              rate-limit/dedupe store
+                              (Ankusa.RateLimiter.Store.Redis), and
                               Ankusa.Sink.Redis (delivered hooks published to
                               a pub/sub channel).
   ankusa_server               the jamescarr/ankusa Docker image: core + every

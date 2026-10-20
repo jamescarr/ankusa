@@ -275,8 +275,10 @@ The active index is what makes a dispatch scan cost the tenants with work due,
 not all tenants: a scan reads the markers up to the current second, claims from
 each tenant named, oldest second first, and removes a marker once its second is
 over and the tenant has nothing due in it (delete, then verify no commit slipped
-a row in). Until TEN-3 that order is the only fairness: a tenant with a long
-backlog is served before one that arrived later in the same scan. A due row
+a row in). The index order alone would serve a tenant with a long backlog before
+one that arrived later in the same scan; dispatch's claim splits its page
+across the tenants with work due and gives each its own in-flight window
+([`delivery.md#fairness-between-tenants`](delivery.md#fairness-between-tenants)). A due row
 is never written without its marker (`Deliveries.due_ops/6`), and a counter is
 never changed by hand: both only through the `Deliveries` op builders.
 `Ankusa.Queue.purge_tenant/3` removes a tenant's pending, in-flight or dead rows

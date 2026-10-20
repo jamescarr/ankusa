@@ -11,10 +11,14 @@
 _**Don't fight the traffic. Steer it.** Durable webhook ingestion for any volume._
 
 Run Ankusa without knowing Elixir, the way you run Elasticsearch without knowing
-Java. One image, one YAML file, HTTP in and HTTP out. Every hook is written to a
-durable local store before it is acked, so a provider retry is either a hook
-that was durably stored (and will be delivered again) or one that genuinely
-never arrived.
+Java. One image, one YAML file, HTTP in and HTTP or a broker out. Every hook is
+durably accepted before it is acked: under the default `wal.type: disk` that
+is an fsync in this node's store, under `dual` it is also a confirmed publish
+to a Kafka intake log, and under `none` it is every sink's confirm. So a
+provider retry is either a hook that was durably accepted (and will be
+delivered again) or one that genuinely never arrived. The root
+[README](https://github.com/jamescarr/ankusa/blob/main/README.md) has the
+per-mode table.
 
 ## Quick start
 
@@ -117,10 +121,14 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` (`true`/`false`) |
 | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
 | `ANKUSA_SOURCE_STORE_URL` | `source_store.url` (a URL with no `type` means `redis`) |
-| `ANKUSA_WAL_TYPE` | `wal.type` (`disk` \| `none`) |
+| `ANKUSA_WAL_TYPE` | `wal.type` (`disk` \| `dual` \| `none`) |
+| `ANKUSA_INTAKE_NODE_ID` | `intake.node_id` (required under `wal.type: dual`: the node's stable identity in the intake log) |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
 | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
+| `ANKUSA_STORAGE_KEY_PREFIX` | `storage.key_prefix` (gives each node its own segment keys in a shared bucket) |
+| `ANKUSA_BACKUP_ENABLED` | `backup.enabled` |
+| `ANKUSA_METRICS_ENABLED`, `ANKUSA_METRICS_PORT`, `ANKUSA_METRICS_IP` | `metrics.enabled/port/ip` |
 
 Route definitions live in `routes.store`, chosen by `type`: `ets` (each node's
 own memory, the default) or `redis` (shared by every edge node); a `url` with
@@ -182,8 +190,9 @@ the walkthrough with outages, dead letters, and replay is
 | 4001 | claim check gateway (`claim_check` role) | your own proxy or network policy |
 | 4002 | admin API + `/metrics` | your own proxy or network policy |
 | 4003 | route management API (`routes.enabled` on an `edge` node) | your own proxy or network policy |
+| 4004 | metrics listener: only `/metrics`, `/health`, `/ready` (`metrics.enabled`, default off) | your Prometheus / kubelet network rule |
 
-Every surface is on its own port so it can be firewalled on its own. 4001/4002/4003 listen on `127.0.0.1` by default; inside a container set `ANKUSA_ADMIN_IP` / `ANKUSA_CLAIM_CHECK_IP` (or `admin.ip` / `claim_check.ip`, and `routes.admin.ip` for 4003) to `0.0.0.0` before a published port can reach them. 4003 only
+Every surface is on its own port so it can be firewalled on its own. 4001/4002/4003/4004 listen on `127.0.0.1` by default; inside a container set `ANKUSA_ADMIN_IP` / `ANKUSA_CLAIM_CHECK_IP` / `ANKUSA_METRICS_IP` (or `admin.ip` / `claim_check.ip` / `metrics.ip`, and `routes.admin.ip` for 4003) to `0.0.0.0` before a published port can reach them. 4003 only
 listens when `routes.enabled` is set and the node runs the `edge` role; without
 both, nothing binds it.
 
@@ -247,7 +256,7 @@ So:
   enforces, and only listens when `routes.enabled` is set on an `edge` node.
 - **Point Prometheus at 4002 through your proxy, with read-only credentials.**
 
-All three listeners bind `127.0.0.1` by default. A proxy or a Prometheus in
+Every listener but ingest binds `127.0.0.1` by default. A proxy or a Prometheus in
 another container, pod or host reaches them only after `admin.ip`,
 `claim_check.ip` or `routes.admin.ip` is set to an address it can route to
 (`0.0.0.0` inside a container); the bind decides who can connect, and the

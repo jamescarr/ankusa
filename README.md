@@ -12,15 +12,28 @@
 _**Don't fight the traffic. Steer it.**_
 
 Ankusa is a self-hosted webhook receiver. Point Stripe, GitHub, or any provider
-at it: every hook is written to a durable local store before Ankusa answers
-`2xx`, every accepted POST is stored under a fresh `id` (unless the source sets `dedupe`), and each hook is
-delivered to your own worker over HTTP, RabbitMQ, Kafka, NATS JetStream,
-Redis pub/sub, Amazon SQS, or Google Cloud Pub/Sub, with retries, a dead-letter queue, and replay. Start with one
-container. Grow into a fleet by changing config, not code.
+at it and it verifies the signature, writes the hook down, and only then answers
+`2xx`; delivery to your workers happens afterwards, with retries, a dead-letter
+queue, and replay. It is for teams that need a durable inbox in front of their
+consumers without operating a stream processor just to accept a POST. One
+container is a complete receiver; more containers are a fleet, not a rewrite.
 
-## Quickstart
+That is the whole promise: **a `2xx` means the hook is stored somewhere that
+survives the failure you are worried about.** Which "somewhere" is one config
+key, `wal.type`. Nothing else in this README matters as much:
 
-### 1. Run it
+| `wal.type` | `201 accepted` means | An acked hook survives | Needs |
+| --- | --- | --- | --- |
+| `disk` (default) | fsynced in this node's local store | process crash and power loss on this host. A lost host loses the hooks acked since the last backup — all of them if backup is off. | local disk |
+| `dual` | fsynced here **and** confirmed in the Kafka intake log | loss of this host, unless every in-sync replica of the log is lost with it | Kafka with `replication.factor ≥ 3`, `min.insync.replicas ≥ 2`; backup on |
+| `none` | every sink confirmed, in the request | whatever the sink durably holds; the provider is the retry | a sink whose confirm means durable |
+
+Under every mode, a node that cannot keep that promise answers `503` with
+`Retry-After` instead of a `2xx`. Hooks are delivered at least once; consumers
+dedupe on the idempotency key. [`docs/architecture.md`](docs/architecture.md)
+walks the request path and the failure modes.
+
+## Run it
 
 ```sh
 export ANKUSA_ADMIN_TOKEN=$(openssl rand -hex 32)   # the admin API needs a credential off loopback
@@ -36,18 +49,17 @@ curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d 
 # => {"id":"01a0...","status":"accepted"}   (returned only after the store fsync)
 ```
 
-Done? `docker rm -f ankusa`
-
-That is a complete, durable webhook receiver. The image ships a `demo` source
-that accepts anything, so it works before you have any provider credentials:
 4000 is ingest, 4002 is the operator API (`/health`, `/metrics`), and
-`/var/lib/ankusa` holds the only state worth keeping.
+`/var/lib/ankusa` holds the only state worth keeping. The image's default
+config declares a `demo` source that accepts anything and logs it, so this
+works before you have any provider credentials. Done? `docker rm -f ankusa`.
 
-### 2. Deliver to your own worker
+## Deliver to your worker
 
-Ankusa POSTs each hook to your endpoint with the raw body intact and an
-`x-ankusa-idempotency-key` header to dedupe on; short outages are retried, long
-ones land in a dead-letter queue you can replay with one call.
+Ankusa POSTs each hook to your endpoint with the raw body intact, and delivery
+is signed by default: the receiver verifies the Standard Webhooks signature
+against the sink's `secret`. Short outages are retried; long ones land in a
+dead-letter queue you can replay with one call.
 
 ```sh
 git clone https://github.com/jamescarr/ankusa
@@ -58,9 +70,10 @@ sleep 1 && docker compose logs worker
 # received id=01a0... source=demo bytes=36 body={"id":"evt_1","type":"invoice.paid"}
 ```
 
-The wiring is one sink in `ankusa.yml`. The worker is plain `http://` at a
-private address, which sinks may not reach unless `egress` says so (a production
-sink is an `https://` URL on a public name and needs no `egress` block):
+The wiring is one sink in [`ankusa.yml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/ankusa.yml). The
+demo worker is plain `http://` at a private address, which sinks may not reach
+until `egress` says so; a production sink is an `https://` URL on a public name
+and needs no `egress` block:
 
 ```yaml
 egress:
@@ -78,36 +91,33 @@ sources:
         allow_unsigned: true   # demo only: this worker does not verify
 ```
 
-Deliveries are signed by default: a real sink sets `secret: ${WORKER_WHSEC}`
-and its receiver verifies the signature
-([`docs/integrations.md`](docs/integrations.md#signed-deliveries)). The demo
-opts out, because its worker does not verify.
-
-The worker is
-[a small FastAPI app](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py)
-built with [`uv`](https://docs.astral.sh/uv/), using the `ankusa` Python SDK
-([`packages/sdk-python`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-python));
-replace it with your own service. [The quickstart guide](docs/quickstart.md)
-walks through outages, dead letters, replay, and pointing a real provider at it.
+A real sink sets `secret: ${WORKER_WHSEC}` and its receiver verifies the
+signature ([`docs/integrations.md`](docs/integrations.md#signed-deliveries)).
+The worker is [a small FastAPI app](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py) built with
+[`uv`](https://docs.astral.sh/uv/) using the `ankusa` Python SDK
+([`packages/sdk-python`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-python)); replace it with your own
+service. [`docs/quickstart.md`](docs/quickstart.md) breaks the worker, replays
+the dead letters, and points a real provider at it.
 
 ## How it works
 
-Ankusa never answers `2xx` until the hook is durably accepted, and which system
-accepts it is one config key. By default (`wal.type: disk` — the queue's mode,
-named for the log it replaced) the hook is written to the node's RocksDB store,
-the fsync lands first, and `201 accepted` is the only committed response —
-there is no `200`. If a node dies before the write, the provider never got an
-ack and retries; unless the source sets [`dedupe`](docs/configuration.md#sources), that retry is a new hook with a new `id`, stored and delivered
-again, and delivery is at-least-once.
-Under `wal.type: none` the node keeps no store at all: it publishes to the
-source's sinks inside the request and acks on the broker's confirm. Either way,
-when the destination slows down,
-Ankusa answers `503` with `Retry-After`, so providers back off and try again
-instead of losing events. You get that guarantee on day one, on one machine,
-and you keep it when you run a hundred.
+A POST is accepted only after a durable write, and the accepted write is the
+only thing `201` ever means. Each accepted POST is a new hook with a fresh
+`id`, unless the source sets [`dedupe`](docs/configuration.md#sources) on a
+provider event key; then a repeat within the TTL is `201 duplicate` with the
+original `id` and nothing new is stored. Verification runs before the write,
+and its failure policy is per source: reject, quarantine in a durable,
+rate-limited pen, or accept flagged.
 
-[`docs/architecture.md`](docs/architecture.md) walks the full pipeline and shows
-why each guarantee holds.
+After the accept, ingest and delivery are fully decoupled. A commit writes the
+hook and one delivery row per sink in one store batch. Dispatch is a scheduler
+over the due rows; the compactor packs archived hooks into immutable segments
+in an object store. Neither is an RPC caller of the other, so a slow sink, a
+dead compactor, or a paused dispatch node never stops the edge from acking.
+`wal.type: none` skips the hook store and the retry machinery entirely: one
+request, one concurrent publish, and the provider's retry is the only retry.
+(The store still opens for the quarantine pen, API-managed sources and
+rate-limit overrides.)
 
 ```mermaid
 flowchart LR
@@ -121,31 +131,54 @@ flowchart LR
     D --> SK[Sinks]
 ```
 
-## What you get
+## Operating it
 
-- Signature verification via a configurable HMAC engine, with named schemes for Stripe, GitHub, Standard Webhooks, Shopify, and Slack, plus any body-HMAC scheme you describe in config
-- Multi-tenant catch URLs, with a pluggable resolver for custom schemes
-- Delivery over HTTP, RabbitMQ, Kafka, NATS JetStream, Redis pub/sub, Amazon SQS, and Google Cloud Pub/Sub, with
-  retries, backoff, a dead letter queue, and replay
-- Quarantine for hooks that fail verification, so nothing is silently dropped
-- Archiving to S3, GCS, Azure Blob Storage, OCI Object Storage, Cloudflare R2, or MinIO
-- Telemetry on every stage of the pipeline
-- A clean handoff to job frameworks like Oban and Celery
+The control plane is the admin API on `admin.port` (4002 in the image), and it
+is authenticated: bearer tokens with scopes, OIDC/JWT, or mTLS. It serves
+`/health`, `/metrics`, the redacted effective config, source management, the
+dead-letter queue, replay jobs, quarantine release/purge, and a durable audit
+trail of every change and replay. When `source_store` keeps sources in the
+store or Redis, their secrets are encrypted at rest with `secrets.kek`;
+`check-config` and `print-config` validate and show the effective config
+without starting the node.
 
-Every piece is a swappable module, so when your needs outgrow a default you
-replace that piece and keep the rest.
+Backups are off by default and worth turning on. With `backup.enabled`, a
+checkpoint of the store and its `intake_offset` goes to an object store every
+`backup.interval_ms`, with a manifest that `backup.signing_key` signs; a node
+starting on an empty `data_dir` restores the latest checkpoint before opening
+the store, checks it, and refuses to start on a corrupt or unreadable backup
+rather than starting empty. A clean stop writes a final checkpoint.
 
-## Grow into a fleet
+Tenants are a first-class scope: the tenant id is in the store key, rate
+limits and dispatch fairness are per tenant, routes and source definitions can
+be shared through Redis, and a tenant can be erased. [`docs/multi-tenancy.md`](docs/multi-tenancy.md)
+has the URL schemes and the isolation rules.
+
+Observability is `/metrics` (Prometheus) plus `:telemetry` events under
+`[:ankusa, ...]` for every stage. Gauges cover the store, queue depth, oldest
+due age, quarantine bytes, disk free, and open dispatch breakers — enough to
+alert on a backlog before a provider sees a `503`. There is no OpenTelemetry
+tracing or structured-JSON logging yet.
+
+## Run a fleet
 
 When one box is not enough, run N independent all-role nodes behind a load
 balancer. Each node has its own data volume, its own store, and its own
-DLQ/admin API. Archive to S3 or GCS, and fan out to Kafka, NATS, RabbitMQ,
-Redis pub/sub, SQS, or Google Cloud Pub/Sub.
-A disk-mode node keeps `edge`, `dispatch`, and `storage` in one BEAM node, so a
-node is the unit of scale: add nodes, not roles. Give each node **its own
-bucket** (or LocalFS) for segments. Segment keys are
-`seg/<first_seq>-<last_seq>.seg`, and remote blob stores ignore the instance,
-so nodes sharing a bucket overwrite each other's segments.
+admin/replay API; they share nothing but the provider's traffic, and optionally
+Redis for routes, sources, and fleet-scoped rate limits and dedupe. `edge`,
+`dispatch`, and `storage` must stay in one BEAM node because they share the one
+local store — a node is the unit of scale. The one role you may split out is
+`:claim_check`, the large-payload gateway, which never opens the store.
+
+Give each node its own archive prefix (`storage.key_prefix`) or its own bucket:
+segment keys are `seg/<first_seq>-<last_seq>.seg` and remote blob stores ignore
+the instance, so nodes sharing a bucket without a prefix overwrite each other's
+segments. Claim keys are never prefixed, so one claim-check gateway can serve
+the whole fleet.
+
+Under `wal.type: dual`, the intake log also survives a lost host: restore that
+node's backup under its stable `intake.node_id` and run `recover` to replay
+whatever the backup does not hold.
 
 ```mermaid
 flowchart LR
@@ -162,12 +195,14 @@ flowchart LR
 ```
 
 Your workers can be written in anything. A TypeScript, Python, Ruby, or Go
-consumer reads from the queue and fetches large payloads over HTTP without ever
-holding storage credentials.
-
-Roles, the container, and fleets: [`docs/deployment.md`](docs/deployment.md).
+consumer reads from the queue and fetches large payloads over the claim-check
+gateway without ever holding storage credentials. Roles, the container, and
+fleet operations: [`docs/deployment.md`](docs/deployment.md).
 
 ## Examples
+
+Each example is runnable, ends with a worker you could replace, and picks a
+different transport.
 
 | Example | Delivers via | Worker | Shows |
 | --- | --- | --- | --- |
@@ -176,23 +211,28 @@ Roles, the container, and fleets: [`docs/deployment.md`](docs/deployment.md).
 | [kafka-sqs-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/) | Kafka → SQS FIFO | TypeScript | SQS FIFO handoff, failure drills |
 | [nats-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/nats-consumer/) | NATS JetStream | Rust | a consumer-owned stream, claim-check redemption with the published Rust crate |
 | [oban-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/oban-consumer/) | HTTP → Oban on Kubernetes | Elixir | a fleet of independent nodes, each with its own on-disk store, load-tested with pods killed mid-run |
+| [fleet-e2e](https://github.com/jamescarr/ankusa/tree/main/examples/fleet-e2e/) | RabbitMQ, two nodes behind nginx | TypeScript | shared routes, sources, bucket prefixes, and a node killed mid-run; run nightly in CI |
+| [jetstream-k8s](https://github.com/jamescarr/ankusa/tree/main/examples/jetstream-k8s/) | NATS JetStream on kind | TypeScript | an autoscaling direct-mode fleet and a durable fleet, with a browser control panel |
 
-How to pick one: [examples/README.md](https://github.com/jamescarr/ankusa/blob/main/examples/README.md)
+How to pick one, and what each proves:
+[`examples/README.md`](https://github.com/jamescarr/ankusa/blob/main/examples/README.md).
 
 ## Documentation
 
 - [Quickstart](docs/quickstart.md)
+- [Architecture and guarantees](docs/architecture.md)
 - [Configuration](docs/configuration.md)
 - [Deployment and scaling](docs/deployment.md)
 - [Delivery, retries, and dead letters](docs/delivery.md)
-- [Integrations: Oban, Celery, queues](docs/integrations.md)
-- [Architecture and guarantees](docs/architecture.md)
-- [Storage](docs/storage.md)
+- [Storage and backup](docs/storage.md)
 - [Multi-tenancy](docs/multi-tenancy.md)
 - [Claim check](docs/claim-check.md)
+- [Integrations: Oban, Celery, queues](docs/integrations.md)
 
-Ankusa is also an Elixir library you can embed in your own app:
-[docs/elixir.md](docs/elixir.md) · [HexDocs](https://hexdocs.pm/ankusa).
+Everything else, including the contributing docs:
+[`docs/README.md`](docs/README.md). Ankusa is also an Elixir library you can
+embed in your own app: [`docs/elixir.md`](docs/elixir.md) ·
+[HexDocs](https://hexdocs.pm/ankusa).
 
 ## The name
 
