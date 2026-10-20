@@ -485,7 +485,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/retry_policy/exponential.ex`, `dispatch/pipeline.ex:80-81,1302-1315`, `source.ex:8-33`, `sink/sqs.ex:252-279`, `sink/google_pubsub.ex:220-233`.
   *Evidence:* —
 
-- [ ] **DEL-3 — Owned, bounded HTTP connection pools** · P1 · Deps: —
+- [x] **DEL-3 — Owned, bounded HTTP connection pools** · P1 · Deps: —
   *Why:* Req's default Finch gives one pool per origin, 50 connections, `pool_max_idle_time: :infinity`, `conn_max_idle_time: :infinity`, HTTP/1 only; at 10⁵ tenant origins that is 10⁵ pools and millions of sockets with nothing reaping them.
   *Change:* `Ankusa.HttpClient.Finch` started in `Ankusa.Application` with `default: [size: 8, count: 1, pool_max_idle_time: 60_000, conn_max_idle_time: 30_000, protocols: [:http1, :http2]]`; per-sink `:pool` override; an idle-pool reaper (mirror `Sink.Reaper`); pools closed on source delete; gauge `ankusa_http_pools`.
   *Done when:* 10⁵ synthetic origins keep FDs and RSS bounded with idle pools reaped; HTTP/2 negotiates against a test server; throughput at 1 origin is unchanged.

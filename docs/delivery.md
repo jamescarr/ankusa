@@ -336,27 +336,42 @@ and the admin API build static sinks only. `Ankusa.Sink.describe/3` reports
 the options that are `computed`; the sink stays out of the AsyncAPI document,
 which describes the envelope and not the raw body this sink sends.
 
-Computed URLs connect through `Ankusa.Sink.Http.Pool`, one Finch per instance,
-not Req's default of one pool per origin that is never closed (one per tenant
-receiver, so file descriptors and processes would grow with the tenant count
-until the node ran out). Its bounds:
+### `Sink.Http`: connection pools
+
+Every `Sink.Http` delivery (a static URL as much as a computed one) goes
+through `Ankusa.HttpClient.Pools`, the node's owned Finch, not Req's default of
+one 50-connection pool per origin that is never closed (one per tenant receiver,
+so file descriptors and processes would grow with the tenant count until the node
+ran out). There is one pool per receiver *address* and TLS profile, per instance,
+started on delivery. Its bounds (`http_pools` in the
+[configuration](configuration.md#outbound-connection-pools)):
 
 | | |
 | --- | --- |
-| Cap | 4 connections per origin (HTTP/1), so one tenant's slow receiver holds at most 4; 4,096 open origins per node |
-| Sweep | an origin with no delivery for 30 s has its pool closed; a connection idle 15 s is not reused |
-| Metric | `ankusa_sink_http_pool_origins` |
-| Refusal | a delivery that cannot get a connection within 5 s, or that would open origin 4,097, fails that attempt (`{:error, :pool_origins_exhausted}` for the latter) and is retried by the retry policy; deliveries to open origins are never refused for the ceiling |
+| Cap | `pool_size` (32) HTTP/1 connections per pool, so one receiver's slow endpoint holds at most that many; `max_pools` (1,024) live pools per instance and `max_pools_per_tenant` (256) per tenant, so one tenant with a thousand receivers only ever churns its own pools |
+| Sweep | every 30 s a pool with no request in flight for `pool_max_idle_ms` (60 s) is closed; a connection idle `conn_max_idle_ms` (30 s) is not reused; a deleted source's idle pools are closed at once |
+| Metric | gauge `ankusa_http_pools`; counters `ankusa_http_pool_closed_total{reason}` and `ankusa_http_pool_refused_total{scope}` |
+| Refusal | at a ceiling the least recently used idle pool is closed to make room; with every pool in scope serving a request the delivery fails that attempt as `{:error, {:unavailable, :pool_limit}}`; a request that cannot get a connection within `pool_timeout` (5 s) fails it as a transport error. Both are retried by the retry policy |
 
-The pool verifies peers against the system trust store with one 5 s connect
-timeout, so a computed `url` cannot also set `cacertfile` or
-`allow_insecure_tls` (refused at load): give such a sink a pool of its own with
-`req_options: [finch: [name: MyFinch]]`, which owns its TLS options. A plain
-`http` URL whose host has only IPv6 addresses cannot be pinned and is
-`{:permanent, {:computed, :url, :unpinnable}}`. This pool is interim: owned,
-bounded pools for every outbound client are the hardening plan's DEL-3, which
-replaces it. Tests: `sink/http_test.exs` ("computed destinations": `computed url
-per tenant`, `computed url denied`, the pool and its idle reap).
+A pool belongs to its receiver, not to a sink: several sinks (of any sources)
+posting to one endpoint share it, up to `dispatch.concurrency` attempts at once.
+Size `pool_size` for that, not for one sink: a pool of 8 against a 100 ms
+receiver tops out at 80 requests a second however many attempts wait, and boot
+warns when `pool_size * pool_count` is below `dispatch.concurrency`. A sink sets
+its own `pool: [pool_size:, pool_count:, pool_timeout:, protocols:]`.
+Connections negotiate HTTP/2 where the receiver offers it (`protocols`).
+
+The pool is keyed by the address the egress check validated: its connections go
+to that address and verify the peer against the name (SNI and certificate), so a
+name that later resolves somewhere denied is refused on its next attempt, before
+a pool is touched, and one that moves to another public address gets a pool of its
+own. `cacertfile` and `allow_insecure_tls` are part of the pool's connection
+options, so a computed `url` may use them. Tests: `http_client_test.exs`
+(`pool reaped`, `http2`, the ceilings and the refusal), `sink/http_test.exs`
+("computed destinations": `computed url per tenant`, `computed url denied`,
+`every connection of a pool goes to the pinned address`, `a name that turns
+private between two deliveries through one pool is denied on the second`),
+`bench/pools_bench.exs` (10⁵ origins, throughput at one origin).
 
 ### Idempotent receivers
 

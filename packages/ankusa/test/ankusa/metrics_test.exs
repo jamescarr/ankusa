@@ -344,7 +344,7 @@ defmodule Ankusa.MetricsTest do
       assert gauge(scrape, "ankusa_quarantine_entries", inst) == 1.0
       assert gauge(scrape, "ankusa_quarantine_bytes", inst) > 0.0
       assert gauge(scrape, "ankusa_quarantine_pending", inst) == 0.0
-      assert gauge(scrape, "ankusa_sink_http_pool_origins", inst) == 0.0
+      assert gauge(scrape, "ankusa_http_pools", inst) == 0.0
     end
 
     test "the dedupe and audit-retention series follow their events" do

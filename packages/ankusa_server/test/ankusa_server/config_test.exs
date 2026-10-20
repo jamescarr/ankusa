@@ -2265,6 +2265,40 @@ defmodule AnkusaServer.ConfigTest do
              %{burst: 5, rate: 0.5, max_bytes: 1024, retention_days: 14}
   end
 
+  test "an http_pools section maps to core's http_pools config" do
+    path =
+      tmp_config("""
+      http_pools: {pool_size: 4, pool_count: 2, pool_timeout: 1500, max_pools: 10, max_pools_per_tenant: 3, protocols: [http1]}
+      """)
+
+    pools = Config.load!(path: path, env: %{}).config.http_pools
+    assert pools.pool_size == 4
+    assert pools.pool_count == 2
+    assert pools.pool_timeout == 1_500
+    assert {pools.max_pools, pools.max_pools_per_tenant} == {10, 3}
+    assert pools.protocols == [:http1]
+    # What the section leaves out keeps core's default.
+    assert pools.pool_max_idle_ms == 60_000
+  end
+
+  test "a bad http_pools key names it, and core's ranges come back as core's message" do
+    for {yaml, message} <- [
+          {"http_pools: {pool_sizes: 1}", ~s(http_pools: unknown key "pool_sizes")},
+          {"http_pools: {pool_size: big}",
+           ~s(http_pools.pool_size: expected an integer, got "big")},
+          {"http_pools: {pool_size: 0}",
+           "http_pools.pool_size must be an integer from 1 to 1024, got 0"},
+          {"http_pools: {pool_count: 65}",
+           "http_pools.pool_count must be an integer from 1 to 64, got 65"},
+          {"http_pools: {protocols: [http3]}",
+           "http_pools.protocols: unknown value \"http3\"; expected one of http1, http2"}
+        ] do
+      path = tmp_config(yaml <> "\n")
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message == message
+    end
+  end
+
   test "a bad quarantine key names it, and core's ranges come back as core's message" do
     for {yaml, message} <- [
           {"quarantine: {max_byte: 1}", ~s(quarantine: unknown key "max_byte")},

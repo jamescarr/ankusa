@@ -72,7 +72,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http listener admin metrics routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive)
+  @root_keys ~w(node log http listener admin metrics routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress http_pools audit tenants queue archive)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level banner)
   @http_keys ~w(port max_body_bytes routing prefix store_headers)
@@ -144,6 +144,7 @@ defmodule AnkusaServer.Config do
   @rate_limit_sources_keys ~w(default)
   @source_limit_keys ~w(bytes_per_second burst_bytes)
   @quarantine_keys ~w(burst rate max_bytes retention_days)
+  @http_pools_keys ~w(pool_size pool_count pool_timeout pool_max_idle_ms conn_max_idle_ms max_pools max_pools_per_tenant protocols)
   @audit_keys ~w(retention_days max_rows max_bytes outbox_max_backlog)
   @queue_keys ~w(dlq rocksdb)
   @dlq_keys ~w(retention_days max_rows max_bytes)
@@ -545,6 +546,7 @@ defmodule AnkusaServer.Config do
         rate_limits_section(doc) ++
         fleet_section(doc) ++
         quarantine_section(doc) ++
+        http_pools_section(doc) ++
         audit_section(doc) ++
         queue_section(doc) ++
         archive_section(doc) ++
@@ -1695,6 +1697,42 @@ defmodule AnkusaServer.Config do
         |> put_opt(:max_bytes, int_opt(quarantine, "max_bytes", path))
         |> put_opt(:retention_days, int_opt(quarantine, "retention_days", path))
     ]
+  end
+
+  # ── http_pools ──────────────────────────────────────────────────────────────
+
+  # Types only; the ranges are core's (`Ankusa.Config`), so `check-config` and an
+  # embedded boot fail with the same message.
+  defp http_pools_section(doc) do
+    path = ["http_pools"]
+    pools = section!(doc, "http_pools", @http_pools_keys, [])
+
+    [
+      http_pools:
+        []
+        |> put_opt(:pool_size, int_opt(pools, "pool_size", path))
+        |> put_opt(:pool_count, int_opt(pools, "pool_count", path))
+        |> put_opt(:pool_timeout, int_opt(pools, "pool_timeout", path))
+        |> put_opt(:pool_max_idle_ms, int_opt(pools, "pool_max_idle_ms", path))
+        |> put_opt(:conn_max_idle_ms, int_opt(pools, "conn_max_idle_ms", path))
+        |> put_opt(:max_pools, int_opt(pools, "max_pools", path))
+        |> put_opt(:max_pools_per_tenant, int_opt(pools, "max_pools_per_tenant", path))
+        |> put_opt(:protocols, protocols_opt(pools, path))
+    ]
+  end
+
+  # `http1` and `http2`, a list or one comma-separated string; the closed list is
+  # checked before any atom is made.
+  defp protocols_opt(pools, path) do
+    case pools["protocols"] do
+      nil ->
+        nil
+
+      value ->
+        value
+        |> string_list!(path ++ ["protocols"])
+        |> Enum.map(&String.to_existing_atom(enum!(&1, ~w(http1 http2), path ++ ["protocols"])))
+    end
   end
 
   # ── audit ───────────────────────────────────────────────────────────────────

@@ -8,6 +8,14 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`http_pools` section (DEL-3).** `pool_size` (32), `pool_count` (1),
+  `pool_timeout` (5000), `pool_max_idle_ms` (60000), `conn_max_idle_ms` (30000),
+  `max_pools` (1024), `max_pools_per_tenant` (256) and `protocols` (`[http1,
+  http2]`) size and bound the outbound HTTP connection pools every HTTP sink
+  delivery goes through; core range-checks them when the config loads. See the
+  `ankusa` changelog, [`configuration.md`](../../docs/configuration.md#outbound-connection-pools)
+  and the `http_pools` block of `config-examples/reference.yml`.
+
 - **`claim_check.integrity_check` (`off` or `manifest`, default `manifest`).** The
   claim gateway checks every whole-claim `GET` against the sha256 its pack's
   manifest records and answers `502 integrity_mismatch` on a difference;

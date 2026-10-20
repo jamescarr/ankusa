@@ -51,11 +51,29 @@ defmodule Ankusa.HttpClient do
   Req refuses `:finch` beside `:connect_options`, so the request carries none.
   Asking for TLS settings per request on top of a named pool (`:cacertfile`,
   `allow_insecure_tls: true`, `:connect_options`) raises `ArgumentError` from
-  `validate!/3`, rather than being ignored. `Ankusa.Sink.Http.Pool` is such a
+  `validate!/3`, rather than being ignored. `Ankusa.BlobStore.Pool` is such a
   pool.
+
+  ## Every other request goes through an owned, bounded pool
+
+  A request with no `:finch` and no `:plug` in its options is sent through
+  `Ankusa.HttpClient.Pools`: a pool per origin and connection profile, sized and
+  idle-swept from the instance's `http_pools` config, never Req's default of an
+  unbounded number of pools that are never closed. The connection options the
+  request would carry (connect timeout, TLS, the `:connect_options` in
+  `req_options`) become the pool's, so every connection it opens uses them.
+  `opts` takes the pool's context (taken out before the request is built):
+  `:instance` (whose `http_pools` apply; none uses the defaults), `:tenant`
+  (whose ceiling the pool counts against), `:source` (what `close_source/3`
+  closes pools for) and `:pool` (a per-sink override, see
+  `Ankusa.HttpClient.Pools.validate_override!/1`). A pool ceiling that cannot be
+  made room for is `{:error, {:unavailable, :pool_limit}}`.
   """
 
+  alias Ankusa.HttpClient.Pools
+
   @transport_options [:finch, :connect_options, :pool_timeout, :plug]
+  @pool_context [:instance, :tenant, :source, :pool]
   @tls_versions [:"tlsv1.3", :"tlsv1.2"]
 
   @doc """
@@ -105,7 +123,9 @@ defmodule Ankusa.HttpClient do
     {max_bytes, opts} = Keyword.pop(opts, :max_response_bytes)
     {cacertfile, opts} = Keyword.pop(opts, :cacertfile)
     {insecure_tls?, opts} = Keyword.pop(opts, :allow_insecure_tls, false)
+    {pool_context, opts} = Keyword.split(opts, @pool_context)
     validate!(opts, insecure_tls?, cacertfile)
+    tls = %{cacertfile: cacertfile, insecure?: insecure_tls?}
 
     request =
       [
@@ -117,16 +137,15 @@ defmodule Ankusa.HttpClient do
         retry: false,
         redirect: false,
         receive_timeout: timeout_ms
-      ] ++
-        connect_option(url, timeout_ms, opts, %{cacertfile: cacertfile, insecure?: insecure_tls?}) ++
-        Keyword.drop(opts, [:connect_options]) ++ body_option(body) ++ cap_option(max_bytes)
+      ] ++ body_option(body) ++ cap_option(max_bytes)
 
-    case Req.request(request) do
-      {:ok, %Req.Response{status: status, headers: headers, body: body}} ->
-        {:ok, status, headers, body}
-
-      {:error, reason} ->
-        {:error, reason}
+    if Keyword.has_key?(opts, :finch) or Keyword.has_key?(opts, :plug) do
+      perform(
+        request ++
+          connect_option(url, timeout_ms, opts, tls) ++ Keyword.drop(opts, [:connect_options])
+      )
+    else
+      pooled(request, url, timeout_ms, opts, pool_context, tls)
     end
   rescue
     # Finch raises when no pooled connection frees up within its checkout
@@ -136,6 +155,29 @@ defmodule Ankusa.HttpClient do
     error in RuntimeError -> {:error, error}
   catch
     :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # Through the node's owned pools: the connection options are the pool's.
+  defp pooled(request, url, timeout_ms, opts, pool_context, tls) do
+    connect = connect_options(url, timeout_ms, Keyword.get(opts, :connect_options, []), tls)
+    rest = Keyword.drop(opts, [:connect_options, :pool_timeout])
+
+    pool_request =
+      pool_context
+      |> Map.new()
+      |> Map.merge(%{url: url, connect_options: connect, pool_timeout: opts[:pool_timeout]})
+
+    Pools.run(pool_request, fn finch -> perform(request ++ rest ++ [finch: finch]) end)
+  end
+
+  defp perform(request) do
+    case Req.request(request) do
+      {:ok, %Req.Response{status: status, headers: headers, body: body}} ->
+        {:ok, status, headers, body}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   # A named pool owns the connection options; otherwise the request carries them.

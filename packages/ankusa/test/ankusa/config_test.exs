@@ -34,6 +34,46 @@ defmodule Ankusa.ConfigTest do
     assert config.batcher.max_queue == 5
   end
 
+  describe "the http_pools section" do
+    test "defaults to bounded, idle-swept pools" do
+      assert %{
+               pool_size: 32,
+               pool_count: 1,
+               pool_timeout: 5_000,
+               pool_max_idle_ms: 60_000,
+               conn_max_idle_ms: 30_000,
+               max_pools: 1_024,
+               max_pools_per_tenant: 256,
+               protocols: [:http1, :http2]
+             } = Config.new().http_pools
+    end
+
+    test "merges over the defaults, and every number is range checked" do
+      assert %{pool_size: 4, max_pools: 1_024} = Config.new(http_pools: [pool_size: 4]).http_pools
+
+      for {key, bad, message} <- [
+            {:pool_size, 0, "an integer from 1 to 1024"},
+            {:pool_size, 1_025, "an integer from 1 to 1024"},
+            {:pool_count, 65, "an integer from 1 to 64"},
+            {:pool_timeout, 600_001, "an integer from 1 to 600000"},
+            {:max_pools, 65_537, "an integer from 1 to 65536"},
+            {:max_pools_per_tenant, 0, "an integer from 1 to 65536"},
+            {:pool_max_idle_ms, 0, "a positive integer"},
+            {:conn_max_idle_ms, -1, "a positive integer"},
+            {:protocols, [], "a non-empty list of :http1 and :http2"},
+            {:protocols, [:http3], "a non-empty list of :http1 and :http2"}
+          ] do
+        assert_raise ArgumentError, ~r/http_pools\.#{key} must be #{message}/, fn ->
+          Config.new(http_pools: [{key, bad}])
+        end
+      end
+
+      assert_raise ArgumentError, ~r/http_pools\.pool_sizes/, fn ->
+        Config.new(http_pools: [pool_sizes: 1])
+      end
+    end
+  end
+
   describe "the routes section" do
     test "defaults to off, with an ETS store and no trusted proxies" do
       config = Config.new()

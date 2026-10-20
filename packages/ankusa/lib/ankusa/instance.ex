@@ -85,6 +85,7 @@ defmodule Ankusa.Instance do
     Ankusa.Store.Backup.validate_config!(config)
     Ankusa.BlobStore.validate_config!(config)
     Ankusa.HttpClient.Egress.validate_config!(config)
+    Ankusa.HttpClient.Pools.validate_config!(config)
     Ankusa.Intake.validate_config!(config)
     if config.wal == :dual, do: Ankusa.Intake.Pending.create(instance)
     opts = [instance: config.instance]
@@ -99,7 +100,6 @@ defmodule Ankusa.Instance do
         store_children(config, opts) ++
         erase_children(config, opts) ++
         backup_children(config, opts) ++
-        [{Ankusa.Sink.Http.Pool, opts}] ++
         source_store_children(config, opts) ++
         lifecycle_children(config, opts) ++
         edge_children(config, opts) ++
