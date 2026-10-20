@@ -108,8 +108,8 @@ docker compose down -v
 
 This compose file runs one ingest container: it publishes host port 4000, so a
 second replica cannot bind it. A fleet needs one host port per node or a load
-balancer in front, and its own bucket per node, because segment keys are
-`seg/<first>-<last>.seg` and would collide in a shared one. See
+balancer in front, and its own `intake.node_id` (or bucket) per node, because segment keys are
+`archive/v1/dt=<day>/<node>/seg-<first>-<last>.seg` and would collide under one node name. See
 [`docs/deployment.md`](../../docs/deployment.md).
 
 ## What's stubbed on purpose

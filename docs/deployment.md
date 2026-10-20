@@ -192,10 +192,13 @@ Two things to get right once you run more than one node:
   `edge`, `dispatch`, and `storage` cannot be split across hosts (see above).
   `:claim_check` is the exception and can run anywhere.
 - **Distinct segment keys per node.** Segment keys are
-  `seg/<first_seq>-<last_seq>.seg` and remote blob stores ignore the
-  instance, so nodes writing the same keys overwrite each other's segments.
-  Give each node its own `storage.key_prefix` (`node-a/`, `node-b/`; env
-  `ANKUSA_STORAGE_KEY_PREFIX`) and they can share one bucket — or give each
+  `archive/v1/dt=<day>/<node>/seg-<first_seq>-<last_seq>.seg`, where `<node>` is
+  `intake.node_id` (else the host name), and remote blob stores ignore the
+  instance, so two nodes with one name write the same keys and overwrite each
+  other's segments. Give each node its own `intake.node_id` (or its own
+  `storage.key_prefix` (`node-a/`, `node-b/`; env `ANKUSA_STORAGE_KEY_PREFIX`))
+  and they can share one bucket, and a node that lost its catalogue finds the
+  others' segments by day — or give each
   its own bucket or LocalFS directory. Claims are never prefixed (claim ids
   are unique across nodes), so one claim-check gateway serves the claims of
   every node; see [`claim-check.md`](claim-check.md#a-dedicated-claim-store).

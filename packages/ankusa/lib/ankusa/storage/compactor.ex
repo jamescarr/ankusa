@@ -10,13 +10,21 @@ defmodule Ankusa.Storage.Compactor do
   instead of one unbounded one, so peak memory is one segment whatever the
   backlog and however long a storage node was unavailable.
 
-  A segment is encoded via `config.storage.codec` and `PUT` through the blob
-  store as `seg/<first>-<last>.seg`, followed by an index object
-  (`seg/<first>-<last>.idx`: event id to offset, length and seq) and the
-  segment's catalogue row in the store. Only then do its obligations clear. A
-  hook is deleted when its *last* obligation — archive or delivery — clears, so
-  an archive that is behind or switched off never blocks delivery, and delivery
-  never blocks the archive.
+  A segment is encoded via `config.storage.codec`, wrapped in the segment header
+  and sha256 trailer (`Ankusa.Storage.Segment`), and `PUT` through the blob store
+  under the dated layout (`Ankusa.Storage.Layout`):
+  `archive/v1/dt=<yyyy-mm-dd>/<node>/seg-<first>-<last>.seg`, followed by an
+  index object (`….idx`: event id to offset, length and seq,
+  `Ankusa.Storage.Index`), the node-day's `_manifest.json` summary, and the
+  segment's catalogue row in the store (which records the format, codec, node and
+  day). Only then do its obligations clear. A hook is deleted when its *last*
+  obligation — archive or delivery — clears, so an archive that is behind or
+  switched off never blocks delivery, and delivery never blocks the archive.
+
+  A backlog of `roll_bytes` or more rolls at once; a smaller one — a partial
+  segment — is written once its first obligation has waited `storage.roll_ms`
+  (`tick/1` writes it at once). One tick writes at most
+  `storage.max_segments_per_tick` segments.
 
   A failed write ends the tick, nothing crashes, and the same hooks are written
   again — after `storage.interval_ms` doubled per consecutive failure (jittered,
@@ -29,6 +37,7 @@ defmodule Ankusa.Storage.Compactor do
 
   alias Ankusa.{Config, Envelope}
   alias Ankusa.Queue.{Archive, Reclaim}
+  alias Ankusa.Storage.{Index, Layout, Segment}
   alias Ankusa.Store.Keys
 
   # The catalogue sweep: hourly, `@catalogue_batch` segments a batch.
@@ -110,7 +119,7 @@ defmodule Ankusa.Storage.Compactor do
   defp prune_segments(instance, cutoff, objects?, after_seq, left, done) do
     with {:ok, rows} <- Archive.expired_segments(instance, cutoff, @catalogue_batch, after_seq),
          {:ok, doomed} <- not_owed(instance, rows),
-         :ok <- delete_objects(instance, doomed, objects?),
+         :ok <- delete_objects(instance, doomed, objects?, cutoff),
          :ok <- Archive.delete_rows(instance, Enum.map(doomed, &elem(&1, 0))) do
       done = %{
         done
@@ -142,12 +151,59 @@ defmodule Ankusa.Storage.Compactor do
     end
   end
 
-  defp delete_objects(_instance, _doomed, false), do: :ok
+  defp delete_objects(_instance, _doomed, false, _cutoff), do: :ok
 
-  defp delete_objects(instance, doomed, true) do
-    for {_key, row} <- doomed, key <- [row.key, row.idx_key], reduce: :ok do
-      :ok -> delete_object(instance, key)
-      error -> error
+  defp delete_objects(instance, doomed, true, cutoff) do
+    with :ok <-
+           (for {_key, row} <- doomed, key <- [row.key, row.idx_key], reduce: :ok do
+              :ok -> delete_object(instance, key)
+              error -> error
+            end) do
+      delete_manifests(instance, doomed, cutoff)
+    end
+  end
+
+  # A node-day's manifest goes once everything it summarises is past the cutoff
+  # (its newest id is older than it). It is advisory: a reader that finds none
+  # searches the node's segments anyway, so deleting it can only cost a read.
+  # Rows from before the dated layout (no `dt`) have no manifest.
+  defp delete_manifests(instance, doomed, cutoff) do
+    doomed
+    |> Enum.filter(fn {_key, row} -> is_binary(Map.get(row, :dt)) end)
+    |> Enum.map(fn {_key, row} -> Layout.manifest_key(row.key) end)
+    |> Enum.uniq()
+    |> Enum.reduce_while(:ok, fn manifest_key, :ok ->
+      case manifest_expired?(instance, manifest_key, cutoff) do
+        {:ok, true} ->
+          case delete_object(instance, manifest_key) do
+            :ok -> {:cont, :ok}
+            {:error, _reason} = error -> {:halt, error}
+          end
+
+        {:ok, false} ->
+          {:cont, :ok}
+
+        {:error, _reason} = error ->
+          {:halt, error}
+      end
+    end)
+  end
+
+  defp manifest_expired?(instance, key, cutoff) do
+    case get(instance, key) do
+      {:ok, bin} ->
+        with {:ok, %{"max_id" => max_id}} when is_binary(max_id) <- Layout.decode_manifest(bin),
+             {:ok, ms} <- Ankusa.UUIDv7.timestamp_ms(max_id) do
+          {:ok, ms < cutoff}
+        else
+          _ -> {:ok, false}
+        end
+
+      {:error, :not_found} ->
+        {:ok, false}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -194,7 +250,10 @@ defmodule Ankusa.Storage.Compactor do
        interval: interval,
        after_seq: 0,
        failures: 0,
-       pruning: nil
+       pruning: nil,
+       node: Layout.node_name(config),
+       manifests: %{},
+       partial: nil
      }}
   end
 
@@ -210,13 +269,13 @@ defmodule Ankusa.Storage.Compactor do
 
   @impl true
   def handle_call(:tick, _from, state) do
-    {n, state} = compact(state)
+    {n, state} = compact(state, true)
     {:reply, {:ok, n}, state}
   end
 
   @impl true
   def handle_info(:tick, state) do
-    {_n, state} = compact(state)
+    {_n, state} = compact(state, false)
     schedule(next_delay(state))
     {:noreply, state}
   end
@@ -272,66 +331,101 @@ defmodule Ankusa.Storage.Compactor do
 
   # ── compaction ────────────────────────────────────────────────────────────
 
-  defp compact(state), do: compact(state, 0)
+  # `flush?` is a tick someone asked for (`tick/1`): it writes a partial segment
+  # at once instead of waiting out `storage.roll_ms`.
+  defp compact(state, flush?), do: compact(state, 0, flush?)
 
-  defp compact(state, written) do
-    case archive_batch(state) do
-      {:ok, :none} ->
-        {written, %{state | failures: 0}}
+  defp compact(state, written, flush?) do
+    if written >= state.config.storage.max_segments_per_tick do
+      # The rest of the backlog is the next tick's.
+      {written, state}
+    else
+      case archive_batch(state, flush?) do
+        {:ok, :none, state} ->
+          {written, %{state | failures: 0}}
 
-      {:ok, {last_seq, more?}} ->
-        state = %{state | after_seq: last_seq, failures: 0}
-        if more?, do: compact(state, written + 1), else: {written + 1, state}
+        {:ok, :waiting, state} ->
+          {written, %{state | failures: 0}}
 
-      {:error, reason} ->
-        # `after_seq` did not move, so the same hooks (and the same segment
-        # key) are written again next tick.
-        Logger.warning(
-          "[ankusa] archive segment after seq #{state.after_seq} not written " <>
-            "(#{state.failures + 1} in a row), retried with backoff: #{inspect(reason)}"
-        )
+        {:ok, {last_seq, more?}, state} ->
+          state = %{state | after_seq: last_seq, failures: 0}
+          if more?, do: compact(state, written + 1, flush?), else: {written + 1, state}
 
-        Ankusa.Telemetry.emit([:archive, :failure], %{}, %{instance: state.instance})
+        {:error, reason} ->
+          # `after_seq` did not move, so the same hooks (and the same segment
+          # key) are written again next tick.
+          Logger.warning(
+            "[ankusa] archive segment after seq #{state.after_seq} not written " <>
+              "(#{state.failures + 1} in a row), retried with backoff: #{inspect(reason)}"
+          )
 
-        {written, %{state | failures: state.failures + 1}}
+          Ankusa.Telemetry.emit([:archive, :failure], %{}, %{instance: state.instance})
+
+          {written, %{state | failures: state.failures + 1}}
+      end
     end
   end
 
-  defp archive_batch(state) do
+  defp archive_batch(state, flush?) do
     roll_bytes = state.config.storage.roll_bytes
 
-    with {:ok, pending, more?} <- Archive.pending(state.instance, state.after_seq, roll_bytes),
-         {:ok, hooks} <- Archive.hooks(state.instance, Enum.map(pending, &elem(&1, 0))) do
-      case pending do
-        [] ->
-          emit_archive_state(state.instance, [])
-          {:ok, :none}
+    with {:ok, pending, more?} <- Archive.pending(state.instance, state.after_seq, roll_bytes) do
+      case gate(state, pending, more?, flush?) do
+        {:wait, state} -> {:ok, :waiting, state}
+        {:go, state} -> archive_pending(state, pending, more?)
+      end
+    end
+  end
 
-        pending ->
-          {present, missing} = Enum.split_with(hooks, fn {_seq, bin} -> bin != nil end)
-          {entries, undecodable} = decode_ids(present)
-          emit_archive_state(state.instance, entries)
-          missing_seqs = Enum.map(missing, &elem(&1, 0))
+  # A backlog of `roll_bytes` or more (`more?`) rolls at once. What is left after
+  # it, or all there is, is a partial segment: it is written once its first
+  # obligation has waited `storage.roll_ms` (measured from the tick that first saw
+  # it), so an idle trickle becomes one segment per `roll_ms` rather than one per
+  # tick, and `roll_ms: 0` writes every tick.
+  defp gate(state, [{first_seq, _size} | _], false, false) do
+    roll_ms = state.config.storage.roll_ms
+    now = System.monotonic_time(:millisecond)
 
-          if missing_seqs != [] do
-            Logger.error(
-              "[ankusa] archive obligation(s) for hook(s) #{inspect(missing_seqs)} have no hook; dropping them"
-            )
-          end
+    case state.partial do
+      _ when roll_ms == 0 -> {:go, state}
+      {^first_seq, since} when now - since >= roll_ms -> {:go, state}
+      {^first_seq, _since} -> {:wait, state}
+      _ -> {:wait, %{state | partial: {first_seq, now}}}
+    end
+  end
 
-          # A stored hook that does not decode can never be archived; retrying it
-          # would stop the archive behind it for good. Its obligation goes, the
-          # hook itself stays for whatever deliveries it still has.
-          if undecodable != [] do
-            Logger.error(
-              "[ankusa] hook(s) #{inspect(undecodable)} do not decode and cannot be archived; " <>
-                "dropping their archive obligation(s)"
-            )
-          end
+  defp gate(state, _pending, _more?, _flush?), do: {:go, state}
 
-          with :ok <- write_segment(state, entries, missing_seqs ++ undecodable) do
-            {:ok, {pending |> List.last() |> elem(0), more?}}
-          end
+  defp archive_pending(state, [], _more?) do
+    emit_archive_state(state.instance, [])
+    {:ok, :none, state}
+  end
+
+  defp archive_pending(state, pending, more?) do
+    with {:ok, hooks} <- Archive.hooks(state.instance, Enum.map(pending, &elem(&1, 0))) do
+      {present, missing} = Enum.split_with(hooks, fn {_seq, bin} -> bin != nil end)
+      {entries, undecodable} = decode_ids(present)
+      emit_archive_state(state.instance, entries)
+      missing_seqs = Enum.map(missing, &elem(&1, 0))
+
+      if missing_seqs != [] do
+        Logger.error(
+          "[ankusa] archive obligation(s) for hook(s) #{inspect(missing_seqs)} have no hook; dropping them"
+        )
+      end
+
+      # A stored hook that does not decode can never be archived; retrying it
+      # would stop the archive behind it for good. Its obligation goes, the
+      # hook itself stays for whatever deliveries it still has.
+      if undecodable != [] do
+        Logger.error(
+          "[ankusa] hook(s) #{inspect(undecodable)} do not decode and cannot be archived; " <>
+            "dropping their archive obligation(s)"
+        )
+      end
+
+      with {:ok, state} <- write_segment(state, entries, missing_seqs ++ undecodable) do
+        {:ok, {pending |> List.last() |> elem(0), more?}, %{state | partial: nil}}
       end
     end
   end
@@ -358,28 +452,31 @@ defmodule Ankusa.Storage.Compactor do
   # Every hook of the batch was already gone: nothing to write, only
   # obligations to drop.
   defp write_segment(state, [], missing_seqs) do
-    Archive.archived(state.instance, nil, [], missing_seqs)
+    with :ok <- Archive.archived(state.instance, nil, [], missing_seqs), do: {:ok, state}
   end
 
   defp write_segment(state, entries, missing_seqs) do
     started = System.monotonic_time()
     {codec, _opts} = state.config.storage.codec
 
-    with {:ok, {segment, index}} <- encode(codec, entries) do
-      write_encoded(state, entries, missing_seqs, segment, index, started)
+    with {:ok, {segment, index, sha256}} <- encode(codec, entries) do
+      write_encoded(state, entries, missing_seqs, {segment, index, sha256}, started)
     end
   end
 
-  defp write_encoded(state, entries, missing_seqs, segment, index, started) do
+  defp write_encoded(state, entries, missing_seqs, {segment, index, sha256}, started) do
     instance = state.instance
+    {codec, _opts} = state.config.storage.codec
 
     seqs = Enum.map(entries, &elem(&1, 0))
     ids = Enum.map(entries, &elem(&1, 1))
     first_seq = hd(seqs)
     last_seq = List.last(seqs)
+    {min_id, max_id} = Enum.min_max(ids)
+    dt = Layout.day(min_id)
     # Full keys, `storage.key_prefix` included: the catalogue records exactly
     # what was written, so a later prefix change never strands this segment.
-    name = "seg/#{pad(first_seq)}-#{pad(last_seq)}"
+    name = Layout.segment_name(dt, state.node, first_seq, last_seq)
     key = Ankusa.BlobStore.object_key(instance, :segments, name <> ".seg")
     idx_key = Ankusa.BlobStore.object_key(instance, :segments, name <> ".idx")
 
@@ -393,14 +490,20 @@ defmodule Ankusa.Storage.Compactor do
       idx_key: idx_key,
       first_seq: first_seq,
       last_seq: last_seq,
-      min_id: Enum.min(ids),
-      max_id: Enum.max(ids),
+      min_id: min_id,
+      max_id: max_id,
       count: length(entries),
-      bytes: byte_size(segment)
+      bytes: byte_size(segment),
+      format: Segment.version(),
+      codec: codec,
+      node: state.node,
+      dt: dt,
+      sha256: sha256
     }
 
     with :ok <- put(instance, key, segment),
-         :ok <- put(instance, idx_key, :erlang.term_to_binary(idx)),
+         :ok <- put(instance, idx_key, Index.encode(idx)),
+         {:ok, state} <- record_manifest(state, row),
          :ok <- Archive.archived(instance, row, seqs, missing_seqs) do
       markers = Enum.map(seqs, fn seq -> {seq, Keys.cleared(seq, 1, 0)} end)
 
@@ -419,8 +522,66 @@ defmodule Ankusa.Storage.Compactor do
         %{instance: instance}
       )
 
-      :ok
+      {:ok, state}
     end
+  end
+
+  # The day manifest (`Layout`): a constant-size summary, read once per day this
+  # process writes to and rewritten after each segment. A segment the manifest
+  # already counts (a tick that failed after this write) leaves it alone.
+  defp record_manifest(state, %{dt: dt} = row) do
+    with {:ok, manifest} <- load_manifest(state, dt) do
+      if manifest["last_seq"] >= row.last_seq do
+        {:ok, cache_manifest(state, dt, manifest)}
+      else
+        manifest = Layout.add_segment(manifest, row)
+        name = Layout.manifest_name(dt, state.node)
+        key = Ankusa.BlobStore.object_key(state.instance, :segments, name)
+
+        with :ok <- put(state.instance, key, JSON.encode!(manifest)) do
+          {:ok, cache_manifest(state, dt, manifest)}
+        end
+      end
+    end
+  end
+
+  defp load_manifest(%{manifests: %{} = cached} = state, dt) when is_map_key(cached, dt),
+    do: {:ok, Map.fetch!(state.manifests, dt)}
+
+  defp load_manifest(state, dt) do
+    key =
+      Ankusa.BlobStore.object_key(state.instance, :segments, Layout.manifest_name(dt, state.node))
+
+    case get(state.instance, key) do
+      {:ok, bin} ->
+        case Layout.decode_manifest(bin) do
+          {:ok, manifest} ->
+            {:ok, manifest}
+
+          {:error, :bad_manifest} ->
+            Logger.warning("[ankusa] archive manifest #{key} does not decode; starting it over")
+            {:ok, Layout.new_manifest(dt, state.node)}
+        end
+
+      {:error, :not_found} ->
+        {:ok, Layout.new_manifest(dt, state.node)}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # Only the newest days are kept: segments are written in `seq` order, so
+  # older days do not come back.
+  defp cache_manifest(state, dt, manifest) do
+    manifests =
+      state.manifests
+      |> Map.put(dt, manifest)
+      |> Enum.sort(:desc)
+      |> Enum.take(3)
+      |> Map.new()
+
+    %{state | manifests: manifests}
   end
 
   # `{seq, id, bin}` for every hook that decodes, and the seqs of those that do not.
@@ -439,7 +600,8 @@ defmodule Ankusa.Storage.Compactor do
   # The codec is configurable code: a raise is this tick's failure, retried next
   # tick like a failed blob write, never a crashed compactor.
   defp encode(codec, entries) do
-    {:ok, codec.encode(Enum.map(entries, fn {_seq, id, bin} -> %{key: id, payload: bin} end))}
+    {:ok,
+     Segment.encode(codec, Enum.map(entries, fn {_seq, id, bin} -> %{key: id, payload: bin} end))}
   rescue
     error -> {:error, {:raised, error}}
   end
@@ -466,5 +628,16 @@ defmodule Ankusa.Storage.Compactor do
 
   defp schedule(_), do: :ok
 
-  defp pad(seq), do: seq |> Integer.to_string() |> String.pad_leading(20, "0")
+  # Same guard as `put/3`.
+  defp get(instance, key) do
+    case Ankusa.BlobStore.get(instance, :segments, key) do
+      {:ok, _bin} = ok -> ok
+      {:error, _reason} = error -> error
+    end
+  rescue
+    error -> {:error, {:raised, error}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+    :throw, value -> {:error, {:throw, value}}
+  end
 end

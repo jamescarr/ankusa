@@ -1,53 +1,7 @@
-defmodule Ankusa.Codec.RawTest do
-  use ExUnit.Case, async: true
-
-  alias Ankusa.Codec.Raw
-
-  test "encode/decode_record round-trips every record with correct byte ranges" do
-    records = [
-      %{key: "a", payload: "hello"},
-      %{key: "b", payload: <<0, 1, 2, 3, 255>>},
-      %{key: "c", payload: :erlang.term_to_binary(%{deep: [1, 2, 3]})}
-    ]
-
-    {segment, index} = Raw.encode(records)
-
-    assert length(index) == length(records)
-
-    for {rec, entry} <- Enum.zip(records, index) do
-      assert entry.key == rec.key
-      # length is the full frame: 8-byte header + payload
-      assert entry.length == 8 + byte_size(rec.payload)
-      frame = binary_part(segment, entry.offset, entry.length)
-      assert {:ok, rec.payload} == Raw.decode_record(frame)
-    end
-
-    # offsets are contiguous and cover the whole segment
-    total = Enum.reduce(index, 0, fn e, acc -> acc + e.length end)
-    assert total == byte_size(segment)
-    assert hd(index).offset == 0
-  end
-
-  test "decode_record detects a corrupted payload as :crc_mismatch" do
-    {segment, [_entry]} = Raw.encode([%{key: "x", payload: "correct-bytes"}])
-    # keep the original len/crc header but flip the first payload byte
-    <<len::32, crc::32, first, rest::binary>> = segment
-    corrupted = <<len::32, crc::32, Bitwise.bxor(first, 1)::8, rest::binary>>
-
-    assert {:error, :crc_mismatch} == Raw.decode_record(corrupted)
-  end
-
-  test "decode_record rejects a truncated/garbage frame as :malformed" do
-    assert {:error, :malformed} == Raw.decode_record(<<1, 2, 3>>)
-    # header promises 100 payload bytes that are not present
-    assert {:error, :malformed} == Raw.decode_record(<<100::32, 0::32, "short">>)
-  end
-end
-
 defmodule Ankusa.StorageTest do
   @moduledoc """
   The archive: hooks committed under the `:storage` role carry an archive
-  obligation, a tick packs them into `seg/<first>-<last>.seg` plus a `.idx`
+  obligation, a tick packs them into `archive/v1/dt=<day>/<node>/seg-<first>-<last>.seg` plus a `.idx`
   object and a catalogue row, and `Ankusa.Storage.fetch/2` reads any of them
   back byte-for-byte.
 
@@ -248,6 +202,51 @@ defmodule Ankusa.StorageTest do
     end
   end
 
+  defp segments_root(config), do: Ankusa.Config.path(config, "segments")
+
+  defp archive_files(config, ext),
+    do: Path.wildcard(Path.join(segments_root(config), "archive/v1/dt=*/*/*" <> ext))
+
+  defp uuid_envelope(body), do: %{envelope(body) | id: Ankusa.UUIDv7.generate()}
+
+  # One object-store root shared by several nodes, which differ by `intake.node_id`.
+  defp shared_root do
+    root = Path.join(System.tmp_dir!(), "ankusa_shared_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(root) end)
+    root
+  end
+
+  defp shared_node(root, name) do
+    start(
+      roles: [:edge, :storage],
+      intake: %{node_id: name},
+      storage: %{blob_store: {Ankusa.BlobStore.LocalFS, root: root}}
+    )
+  end
+
+  # What a release before the header wrote: bare frames, a bare `term_to_binary`
+  # index, a catalogue row with no `format`.
+  defp write_legacy_segment(inst, env) do
+    payload = Envelope.to_binary(env)
+    {frames, [entry]} = Ankusa.Codec.Raw.encode([%{key: env.id, payload: payload}])
+    name = "seg/#{String.pad_leading("1", 20, "0")}-#{String.pad_leading("1", 20, "0")}"
+    idx = %{env.id => {entry.offset, entry.length, env.seq}}
+
+    :ok = Ankusa.BlobStore.put(inst, :segments, name <> ".seg", frames)
+    :ok = Ankusa.BlobStore.put(inst, :segments, name <> ".idx", :erlang.term_to_binary(idx))
+
+    %{
+      key: name <> ".seg",
+      idx_key: name <> ".idx",
+      first_seq: 1,
+      last_seq: 1,
+      min_id: env.id,
+      max_id: env.id,
+      count: 1,
+      bytes: byte_size(frames)
+    }
+  end
+
   # ── tests ──────────────────────────────────────────────────────────────────
 
   test "a tick writes one segment and one index object, and every hook reads back byte-for-byte" do
@@ -267,11 +266,12 @@ defmodule Ankusa.StorageTest do
 
     assert {:ok, 1} == Compactor.tick(inst)
 
-    {:ok, keys} = Ankusa.BlobStore.list(inst, :segments, "seg/")
+    {:ok, keys} = Ankusa.BlobStore.list(inst, :segments, "archive/v1/")
     assert [seg_key] = Enum.filter(keys, &String.ends_with?(&1, ".seg"))
-    assert String.starts_with?(seg_key, "seg/")
+    assert String.starts_with?(seg_key, "archive/v1/dt=")
     assert [_idx_key] = Enum.filter(keys, &String.ends_with?(&1, ".idx"))
-    assert length(keys) == 2
+    assert [_manifest] = Enum.filter(keys, &String.ends_with?(&1, "/_manifest.json"))
+    assert length(keys) == 3
 
     # every original is fetchable byte-for-byte through the storage read path,
     # with the seq stamped from the segment index
@@ -315,7 +315,7 @@ defmodule Ankusa.StorageTest do
 
     assert {:ok, 1} == Compactor.tick(inst)
 
-    {:ok, keys} = Ankusa.BlobStore.list(inst, :segments, "seg/")
+    {:ok, keys} = Ankusa.BlobStore.list(inst, :segments, "archive/v1/")
     assert [_ | _] = keys
 
     for key <- keys do
@@ -407,8 +407,9 @@ defmodule Ankusa.StorageTest do
 
     # one tick writes every segment the backlog needs, not one holding it all
     assert {:ok, 3} == Compactor.tick(inst)
-    assert {:ok, keys} = Ankusa.BlobStore.list(inst, :segments, "seg/")
-    assert length(keys) == 6
+    assert {:ok, keys} = Ankusa.BlobStore.list(inst, :segments, "archive/v1/")
+    # three segments, their three indexes, and the day's manifest
+    assert length(keys) == 7
 
     for original <- originals do
       assert {:ok, fetched} = Storage.fetch(inst, original.id)
@@ -430,7 +431,7 @@ defmodule Ankusa.StorageTest do
     compactor = Ankusa.whereis(inst, :compactor)
     assert is_pid(compactor)
     assert Process.alive?(compactor)
-    assert Ankusa.BlobStore.list(inst, :segments, "seg/") == {:ok, []}
+    assert Ankusa.BlobStore.list(inst, :segments, "archive/v1/") == {:ok, []}
     assert :error == Storage.fetch(inst, env.id)
 
     # the same hooks are written again under the same keys next tick
@@ -487,7 +488,7 @@ defmodule Ankusa.StorageTest do
     config =
       start(
         roles: [:edge, :storage],
-        storage: %{interval_ms: 10, blob_store: {FailingBlobStore, [agent: agent]}}
+        storage: %{interval_ms: 10, roll_ms: 0, blob_store: {FailingBlobStore, [agent: agent]}}
       )
 
     inst = config.instance
@@ -584,11 +585,11 @@ defmodule Ankusa.StorageTest do
       assert {:ok, 1} == Compactor.tick(inst)
 
       root = Ankusa.Config.path(config, "segments")
-      assert [_seg] = Path.wildcard(Path.join(root, "node-a/seg/*.seg"))
-      assert Path.wildcard(Path.join(root, "seg/*")) == []
+      assert [_seg] = Path.wildcard(Path.join(root, "node-a/archive/v1/dt=*/*/seg-*.seg"))
+      assert Path.wildcard(Path.join(root, "archive")) == []
 
-      assert {:ok, [_, _] = keys} = Ankusa.BlobStore.list(inst, :segments, "seg/")
-      assert Enum.all?(keys, &String.starts_with?(&1, "node-a/seg/"))
+      assert {:ok, [_, _, _] = keys} = Ankusa.BlobStore.list(inst, :segments, "archive/v1/")
+      assert Enum.all?(keys, &String.starts_with?(&1, "node-a/archive/v1/dt="))
       assert {:ok, fetched} = Storage.fetch(inst, original.id)
       assert fetched.body == original.body
     end
@@ -610,8 +611,8 @@ defmodule Ankusa.StorageTest do
       assert {:ok, %{body: ~s({"n":1})}} = Storage.fetch(config.instance, before.id)
       assert {:ok, %{body: ~s({"n":2})}} = Storage.fetch(config.instance, later.id)
       root = Ankusa.Config.path(config, "segments")
-      assert [_] = Path.wildcard(Path.join(root, "seg/*.seg"))
-      assert [_] = Path.wildcard(Path.join(root, "node-a/seg/*.seg"))
+      assert [_] = Path.wildcard(Path.join(root, "archive/v1/dt=*/*/seg-*.seg"))
+      assert [_] = Path.wildcard(Path.join(root, "node-a/archive/v1/dt=*/*/seg-*.seg"))
     end
 
     test "two nodes sharing one root keep their segments apart and read each other's claims" do
@@ -635,9 +636,13 @@ defmodule Ankusa.StorageTest do
       assert {:ok, 1} == Compactor.tick(a.instance)
       assert {:ok, 1} == Compactor.tick(b.instance)
 
-      assert {:ok, [_, _] = keys_a} = Ankusa.BlobStore.list(a.instance, :segments, "seg/")
-      assert {:ok, [_, _] = keys_b} = Ankusa.BlobStore.list(b.instance, :segments, "seg/")
-      assert Enum.all?(keys_a, &String.starts_with?(&1, "a/seg/"))
+      assert {:ok, [_, _, _] = keys_a} =
+               Ankusa.BlobStore.list(a.instance, :segments, "archive/v1/")
+
+      assert {:ok, [_, _, _] = keys_b} =
+               Ankusa.BlobStore.list(b.instance, :segments, "archive/v1/")
+
+      assert Enum.all?(keys_a, &String.starts_with?(&1, "a/archive/v1/"))
 
       assert Enum.map(keys_a, &String.replace_prefix(&1, "a/", "")) ==
                Enum.map(keys_b, &String.replace_prefix(&1, "b/", ""))
@@ -652,6 +657,281 @@ defmodule Ankusa.StorageTest do
         Ankusa.ClaimCheck.check_in(a.instance, "acme", [item])
 
       assert {:ok, "claimed bytes"} = Ankusa.ClaimCheck.read(b.instance, "acme", ref.claim_id)
+    end
+  end
+
+  # ── the dated layout, the segment format, time-based roll ────────────────────
+
+  describe "dated layout" do
+    test "a segment, its index and the day manifest sit under archive/v1/dt=<day>/<node>/" do
+      config = start(roles: [:edge, :storage], intake: %{node_id: "node-a"})
+      inst = config.instance
+      [original] = commit!(inst, [uuid_envelope(~s({"n":1}))])
+      assert {:ok, 1} == Compactor.tick(inst)
+
+      day = Ankusa.Storage.Layout.day(original.id)
+      dir = Path.join(segments_root(config), "archive/v1/dt=#{day}/node-a")
+
+      assert [seg] = Path.wildcard(Path.join(dir, "seg-*.seg"))
+      assert Regex.match?(~r/seg-\d{20}-\d{20}\.seg\z/, seg)
+      assert [_idx] = Path.wildcard(Path.join(dir, "seg-*.idx"))
+
+      manifest = dir |> Path.join("_manifest.json") |> File.read!() |> JSON.decode!()
+      assert %{"format" => 1, "node" => "node-a", "segments" => 1, "dt" => ^day} = manifest
+      assert manifest["min_id"] == original.id and manifest["max_id"] == original.id
+
+      assert {:ok, [row]} = Ankusa.Queue.Archive.segments_containing(inst, original.id)
+      assert %{format: 1, node: "node-a", dt: ^day, codec: Ankusa.Codec.Raw} = row
+      assert String.ends_with?(row.key, Path.basename(seg))
+    end
+
+    test "the manifest counts each segment once, across ticks" do
+      config =
+        start(roles: [:edge, :storage], intake: %{node_id: "node-a"}, storage: %{roll_bytes: 1})
+
+      inst = config.instance
+      commit!(inst, [uuid_envelope("one"), uuid_envelope("two"), uuid_envelope("three")])
+      assert {:ok, 3} == Compactor.tick(inst)
+
+      assert [path] = archive_files(config, "_manifest.json")
+      assert %{"segments" => 3} = path |> File.read!() |> JSON.decode!()
+    end
+  end
+
+  describe "versioned header: what is on disk" do
+    test "versioned header: the object starts with ANKSEG, version, codec, count and ends in its sha256" do
+      config = start(roles: [:edge, :storage])
+      inst = config.instance
+      [first, _second] = commit!(inst, [envelope("one"), envelope("two")])
+      assert {:ok, 1} == Compactor.tick(inst)
+
+      assert [path] = archive_files(config, ".seg")
+      object = File.read!(path)
+      assert <<"ANKSEG", 1, 1, 2::32, _::binary>> = object
+      assert {:ok, %{format: 1, codec_id: 1, count: 2}} = Ankusa.Storage.Segment.verify(object, 1)
+
+      assert {:ok, [row]} = Ankusa.Queue.Archive.segments_containing(inst, first.id)
+      assert row.bytes == byte_size(object)
+
+      assert row.sha256 ==
+               object |> binary_part(byte_size(object) - 32, 32) |> Base.encode16(case: :lower)
+    end
+
+    test "versioned header: a segment altered after the write is not served" do
+      config = start(roles: [:edge, :storage])
+      inst = config.instance
+      [original] = commit!(inst, [envelope(~s({"n":1,"pad":"xxxxxxxxxxxxxxxx"}))])
+      assert {:ok, 1} == Compactor.tick(inst)
+      assert {:ok, %{body: _}} = Storage.fetch(inst, original.id)
+
+      [path] = archive_files(config, ".seg")
+      object = File.read!(path)
+      # one payload byte flipped: the frame's CRC no longer matches
+      <<head::binary-size(40), byte, rest::binary>> = object
+      File.write!(path, <<head::binary, Bitwise.bxor(byte, 1), rest::binary>>)
+      assert :error == Storage.fetch(inst, original.id)
+
+      # and the whole-object check (what a replay runs) refuses it too
+      assert {:error, :sha_mismatch} = Ankusa.Storage.Segment.verify(File.read!(path), 1)
+
+      File.write!(path, binary_part(object, 0, byte_size(object) - 5))
+      assert {:error, :sha_mismatch} = Ankusa.Storage.Segment.verify(File.read!(path), 1)
+    end
+  end
+
+  describe "safe idx: what is read back from the object store is not trusted" do
+    test "safe idx: an index altered after the write is {:error, _} and the hook is not served" do
+      config = start(roles: [:edge, :storage])
+      inst = config.instance
+      [original] = commit!(inst, [envelope(~s({"n":1}))])
+      assert {:ok, 1} == Compactor.tick(inst)
+
+      [path] = archive_files(config, ".idx")
+      object = File.read!(path)
+      assert {:ok, _} = Ankusa.Storage.Index.decode(object)
+
+      <<head::binary-size(20), byte, rest::binary>> = object
+      File.write!(path, <<head::binary, Bitwise.bxor(byte, 1), rest::binary>>)
+      assert {:error, :sha_mismatch} = Ankusa.Storage.Index.decode(File.read!(path))
+      assert :error == Storage.fetch(inst, original.id)
+    end
+
+    test "safe idx: an index that names an atom this node never saw is refused, not interned" do
+      config = start(roles: [:edge, :storage])
+      inst = config.instance
+      [original] = commit!(inst, [envelope(~s({"n":1}))])
+      assert {:ok, 1} == Compactor.tick(inst)
+
+      name = "never_interned_dur8_" <> Integer.to_string(System.unique_integer([:positive]))
+
+      # a legacy (headerless) index whose one value is an atom nobody created
+      hostile = <<131, 116, 1::32, 109, 1::32, "a", 119, byte_size(name), name::binary>>
+      [path] = archive_files(config, ".idx")
+      File.write!(path, hostile)
+
+      assert {:error, :bad_index} = Ankusa.Storage.Index.decode(hostile)
+      assert :error == Storage.fetch(inst, original.id)
+
+      assert_raise ArgumentError, fn -> String.to_existing_atom(name) end
+    end
+  end
+
+  describe "time roll" do
+    test "time roll: a partial segment waits storage.roll_ms, then is written" do
+      config = start(roles: [:edge, :storage], storage: %{interval_ms: 20, roll_ms: 400})
+      inst = config.instance
+      [original] = commit!(inst, [envelope(~s({"n":1}))])
+
+      Process.sleep(150)
+      assert archive_files(config, ".seg") == []
+
+      # the segment's object lands before its catalogue row: wait for the hook itself
+      assert eventually(fn -> match?({:ok, _}, Storage.fetch(inst, original.id)) end, 3_000)
+      assert [_] = archive_files(config, ".seg")
+    end
+
+    test "time roll: a backlog of roll_bytes rolls at once, only the remainder waits" do
+      config =
+        start(
+          roles: [:edge, :storage],
+          storage: %{interval_ms: 20, roll_ms: 60_000, roll_bytes: 1}
+        )
+
+      inst = config.instance
+      commit!(inst, [envelope("one"), envelope("two"), envelope("three")])
+
+      assert eventually(fn -> length(archive_files(config, ".seg")) == 2 end, 3_000)
+      Process.sleep(150)
+      assert length(archive_files(config, ".seg")) == 2
+
+      # an asked-for tick does not wait for the roll
+      assert {:ok, 1} == Compactor.tick(inst)
+      assert length(archive_files(config, ".seg")) == 3
+    end
+
+    test "time roll: roll_ms: 0 writes every tick" do
+      config = start(roles: [:edge, :storage], storage: %{interval_ms: 20, roll_ms: 0})
+      [original] = commit!(config.instance, [envelope(~s({"n":1}))])
+
+      assert eventually(
+               fn -> match?({:ok, _}, Storage.fetch(config.instance, original.id)) end,
+               3_000
+             )
+    end
+  end
+
+  describe "storage.max_segments_per_tick" do
+    test "one tick writes at most that many segments; the next tick takes the rest" do
+      config =
+        start(roles: [:edge, :storage], storage: %{roll_bytes: 1, max_segments_per_tick: 2})
+
+      inst = config.instance
+      commit!(inst, Enum.map(1..5, &envelope("hook #{&1}")))
+
+      assert {:ok, 2} == Compactor.tick(inst)
+      assert {:ok, 2} == Compactor.tick(inst)
+      assert {:ok, 1} == Compactor.tick(inst)
+      assert {:ok, 0} == Compactor.tick(inst)
+    end
+  end
+
+  describe "reconcile other node" do
+    test "reconcile other node: a second node serves the first's segments by day, then reconciles them" do
+      root = shared_root()
+      a = shared_node(root, "node-a")
+      [original] = commit!(a.instance, [uuid_envelope(~s({"from":"a"}))])
+      assert {:ok, 1} == Compactor.tick(a.instance)
+      stop_supervised!({Ankusa.Instance, a.instance})
+
+      b = shared_node(root, "node-b")
+      inst = b.instance
+
+      # nothing in b's catalogue, yet the day prefix leads to the segment
+      assert {:ok, []} = Ankusa.Queue.Archive.segments_containing(inst, original.id)
+      assert {:ok, %{body: ~s({"from":"a"})}} = Storage.fetch(inst, original.id)
+
+      assert {:ok, %{catalogued: 1, present: 0, conflicts: 0, skipped: 0}} =
+               Ankusa.Queue.Archive.reconcile(inst)
+
+      assert {:ok, [row]} = Ankusa.Queue.Archive.segments_containing(inst, original.id)
+      assert %{node: "node-a", format: 1} = row
+      assert {:ok, %{body: ~s({"from":"a"}), seq: seq}} = Storage.fetch(inst, original.id)
+      assert seq == original.seq
+
+      # idempotent
+      assert {:ok, %{catalogued: 0, present: 1}} = Ankusa.Queue.Archive.reconcile(inst)
+    end
+
+    test "reconcile other node: another node's segment never settles this node's own obligations" do
+      root = shared_root()
+      a = shared_node(root, "node-a")
+      [from_a] = commit!(a.instance, [uuid_envelope(~s({"from":"a"}))])
+      assert {:ok, 1} == Compactor.tick(a.instance)
+      stop_supervised!({Ankusa.Instance, a.instance})
+
+      b = shared_node(root, "node-b")
+      inst = b.instance
+      # the same seq as a's hook, a different hook
+      [from_b] = commit!(inst, [uuid_envelope(~s({"from":"b"}))])
+      assert from_b.seq == from_a.seq
+
+      assert {:ok, %{catalogued: 1}} = Ankusa.Queue.Archive.reconcile(inst)
+      assert {:ok, _} = Store.get(inst, :index, Keys.archive_pending(from_b.seq))
+
+      assert {:ok, 1} == Compactor.tick(inst)
+      assert {:ok, %{body: ~s({"from":"b"})}} = Storage.fetch(inst, from_b.id)
+      # a's row was overwritten by b's at the same first seq; the day scan still finds it
+      assert {:ok, %{body: ~s({"from":"a"})}} = Storage.fetch(inst, from_a.id)
+    end
+
+    test "reconcile other node: node: :own leaves the others alone" do
+      root = shared_root()
+      a = shared_node(root, "node-a")
+      commit!(a.instance, [uuid_envelope(~s({"from":"a"}))])
+      assert {:ok, 1} == Compactor.tick(a.instance)
+      stop_supervised!({Ankusa.Instance, a.instance})
+
+      b = shared_node(root, "node-b")
+      assert {:ok, %{catalogued: 0}} = Ankusa.Queue.Archive.reconcile(b.instance, node: :own)
+      assert {:ok, %{catalogued: 1}} = Ankusa.Queue.Archive.reconcile(b.instance, node: "node-a")
+    end
+
+    test "reconcile other node: an id that carries no time is found only through the catalogue" do
+      root = shared_root()
+      a = shared_node(root, "node-a")
+      [original] = commit!(a.instance, [envelope(~s({"from":"a"}))])
+      assert {:ok, 1} == Compactor.tick(a.instance)
+      stop_supervised!({Ankusa.Instance, a.instance})
+
+      b = shared_node(root, "node-b")
+      assert :error == Storage.fetch(b.instance, original.id)
+      assert {:ok, %{catalogued: 1}} = Ankusa.Queue.Archive.reconcile(b.instance)
+      assert {:ok, %{body: ~s({"from":"a"})}} = Storage.fetch(b.instance, original.id)
+    end
+  end
+
+  describe "legacy seg/ layout" do
+    test "a legacy segment and its row (no format field) stay readable" do
+      config = start(roles: [:edge, :storage])
+      inst = config.instance
+      env = %{envelope(~s({"legacy":true})) | seq: 1}
+      row = write_legacy_segment(inst, env)
+      assert :ok = Ankusa.Queue.Archive.archived(inst, row, [])
+
+      assert {:ok, %{body: ~s({"legacy":true}), seq: 1}} = Storage.fetch(inst, env.id)
+    end
+
+    test "reconcile catalogues a legacy segment as format 0" do
+      config = start(roles: [:edge, :storage])
+      inst = config.instance
+      env = %{envelope(~s({"legacy":true})) | seq: 1}
+      write_legacy_segment(inst, env)
+      assert :error == Storage.fetch(inst, env.id)
+
+      assert {:ok, %{catalogued: 1}} = Ankusa.Queue.Archive.reconcile(inst, node: :own)
+      assert {:ok, [row]} = Ankusa.Queue.Archive.segments_containing(inst, env.id)
+      assert %{format: 0, codec: Ankusa.Codec.Raw, node: nil, dt: nil} = row
+      assert {:ok, %{body: ~s({"legacy":true})}} = Storage.fetch(inst, env.id)
     end
   end
 end

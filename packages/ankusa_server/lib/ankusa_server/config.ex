@@ -99,7 +99,7 @@ defmodule AnkusaServer.Config do
   @intake_keys ~w(type node_id fleet topic kafka publish_timeout_ms reconcile_deadline_ms breaker_failures probe_ms retry_after_s offset_flush_ms pending max_record_bytes recover_on_boot verify_topic)
   @intake_pending_keys ~w(max_records max_bytes)
   @intake_kafka_keys ~w(brokers ssl sasl)
-  @storage_keys ~w(type roll_bytes roll_ms key_prefix s3 gcs catalogue_retention_days)
+  @storage_keys ~w(type roll_bytes roll_ms max_segments_per_tick key_prefix s3 gcs catalogue_retention_days)
   @blob_store_keys ~w(type root s3 gcs)
   # The transport options of `Ankusa.BlobStore.Options`, in milliseconds or bytes
   # as named; the core range-checks them when the instance starts.
@@ -1094,6 +1094,10 @@ defmodule AnkusaServer.Config do
         [blob_store: blob_store!(storage, ["storage"], false)]
         |> put_opt(:roll_bytes, int_opt(storage, "roll_bytes", ["storage"]))
         |> put_opt(:roll_ms, int_opt(storage, "roll_ms", ["storage"]))
+        |> put_opt(
+          :max_segments_per_tick,
+          int_opt(storage, "max_segments_per_tick", ["storage"])
+        )
         |> put_opt(:key_prefix, string_opt(storage, "key_prefix", ["storage"]))
         |> put_opt(
           :catalogue_retention_days,

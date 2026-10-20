@@ -170,9 +170,10 @@ Redis for routes, sources, and fleet-scoped rate limits and dedupe. `edge`,
 local store — a node is the unit of scale. The one role you may split out is
 `:claim_check`, the large-payload gateway, which never opens the store.
 
-Give each node its own archive prefix (`storage.key_prefix`) or its own bucket:
-segment keys are `seg/<first_seq>-<last_seq>.seg` and remote blob stores ignore
-the instance, so nodes sharing a bucket without a prefix overwrite each other's
+Give each node its own `intake.node_id` (or archive prefix `storage.key_prefix`, or
+its own bucket): segment keys are
+`archive/v1/dt=<day>/<node>/seg-<first_seq>-<last_seq>.seg` and remote blob stores
+ignore the instance, so two nodes with one name overwrite each other's
 segments. Claim keys are never prefixed, so one claim-check gateway can serve
 the whole fleet.
 

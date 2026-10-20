@@ -774,11 +774,13 @@ defmodule Ankusa.Queue.DeliveriesTest do
 
       old_hook(inst, 3 * @day_ms, [])
       assert {:ok, 1} = Compactor.tick(inst)
-      assert {:ok, [_seg, _idx] = keys} = Ankusa.BlobStore.list(inst, :segments, "seg/")
+      # the segment, its index and the node-day's manifest
+      assert {:ok, [_, _, _] = keys} = Ankusa.BlobStore.list(inst, :segments, "archive/v1/")
 
       assert {:ok, %{segments: 1, objects: 2}} = Compactor.prune_catalogue(inst)
-      assert {:ok, []} = Ankusa.BlobStore.list(inst, :segments, "seg/")
-      assert length(keys) == 2
+      # the manifest goes with the last segment it summarises
+      assert {:ok, []} = Ankusa.BlobStore.list(inst, :segments, "archive/v1/")
+      assert length(keys) == 3
     end
 
     test "catalogue retention: a segment holding a hook that is still owed, or one a live archive replay reads, stays" do

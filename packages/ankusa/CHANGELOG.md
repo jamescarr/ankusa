@@ -37,6 +37,28 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `[:ankusa, :archive, :state]` (`:oldest_unarchived_age_ms`), and `:deleted`
   metadata on `[:ankusa, :claim_check, :sweep]`. See
   [`claim-check.md#integrity`](../../docs/claim-check.md#integrity).
+- **Segment format header, safe index decode, dated archive layout, time-based roll
+  (DUR-8).** A segment is now `"ANKSEG" <> <<version, codec_id, count::32>>`, the
+  codec's frames and a sha256 trailer (`Ankusa.Storage.Segment`); its `.idx` is
+  `"ANKIDX"` + version + count + `term_to_binary` + sha256 and is decoded with
+  `binary_to_term(_, [:safe])` and a shape check (`Ankusa.Storage.Index`), so a
+  tampered or hostile index or segment is `{:error, _}` (`Storage.fetch/2` answers
+  `:error`, archive replay logs and skips it). Segments go under
+  `archive/v1/dt=<yyyy-mm-dd>/<node>/seg-<first>-<last>.seg` (+ `.idx` and the
+  node-day `_manifest.json`; `<node>` is `intake.node_id`, else the host name), so a
+  node without the catalogue can find another node's segments: `Storage.fetch/2`
+  falls back to a day-prefix scan on a catalogue miss, and the new
+  `Queue.Archive.reconcile/2` rebuilds catalogue rows from the prefix (the
+  boot restore reconcile now runs through it). `storage.roll_ms` is no longer dead:
+  a partial segment is written once its oldest hook has waited that long, and
+  `storage.max_segments_per_tick` (16) caps what one compactor tick writes.
+  `Ankusa.Codec` gains an optional `id/0` callback. Segments written by earlier
+  releases (`seg/…`, bare frames) stay readable. **Store format 7** (the catalogue's
+  segment rows record `format`, `codec`, `node`, `dt`, `sha256`; migration
+  `SegmentRows`, fixture `store-v7.tar.zst`): a format 7 store cannot be opened by an
+  earlier image, and an earlier node cannot read segments of format 1. See
+  [`storage.md`](../../docs/storage.md#ankusacodec-and-segment-format).
+
 - **Store failure telemetry, `/ready` reasons and a reopen backoff (DUR-5).**
   `[:ankusa, :store, :write_failed]` (one per failed write a process reported and
   per failed readiness probe, with a `class` from the fixed set

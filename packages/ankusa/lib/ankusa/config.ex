@@ -197,8 +197,15 @@ defmodule Ankusa.Config do
               key_prefix: "",
               codec: {Ankusa.Codec.Raw, []},
               roll_bytes: 16 * 1024 * 1024,
+              # A partial segment (under `roll_bytes`) is written once its oldest
+              # hook has waited this long; `0` writes every tick. A backlog of
+              # `roll_bytes` or more rolls at once.
               roll_ms: 30_000,
               interval_ms: 1_000,
+              # The most segments one compactor tick writes; the rest wait for
+              # the next tick, so a long backlog never holds the compactor
+              # inside one pass.
+              max_segments_per_tick: 16,
               # How long the archive catalogue keeps a segment's row (`?S`) after
               # the newest hook in it, and a 0.3 import's `?L` row after its hook:
               # `Storage.fetch/2` and an archive replay stop finding a hook past it.
@@ -821,6 +828,7 @@ defmodule Ankusa.Config do
     {[:dispatch, :max_inflight], "dispatch.max_inflight"},
     {[:dispatch, :max_inflight_bytes], "dispatch.max_inflight_bytes"},
     {[:storage, :roll_bytes], "storage.roll_bytes"},
+    {[:storage, :max_segments_per_tick], "storage.max_segments_per_tick"},
     {[:claim_check, :sweep_interval_ms], "claim_check.sweep_interval_ms"},
     {[:claim_check, :redeem_grace_ms], "claim_check.redeem_grace_ms"},
     {[:claim_check, :sweep_max_objects], "claim_check.sweep_max_objects"},

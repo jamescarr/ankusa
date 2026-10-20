@@ -120,8 +120,8 @@ of it:
 ```sh
 find data/default -type f
 # data/default/store/...        # RocksDB: hooks, delivery rows, catalogue
-# data/default/segments/seg/00000000000000000001-...seg
-# data/default/segments/seg/00000000000000000001-...idx
+# data/default/segments/archive/v1/dt=2026-10-19/<node>/seg-00000000000000000001-...seg
+# data/default/segments/archive/v1/dt=2026-10-19/<node>/seg-00000000000000000001-...idx
 ```
 
 State lives under `./data/<instance>/`: `store/` holds the queue, DLQ,

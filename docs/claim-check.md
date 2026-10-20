@@ -694,7 +694,7 @@ claims/tenant=acme/dt=2026-09-24/01M39VMD8RA3C5HR4RBV67Y000
 ```
 
 in the claim store (the storage bucket unless `claim_check.store` or
-`claim_check.stores` is set), beside the `seg/` segments and never under
+`claim_check.stores` is set), beside the `archive/` segments and never under
 `storage.key_prefix`. The last segment is the pack id: any of its claim ids
 with the position bits (the last three characters, plus the lowest bit of the
 fourth-from-last) zeroed. A pack id is the check-in time plus 64 random bits,

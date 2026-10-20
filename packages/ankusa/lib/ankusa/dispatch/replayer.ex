@@ -45,6 +45,7 @@ defmodule Ankusa.Dispatch.Replayer do
   alias Ankusa.Lifecycle.Publisher
   alias Ankusa.Queue
   alias Ankusa.Queue.{Archive, Deliveries}
+  alias Ankusa.Storage.{Index, Segment}
   alias Ankusa.Store.Keys
   alias Ankusa.Tenant
 
@@ -614,7 +615,8 @@ defmodule Ankusa.Dispatch.Replayer do
     with {:ok, idx_bin} <- BlobStore.get(instance, :segments, row.idx_key),
          {:ok, index} <- decode_index(idx_bin),
          entries <- window_entries(index, job.filter),
-         {:ok, bin} <- BlobStore.get(instance, :segments, row.key) do
+         {:ok, bin} <- BlobStore.get(instance, :segments, row.key),
+         :ok <- check_segment(bin, row, entries) do
       cache = %{row: row, entries: entries, bin: bin}
       {:ok, %{state | segments: Map.put(state.segments, job.id, cache)}, job, entries, bin, row}
     else
@@ -626,14 +628,28 @@ defmodule Ankusa.Dispatch.Replayer do
     end
   end
 
-  # An index that does not decode is a corrupt object: skip the segment rather
-  # than crash the Replayer forever on it.
-  # Trusted, internally written data (this node's own store rows); never request input.
-  # sobelow_skip ["Misc.BinToTerm"]
+  # An index or a segment that does not verify (`Ankusa.Storage.Index`,
+  # `Ankusa.Storage.Segment`) is a corrupt object: skip the segment rather than
+  # crash the Replayer forever on it, and say so.
   defp decode_index(bin) do
-    {:ok, :erlang.binary_to_term(bin)}
-  rescue
-    _ -> {:error, :undecodable}
+    case Index.decode(bin) do
+      {:ok, index} -> {:ok, index}
+      {:error, _reason} -> {:error, :undecodable}
+    end
+  end
+
+  # The whole object is in hand: its sha256 is checked (format 1), and every
+  # frame the index points at must lie inside it.
+  defp check_segment(bin, row, entries) do
+    with {:ok, _header} <- Segment.verify(bin, Map.get(row, :format, 0)),
+         true <-
+           Enum.all?(entries, fn {_ms, offset, length} -> offset + length <= byte_size(bin) end) do
+      :ok
+    else
+      _ ->
+        Logger.warning("[ankusa] archive segment #{row.key} does not verify; replay skips it")
+        {:error, :undecodable}
+    end
   end
 
   defp advance_loaded(state, job) do
@@ -683,7 +699,7 @@ defmodule Ankusa.Dispatch.Replayer do
 
     from = Map.fetch!(job.filter, :from)
     to = Map.fetch!(job.filter, :to)
-    codec = state.codec
+    codec = Segment.row_codec(row, state.codec)
 
     {kept, skipped, scanned, done_all?, last_offset} =
       Enum.reduce_while(
