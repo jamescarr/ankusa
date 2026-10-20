@@ -738,7 +738,8 @@ defmodule Ankusa.Edge.RateLimiter do
   # The GCRA parameters for `cost` units against a bucket refilling `rate` units
   # a second with room for `burst`, in a clock of `units_per_second`: the cost's
   # increment (clamped to the bucket) and the bucket's capacity.
-  defp gcra(units_per_second, rate, burst, cost) do
+  @doc false
+  def gcra(units_per_second, rate, burst, cost) do
     interval = max(1, round(units_per_second / rate))
     capacity = interval * burst
     {min(cost * interval, capacity), capacity}
@@ -751,7 +752,8 @@ defmodule Ankusa.Edge.RateLimiter do
   #
   # Every update is a compare-and-swap on the row read, so two concurrent hits
   # on one bucket either both count or one retries: they can never both write.
-  defp hit_bucket(table, key, increment, capacity) do
+  @doc false
+  def hit_bucket(table, key, increment, capacity) do
     now = System.monotonic_time()
 
     case :ets.lookup(table, key) do

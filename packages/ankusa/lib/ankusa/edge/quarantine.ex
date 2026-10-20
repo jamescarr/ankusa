@@ -7,15 +7,31 @@ defmodule Ankusa.Edge.Quarantine do
   verifier and commits the ones that now pass; `purge/3` drops the rest.
 
   A flood of forged requests must not fill the disk, or starve another
-  source's real failures of room, so the pen is bounded twice
-  (`config.quarantine`):
+  source's real failures of room, so the pen is bounded three times:
 
-    * one token bucket per source — `burst` tokens, refilled `rate` per
-      second. Over it, `put/3` answers `{:rate_limited, retry_after_ms}`
-      (`429 quarantine_rate_limited`).
+    * one token bucket per source (`config.quarantine`) — `burst` tokens,
+      refilled `rate` per second. Over it, `put/3` answers
+      `{:rate_limited, retry_after_ms}` (`429 quarantine_rate_limited`).
     * a cap on the pen's total bytes, `max_bytes`. A write that would cross
       it answers `:full` (`503 quarantine_full`). A full pen refuses new
       hooks; it never evicts one it already acked.
+    * at most 1 000 writes waiting for the pen's disk write at once (`pending`,
+      the `ankusa_quarantine_pending` gauge). Past it `put/3` answers
+      `{:error, :overload}` (`503` with `Retry-After: 1`) and spends nothing.
+
+  ## Who does what
+
+  The decisions are made in the calling request process, not in a queue: a
+  source's bucket is one ETS row updated with a compare-and-swap (GCRA, as
+  `Ankusa.Edge.RateLimiter`'s buckets are), and the byte and pending counts are
+  `:ets.update_counter/3`, so a flood on one source never makes another
+  source's `hit/3` or `put/3` wait for it. Only the disk write is shared: the
+  caller hands its two rows to the pen process, which commits every write that
+  has queued up meanwhile in **one** synced `Ankusa.Store.write/3` (a group
+  commit), so a flood costs one fsync per group instead of one per request and
+  holds one dirty-IO scheduler however many callers wait. The pen process
+  otherwise keeps the node-start recovery of the byte count, the bucket sweep,
+  the retention sweep and `purge/3`.
 
   Each record is two keys in this node's `Ankusa.Store`, committed in one synced
   batch: a small summary (id, source, tenant, time, reason, size) that
@@ -29,6 +45,7 @@ defmodule Ankusa.Edge.Quarantine do
 
   alias Ankusa.{Audit, Config, Envelope, Store}
   alias Ankusa.Audit.Context
+  alias Ankusa.Edge.RateLimiter
   alias Ankusa.Queue.Tenants
   alias Ankusa.Store.Keys
   alias Ankusa.Tenant.Gate
@@ -40,6 +57,15 @@ defmodule Ankusa.Edge.Quarantine do
   @retention_interval_ms 3_600_000
   @retention_chunk 1_000
   @retention_chunks 100
+
+  # How long a caller waits for the pen's group commit before it answers 503. A
+  # write still queued then may land afterwards, so the caller keeps its token
+  # and its bytes counted.
+  @write_timeout_ms 5_000
+  # Writes waiting for the pen (queued or in the group being committed).
+  @max_pending 1_000
+  # The most writes one group commit takes.
+  @write_group 256
 
   @typedoc """
   `:source_id`/`:id` match the summary; `:since`/`:until` (ms, inclusive) bound
@@ -85,22 +111,58 @@ defmodule Ankusa.Edge.Quarantine do
   @doc """
   Durably record a quarantined envelope. Returns `:ok` once it is on disk;
   `{:rate_limited, retry_after_ms}` when the source's bucket is empty; `:full`
-  when the entry would take the pen past `max_bytes` (no token is spent); or
-  `{:error, :store_unavailable}` when the store could not take the write (no
-  token is spent); `{:error, :tenant_erasing}` when an erase of the envelope's
-  tenant is running (`Ankusa.Tenant`).
+  when the entry would take the pen past `max_bytes` (no token is spent);
+  `{:error, :overload}` when #{1_000} writes already wait for the pen (nothing is
+  spent); `{:error, :store_unavailable}` when the store could not take the
+  write (no token is spent) or the pen did not answer; `{:error,
+  :tenant_erasing}` when an erase of the envelope's tenant is running
+  (`Ankusa.Tenant`).
   """
   @spec put(atom(), Envelope.t(), term()) ::
           :ok
           | {:rate_limited, pos_integer()}
           | :full
-          | {:error, :store_unavailable | :tenant_erasing}
+          | {:error, :store_unavailable | :tenant_erasing | :overload}
   def put(instance, env, reason) do
-    if Gate.closed?(instance, Ankusa.Queue.Tenants.normalize(env.tenant_id)),
+    tenant = Tenants.normalize(env.tenant_id)
+
+    if Gate.closed?(instance, tenant),
       do: {:error, :tenant_erasing},
-      else: GenServer.call(Ankusa.via(instance, :quarantine), {:put, env, reason})
+      else: charged_put(instance, env, reason, tenant)
+  rescue
+    # The pen's tables went with the pen: it is restarting.
+    ArgumentError -> {:error, :store_unavailable}
   catch
     :exit, _reason -> {:error, :store_unavailable}
+  end
+
+  # The source's token first (a flood on a drained bucket costs one ETS read),
+  # then the bytes and the write. Whatever refuses the hook after that gives
+  # the token back.
+  defp charged_put(instance, env, reason, tenant) do
+    limits = Ankusa.config(instance).quarantine
+    source_id = env.source_id
+
+    case charge(instance, source_id, limits) do
+      {:error, {:rate_limited, retry_after_ms}} ->
+        refused(:rate_limited, instance, source_id, tenant)
+        {:rate_limited, retry_after_ms}
+
+      {:ok, increment} ->
+        case reserve_and_write(instance, env, reason, limits.max_bytes) do
+          :ok ->
+            :ok
+
+          :full ->
+            refund(instance, source_id, increment)
+            refused(:full, instance, source_id, tenant)
+            :full
+
+          {:error, _reason} = error ->
+            refund(instance, source_id, increment)
+            error
+        end
+    end
   end
 
   @doc """
@@ -109,14 +171,21 @@ defmodule Ankusa.Edge.Quarantine do
   which is committed like any hook but must not be free to forge. Same bucket,
   same arithmetic as `put/3`; `tenant_id` only labels the refusal's telemetry.
   `{:rate_limited, retry_after_ms}` when it is empty; `{:error, :store_unavailable}`
-  when the pen does not answer.
+  when the pen's tables are gone (it is restarting).
   """
   @spec hit(atom(), String.t(), String.t() | nil) ::
           :ok | {:rate_limited, pos_integer()} | {:error, :store_unavailable}
   def hit(instance, source_id, tenant_id) do
-    GenServer.call(Ankusa.via(instance, :quarantine), {:hit, source_id, tenant_id})
-  catch
-    :exit, _reason -> {:error, :store_unavailable}
+    case charge(instance, source_id, Ankusa.config(instance).quarantine) do
+      {:ok, _increment} ->
+        :ok
+
+      {:error, {:rate_limited, retry_after_ms}} ->
+        refused(:rate_limited, instance, source_id, Tenants.normalize(tenant_id))
+        {:rate_limited, retry_after_ms}
+    end
+  rescue
+    ArgumentError -> {:error, :store_unavailable}
   end
 
   @doc """
@@ -126,12 +195,8 @@ defmodule Ankusa.Edge.Quarantine do
   @spec released(atom(), non_neg_integer()) :: :ok
   def released(_instance, 0), do: :ok
 
-  def released(instance, bytes) when is_integer(bytes) and bytes > 0 do
-    case Ankusa.whereis(instance, :quarantine) do
-      nil -> :ok
-      pid -> GenServer.cast(pid, {:released, bytes})
-    end
-  end
+  def released(instance, bytes) when is_integer(bytes) and bytes > 0,
+    do: give_back(counters_table(instance), :bytes, bytes)
 
   @doc """
   Delete up to `limit` entries matching `filter`, oldest first, in one synced
@@ -182,19 +247,21 @@ defmodule Ankusa.Edge.Quarantine do
 
   @doc """
   What the pen holds: `bytes` (the count the `max_bytes` cap is enforced
-  against) and `entries`. The entry count is a scan of the pen's summary keys, run
-  in the caller, so it never queues a write behind it. A pen that is not running
-  is `{:error, :store_unavailable}`.
+  against), `pending` (writes waiting for the pen's disk write) and `entries`.
+  The entry count is a scan of the pen's summary keys, run in the caller, so it
+  never queues a write behind it. A pen that is not running is
+  `{:error, :store_unavailable}`.
   """
   @spec held(atom()) ::
-          {:ok, %{bytes: non_neg_integer(), entries: non_neg_integer()}}
+          {:ok,
+           %{bytes: non_neg_integer(), entries: non_neg_integer(), pending: non_neg_integer()}}
           | {:error, :store_unavailable}
   def held(instance) do
-    bytes = GenServer.call(Ankusa.via(instance, :quarantine), :held)
+    %{bytes: bytes, pending: pending} = GenServer.call(Ankusa.via(instance, :quarantine), :held)
     %{lo: lo, hi: hi} = Keys.family(:quarantine)
 
     case Store.fold(instance, :quarantine, {lo, hi}, 0, fn _key, _value, n -> {:cont, n + 1} end) do
-      {:ok, entries} -> {:ok, %{bytes: bytes, entries: entries}}
+      {:ok, entries} -> {:ok, %{bytes: bytes, entries: entries, pending: pending}}
       {:error, _reason} -> {:error, :store_unavailable}
     end
   catch
@@ -342,105 +409,139 @@ defmodule Ankusa.Edge.Quarantine do
     {:erlang.term_to_binary(Map.put(summary, :size, size)), size}
   end
 
+  # ── request-side admission ────────────────────────────────────────────────
+
+  defp charge(instance, source_id, %{burst: burst, rate: rate}) do
+    {increment, capacity} =
+      RateLimiter.gcra(System.convert_time_unit(1, :second, :native), rate, burst, 1)
+
+    case RateLimiter.hit_bucket(buckets_table(instance), source_id, increment, capacity) do
+      :ok -> {:ok, increment}
+      {:error, {:rate_limited, _retry_after_ms}} = denied -> denied
+    end
+  end
+
+  # Moves the row's arrival time back by what `charge/3` moved it forward: a
+  # refusal after the token was taken must not have cost the source anything.
+  # A row the sweep deleted meanwhile was a full bucket already.
+  defp refund(instance, source_id, increment) do
+    :ets.update_counter(buckets_table(instance), source_id, {2, -increment})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp refused(kind, instance, source_id, tenant_id) do
+    Ankusa.Telemetry.emit([:quarantine, kind], %{}, %{
+      instance: instance,
+      source_id: source_id,
+      tenant_id: tenant_id
+    })
+  end
+
+  # Charge first, compare, undo on refusal: two racers at the edge of a cap see
+  # different counts, so the pen never passes `max_bytes` or `@max_pending`.
+  defp reserve_and_write(instance, env, reason, max_bytes) do
+    held = Envelope.to_binary(%{env | seq: nil})
+
+    {summary, size} =
+      sized(
+        %{
+          id: env.id,
+          source_id: env.source_id,
+          tenant_id: env.tenant_id,
+          received_at: env.received_at,
+          reason: reason
+        },
+        held
+      )
+
+    counters = counters_table(instance)
+
+    cond do
+      :ets.update_counter(counters, :bytes, {2, size}) > max_bytes ->
+        give_back(counters, :bytes, size)
+        :full
+
+      :ets.update_counter(counters, :pending, {2, 1}) > @max_pending ->
+        give_back(counters, :pending, 1)
+        give_back(counters, :bytes, size)
+        {:error, :overload}
+
+      true ->
+        ops = [
+          {:put, :quarantine, Keys.quarantine_summary(env.received_at, env.id), summary},
+          {:put, :quarantine, Keys.quarantine_body(env.received_at, env.id), held}
+        ]
+
+        # The pen takes this write off `pending` once it has answered it, so a
+        # caller that gave up (the exit goes to `put/3`) still counts while its
+        # message is queued.
+        case GenServer.call(Ankusa.via(instance, :quarantine), {:write, ops}, @write_timeout_ms) do
+          :ok ->
+            :ok
+
+          {:error, _reason} ->
+            give_back(counters, :bytes, size)
+            {:error, :store_unavailable}
+        end
+    end
+  end
+
   # ── server ────────────────────────────────────────────────────────────────
 
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    %{burst: burst, rate: rate, max_bytes: max_bytes} = Ankusa.config(instance).quarantine
 
     # The cap is only as good as the count: refuse to start rather than guess
     # an empty pen.
     case held_bytes(instance) do
       {:ok, bytes} ->
+        new_table(buckets_table(instance))
+        counters = new_table(counters_table(instance))
+        :ets.insert(counters, [{:bytes, bytes}, {:pending, 0}])
+
         schedule_sweep()
         schedule_retention(@retention_interval_ms)
-
-        {:ok,
-         %{
-           instance: instance,
-           burst: burst * 1.0,
-           rate: rate * 1.0,
-           max_bytes: max_bytes,
-           bytes: bytes,
-           buckets: %{},
-           pruning: nil
-         }}
+        {:ok, %{instance: instance, pruning: nil}}
 
       {:error, reason} ->
         {:stop, {:quarantine_init_failed, reason}}
     end
   end
 
+  # Group commit: this write and every other one already queued (up to
+  # `@write_group`) go to the store in one synced batch, and each caller gets
+  # that batch's answer. The rows of different hooks never share a key.
   @impl true
-  def handle_call({:hit, source_id, tenant_id}, _from, state) do
-    bucket = refill(Map.get(state.buckets, source_id), state, mono_ms())
+  def handle_call({:write, ops}, from, state) do
+    {froms, groups, n} = drain_writes([from], [ops], 1)
 
-    if bucket.tokens < 1.0 do
-      Ankusa.Telemetry.emit([:quarantine, :rate_limited], %{}, %{
-        instance: state.instance,
-        source_id: source_id,
-        tenant_id: Tenants.normalize(tenant_id)
-      })
+    reply =
+      case Store.write(state.instance, Enum.concat(groups), sync: true) do
+        :ok ->
+          :ok
 
-      retry_after_ms = max(ceil((1.0 - bucket.tokens) * 1000 / state.rate), 1)
-      {:reply, {:rate_limited, retry_after_ms}, put_bucket(state, source_id, bucket)}
-    else
-      {:reply, :ok, put_bucket(state, source_id, %{bucket | tokens: bucket.tokens - 1.0})}
-    end
-  end
-
-  def handle_call({:put, env, reason}, _from, state) do
-    source_id = env.source_id
-    bucket = refill(Map.get(state.buckets, source_id), state, mono_ms())
-
-    if bucket.tokens < 1.0 do
-      Ankusa.Telemetry.emit([:quarantine, :rate_limited], %{}, %{
-        instance: state.instance,
-        source_id: source_id,
-        tenant_id: Tenants.normalize(env.tenant_id)
-      })
-
-      retry_after_ms = max(ceil((1.0 - bucket.tokens) * 1000 / state.rate), 1)
-      {:reply, {:rate_limited, retry_after_ms}, put_bucket(state, source_id, bucket)}
-    else
-      held = Envelope.to_binary(%{env | seq: nil})
-
-      {summary, size} =
-        sized(
-          %{
-            id: env.id,
-            source_id: source_id,
-            tenant_id: env.tenant_id,
-            received_at: env.received_at,
-            reason: reason
-          },
-          held
-        )
-
-      if state.bytes + size > state.max_bytes do
-        Ankusa.Telemetry.emit([:quarantine, :full], %{}, %{
-          instance: state.instance,
-          source_id: source_id,
-          tenant_id: Tenants.normalize(env.tenant_id)
-        })
-
-        {:reply, :full, put_bucket(state, source_id, bucket)}
-      else
-        case write(state.instance, env, summary, held) do
-          :ok ->
-            state = put_bucket(state, source_id, %{bucket | tokens: bucket.tokens - 1.0})
-            {:reply, :ok, %{state | bytes: state.bytes + size}}
-
-          {:error, error} ->
-            Logger.error("[ankusa] quarantine write failed: #{inspect(error)}")
-            {:reply, {:error, :store_unavailable}, put_bucket(state, source_id, bucket)}
-        end
+        {:error, error} ->
+          Logger.error("[ankusa] quarantine write failed: #{inspect(error)}")
+          {:error, error}
       end
-    end
+
+    Enum.each(froms, &GenServer.reply(&1, reply))
+    give_back(counters_table(state.instance), :pending, n)
+    {:noreply, state}
   end
 
-  def handle_call(:held, _from, state), do: {:reply, state.bytes, state}
+  def handle_call(:held, _from, state) do
+    counters = counters_table(state.instance)
+
+    {:reply,
+     %{
+       bytes: :ets.lookup_element(counters, :bytes, 2),
+       pending: :ets.lookup_element(counters, :pending, 2)
+     }, state}
+  end
 
   def handle_call({:purge, filter, limit, context}, _from, state) do
     {since, until} = {Map.get(filter, :since), Map.get(filter, :until)}
@@ -450,12 +551,22 @@ defmodule Ankusa.Edge.Quarantine do
          bytes = hits |> Enum.map(&elem(&1, 1)) |> Enum.sum(),
          :ok <-
            Audit.commit(state.instance, context, purge_attrs(filter, limit, hits, bytes), ops) do
-      {:reply, {:ok, %{deleted: length(hits), bytes: bytes}},
-       %{state | bytes: max(state.bytes - bytes, 0)}}
+      give_back(counters_table(state.instance), :bytes, bytes)
+      {:reply, {:ok, %{deleted: length(hits), bytes: bytes}}, state}
     else
       {:error, error} ->
         Logger.error("[ankusa] quarantine purge failed: #{inspect(error)}")
         {:reply, {:error, :store_unavailable}, state}
+    end
+  end
+
+  defp drain_writes(froms, groups, n) when n >= @write_group, do: {froms, groups, n}
+
+  defp drain_writes(froms, groups, n) do
+    receive do
+      {:"$gen_call", from, {:write, ops}} -> drain_writes([from | froms], [ops | groups], n + 1)
+    after
+      0 -> {froms, groups, n}
     end
   end
 
@@ -477,22 +588,15 @@ defmodule Ankusa.Edge.Quarantine do
   end
 
   @impl true
-  def handle_cast({:released, bytes}, state) do
-    {:noreply, %{state | bytes: max(state.bytes - bytes, 0)}}
-  end
-
-  @impl true
   def handle_info(:sweep, state) do
-    now = mono_ms()
-
-    buckets =
-      state.buckets
-      |> Enum.map(fn {source_id, bucket} -> {source_id, refill(bucket, state, now)} end)
-      |> Enum.filter(fn {_source_id, bucket} -> bucket.tokens < state.burst end)
-      |> Map.new()
+    # A row whose arrival time has passed is a full bucket: dropping it admits
+    # exactly what keeping it would.
+    :ets.select_delete(buckets_table(state.instance), [
+      {{:_, :"$1"}, [{:"=<", :"$1", System.monotonic_time()}], [true]}
+    ])
 
     schedule_sweep()
-    {:noreply, %{state | buckets: buckets}}
+    {:noreply, state}
   end
 
   # The retention sweep runs in a process of its own (`prune/1`): it asks the
@@ -531,17 +635,6 @@ defmodule Ankusa.Edge.Quarantine do
   def handle_info(_message, state), do: {:noreply, state}
 
   # ── helpers ───────────────────────────────────────────────────────────────
-
-  defp write(instance, env, summary, held) do
-    Store.write(
-      instance,
-      [
-        {:put, :quarantine, Keys.quarantine_summary(env.received_at, env.id), summary},
-        {:put, :quarantine, Keys.quarantine_body(env.received_at, env.id), held}
-      ],
-      sync: true
-    )
-  end
 
   defp held_bytes(instance) do
     %{lo: lo, hi: hi} = Keys.family(:quarantine)
@@ -650,15 +743,35 @@ defmodule Ankusa.Edge.Quarantine do
     ArgumentError -> {:error, :undecodable}
   end
 
-  defp refill(nil, state, now), do: %{tokens: state.burst, last: now}
+  # Bucket rows `{source_id, tat}` and the counters `{:bytes, n}`, `{:pending,
+  # n}`: both written by request processes, owned (and recreated at a restart)
+  # by the pen.
+  # The instance name is operator config: one atom per instance, never request input.
+  # sobelow_skip ["DOS.BinToAtom"]
+  defp buckets_table(instance), do: :"ankusa_quarantine_buckets_#{instance}"
 
-  defp refill(bucket, state, now) do
-    elapsed = (now - bucket.last) / 1000.0
-    %{tokens: min(state.burst, bucket.tokens + elapsed * state.rate), last: now}
+  # The instance name is operator config: one atom per instance, never request input.
+  # sobelow_skip ["DOS.BinToAtom"]
+  defp counters_table(instance), do: :"ankusa_quarantine_counters_#{instance}"
+
+  defp new_table(name),
+    do:
+      :ets.new(name, [
+        :set,
+        :public,
+        :named_table,
+        read_concurrency: true,
+        write_concurrency: true
+      ])
+
+  # Counters never go below zero, and a pen that is not running has nothing to
+  # give back to.
+  defp give_back(table, key, amount) do
+    :ets.update_counter(table, key, {2, -amount, 0, 0})
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
-
-  defp put_bucket(state, source_id, bucket),
-    do: %{state | buckets: Map.put(state.buckets, source_id, bucket)}
 
   defp schedule_sweep, do: Process.send_after(self(), :sweep, @sweep_interval_ms)
   defp schedule_retention(ms), do: Process.send_after(self(), :retention, ms)
@@ -713,6 +826,4 @@ defmodule Ankusa.Edge.Quarantine do
       {:ok, bytes}
     end
   end
-
-  defp mono_ms, do: System.monotonic_time(:millisecond)
 end

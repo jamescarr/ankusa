@@ -506,6 +506,7 @@ defmodule Ankusa.Edge.Ingest do
       :full -> {:error, :quarantine_full}
       {:error, :tenant_erasing} -> {:error, :tenant_erasing}
       {:error, :store_unavailable} -> {:error, :store_unavailable}
+      {:error, :overload} -> {:error, :overload}
     end
   end
 

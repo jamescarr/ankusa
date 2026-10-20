@@ -255,6 +255,14 @@ The always-on tests cover:
   per source (`429 quarantine_rate_limited` with `Retry-After` on one source
   leaves another's `202`), and a full pen is `503 quarantine_full` that evicts
   nothing, frees room on a purge, and still counts its bytes after a restart.
+  A hook refused for room gives its token back, concurrent charges on one
+  source's bucket never pass its `burst`, and with the pen suspended 1 000
+  writes wait (`pending`) and the 1 001st is `503 overload` that counts nothing,
+  after which every waiting write lands and the pen's byte count is the sum of
+  its entries' sizes. `bench/quarantine_bench.exs` (self-asserting, not in the
+  gate) paces 5 000 forged hooks/s over 500 sources for 10 s and exits 1 unless
+  their p99 ack latency is under 50 ms, a clean source's p99 beside them is
+  within 2× of its solo p99 (or under 25 ms), and the byte count is exact.
   Admission (`edge_rate_limit_test.exs`): the per-address limit answers `429`
   over a real socket before a declared 1 000-byte body is read, an IPv6 address
   is its `/64`, `X-Forwarded-For` counts only behind a trusted proxy, an address

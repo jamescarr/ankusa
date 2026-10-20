@@ -732,6 +732,23 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- **The quarantine pen no longer serializes every flagged hook (DUR-9).** A
+  source's bucket is one ETS row updated with a compare-and-swap
+  (`RateLimiter.hit_bucket/4`), the pen's byte count and the number of writes
+  waiting for it are `:ets.update_counter/3`, and `Quarantine.put/3` and `hit/3`
+  run in the request's process; a refusal after the token was taken gives it
+  back. The pen process keeps recovery, the bucket sweep, retention and
+  `purge/3`, and commits the writes that queued meanwhile in **one** synced
+  `Store.write` (a group commit), so a forged flood costs one fsync per group
+  and never holds more than one dirty-IO scheduler. At most 1 000 writes may
+  wait: the next is `{:error, :overload}` (`503`, `Retry-After: 1`), spending
+  nothing (`ankusa_quarantine_pending` is the gauge; `Quarantine.held/1` gains
+  `pending`). `Quarantine.hit/3` answers `{:error, :store_unavailable}` only
+  while the pen restarts (its tables are gone), no longer when its process is
+  busy. A refusal's `Retry-After` is now the GCRA wait for the bucket rather
+  than the token-bucket arithmetic it replaced. `bench/quarantine_bench.exs`: 5 000 forged hooks/s over 500
+  sources, p99 under 50 ms, a clean source's p99 within 2× of its solo p99.
+  Docs: `delivery.md#quarantine`, `architecture.md`, `configuration.md`.
 - `routes.max_routes` defaults to 1 000 000 (was 10 000, TEN-9); the cap is
   still hard and nothing is evicted, and it is checked against the new
   `routes.memory_budget_bytes`. The snapshot's `:pattern` rows are replaced by

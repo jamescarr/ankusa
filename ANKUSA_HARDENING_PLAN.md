@@ -451,7 +451,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/codec/raw.ex`, `storage/compactor.ex:90-97,150-205`, `storage.ex:42-56`, `store/backup.ex` (reconcile), `replay.ex:260-265`.
   *Evidence:* —
 
-- [ ] **DUR-9 — Quarantine off the serial GenServer** · P1 · Deps: —
+- [x] **DUR-9 — Quarantine off the serial GenServer** · P1 · Deps: —
   *Why:* every quarantined or `accept_flag` hook is a `GenServer.call` plus a synced `Store.write` inside one process (`edge/quarantine.ex:84-102,421-429`): ~1/fsync per node for all sources, and a forged flood stalls `hit/2` for every flagged source.
   *Change:* bucket map → ETS CAS (reuse `RateLimiter.hit_bucket/4`); the pen write happens in the caller via `Store.write`; byte accounting via `:ets.update_counter`; the GenServer keeps only recovery/purge.
   *Done when:* 5 k quarantined/s across 500 sources with p99 < 50 ms; existing quarantine tests pass unchanged.
