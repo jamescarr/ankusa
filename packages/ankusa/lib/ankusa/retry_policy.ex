@@ -123,7 +123,11 @@ defmodule Ankusa.RetryPolicy do
   @spec schedule(
           {module(), keyword()},
           Ankusa.Sink.class(),
-          %{attempts: pos_integer(), first_attempt_at: integer()},
+          %{
+            required(:attempts) => pos_integer(),
+            required(:first_attempt_at) => integer(),
+            optional(atom()) => term()
+          },
           integer(),
           pos_integer()
         ) :: {:retry, integer()} | :give_up
