@@ -660,7 +660,10 @@ carries the same headers the Kafka sink sets — always `ankusa_id`,
 parses one set of fields regardless of
 transport. Unlike Kafka, there is no separate record key: NATS has no
 partition-ordering contract to lean on and no partition count to change under
-you. Order within a subject is the order the stream received it.
+you. Order within a subject is the order the stream received the messages: the
+order Ankusa published them, not the order the hooks arrived (see
+[Deliveries are not ordered](#the-dispatch-pipeline)); dedupe on
+`idempotency_key`.
 
 **Connection lifecycle**: one `Gnat.ConnectionSupervisor` per `(instance,
 connection)`, started on demand by the first `deliver/3` under `ankusa_nats`'s
@@ -785,7 +788,10 @@ durable for [direct mode](#direct-mode). The other outcomes:
 **FIFO when the queue URL ends `.fifo`** (AWS requires the suffix). Each send
 carries a `MessageGroupId`, `message_group_id` or by default
 `"tenant_id/source_id"` (`"/source_id"` without a tenant), the scope of the
-Kafka sink's default key: one group's messages are received in order. Its
+Kafka sink's default key: messages in one group are received in the order
+Ankusa sent them, which is not the order the hooks arrived. See
+[Deliveries are not ordered](#the-dispatch-pipeline); dedupe on
+`idempotency_key`. Its
 `MessageDeduplicationId` is the hook's `id`, or `id:replay:<replay_id>` on a
 replay (the `Nats-Msg-Id` rule), so SQS collapses a retry after a lost
 response while a deliberate replay is stored. SQS's deduplication window is
