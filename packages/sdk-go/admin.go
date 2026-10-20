@@ -127,6 +127,44 @@ type ListQuarantinedParams struct {
 	Limit int `json:"limit"`
 }
 
+// ListAuditParams filters an audit-trail listing. Zero values mean "no
+// filter"; only the fields given go out, in this struct's declared order:
+// since, until, actor, tenant, action, limit, cursor.
+type ListAuditParams struct {
+	Since  int64  `json:"since"`
+	Until  int64  `json:"until"`
+	Actor  string `json:"actor"`
+	Tenant string `json:"tenant"`
+	Action string `json:"action"`
+	Limit  int    `json:"limit"`
+	Cursor string `json:"cursor"`
+}
+
+// AuditEntry is one row of the audit trail. Tenant and Revision are nil when
+// the change has none.
+type AuditEntry struct {
+	Seq        int64          `json:"seq"`
+	At         string         `json:"at"`
+	Actor      string         `json:"actor"`
+	RemoteIP   string         `json:"remote_ip"`
+	Action     string         `json:"action"`
+	Tenant     *string        `json:"tenant"`
+	Resource   string         `json:"resource"`
+	BeforeHash string         `json:"before_hash"`
+	AfterHash  string         `json:"after_hash"`
+	RequestID  string         `json:"request_id"`
+	Result     string         `json:"result"`
+	Revision   *int           `json:"revision"`
+	Detail     map[string]any `json:"detail"`
+}
+
+// AuditPage is a page of the audit trail. NextCursor is nil on the last
+// page; pass it as Cursor for the next call otherwise.
+type AuditPage struct {
+	Entries    []AuditEntry `json:"entries"`
+	NextCursor *string      `json:"next_cursor"`
+}
+
 // AdminClient talks to the admin listener (admin.port). Safe for concurrent
 // use.
 type AdminClient struct {
@@ -297,6 +335,46 @@ func (c *AdminClient) ListQuarantined(ctx context.Context, p ListQuarantinedPara
 	return &page, nil
 }
 
+// ListAudit lists the audit trail, newest first. Query parameters go out in
+// this order: since, until, actor, tenant, action, limit, cursor, only those
+// given. A tenant named without the tenant:* scope is a 403
+// *AdminRejectedError.
+func (c *AdminClient) ListAudit(ctx context.Context, p ListAuditParams) (*AuditPage, error) {
+	var pairs [][2]string
+	if p.Since > 0 {
+		pairs = append(pairs, [2]string{"since", strconv.FormatInt(p.Since, 10)})
+	}
+	if p.Until > 0 {
+		pairs = append(pairs, [2]string{"until", strconv.FormatInt(p.Until, 10)})
+	}
+	if p.Actor != "" {
+		pairs = append(pairs, [2]string{"actor", p.Actor})
+	}
+	if p.Tenant != "" {
+		pairs = append(pairs, [2]string{"tenant", p.Tenant})
+	}
+	if p.Action != "" {
+		pairs = append(pairs, [2]string{"action", p.Action})
+	}
+	if p.Limit > 0 {
+		pairs = append(pairs, [2]string{"limit", strconv.Itoa(p.Limit)})
+	}
+	if p.Cursor != "" {
+		pairs = append(pairs, [2]string{"cursor", p.Cursor})
+	}
+
+	resp, err := c.call(ctx, http.MethodGet, appendQuery("/v1/audit", pairs), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var page AuditPage
+	if err := decodeJSON(resp, &page); err != nil {
+		return nil, err
+	}
+	return &page, nil
+}
+
 // call performs one admin request and classifies the response: 2xx returns
 // the response for decoding, a 409 role_not_enabled is a
 // *RoleNotEnabledError, other 4xx are *AdminRejectedError, everything else is
@@ -313,6 +391,7 @@ func (c *AdminClient) call(ctx context.Context, method, path string, body []byte
 	var payload struct {
 		Error string `json:"error"`
 		Role  string `json:"role"`
+		Scope string `json:"scope"`
 	}
 	_ = json.Unmarshal(resp.body, &payload)
 
@@ -321,7 +400,7 @@ func (c *AdminClient) call(ctx context.Context, method, path string, body []byte
 		return nil, &RoleNotEnabledError{Role: payload.Role}
 
 	case resp.status >= 400 && resp.status <= 499:
-		return nil, &AdminRejectedError{Status: resp.status, Code: payload.Error}
+		return nil, &AdminRejectedError{Status: resp.status, Code: payload.Error, Scope: scopePointer(payload.Scope)}
 
 	default:
 		// 1xx, 3xx (redirects are never followed), 5xx.

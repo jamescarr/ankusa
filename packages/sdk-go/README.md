@@ -89,6 +89,7 @@ health, err := admin.Health(ctx)                             // {Status, Instanc
 metrics, err := admin.Metrics(ctx)                           // Prometheus text
 dlq, err := admin.ListDeadLetters(ctx, ankusa.ListDeadLettersParams{Limit: 10})
 quarantine, err := admin.ListQuarantined(ctx, ankusa.ListQuarantinedParams{})
+audit, err := admin.ListAudit(ctx, ankusa.ListAuditParams{Tenant: "acme", Limit: 50}) // {Entries, NextCursor}
 
 // Replay jobs. CreateReplay answers 202 with a new job, or 200 with an
 // existing running/paused job whose filter matches, so a retried POST is
@@ -176,6 +177,12 @@ case errors.As(err, &noID):
 // received.ID, received.IdempotencyKey(false), ...; received.Verified is false
 // only for an unsigned delivery AllowUnsigned let through.
 ```
+
+`hook.Verification` (also on `ParseHeaders` and `DecodeMessage` results) is a
+`*Verification` saying how the *node* verified the hook at ingest, `nil` from
+a node older than the field. `Verification.Flagged == true` means the node
+accepted a failed check (`on_verify_failure: accept_flag`) — treat it as
+unverified.
 
 ## Consuming queue messages
 

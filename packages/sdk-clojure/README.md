@@ -102,6 +102,7 @@ the redacted config, the DLQ, replay jobs, and the quarantine list.
 (admin/metrics a)                                 ; => Prometheus text, a string
 (admin/list-dead-letters a {:limit 10})
 (admin/list-quarantined a)
+(admin/list-audit a {:tenant "acme" :action "source.create" :limit 10}) ; newest-first audit trail
 
 ;; Replay dead letters ("dlq"), redrive an archived time window ("archive"), or
 ;; re-verify and release held hooks ("quarantine"), without flooding live traffic.
@@ -219,6 +220,12 @@ the hook id, so a delivery that fails it is a `401` even when it also lacks
       "MissingHookIdError" {:status 400}
       (throw e))))
 ```
+
+`(:verification hook)` (also on `parse-headers` and `decode-message` results)
+says how the *node* verified the hook at ingest, `nil` from a node older than
+the field. `(:flagged (:verification hook))` being `true` means the node
+accepted a failed check (`on_verify_failure: accept_flag`) — treat it as
+unverified.
 
 ## Consuming queue messages
 
@@ -349,10 +356,10 @@ the keyword (or `nil` for an exception that is not the SDK's) and
 | `InvalidMessageError` | `false` | a queue message is not a valid v1 message | `:code`, `:field` |
 | `InvalidRouteIdError` | `false` | route id is not a string, empty, or exactly `.`/`..` | |
 | `RouteNotFoundError` | `false` | routes listener `404` | |
-| `RoutesRejectedError` | `false` | routes listener `4xx` other than `404` | `:status`, `:code`, `:field`, `:message`, `:conflicting-id`, `:max-routes` |
+| `RoutesRejectedError` | `false` | routes listener `4xx` other than `404` | `:status`, `:code`, `:field`, `:message`, `:conflicting-id`, `:max-routes`, `:scope` |
 | `RoutesUnavailableError` | `true` | routes listener unreachable, `5xx`, an unfollowed `3xx`, or a non-JSON success body | `:status`, `:reason` |
 | `RoleNotEnabledError` | `false` | admin listener `409` `role_not_enabled` | `:role` |
-| `AdminRejectedError` | `false` | admin listener `4xx` other than that 409 | `:status`, `:code` |
+| `AdminRejectedError` | `false` | admin listener `4xx` other than that 409 | `:status`, `:code`, `:scope` |
 | `AdminUnavailableError` | `true` | admin listener unreachable, `5xx`, an unfollowed `3xx`, or a non-JSON success body | `:status`, `:reason` |
 | `SourceNotFoundError`, `SourceConflictError`, `SourceStoreReadOnlyError`, `SourceInvalidError`, `VersionMismatchError` | `false` | sources `404`, `409`, read-only store, `400` or invalid id, version mismatch | `:status`, `:body` |
 | `SourcesUnavailableError` | `true` | admin listener unreachable, `5xx`, or any other unexpected status | `:status`, `:body` |

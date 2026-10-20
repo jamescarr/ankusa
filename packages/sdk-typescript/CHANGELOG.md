@@ -14,6 +14,18 @@ this project follows [Semantic Versioning](https://semver.org/).
   `paths`. The routes client still calls `/admin/routes`, which spans tenants and
   needs `tenant:*`; it has no methods for the tenant paths yet, so a principal
   limited to one tenant calls them with its own HTTP client.
+- `AdminClient.listAudit(params?)`: `GET /v1/audit`, the audit trail (newest
+  first, paged by `cursor`/`limit`, filtered by `since`, `until`, `actor`,
+  `action`, `tenant`).
+- `scope` on `AdminRejectedError` and `RoutesRejectedError`: the scope a `403
+  forbidden` says the credential lacks (control planes require a credential
+  since Ankusa 0.6).
+- `HookHeaders.verification`, `Message.verification`, and `ReceivedDelivery.verification`
+  carry how Ankusa verified the hook at ingest (`{status, flagged}`, `null`
+  from a node that predates the field). `parseHeaders` reads it from
+  `x-ankusa-verification`/`x-ankusa-verification-flagged`; `decodeMessage`
+  reads the message's `verification` object and raises `InvalidMessageError`
+  (`invalid_field`, field `verification`) when present but malformed.
 - `parseClaimRef` and `redeem` accept signed, expiring v2 refs
   (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`): the
   parsed `path` carries `?exp=&sig=`, `redeem` sends them as the query, and

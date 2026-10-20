@@ -33,6 +33,7 @@ type Route struct {
 	Enabled    bool           `json:"enabled"`
 	IPRules    []IPRule       `json:"ip_rules"`
 	Metadata   map[string]any `json:"metadata"`
+	Revision   int            `json:"revision,omitempty"`
 	InsertedAt time.Time      `json:"inserted_at"`
 	UpdatedAt  time.Time      `json:"updated_at"`
 }
@@ -304,6 +305,7 @@ func (c *RoutesClient) call(ctx context.Context, method, path, id string, body [
 			Message       string `json:"message"`
 			ConflictingID string `json:"conflicting_id"`
 			MaxRoutes     int    `json:"max_routes"`
+			Scope         string `json:"scope"`
 		}
 		_ = json.Unmarshal(resp.body, &body)
 		return &RoutesRejectedError{
@@ -313,6 +315,7 @@ func (c *RoutesClient) call(ctx context.Context, method, path, id string, body [
 			Message:       body.Message,
 			ConflictingID: body.ConflictingID,
 			MaxRoutes:     body.MaxRoutes,
+			Scope:         scopePointer(body.Scope),
 		}
 
 	default:

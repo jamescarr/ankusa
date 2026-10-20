@@ -27,6 +27,16 @@ export type HookHeaders = {
    * when absent or empty (a sender that predates the header).
    */
   idempotencyKey: string | null;
+  /** How Ankusa verified the hook at ingest; `null` when absent or empty. */
+  verification: Verification | null;
+};
+
+/** How Ankusa verified the hook at ingest. */
+export type Verification = {
+  /** `ok`, `failed` or `skipped`; other values pass through. */
+  status: string;
+  /** `true` when a failed check was accepted (`on_verify_failure: accept_flag`): treat as unverified. */
+  flagged: boolean;
 };
 
 /**
@@ -77,5 +87,12 @@ export function parseHeaders(headers: HeaderSource): HookHeaders {
     dedupeKey: lowered.get("x-ankusa-dedupe-key") || null,
     replayId: lowered.get("x-ankusa-replay-id") || null,
     idempotencyKey: lowered.get("x-ankusa-idempotency-key") || null,
+    verification: parseVerificationHeaders(lowered),
   };
+}
+
+function parseVerificationHeaders(lowered: Map<string, string>): Verification | null {
+  const status = lowered.get("x-ankusa-verification");
+  if (!status) return null;
+  return { status, flagged: lowered.get("x-ankusa-verification-flagged") === "true" };
 }

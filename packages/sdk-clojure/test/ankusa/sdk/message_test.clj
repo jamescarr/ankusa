@@ -66,6 +66,14 @@
            (dissoc hook :body)))
     (is (= [] @rec))))
 
+(deftest decode-verification-is-nil-when-absent
+  (is (nil? (:verification (message/decode inline-json)))))
+
+(deftest decode-verification-round-trips-a-flagged-status
+  (let [json (str "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1,\"size\":5,"
+                  "\"body_base64\":\"aGVsbG8=\",\"verification\":{\"status\":\"failed\",\"flagged\":true}}")]
+    (is (= {:status "failed" :flagged true} (:verification (message/decode json))))))
+
 (deftest a-claim-hook-redeems-the-claim
   (let [rec (gateway/recorder)
         hook (message/->hook (message/decode claim-json) (gateway-client rec 200 "hello"))]

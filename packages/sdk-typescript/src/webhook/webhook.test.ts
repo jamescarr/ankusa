@@ -15,6 +15,7 @@ describe("parseHeaders", () => {
       dedupeKey: null,
       replayId: null,
       idempotencyKey: null,
+      verification: null,
     });
   });
 

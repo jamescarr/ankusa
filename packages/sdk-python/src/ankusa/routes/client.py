@@ -194,6 +194,7 @@ def _raise_for_status(response: httpx.Response) -> None:
             detail=body.get("message") if isinstance(body, dict) else None,
             conflicting_id=body.get("conflicting_id") if isinstance(body, dict) else None,
             max_routes=body.get("max_routes") if isinstance(body, dict) else None,
+            scope=body.get("scope") if isinstance(body, dict) and isinstance(body.get("scope"), str) else None,
         )
     # Everything else that isn't 2xx is retryable: 1xx, an unfollowed 3xx
     # redirect, and 5xx.
