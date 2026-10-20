@@ -138,13 +138,6 @@ defmodule Ankusa.Queue.Syncer do
     end
   end
 
-  @doc """
-  Whether `now` is later than what `visible/2` lets dispatch see: a row that is
-  due but hidden is waiting for an fsync, and dispatch is woken when it returns.
-  """
-  @spec hidden?(atom(), integer()) :: boolean()
-  def hidden?(instance, now), do: visible(instance, now) < now
-
   # ── the process ───────────────────────────────────────────────────────────
 
   @doc false
@@ -252,7 +245,8 @@ defmodule Ankusa.Queue.Syncer do
     state
   end
 
-  defp answer(%{done: {:reply, calls, reply}}, :ok), do: Ankusa.Queue.Writer.reply_calls(calls, reply)
+  defp answer(%{done: {:reply, calls, reply}}, :ok),
+    do: Ankusa.Queue.Writer.reply_calls(calls, reply)
 
   defp answer(%{done: {:reply, calls, _reply}}, {:error, _} = error),
     do: Ankusa.Queue.Writer.reply_calls(calls, error)

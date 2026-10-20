@@ -100,7 +100,7 @@ store one hook (`dedupe_test.exs`, "the same key on two batcher partitions").
 The cap is a latency bound: every caller waits for its whole group, so a
 group is kept to what one fsync and one produce request can carry in a few
 milliseconds ([`configuration.md`](configuration.md#library-configuration-elixir)).
-A writer that is saturated (its last group held 16 or more hooks) waits
+A writer that is saturated (its last group held 64 or more hooks) waits
 `batcher.group_commit_delay_ms` (1 ms) before it starts the next group, so the
 callers it just answered join it instead of forming the one after: under a
 closed loop of clients the groups are twice the size (`bench/store_commit.exs`),

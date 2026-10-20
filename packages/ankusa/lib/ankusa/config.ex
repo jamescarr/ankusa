@@ -74,7 +74,7 @@ defmodule Ankusa.Config do
               # `wal: :dual` one group is one produce request
               group_commit_max_bytes: 4_194_304,
               group_commit_max_records: 1_024,
-              # how long a saturated writer (its last group held 16 or more
+              # how long a saturated writer (its last group held 64 or more
               # hooks) waits for the callers it just answered to call again, so
               # they join the next group; 0 disables it. Never at low load.
               group_commit_delay_ms: 1,

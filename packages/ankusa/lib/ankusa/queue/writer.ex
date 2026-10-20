@@ -302,7 +302,7 @@ defmodule Ankusa.Queue.Writer do
 
   @recent_ms 2_000
   @recent_max 100_000
-  @busy_records 16
+  @busy_records 64
 
   # `first` and every `:enqueue` call already queued (no `extra_ops`), as long as
   # the group stays within its caps; the call that would pass one starts the next
@@ -354,7 +354,9 @@ defmodule Ankusa.Queue.Writer do
   # and the callers it just answered are about to call again: a short wait lets
   # them join the next group instead of forming the one after it (without it a
   # closed loop of clients splits into two cohorts that commit alternately, each
-  # half the size it could be). Never at low load, where it would only add latency.
+  # half the size it could be). Never at low concurrency (a 32-client closed loop
+  # never fills a group of 64, and a wait there costs most of its throughput once
+  # the fsync is cheap), where it would only add latency.
   defp linger(%{group_delay_ms: 0} = state), do: state
 
   defp linger(state) do
