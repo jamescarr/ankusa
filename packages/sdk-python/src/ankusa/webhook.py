@@ -30,6 +30,7 @@ __all__ = [
     "InvalidSignatureError",
     "MissingHookIdError",
     "ReceivedDelivery",
+    "Verification",
     "VerifiedSignature",
     "parse_headers",
     "receive_delivery",
@@ -44,6 +45,17 @@ class MissingHookIdError(ValueError):
     receiver dedupes on, so a delivery without it is a framework bug, not a
     malformed but tolerable request.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class Verification:
+    """How Ankusa verified the hook at ingest."""
+
+    # ``ok``, ``failed`` or ``skipped``; other values pass through.
+    status: str
+    # True when a failed check was accepted (``on_verify_failure:
+    # accept_flag``): treat as unverified.
+    flagged: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +74,8 @@ class HookHeaders:
     # The tenant-scoped key to dedupe on, from ``x-ankusa-idempotency-key``;
     # None when absent or empty (a sender that predates the header).
     idempotency_key: str | None
+    # How Ankusa verified the hook at ingest; None when absent or empty.
+    verification: Verification | None
 
 
 def parse_headers(headers: Mapping[str, str]) -> HookHeaders:
@@ -88,7 +102,15 @@ def parse_headers(headers: Mapping[str, str]) -> HookHeaders:
         dedupe_key=lowered.get("x-ankusa-dedupe-key") or None,
         replay_id=lowered.get("x-ankusa-replay-id") or None,
         idempotency_key=lowered.get("x-ankusa-idempotency-key") or None,
+        verification=_parse_verification_headers(lowered),
     )
+
+
+def _parse_verification_headers(lowered: Mapping[str, str]) -> Verification | None:
+    status = lowered.get("x-ankusa-verification")
+    if not status:
+        return None
+    return Verification(status=status, flagged=lowered.get("x-ankusa-verification-flagged") == "true")
 
 
 class InvalidSignatureError(ValueError):

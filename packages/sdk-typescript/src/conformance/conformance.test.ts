@@ -254,6 +254,7 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
         dedupe_key: received.dedupeKey,
         replay_id: received.replayId,
         idempotency_key: received.idempotencyKey,
+        verification: received.verification,
       };
     }
     case "parse_headers": {
@@ -266,6 +267,7 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
         dedupe_key: parsed.dedupeKey,
         replay_id: parsed.replayId,
         idempotency_key: parsed.idempotencyKey,
+        verification: parsed.verification,
       };
     }
     case "decode_message": {
@@ -411,6 +413,14 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
         await built.close();
       }
     }
+    case "admin_audit_list": {
+      const built = await buildClient(gateway, client, requests, makeAdminClient);
+      try {
+        return await (built.client as sdk.AdminClient).listAudit(input.params as sdk.ListAuditParams);
+      } finally {
+        await built.close();
+      }
+    }
     case "admin_replay_create": {
       const built = await buildClient(gateway, client, requests, makeAdminClient);
       try {
@@ -508,6 +518,7 @@ async function runCase(c: Case): Promise<void> {
       "conflicting_id",
       "max_routes",
       "role",
+      "scope",
     ] as const) {
       if (key in (err as object)) error[key] = (err as Record<string, unknown>)[key];
     }

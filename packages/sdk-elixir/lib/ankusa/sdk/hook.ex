@@ -39,6 +39,7 @@ defmodule Ankusa.SDK.Hook do
           dedupe_key: String.t() | nil,
           replay_id: String.t() | nil,
           idempotency_key: String.t() | nil,
+          verification: %{status: String.t(), flagged: boolean()} | nil,
           headers: %{String.t() => String.t()}
         }
 
@@ -53,6 +54,7 @@ defmodule Ankusa.SDK.Hook do
     :dedupe_key,
     :replay_id,
     :idempotency_key,
+    :verification,
     headers: %{}
   ]
 end
