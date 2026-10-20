@@ -546,8 +546,9 @@ flows straight into the source's `Ankusa.RetryPolicy`:
 | `{:error, :not_connected}` | No channel yet. Connection loss doesn't crash the GenServer; it reconnects every `:retry_ms` (default 5000). |
 
 There is no option to turn `mandatory` off, and no separate reconnect policy
-to get wrong. A connection whose sink is removed from config stays up until
-the node restarts (nothing reaps idle connections).
+to get wrong. A connection whose sink is removed from config closes after
+`:idle_timeout_ms` with no delivery through it (`Ankusa.Sink.Reaper`), so a
+deleted source does not leave it open for the life of the node.
 
 ### `Sink.Kafka`: topic delivery
 
