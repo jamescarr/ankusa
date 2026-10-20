@@ -582,3 +582,11 @@ belongs on `ankusa_queue_oldest_due_age_seconds`. Per-delivery counters carry th
 `ankusa_backup_age_seconds` (since the last successful backup — the data a
 lost host would take with it), `ankusa_backup_runs_total{result}` and
 `ankusa_backup_verify_failed_total{target}`.
+
+A store that fails is visible without logs: `ankusa_store_write_failures_total{class}`
+(`no_space`, `io_error`, `read_only`, `corruption`, `busy`, `other`),
+`ankusa_store_reopen_total{result}`, `ankusa_store_unavailable_seconds` (how
+long the store has been closed; alert on it staying above 0) and
+`ankusa_store_wal_replay_seconds`, and `/ready` names the same `reason` in its
+`503` body. A closed store retries its open after 5 s, then 10, 20, 40 and 60 s
+(jittered), until it works ([`storage.md`](storage.md#durability-corruption-full-disk)).

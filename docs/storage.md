@@ -147,9 +147,33 @@ This release writes v0. The release after it writes v1, so a rollback of
   dispatch, the archive, the quarantine pen, source and rate-limit edits) also
   tells the Store, whichever process saw it, and the Store closes and reopens
   itself at most once every 5 s. That clears a latched RocksDB write error if
-  one outlives the freed space. The crash drill fills a 96 MiB tmpfs under load
+  one outlives the freed space. The reopen waits until a synced write of a small
+  file next to the database works (`ankusa_store_reopen_total{result="deferred"}`
+  counts the waits): a disk that still fails keeps its database open and
+  readable instead of being closed and half-recovered. A store that cannot reopen stays closed (every
+  call answers `:store_unavailable`) and retries by itself after 5 s, then
+  twice as long each time up to 60 s, each wait jittered down by up to a
+  quarter, so a fleet whose disks came back together does not replay its WALs
+  in step. The crash drill fills a 192 MiB tmpfs under load
   and checks the `503`s, the `/ready` flip and the resume
   ([`testing.md`](testing.md#crash-consistency-drill-mise-run-testcrash)).
+- A failing store is visible without reading logs. `/ready` answers `503` with
+  `store` (`"write_failed"` or `"store_unavailable"`) and a `reason` from a
+  fixed set: `no_space`, `io_error`, `read_only`, `corruption`, `busy`,
+  `timeout`, `not_running`, `other` (`Ankusa.Store.failure_class/1`). The
+  scrape carries `ankusa_store_write_failures_total{class}` (every failed
+  write a process reported and every failed readiness probe),
+  `ankusa_store_reopen_total{result}` (every reopen attempt, the store's own
+  retries included), `ankusa_store_unavailable_seconds` (how long the store has
+  been closed: `0` while it is open, and refreshed by every failed retry, so
+  at most 60 s stale) and `ankusa_store_wal_replay_seconds` (the close plus the
+  open of each successful reopen). The events behind them are
+  `[:ankusa, :store, :write_failed | :reopened | :unavailable]`
+  ([`Ankusa.Telemetry`](https://hexdocs.pm/ankusa/Ankusa.Telemetry.html)).
+  The first open of a process is not a reopen: its replay is in the boot log.
+  Tests: `store_test.exs` (`write failure telemetry`, `reopen backoff`),
+  `metrics_test.exs`, and the crash drills, which fail unless the series rise
+  and `/ready` names the reason.
 - Stop an instance cleanly (supervisor shutdown, `docker stop`'s SIGTERM) and
   the store closes with it. SIGKILL keeps the data (RocksDB WAL recovery), but a
   node halted mid-write-load with the DB open can segfault at exit.

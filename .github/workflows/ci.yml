@@ -350,7 +350,7 @@ jobs:
           if-no-files-found: ignore
 
   # The crash-consistency drill (scripts/drills/crash_drill.sh): ENOSPC on a
-  # 96 MiB tmpfs, then kill -9 under load; every acked hook must read back.
+  # 192 MiB tmpfs, then kill -9 under load; every acked hook must read back.
   crash:
     name: crash drill (ENOSPC, kill -9)
     runs-on: ubuntu-latest
