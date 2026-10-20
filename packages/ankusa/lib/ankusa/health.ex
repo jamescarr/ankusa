@@ -19,7 +19,10 @@ defmodule Ankusa.Health do
   it answers `503`. Without `max_age_ms` the body has no `backup` key.
 
   The body never carries a raw error term: `store` is `"ok"`, `"none"`,
-  `"store_unavailable"` or `"write_failed"`.
+  `"store_unavailable"` or `"write_failed"`, and while the store is not ok
+  `reason` names why, one of a fixed set (`"no_space"`, `"io_error"`,
+  `"read_only"`, `"corruption"`, `"busy"`, `"timeout"`, `"not_running"`,
+  `"other"`; see `Ankusa.Store.failure_class/1`).
   """
 
   alias Ankusa.Instance
@@ -30,6 +33,7 @@ defmodule Ankusa.Health do
           required(:status) => String.t(),
           required(:instance) => String.t(),
           required(:store) => String.t(),
+          optional(:reason) => String.t(),
           optional(:backup) => String.t(),
           optional(:intake) => String.t()
         }
@@ -47,8 +51,14 @@ defmodule Ankusa.Health do
             backup_state(config, body)
           end
 
-        {:error, reason} ->
-          {:error, %{status: "unavailable", instance: name, store: label(reason)}}
+        {:error, {kind, class}} ->
+          {:error,
+           %{
+             status: "unavailable",
+             instance: name,
+             store: Atom.to_string(kind),
+             reason: Atom.to_string(class)
+           }}
       end
     else
       {:ok, %{status: "ready", instance: name, store: "none"}}
@@ -90,7 +100,4 @@ defmodule Ankusa.Health do
         {:ok, body}
     end
   end
-
-  defp label(:store_unavailable), do: "store_unavailable"
-  defp label(_reason), do: "write_failed"
 end

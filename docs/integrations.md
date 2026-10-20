@@ -133,6 +133,26 @@ together: a receiver that opts out accepts anything, so keep it off any
 address you do not control. The shared vectors are the
 `webhook.require_signature` cases in `conformance/cases/receive.json`.
 
+Every parsed-headers, decoded-message, and received-delivery result also
+carries how the node verified the hook at ingest: `{status, flagged}`, or
+`null` from a node older than the field. `flagged` is `true` only when the
+node accepted a failed check (`on_verify_failure: accept_flag`) — treat that
+delivery as unverified.
+
+| SDK | Verification accessor |
+| --- | --- |
+| TypeScript (`ankusa`) | `parsed.verification` / `message.verification` / `received.verification` |
+| Python (`ankusa`) | `parsed.verification` / `message.verification` / `received.verification` |
+| Go | `parsed.Verification` / `message.Verification` / `received.Verification` |
+| Rust | `parsed.verification` / `message.verification` / `received.verification` |
+| Ruby (`ankusa-sdk`) | `parsed.verification` / `message.verification` / `received.verification` |
+| PHP | `$parsed->verification` / `$message->verification` / `$received->verification` |
+| Java | `parsed.verification()` / `message.verification()` / `received.verification()` |
+| Elixir (`ankusa_sdk`) | `hook.verification` / `message.verification` / `received.verification` |
+| Clojure (`ankusa-clj`) | `(:verification parsed)` / `(:verification message)` / `(:verification received)` |
+
+The shared vectors are `conformance/cases/verification.json`.
+
 Elixir consumers get this contract as a `Plug`: `Ankusa.SDK.Receiver` (Hex
 package
 [`ankusa_sdk`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-elixir))

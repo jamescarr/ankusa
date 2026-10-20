@@ -8,19 +8,30 @@ import (
 
 // HookHeaders is a hook delivery's identity, read from the headers Ankusa's
 // HTTP sink attaches. Source is "" when absent; Tenant, ContentType,
-// DedupeKey, ReplayID and ShippedIdempotencyKey are nil when absent.
+// DedupeKey, ReplayID, ShippedIdempotencyKey and Verification are nil when
+// absent.
 //
 // ShippedIdempotencyKey is x-ankusa-idempotency-key: the tenant-scoped key
 // Ankusa computed once for the hook, nil for a sender that predates the
 // header. Read the key through IdempotencyKey, which falls back to computing it.
 type HookHeaders struct {
-	ID                    string  `json:"id"`
-	Source                string  `json:"source"`
-	Tenant                *string `json:"tenant"`
-	ContentType           *string `json:"content_type"`
-	DedupeKey             *string `json:"dedupe_key"`
-	ReplayID              *string `json:"replay_id"`
-	ShippedIdempotencyKey *string `json:"idempotency_key"`
+	ID                    string        `json:"id"`
+	Source                string        `json:"source"`
+	Tenant                *string       `json:"tenant"`
+	ContentType           *string       `json:"content_type"`
+	DedupeKey             *string       `json:"dedupe_key"`
+	ReplayID              *string       `json:"replay_id"`
+	ShippedIdempotencyKey *string       `json:"idempotency_key"`
+	Verification          *Verification `json:"verification"`
+}
+
+// Verification is how Ankusa verified a hook at ingest.
+type Verification struct {
+	// Status is "ok", "failed" or "skipped"; other values pass through.
+	Status string `json:"status"`
+	// Flagged is true when a failed check was accepted
+	// (on_verify_failure: accept_flag): treat the delivery as unverified.
+	Flagged bool `json:"flagged"`
 }
 
 // IdempotencyKey is the key a consumer dedupes this delivery on: the key
@@ -36,13 +47,13 @@ func (h HookHeaders) IdempotencyKey(includeReplay bool) string {
 }
 
 // ParseHeaders reads x-ankusa-id, x-ankusa-source, x-ankusa-tenant,
-// content-type, x-ankusa-dedupe-key, x-ankusa-replay-id, and
-// x-ankusa-idempotency-key off a request's
-// headers, case-insensitively. A missing or empty x-ankusa-id is a
+// content-type, x-ankusa-dedupe-key, x-ankusa-replay-id,
+// x-ankusa-idempotency-key, and x-ankusa-verification(-flagged) off a
+// request's headers, case-insensitively. A missing or empty x-ankusa-id is a
 // *MissingHookIdError: delivery is at-least-once, and x-ankusa-id is the
 // identity to dedupe on, so a delivery without it is a framework bug rather
-// than a tolerable request. dedupe_key, replay_id and idempotency_key are nil
-// when their header is absent or empty.
+// than a tolerable request. dedupe_key, replay_id, idempotency_key and
+// verification are nil when their header is absent or empty.
 func ParseHeaders(h http.Header) (HookHeaders, error) {
 	id, ok := headerValue(h, "x-ankusa-id")
 	if !ok || id == "" {
@@ -66,6 +77,11 @@ func ParseHeaders(h http.Header) (HookHeaders, error) {
 	if value, ok := headerValue(h, "x-ankusa-idempotency-key"); ok && value != "" {
 		shipped = &value
 	}
+	var verification *Verification
+	if status, ok := headerValue(h, "x-ankusa-verification"); ok && status != "" {
+		flagged, _ := headerValue(h, "x-ankusa-verification-flagged")
+		verification = &Verification{Status: status, Flagged: flagged == "true"}
+	}
 
 	return HookHeaders{
 		ID:                    id,
@@ -75,6 +91,7 @@ func ParseHeaders(h http.Header) (HookHeaders, error) {
 		DedupeKey:             dedupeKey,
 		ReplayID:              replayID,
 		ShippedIdempotencyKey: shipped,
+		Verification:          verification,
 	}, nil
 }
 

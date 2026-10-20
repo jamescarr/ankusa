@@ -39,6 +39,23 @@
   (when-not ok?
     (fail "invalid_field" field)))
 
+(defn- decode-verification
+  "`{:status :flagged}` from the raw `verification` value, or `nil` when it is
+  absent or `null`. Any other shape (not a map, non-string/empty status, or
+  non-boolean flagged) is an `invalid_field` failure. Unknown `status` values
+  pass through unvalidated, forward-compatibly."
+  [raw]
+  (when (contains? raw "verification")
+    (let [v (get raw "verification")]
+      (when-not (nil? v)
+        (if (map? v)
+          (let [status (get v "status")
+                flagged (get v "flagged")]
+            (if (and (string? status) (not= "" status) (boolean? flagged))
+              {:status status :flagged flagged}
+              (fail "invalid_field" "verification")))
+          (fail "invalid_field" "verification"))))))
+
 (defn- optional-string!
   [raw field]
   (let [v (get raw field)]
@@ -102,7 +119,7 @@
   JSON. Returns
 
   `{:v :id :source-id :tenant-id :received-at :content-type :size :body :claim
-  :sha256 :dedupe-key :replay-id :idempotency-key :headers}`
+  :sha256 :dedupe-key :replay-id :idempotency-key :headers :verification}`
 
   where `:body` is a `byte[]` for an inline message and `nil` for a claim, and
   `:claim` the claim ref for a claim and `nil` otherwise. `:headers` keeps its
@@ -135,6 +152,7 @@
         sha256 (get raw "sha256")
         _ (check-field! (or (nil? sha256) (and (string? sha256) (re-matches sha256-pattern sha256)))
                         "sha256")
+        verification (decode-verification raw)
         {:keys [body claim claim-tenant]} (body-fields raw)]
     (if body
       (do (when (not= (alength ^bytes body) size)
@@ -156,7 +174,8 @@
      :dedupe-key dedupe-key
      :replay-id replay-id
      :idempotency-key idempotency-key
-     :headers headers}))
+     :headers headers
+     :verification verification}))
 
 (defn ->hook
   "Turn a decoded `message` into the hook a handler takes:

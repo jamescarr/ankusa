@@ -4,6 +4,7 @@ import io.github.jamescarr.ankusa.claimcheck.InvalidClaimRefError;
 import io.github.jamescarr.ankusa.claimcheck.ParsedClaimRef;
 import io.github.jamescarr.ankusa.internal.IdempotencyKey;
 import io.github.jamescarr.ankusa.internal.Json;
+import io.github.jamescarr.ankusa.webhook.Verification;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -57,6 +58,8 @@ import tools.jackson.databind.JsonNode;
  * @param idempotencyKey the tenant-scoped key Ankusa computed for the hook, or null for a message
  *     from a node that predates the field; read it through {@link #idempotencyKey(boolean)}
  * @param headers the forwarded provider request headers, lower-cased names, never null
+ * @param verification how Ankusa verified the hook at ingest, or null from a node that predates the
+ *     field
  */
 public record Message(
     int v,
@@ -72,7 +75,8 @@ public record Message(
     @Nullable String dedupeKey,
     @Nullable String replayId,
     @Nullable String idempotencyKey,
-    Map<String, String> headers) {
+    Map<String, String> headers,
+    @Nullable Verification verification) {
 
   /** A lowercase-hex SHA-256, the only digest shape a message may carry. */
   private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
@@ -133,6 +137,7 @@ public record Message(
     String idempotencyKey = nullableText(root, "idempotency_key");
     Map<String, String> headers = headers(root);
     String sha256 = sha256(root);
+    Verification verification = verification(root);
 
     JsonNode bodyNode = root.get("body_base64");
     JsonNode claimNode = root.get("claim");
@@ -171,7 +176,8 @@ public record Message(
           dedupeKey,
           replayId,
           idempotencyKey,
-          headers);
+          headers,
+          verification);
     }
 
     if (!claimNode.isString()) {
@@ -209,7 +215,8 @@ public record Message(
         dedupeKey,
         replayId,
         idempotencyKey,
-        headers);
+        headers,
+        verification);
   }
 
   /**
@@ -314,6 +321,37 @@ public record Message(
           "invalid_field", "sha256", "sha256 must be 64 lowercase hex characters");
     }
     return node.stringValue();
+  }
+
+  /**
+   * The verification field: absent or null passes as null; an object of a non-empty string {@code
+   * status} and a boolean {@code flagged} decodes; anything else fails. The status value itself is
+   * never validated, so a status this SDK doesn't know yet still decodes.
+   */
+  private static @Nullable Verification verification(JsonNode root) {
+    JsonNode node = root.get("verification");
+    if (node == null || node.isNull()) {
+      return null;
+    }
+    if (!node.isObject()) {
+      throw new InvalidMessageError(
+          "invalid_field", "verification", "verification must be an object");
+    }
+
+    JsonNode status = node.get("status");
+    JsonNode flagged = node.get("flagged");
+    if (status == null
+        || !status.isString()
+        || status.stringValue().isEmpty()
+        || flagged == null
+        || !flagged.isBoolean()) {
+      throw new InvalidMessageError(
+          "invalid_field",
+          "verification",
+          "verification must be {status: non-empty string, flagged: boolean}");
+    }
+
+    return new Verification(status.stringValue(), flagged.booleanValue());
   }
 
   /** The lowercase-hex SHA-256 of the body. */

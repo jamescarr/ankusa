@@ -4,7 +4,7 @@ use crate::message::KeyParts;
 
 /// The `x-ankusa-*` headers of a delivered hook, borrowed from the header map
 /// they were parsed out of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookHeaders<'a> {
     /// `x-ankusa-id`: the envelope id, a `UUIDv7`.
     pub id: &'a str,
@@ -24,6 +24,19 @@ pub struct HookHeaders<'a> {
     /// the hook. `None` when the header is absent or empty (a sender that
     /// predates it). Read it through [`HookHeaders::idempotency_key`].
     pub idempotency_key: Option<&'a str>,
+    /// How Ankusa verified the hook at ingest; `None` when the
+    /// `x-ankusa-verification` header is absent or empty.
+    pub verification: Option<Verification>,
+}
+
+/// How Ankusa verified the hook at ingest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verification {
+    /// `ok`, `failed` or `skipped`; other values pass through untouched.
+    pub status: String,
+    /// `true` when a failed check was accepted
+    /// (`on_verify_failure: accept_flag`): treat as unverified.
+    pub flagged: bool,
 }
 
 impl HookHeaders<'_> {
@@ -72,6 +85,12 @@ pub fn parse_headers(headers: &http::HeaderMap) -> Result<HookHeaders<'_>, Missi
         replay_id: header(headers, "x-ankusa-replay-id").filter(|value| !value.is_empty()),
         idempotency_key: header(headers, "x-ankusa-idempotency-key")
             .filter(|value| !value.is_empty()),
+        verification: header(headers, "x-ankusa-verification")
+            .filter(|value| !value.is_empty())
+            .map(|status| Verification {
+                status: status.to_owned(),
+                flagged: header(headers, "x-ankusa-verification-flagged") == Some("true"),
+            }),
     })
 }
 
@@ -86,7 +105,7 @@ pub struct MissingHookIdError;
 
 #[cfg(test)]
 mod tests {
-    use super::{MissingHookIdError, parse_headers};
+    use super::{MissingHookIdError, Verification, parse_headers};
     use http::{HeaderMap, HeaderValue};
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -153,6 +172,30 @@ mod tests {
         assert_eq!(parsed.dedupe_key, None);
         assert_eq!(parsed.replay_id, None);
         assert_eq!(parsed.idempotency_key(true), "01a0");
+    }
+
+    #[test]
+    fn verification_is_absent_without_the_header() {
+        let map = headers(&[("x-ankusa-id", "01a0")]);
+        let parsed = parse_headers(&map).expect("id present");
+        assert_eq!(parsed.verification, None);
+    }
+
+    #[test]
+    fn verification_flagged_header_is_true() {
+        let map = headers(&[
+            ("x-ankusa-id", "01a0"),
+            ("x-ankusa-verification", "failed"),
+            ("x-ankusa-verification-flagged", "true"),
+        ]);
+        let parsed = parse_headers(&map).expect("id present");
+        assert_eq!(
+            parsed.verification,
+            Some(Verification {
+                status: "failed".to_owned(),
+                flagged: true,
+            })
+        );
     }
 
     #[test]
