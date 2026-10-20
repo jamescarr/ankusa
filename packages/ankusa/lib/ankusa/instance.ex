@@ -93,6 +93,7 @@ defmodule Ankusa.Instance do
       [{Ankusa.Instance.RegistryWatch, config.instance}] ++
         metrics_children(config, opts) ++
         auth_children(config) ++
+        Ankusa.BlobStore.Pool.child_specs(config) ++
         claim_store_children(opts) ++
         intake_children(config, opts) ++
         store_children(config, opts) ++

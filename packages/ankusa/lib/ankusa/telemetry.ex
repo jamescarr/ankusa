@@ -41,7 +41,8 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :compact, :stop]` | `:records`, `:bytes`, `:duration` | `:instance` |
   | `[:ankusa, :backup, :stop]` | `:duration`, `:files`, `:bytes` | `:instance`, `:result` (`:ok`, `:error`), `:reason` (on `:error`) |
   | `[:ankusa, :backup, :state]` | `:age_seconds` (since the last successful backup, or since the uploader started) | `:instance` |
-  | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size`, `:claims` | `:instance`, `:tenant_id`, `:pack_id`, `:result`, `:store` (index into `claim_check.blob_stores` the pack was written to, `nil` on failure) |
+  | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size`, `:claims` | `:instance`, `:tenant_id`, `:pack_id` (the id the pack was written under, after any collision), `:result`, `:store` (index into `claim_check.blob_stores` the pack was written to, `nil` on failure) |
+  | `[:ankusa, :claim_check, :pack_collision]` | — | `:instance`, `:tenant_id`, `:pack_id` (an id a claim store already held an object under; `check_in/4` mints a fresh one, up to 3 attempts) |
   | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:claim_id`, `:result` |
   | `[:ankusa, :claim_check, :sweep]` | `:deleted` (partition directories removed), `:scanned` (partitions), `:packs` (pack objects deleted), `:kept` (packs a lease held back), `:leases_pruned` (lease rows deleted: grace over, or their hook no longer names the pack), `:backlog` (names the tick did not examine in the partition it stopped in), `:partitions_left` (expired partitions it did not reach), `:duration` | `:instance` |
   | `[:ankusa, :claim_check, :store_breaker]` | — | `:instance`, `:store` (index into `claim_check.blob_stores`), `:state` (`:open`, `:closed`), `:reason` (`nil` on `:closed`) |
@@ -49,7 +50,8 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :claim_check, :read]` | `:duration` | `:instance`, `:kind` (`:index`, `:bytes`, `:range`), `:source` (`:cache`, `:store`, `:coalesced`, `:shed`, `:direct`), `:result` (`:ok`, `:not_found`, `:forbidden`, `:throttled`, `:unavailable`, `:overloaded`, `:deadline`), `:store`. One per caller: `:store` is the caller whose fetch went to the store, `:coalesced` one that joined it, `:shed` one answered without a fetch's result (the queue was full, or its deadline passed — a fetch it started still finishes and is counted as `:store`) |
   | `[:ankusa, :claim_check, :read_limit]` | `:limit` | `:instance`, `:store` (every change of a store's adaptive read limit) |
   | `[:ankusa, :claim_check, :read_state]` | `:limit`, `:inflight`, `:queued` | `:instance`, `:store` (every second, per store the gateway's reader has read from) |
-  | `[:ankusa, :blob_store, :retry]` | `:delay_ms` | `:instance`, `:attempt`, `:status` (an HTTP status or `:transport`) |
+  | `[:ankusa, :blob_store, :retry]` | `:delay_ms` (full jitter, or the throttle's `Retry-After` when longer) | `:instance`, `:attempt`, `:status` (an HTTP status or `:transport`) |
+  | `[:ankusa, :blob_store, :breaker]` | — | `:instance`, `:endpoint`, `:bucket`, `:state` (`:open`, `:closed`), `:reason` (`{:failures, n}` or `{:slow, p99_ms}` on `:open`, `nil` on `:closed`) |
   | `[:ankusa, :lifecycle, :delivered]` | — | `:instance`, `:type`, `:sink` |
   | `[:ankusa, :lifecycle, :dropped]` | — | `:instance`, `:type`, `:sink`, `:reason` (`:gave_up`, `:unreadable`) |
   | `[:ankusa, :instance, :subtree_down]` | `:delay_ms` | `:instance`, `:domain`, `:reason` |

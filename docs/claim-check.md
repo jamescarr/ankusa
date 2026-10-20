@@ -616,7 +616,16 @@ runs, shared by every sink of that source. Two more levers keep writes cheap:
   instead of one per hook, with no added latency (the batch is already in
   hand). A group bigger than `claim_check.pack_max_bytes` (16 MiB default)
   splits into several objects; a body bigger than that gets an object of its
-  own.
+  own. The `PUT` is **conditional** (`put_if_absent`: S3 and Azure
+  `If-None-Match: *`, GCS `ifGenerationMatch=0`, OCI `if-none-match: *`): a pack id
+  a store already holds an object under is refused, and the pack is written again
+  under a fresh id (at most 3 attempts; each refusal emits `[:ankusa, :claim_check,
+  :pack_collision]`), so a reused id can never overwrite claims that are already
+  referenced. The whole check-in shares one deadline
+  (`op_deadline_ms` of the claim stores, 120 s by default): a store that is slow
+  or throttles with a `Retry-After` that does not fit costs a dispatch task at
+  most that long, and the batch's items fail with
+  `{:unavailable, {:throttled, seconds}}` for dispatch's own backoff.
 
 Packs never mix tenants, so the write count is one per *tenant present* in a
 batch. A tenant with thousands of distinct values, an account id say, keeps

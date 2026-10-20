@@ -22,7 +22,13 @@ defmodule Ankusa.BlobStore.S3 do
                               the EC2 instance role (IMDSv2)
     * `:endpoint`          — default `"https://s3.\#{region}.amazonaws.com"`;
                               point at `http://localhost:4566` for floci/MinIO
-    * `:timeout_ms`        — default `10_000`, for both connect and response
+    * `:timeout_ms`        — default `10_000`, for both connect and response of one
+                              request that carries at most 1 MiB
+    * `:upload_timeout_ms`, `:op_deadline_ms`, `:multipart_threshold_bytes`,
+      `:multipart_part_bytes`, `:breaker_*`, `:pool_*` — one deadline per
+                              operation, multipart above a size, a breaker per
+                              bucket and a connection pool per endpoint. See
+                              `Ankusa.BlobStore.Options`
     * `:req_options`       — transport options for the HTTP client, e.g. a
                               custom Finch pool (`finch: [name: MyFinch]`), a
                               proxy (via `:connect_options`), or `plug:` for
@@ -30,12 +36,19 @@ defmodule Ankusa.BlobStore.S3 do
                               an allowlist, because a redirected or re-tuned
                               request would no longer match its signature.
     * `:retries`           — default `2`: extra attempts after a transport
-                              error or a `408`/`429`/`5xx`, each re-signed.
-                              See `Ankusa.BlobStore.Retry`
+                              error or a `408`/`429`/`5xx`, each re-signed,
+                              jittered, `Retry-After` honoured. See
+                              `Ankusa.BlobStore.Retry`
     * `:sse`               — `%{type: :aes256}` or `%{type: :kms, key_id: arn}`:
                               server-side encryption, sent (and signed) as
                               `x-amz-server-side-encryption` on every `put/4`.
                               See `Ankusa.BlobStore.SSE`
+
+  `put_if_absent/4` sends `If-None-Match: *` (a `412`/`409` is `:already_exists`);
+  every `PUT` carries `x-amz-checksum-sha256` and a `GET` verifies it
+  (`Ankusa.BlobStore.Checksum`); a body over `multipart_threshold_bytes` is a
+  multipart upload (create, parts each with `Content-MD5`, complete, abort on
+  failure).
 
   Addressing is always path-style (`{endpoint}/{bucket}/{key}`) — the one
   scheme every target (AWS, MinIO, R2, floci) accepts unambiguously.
@@ -66,36 +79,51 @@ defmodule Ankusa.BlobStore.S3 do
   # OTP stdlib apps that aren't themselves Mix dependencies.
   @compile {:no_warn_undefined, [:xmerl_scan, :xmerl_xpath]}
 
-  alias Ankusa.BlobStore.{Retry, SSE}
-  alias Ankusa.HttpClient
+  alias Ankusa.BlobStore
+  alias Ankusa.BlobStore.{Checksum, HTTP, Options, SSE}
 
   @impl true
-  def put(instance, key, data, opts) do
-    case request(instance, opts, :put, key, data, SSE.headers(opts, :s3)) do
-      {:ok, _body} -> :ok
-      {:error, reason} -> {:error, reason}
+  def put(instance, key, data, opts), do: write(instance, key, data, opts, false)
+
+  @impl true
+  def put_if_absent(instance, key, data, opts) do
+    case write(instance, key, data, opts, true) do
+      {:error, :already_exists} -> BlobStore.same_object(__MODULE__, instance, key, data, opts)
+      other -> other
     end
   end
 
   @impl true
-  def get(instance, key, opts), do: request(instance, opts, :get, key, nil, [])
+  def get(instance, key, opts) do
+    opts = Options.with_deadline(opts)
+    headers = [{"x-amz-checksum-mode", "ENABLED"}]
+
+    case request(instance, opts, :small, :get, object_url(opts, key), nil, headers) do
+      {:ok, status, headers, body} when status in 200..299 ->
+        Checksum.check_response(headers, body, :sha256, ["x-amz-checksum-sha256"])
+
+      other ->
+        HTTP.reply(other)
+    end
+  end
 
   @impl true
   def get_range(instance, key, offset, length, opts) do
-    request(instance, opts, :get, key, nil, [
-      {"range", "bytes=#{offset}-#{offset + length - 1}"}
-    ])
+    opts = Options.with_deadline(opts)
+    headers = [{"range", "bytes=#{offset}-#{offset + length - 1}"}]
+    HTTP.reply(request(instance, opts, :small, :get, object_url(opts, key), nil, headers))
   end
 
   @impl true
   def delete(instance, key, opts) do
-    _ = request(instance, opts, :delete, key, nil, [])
+    opts = Options.with_deadline(opts)
+    _ = request(instance, opts, :small, :delete, object_url(opts, key), nil, [])
     :ok
   end
 
   # ListObjectsV2 pages hold at most 1,000 keys: follow the continuation token
-  # to the end. A failed page fails the listing — a short list would read as
-  # "these are all the keys".
+  # to the end, each page under a deadline of its own. A failed page fails the
+  # listing — a short list would read as "these are all the keys".
   @impl true
   def list(instance, prefix, opts), do: list_pages(instance, opts, prefix, nil, [])
 
@@ -105,8 +133,9 @@ defmodule Ankusa.BlobStore.S3 do
         if(token, do: [{"continuation-token", token}], else: [])
 
     url = endpoint(opts) <> "/" <> bucket(opts) <> "?" <> URI.encode_query(query, :rfc3986)
+    page_opts = Options.with_deadline(opts)
 
-    with {:ok, body} <- signed_request(instance, opts, :get, url, nil, []),
+    with {:ok, body} <- HTTP.reply(request(instance, page_opts, :small, :get, url, nil, [])),
          {:ok, keys, next} <- parse_list_page(body) do
       acc = [keys | acc]
 
@@ -117,38 +146,147 @@ defmodule Ankusa.BlobStore.S3 do
     end
   end
 
+  # ── writes ────────────────────────────────────────────────────────────────
+
+  defp write(instance, key, data, opts, conditional?) do
+    opts = Options.with_deadline(opts)
+    size = IO.iodata_length(data)
+
+    if size > Options.get(opts, :multipart_threshold_bytes),
+      do: multipart(instance, opts, key, IO.iodata_to_binary(data), conditional?),
+      else: single(instance, opts, key, data, size, conditional?)
+  end
+
+  defp single(instance, opts, key, data, size, conditional?) do
+    headers =
+      SSE.headers(opts, :s3) ++
+        [{"x-amz-checksum-sha256", Checksum.sha256_base64(data)}] ++ precondition(conditional?)
+
+    instance
+    |> request(opts, Options.kind(size), :put, object_url(opts, key), data, headers)
+    |> HTTP.write_reply(exists_statuses(conditional?))
+  end
+
+  # S3 answers a failed `If-None-Match` with 412, and a conflicting concurrent
+  # conditional write with 409.
+  defp precondition(true), do: [{"if-none-match", "*"}]
+  defp precondition(false), do: []
+  defp exists_statuses(true), do: [409, 412]
+  defp exists_statuses(false), do: []
+
+  # Create, upload each part (its own `Content-MD5`; an `upload_timeout_ms` per
+  # part, all inside the operation's one deadline), complete; abort on any
+  # failure so no orphan parts are billed.
+  defp multipart(instance, opts, key, data, conditional?) do
+    url = object_url(opts, key)
+    parts = HTTP.chunks(data, Options.get(opts, :multipart_part_bytes))
+
+    case create_upload(instance, opts, url) do
+      {:ok, upload_id} ->
+        with {:ok, etags} <- upload_parts(instance, opts, url, upload_id, parts),
+             :ok <- complete_upload(instance, opts, url, upload_id, etags, conditional?) do
+          :ok
+        else
+          {:error, _reason} = error ->
+            abort_upload(instance, opts, url, upload_id)
+            error
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp create_upload(instance, opts, url) do
+    result =
+      request(instance, opts, :small, :post, url <> "?uploads=", "", SSE.headers(opts, :s3))
+
+    with {:ok, body} <- HTTP.reply(result) do
+      case parse_upload_id(body) do
+        nil -> {:error, :upload_unreadable}
+        id -> {:ok, id}
+      end
+    end
+  end
+
+  defp upload_parts(instance, opts, url, upload_id, parts) do
+    parts
+    |> Enum.with_index(1)
+    |> Enum.reduce_while({:ok, []}, fn {part, number}, {:ok, etags} ->
+      query = URI.encode_query([{"partNumber", number}, {"uploadId", upload_id}], :rfc3986)
+      headers = [{"content-md5", Checksum.md5_base64(part)}]
+
+      case request(instance, opts, :bulk, :put, url <> "?" <> query, part, headers) do
+        {:ok, status, headers, _body} when status in 200..299 ->
+          case Checksum.first(headers, "etag") do
+            nil -> {:halt, {:error, :part_without_etag}}
+            etag -> {:cont, {:ok, [{number, etag} | etags]}}
+          end
+
+        other ->
+          {:halt, HTTP.write_reply(other, [])}
+      end
+    end)
+    |> case do
+      {:ok, etags} -> {:ok, Enum.reverse(etags)}
+      error -> error
+    end
+  end
+
+  defp complete_upload(instance, opts, url, upload_id, etags, conditional?) do
+    xml = [
+      "<CompleteMultipartUpload>",
+      for {number, etag} <- etags do
+        [
+          "<Part><PartNumber>",
+          Integer.to_string(number),
+          "</PartNumber><ETag>",
+          etag,
+          "</ETag></Part>"
+        ]
+      end,
+      "</CompleteMultipartUpload>"
+    ]
+
+    headers = [{"content-type", "application/xml"}] ++ precondition(conditional?)
+    complete_url = url <> "?" <> URI.encode_query([{"uploadId", upload_id}], :rfc3986)
+
+    case request(instance, opts, :small, :post, complete_url, xml, headers) do
+      # S3 can answer 200 and put the failure in the body.
+      {:ok, status, _headers, body} when status in 200..299 ->
+        if String.contains?(body, "<Error>"), do: {:error, {:status, status, body}}, else: :ok
+
+      other ->
+        HTTP.write_reply(other, exists_statuses(conditional?))
+    end
+  end
+
+  # Best effort, under a short deadline of its own: the operation's may be spent.
+  defp abort_upload(instance, opts, url, upload_id) do
+    opts =
+      opts
+      |> Keyword.put(:deadline, System.monotonic_time(:millisecond) + 5_000)
+      |> Keyword.put(:retries, 0)
+
+    abort_url = url <> "?" <> URI.encode_query([{"uploadId", upload_id}], :rfc3986)
+    _ = request(instance, opts, :small, :delete, abort_url, nil, [])
+    :ok
+  end
+
   # ── requests ──────────────────────────────────────────────────────────────
 
-  defp request(instance, opts, method, key, body, extra_headers) do
-    url = endpoint(opts) <> "/" <> bucket(opts) <> "/" <> encode_path(key)
-    signed_request(instance, opts, method, url, body, extra_headers)
-  end
-
-  defp signed_request(instance, opts, method, url, body, extra_headers) do
+  defp request(instance, opts, kind, method, url, body, headers) do
     with {:ok, creds} <- Ankusa.AWS.Credentials.get(opts) do
-      send_signed(instance, opts, creds, method, url, body, extra_headers)
-    end
-  end
-
-  defp send_signed(instance, opts, creds, method, url, body, extra_headers) do
-    timeout = Keyword.get(opts, :timeout_ms, 10_000)
-    req_options = Keyword.get(opts, :req_options, [])
-
-    # Signed per attempt: the signature carries the time it was made.
-    result =
-      Retry.run(instance, opts, fn ->
-        headers = sign(opts, creds, method, url, body, extra_headers)
-        HttpClient.request(method, url, headers, body, timeout, req_options)
+      # Signed per attempt: the signature carries the time it was made.
+      HTTP.request(instance, opts, scope(opts), kind, fn ->
+        {method, url, sign(opts, creds, method, url, body, headers), body}
       end)
-
-    case result do
-      # Keep the status visible so 404 can mean :not_found.
-      {:ok, status, body} when status in 200..299 -> {:ok, body}
-      {:ok, 404, _body} -> {:error, :not_found}
-      {:ok, status, body} -> {:error, {:status, status, body}}
-      {:error, reason} -> {:error, reason}
     end
   end
+
+  defp object_url(opts, key), do: endpoint(opts) <> "/" <> bucket(opts) <> "/" <> encode_path(key)
+
+  defp scope(opts), do: {endpoint(opts), bucket(opts)}
 
   defp sign(opts, creds, method, url, body, extra_headers) do
     # The signature covers the host header, so it has to be derived from the same
@@ -201,7 +339,9 @@ defmodule Ankusa.BlobStore.S3 do
 
   defp bucket(opts), do: Keyword.fetch!(opts, :bucket)
 
-  defp endpoint(opts) do
+  @doc false
+  @spec endpoint(keyword()) :: String.t()
+  def endpoint(opts) do
     Keyword.get(opts, :endpoint, "https://s3.#{Keyword.fetch!(opts, :region)}.amazonaws.com")
   end
 
@@ -231,6 +371,13 @@ defmodule Ankusa.BlobStore.S3 do
       else: {:ok, keys, next}
   catch
     :exit, _not_xml -> {:error, :list_unreadable}
+  end
+
+  defp parse_upload_id(xml_body) do
+    {doc, _rest} = :xmerl_scan.string(:binary.bin_to_list(xml_body), quiet: true)
+    text(doc, ~c"//UploadId/text()")
+  catch
+    :exit, _not_xml -> nil
   end
 
   defp text(doc, path) do

@@ -186,6 +186,9 @@ defmodule Ankusa.BlobStore.S3SigningTest do
       assert h["x-amz-content-sha256"] ==
                Base.encode16(:crypto.hash(:sha256, body), case: :lower)
 
+      # the integrity header S3 validates the upload against (`Ankusa.BlobStore.Checksum`)
+      assert h["x-amz-checksum-sha256"] == Base.encode64(:crypto.hash(:sha256, body))
+
       assert h["x-amz-date"] =~ ~r/^\d{8}T\d{6}Z$/
 
       assert h["authorization"] =~
@@ -193,7 +196,8 @@ defmodule Ankusa.BlobStore.S3SigningTest do
 
       # exactly the headers we handed the signer — a stray one would change the
       # signature AWS checks
-      assert h["authorization"] =~ "SignedHeaders=host;x-amz-content-sha256;x-amz-date,"
+      assert h["authorization"] =~
+               "SignedHeaders=host;x-amz-checksum-sha256;x-amz-content-sha256;x-amz-date,"
     end
 
     test "get_range asks for exactly the byte window", %{capture: capture, opts: opts} do
@@ -298,7 +302,7 @@ defmodule Ankusa.BlobStore.S3SigningTest do
           parse_amz_date(h["x-amz-date"]),
           "PUT",
           "http://localhost:4566" <> path,
-          [{"host", h["host"]}],
+          [{"host", h["host"]}, {"x-amz-checksum-sha256", h["x-amz-checksum-sha256"]}],
           body,
           signing_opts
         )

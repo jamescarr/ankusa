@@ -15,7 +15,9 @@ defmodule Ankusa.BlobStore.Azure do
     * `:token_provider` — `{module, fun, args}`, applied per request, must
       return `{:ok, bearer_token} | :error`. For a service running on Azure,
       use the built-in `Ankusa.BlobStore.Azure.ManagedIdentity` (system- or
-      user-assigned) rather than wiring your own Entra ID token source.
+      user-assigned) rather than wiring your own Entra ID token source. On a
+      `401` the adapter calls the module's `invalidate/n` (same arguments) when
+      it exports one, and sends the request once more with the fresh token.
 
   Shared Key signing (the `Authorization: SharedKey ...` HMAC) is deliberately
   not implemented — it is the kind of security-sensitive canonicalization this
@@ -30,7 +32,13 @@ defmodule Ankusa.BlobStore.Azure do
     * `:token_provider` — optional; `{module, fun, args}` returning a bearer token
     * `:endpoint`       — default `"https://\#{account_name}.blob.core.windows.net"`;
                            point at `"http://127.0.0.1:10000/\#{account_name}"` for Azurite
-    * `:timeout_ms`     — default `10_000`, for both connect and response
+    * `:timeout_ms`     — default `10_000`, for both connect and response of
+                           one request that carries at most 1 MiB
+    * `:upload_timeout_ms`, `:op_deadline_ms`, `:multipart_threshold_bytes`,
+      `:multipart_part_bytes`, `:breaker_*`, `:pool_*` — one deadline per
+                           operation, a block-list upload above a size, a
+                           breaker per container and a connection pool per
+                           endpoint. See `Ankusa.BlobStore.Options`
     * `:req_options`    — transport options for the HTTP client, e.g. a custom
                            Finch pool, a proxy, or `plug:` for `Req.Test` in
                            tests. See `Ankusa.HttpClient` for the accepted keys
@@ -41,6 +49,12 @@ defmodule Ankusa.BlobStore.Azure do
                            (`x-ms-encryption-scope`). Blob Storage encrypts
                            everything at rest anyway; this picks the key. See
                            `Ankusa.BlobStore.SSE`
+
+  `put_if_absent/4` sends `If-None-Match: *` (a `409`/`412` is `:already_exists`);
+  every `PUT` carries `Content-MD5` (validated by Azure) and
+  `x-ms-blob-content-md5` (stored), and a `GET` verifies the `Content-MD5` it is
+  sent (`Ankusa.BlobStore.Checksum`); a body over `multipart_threshold_bytes` is
+  Put Block per `multipart_part_bytes` and a Put Block List.
 
   ## Local dev
 
@@ -63,43 +77,54 @@ defmodule Ankusa.BlobStore.Azure do
   # See Ankusa.BlobStore.S3 for why this false-positive suppression exists.
   @compile {:no_warn_undefined, [:xmerl_scan, :xmerl_xpath]}
 
-  alias Ankusa.BlobStore.{Retry, SSE}
-  alias Ankusa.HttpClient
+  alias Ankusa.BlobStore
+  alias Ankusa.BlobStore.{Checksum, HTTP, Options, SSE}
 
   @api_version "2024-11-04"
 
   @impl true
-  def put(instance, key, data, opts) do
-    headers =
-      SSE.headers(opts, :azure) ++
-        [
-          {"x-ms-blob-type", "BlockBlob"},
-          {"content-type", "application/octet-stream"}
-        ]
+  def put(instance, key, data, opts), do: write(instance, key, data, opts, false)
 
-    case request(instance, opts, :put, blob_url(opts, key), data, headers) do
-      {:ok, _body} -> :ok
-      {:error, reason} -> {:error, reason}
+  @impl true
+  def put_if_absent(instance, key, data, opts) do
+    case write(instance, key, data, opts, true) do
+      {:error, :already_exists} -> BlobStore.same_object(__MODULE__, instance, key, data, opts)
+      other -> other
     end
   end
 
   @impl true
-  def get(instance, key, opts),
-    do: request(instance, opts, :get, blob_url(opts, key), nil, [])
+  def get(instance, key, opts) do
+    opts = Options.with_deadline(opts)
+
+    case request(instance, opts, :small, :get, blob_url(opts, key), nil, []) do
+      {:ok, status, headers, body} when status in 200..299 ->
+        Checksum.check_response(headers, body, :md5, ["content-md5"])
+
+      other ->
+        HTTP.reply(other)
+    end
+  end
 
   @impl true
   def get_range(instance, key, offset, length, opts) do
+    opts = Options.with_deadline(opts)
     range = "bytes=#{offset}-#{offset + length - 1}"
-    request(instance, opts, :get, blob_url(opts, key), nil, [{"range", range}])
+
+    HTTP.reply(
+      request(instance, opts, :small, :get, blob_url(opts, key), nil, [{"range", range}])
+    )
   end
 
   @impl true
   def delete(instance, key, opts) do
-    _ = request(instance, opts, :delete, blob_url(opts, key), nil, [])
+    opts = Options.with_deadline(opts)
+    _ = request(instance, opts, :small, :delete, blob_url(opts, key), nil, [])
     :ok
   end
 
-  # Every page (`NextMarker`), and a failed page fails the listing.
+  # Every page (`NextMarker`), each under a deadline of its own, and a failed
+  # page fails the listing.
   @impl true
   def list(instance, prefix, opts), do: list_pages(instance, opts, prefix, nil, [])
 
@@ -109,8 +134,9 @@ defmodule Ankusa.BlobStore.Azure do
         if(marker, do: [{"marker", marker}], else: [])
 
     url = endpoint(opts) <> "/" <> container(opts) <> query_suffix(query, opts)
+    page_opts = Options.with_deadline(opts)
 
-    with {:ok, body} <- request(instance, opts, :get, url, nil, []),
+    with {:ok, body} <- HTTP.reply(request(instance, page_opts, :small, :get, url, nil, [])),
          {:ok, keys, next} <- parse_list_page(body) do
       acc = [keys | acc]
 
@@ -121,25 +147,109 @@ defmodule Ankusa.BlobStore.Azure do
     end
   end
 
+  # ── writes ────────────────────────────────────────────────────────────────
+
+  defp write(instance, key, data, opts, conditional?) do
+    opts = Options.with_deadline(opts)
+    size = IO.iodata_length(data)
+
+    if size > Options.get(opts, :multipart_threshold_bytes),
+      do: block_list(instance, opts, key, IO.iodata_to_binary(data), conditional?),
+      else: single(instance, opts, key, data, size, conditional?)
+  end
+
+  defp single(instance, opts, key, data, size, conditional?) do
+    md5 = Checksum.md5_base64(data)
+
+    headers =
+      SSE.headers(opts, :azure) ++
+        [
+          {"x-ms-blob-type", "BlockBlob"},
+          {"content-type", "application/octet-stream"},
+          {"content-md5", md5},
+          {"x-ms-blob-content-md5", md5}
+        ] ++ precondition(conditional?)
+
+    instance
+    |> request(opts, Options.kind(size), :put, blob_url(opts, key), data, headers)
+    |> HTTP.write_reply(exists_statuses(conditional?))
+  end
+
+  # `If-None-Match: *` on an existing blob is a 409 `BlobAlreadyExists` (or a 412
+  # from a proxy or an emulator).
+  defp precondition(true), do: [{"if-none-match", "*"}]
+  defp precondition(false), do: []
+  defp exists_statuses(true), do: [409, 412]
+  defp exists_statuses(false), do: []
+
+  # Put Block for each `multipart_part_bytes` (its own `Content-MD5`, an
+  # `upload_timeout_ms` per block inside the operation's one deadline), then one
+  # Put Block List that commits them with the whole blob's md5. Uncommitted
+  # blocks expire on their own, so a failure needs no cleanup.
+  defp block_list(instance, opts, key, data, conditional?) do
+    blocks =
+      data
+      |> HTTP.chunks(Options.get(opts, :multipart_part_bytes))
+      |> Enum.with_index()
+      |> Enum.map(fn {chunk, index} -> {block_id(index), chunk} end)
+
+    with :ok <- put_blocks(instance, opts, key, blocks) do
+      ids = Enum.map(blocks, &elem(&1, 0))
+      commit(instance, opts, key, ids, Checksum.md5_base64(data), conditional?)
+    end
+  end
+
+  # Every id of a blob must have the same length.
+  defp block_id(index), do: Base.encode64(String.pad_leading(Integer.to_string(index), 8, "0"))
+
+  defp put_blocks(instance, opts, key, blocks) do
+    Enum.reduce_while(blocks, :ok, fn {id, chunk}, :ok ->
+      url = blob_url(opts, key, [{"comp", "block"}, {"blockid", id}])
+
+      result =
+        request(instance, opts, :bulk, :put, url, chunk, [
+          {"content-md5", Checksum.md5_base64(chunk)}
+        ])
+
+      case HTTP.write_reply(result, []) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp commit(instance, opts, key, ids, md5, conditional?) do
+    xml = [
+      ~s(<?xml version="1.0" encoding="utf-8"?><BlockList>),
+      for(id <- ids, do: ["<Latest>", id, "</Latest>"]),
+      "</BlockList>"
+    ]
+
+    headers =
+      SSE.headers(opts, :azure) ++
+        [
+          {"content-type", "application/xml"},
+          {"x-ms-blob-content-type", "application/octet-stream"},
+          {"x-ms-blob-content-md5", md5}
+        ] ++ precondition(conditional?)
+
+    url = blob_url(opts, key, [{"comp", "blocklist"}])
+
+    instance
+    |> request(opts, :small, :put, url, xml, headers)
+    |> HTTP.write_reply(exists_statuses(conditional?))
+  end
+
   # ── requests ──────────────────────────────────────────────────────────────
 
-  defp request(instance, opts, method, url, body, headers) do
-    timeout = Keyword.get(opts, :timeout_ms, 10_000)
-    req_options = Keyword.get(opts, :req_options, [])
-
-    result =
-      Retry.run(instance, opts, fn ->
-        all_headers = auth_headers(opts) ++ version_header(opts) ++ headers
-        HttpClient.request(method, url, all_headers, body, timeout, req_options)
+  # The token is fetched per attempt (a retry carries a fresh one), and a `401`
+  # drops the provider's cached token and sends once more.
+  defp request(instance, opts, kind, method, url, body, headers) do
+    HTTP.with_refresh(Keyword.get(opts, :token_provider), fn ->
+      HTTP.request(instance, opts, {endpoint(opts), container(opts)}, kind, fn ->
+        {method, url, auth_headers(opts) ++ version_header(opts) ++ headers, body}
       end)
-
-    case result do
-      # Keep the status visible so 404 can mean :not_found.
-      {:ok, status, body} when status in 200..299 -> {:ok, body}
-      {:ok, 404, _body} -> {:error, :not_found}
-      {:ok, status, body} -> {:error, {:status, status, body}}
-      {:error, reason} -> {:error, reason}
-    end
+    end)
   end
 
   # A SAS already encodes the API version it was minted for; sending
@@ -174,8 +284,13 @@ defmodule Ankusa.BlobStore.Azure do
     |> Enum.map_join("/", &URI.encode(&1, unreserved))
   end
 
-  defp blob_url(opts, key) do
-    endpoint(opts) <> "/" <> container(opts) <> "/" <> encode_path(key) <> sas_suffix(opts)
+  defp blob_url(opts, key, query \\ []) do
+    base = endpoint(opts) <> "/" <> container(opts) <> "/" <> encode_path(key)
+
+    case query do
+      [] -> base <> sas_suffix(opts)
+      query -> base <> query_suffix(query, opts)
+    end
   end
 
   defp query_suffix(query, opts) do
@@ -191,7 +306,9 @@ defmodule Ankusa.BlobStore.Azure do
 
   defp container(opts), do: Keyword.fetch!(opts, :container)
 
-  defp endpoint(opts) do
+  @doc false
+  @spec endpoint(keyword()) :: String.t()
+  def endpoint(opts) do
     Keyword.get(
       opts,
       :endpoint,
