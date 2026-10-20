@@ -37,6 +37,20 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `[:ankusa, :archive, :state]` (`:oldest_unarchived_age_ms`), and `:deleted`
   metadata on `[:ankusa, :claim_check, :sweep]`. See
   [`claim-check.md#integrity`](../../docs/claim-check.md#integrity).
+- **Pipelined WAL sync: the fsync is off the writer's critical path (DUR-4.b).**
+  `Ankusa.Queue.Writer` applies a group with `sync: false` and hands its callers'
+  replies to the new `Ankusa.Queue.Syncer`, which runs one `Store.sync_wal/1`
+  (RocksDB `SyncWAL()`) for every group applied so far and then answers them, so
+  group N+1 is assembled and applied while group N syncs. Nothing external relies
+  on a group before its fsync: dispatch does not scan its rows
+  (`Syncer.visible/2`), the archive stops at the durable seq, and a retry's `201
+  duplicate` waits for the fsync of the original; a failed fsync answers every
+  group it covers with the error, reopens the store like a failed write, and is
+  retried. Under `wal: :dual` the local half's confirm is the syncer's. New
+  `[:ankusa, :wal_sync]` span and `ankusa_wal_sync_duration_seconds`;
+  `[:ankusa, :commit]` now measures the write of a group into the store. ADR 0002
+  amendment 17 states the invariant and the crash order.
+
 - **Segment format header, safe index decode, dated archive layout, time-based roll
   (DUR-8).** A segment is now `"ANKSEG" <> <<version, codec_id, count::32>>`, the
   codec's frames and a sha256 trailer (`Ankusa.Storage.Segment`); its `.idx` is

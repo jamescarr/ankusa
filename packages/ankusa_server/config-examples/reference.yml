@@ -440,7 +440,7 @@ batcher:
   # (default 4 MiB); under wal.type dual one group is one produce request.
   group_commit_max_bytes: 4194304
   group_commit_max_records: 1024
-  # How long a saturated writer (its last group held 16 or more hooks) waits for
+  # How long a saturated writer (its last group held 64 or more hooks) waits for
   # the callers it just answered to call again, so they join the next group.
   # Never delays a request at low load; 0 disables it.
   group_commit_delay_ms: 1
