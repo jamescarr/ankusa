@@ -73,6 +73,7 @@ defmodule Ankusa.Instance do
     # Every child reads the config back by name (`Ankusa.config/1`): a
     # supervisor prints its children's start arguments.
     config = Ankusa.config(instance)
+    Ankusa.Dispatch.Pipeline.validate_config!(config)
     Ankusa.ClaimCheck.validate_config!(config)
     Ankusa.Verifier.validate_config!(config)
     Ankusa.Verifier.validate_shared!(config)
@@ -81,7 +82,6 @@ defmodule Ankusa.Instance do
     Ankusa.Lifecycle.validate_config!(config)
     Ankusa.Edge.RateLimiter.validate_config!(config)
     Ankusa.Edge.Quarantine.validate_config!(config)
-    Ankusa.Dispatch.Pipeline.validate_config!(config)
     Ankusa.Store.Backup.validate_config!(config)
     Ankusa.BlobStore.validate_config!(config)
     Ankusa.HttpClient.Egress.validate_config!(config)

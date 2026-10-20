@@ -771,12 +771,18 @@ give every node its own root.
 
 **Object-store claims have no lease.** A bucket lifecycle rule expires by age and
 cannot see Ankusa's store, so its age is the real cutoff, and it has to outlast
-the longest a claim can be needed. The check assumes a 21-day retry horizon
-(the shipped exponential policy gives up after about 6 hours, so this is
-conservative), plus `queue.dlq.retention_days`, plus
-`claim_check.redeem_grace_ms`. Declare the rule's age in
+the longest a claim can be needed: the retry horizon (the instance's
+`dispatch.retry` `max_elapsed_ms`, 24 hours by default, or the longest
+`retry.max_elapsed_ms` of a source that routes to a claim-checking sink; the
+old 21-day figure assumed the 84-attempt policy that no longer exists), plus
+`queue.dlq.retention_days`, plus `claim_check.redeem_grace_ms`, each rounded up
+to whole days. Declare the rule's age in
 `claim_check.bucket_expiry_days`: boot refuses a value below that sum
-(`21 + 30 + 1 = 52` days by default) and, left undeclared, logs the minimum. (Tagging leased objects so the rule skips them would need a
+(`1 + 30 + 1 = 32` days by default) and, left undeclared, logs the minimum. A
+source written later through the admin API whose horizon would outlast the
+declared rule is refused with `422 retry_exceeds_claim_expiry`, and boot refuses
+a stored one, so a source cannot quietly retry past the point its packs
+expire. (Tagging leased objects so the rule skips them would need a
 tag call in every provider's blob store and a lifecycle filter every provider
 supports; it is not built.)
 

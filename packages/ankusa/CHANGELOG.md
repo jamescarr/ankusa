@@ -754,6 +754,42 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- **Retry horizon: 24 hours by wall clock, not 84 attempts; per-source `retry:`;
+  explicit error classes (DEL-2).** Every delivery now gets `max_elapsed_ms`
+  (default 24 h, `dispatch.retry`'s option, 1 s to 30 days) from its first
+  attempt, kept in the delivery row as `first_attempt_at` (an additive key under
+  the row versioning: a row written before it gets the stamp when dispatch first
+  takes it), and is dead-lettered by the first failure at or after it; no retry is
+  scheduled later than it. `Ankusa.RetryPolicy.Exponential`'s `max_attempts`
+  default is now `nil` (it was `84`, about 6 hours), so a sink that is down for 30
+  hours dead-letters its hooks at 24 hours, and a deployment that wants the old
+  window sets `max_elapsed_ms: 21_600_000`. Rows parked behind an open circuit
+  breaker age too: due no later than their horizon, dead-lettered as
+  `{:retry_horizon, module}` past it. A DLQ replay gives the row a fresh horizon.
+  `Ankusa.Source` has a `retry:` field (`base_ms`, `max_ms`, `max_attempts`,
+  `jitter`, `max_elapsed_ms`) laid over `dispatch.retry`; lifecycle events keep the
+  instance's. `dispatch.max_retry_after_ms` (default 1 h, was a constant) caps a
+  sink's `Retry-After`. `Ankusa.RetryPolicy` gains `schedule/5`, `for_source/2`,
+  `normalize_opts!/2`.
+
+  Sinks classify explicitly: SQS `AccessDenied`/`QueueDoesNotExist`/credential
+  errors and Pub/Sub `PERMISSION_DENIED`/`NOT_FOUND`/`UNAUTHENTICATED` are
+  `{:permanent, {:config, _}}` (dead-lettered at once, counted in
+  `ankusa_dispatch_config_errors_total{sink}` / `[:ankusa, :dispatch,
+  :config_error]`; they used to be retried for hours); SQS `Throttling` and
+  Pub/Sub `RESOURCE_EXHAUSTED`, and any `429`/`503` from them, are `{:retry_after,
+  ms, _}` with a full-jitter `ms` (`Ankusa.Sink.throttle_after_ms/1`); `Sink.Http`
+  treats `451` as permanent, `425` as a pause and `409` as transient. See
+  [`delivery.md`](../../docs/delivery.md#retry-horizon).
+- **A source's retry horizon cannot outlast the claim bucket's lifecycle rule
+  (DEL-2).** `claim_check.bucket_expiry_days` is now checked against the longest of
+  `dispatch.retry`'s horizon and every claim-using source's `retry.max_elapsed_ms`
+  (+ `queue.dlq.retention_days` + `redeem_grace_ms`, in days: 32 by default, was a
+  21-day assumption, 52). A source write that would exceed it is `{:error,
+  :retry_exceeds_claim_expiry, message}` (`422 retry_exceeds_claim_expiry` from the
+  admin API), and boot refuses a stored source that does
+  (`Ankusa.ClaimCheck.validate_stored_horizons!/2`).
+
 - **The quarantine pen no longer serializes every flagged hook (DUR-9).** A
   source's bucket is one ETS row updated with a compare-and-swap
   (`RateLimiter.hit_bucket/4`), the pen's byte count and the number of writes

@@ -517,6 +517,80 @@ defmodule Ankusa.ConfigTest do
       end
     end
 
+    test "max_retry_after_ms defaults to 1 h and is an integer from 1 s to 24 h" do
+      assert Config.new().dispatch.max_retry_after_ms == 3_600_000
+
+      for ok <- [1_000, 3_600_000, 86_400_000] do
+        assert :ok =
+                 Ankusa.Dispatch.Pipeline.validate_config!(
+                   Config.new(dispatch: %{max_retry_after_ms: ok})
+                 )
+      end
+
+      for bad <- [0, 999, 86_400_001, -1, 1.5, nil, "3600000"] do
+        assert_raise ArgumentError,
+                     ~r/dispatch.max_retry_after_ms must be an integer from 1000 to 86400000, got #{Regex.escape(inspect(bad))}/,
+                     fn ->
+                       Ankusa.Dispatch.Pipeline.validate_config!(
+                         Config.new(dispatch: %{max_retry_after_ms: bad})
+                       )
+                     end
+      end
+    end
+
+    test "dispatch.retry's max_elapsed_ms defaults to 24 h and is an integer from 1 s to 30 days" do
+      assert Ankusa.RetryPolicy.max_elapsed_ms(elem(Config.new().dispatch.retry, 1)) == 86_400_000
+
+      for ok <- [1_000, 86_400_000, 2_592_000_000] do
+        retry = {Ankusa.RetryPolicy.Exponential, [max_elapsed_ms: ok]}
+
+        assert :ok =
+                 Ankusa.Dispatch.Pipeline.validate_config!(Config.new(dispatch: %{retry: retry}))
+      end
+
+      for bad <- [0, 999, 2_592_000_001, -1, 1.5, nil, "86400000"] do
+        retry = {Ankusa.RetryPolicy.Exponential, [max_elapsed_ms: bad]}
+
+        assert_raise ArgumentError,
+                     ~r/dispatch.retry.max_elapsed_ms must be an integer from 1000 to 2592000000, got #{Regex.escape(inspect(bad))}/,
+                     fn ->
+                       Ankusa.Dispatch.Pipeline.validate_config!(
+                         Config.new(dispatch: %{retry: retry})
+                       )
+                     end
+      end
+    end
+
+    test "the other retry options are range-checked, and retry must be {module, opts}" do
+      check = fn retry ->
+        Ankusa.Dispatch.Pipeline.validate_config!(Config.new(dispatch: %{retry: retry}))
+      end
+
+      mod = Ankusa.RetryPolicy.Exponential
+
+      assert :ok = check.({mod, base_ms: 0, max_ms: 1, max_attempts: nil, jitter: false})
+
+      assert_raise ArgumentError, ~r/dispatch.retry.base_ms must be an integer from 0 to/, fn ->
+        check.({mod, base_ms: -1})
+      end
+
+      assert_raise ArgumentError, ~r/dispatch.retry.max_ms must be an integer from 1 to/, fn ->
+        check.({mod, max_ms: 0})
+      end
+
+      assert_raise ArgumentError,
+                   ~r/dispatch.retry.max_attempts must be an integer from 1 to/,
+                   fn -> check.({mod, max_attempts: 0}) end
+
+      assert_raise ArgumentError, ~r/dispatch.retry.jitter must be true or false/, fn ->
+        check.({mod, jitter: 1})
+      end
+
+      assert_raise ArgumentError, ~r/dispatch.retry must be \{module, keyword_opts\}/, fn ->
+        check.(:exponential)
+      end
+    end
+
     test "sink_concurrency defaults to 8 and is nil or a positive integer" do
       assert Config.new().dispatch.sink_concurrency == 8
 

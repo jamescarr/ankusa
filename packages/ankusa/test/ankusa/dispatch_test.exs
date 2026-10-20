@@ -131,6 +131,31 @@ defmodule Ankusa.DispatchTest do
     end
   end
 
+  # What a throttled destination answers: a pause far longer than any policy.
+  defmodule ThrottleSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(_env, _ctx, opts),
+      do: {:error, {:retry_after, Keyword.fetch!(opts, :ms), :throttled}}
+  end
+
+  # A credential the destination refuses: the operator's to fix.
+  defmodule ConfigErrorSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(_env, _ctx, _opts), do: {:error, {:permanent, {:config, :access_denied}}}
+  end
+
+  # A hook the destination will never take: not a config error.
+  defmodule PermanentSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(_env, _ctx, _opts), do: {:error, {:permanent, :bad_request}}
+  end
+
   # ── helpers ────────────────────────────────────────────────────────────────
 
   defp retry(overrides \\ []) do
@@ -825,14 +850,290 @@ defmodule Ankusa.DispatchTest do
     assert_receive {:delivered, :a, ^id}
   end
 
+  # ── DEL-2: retry horizon, per-source policy, error classes ─────────────────
+
+  @hour 3_600_000
+
+  # A hook and its delivery row (sink 0) as given: `extra` is laid over a fresh
+  # pending row, so a test can say how old the delivery is.
+  defp write_row!(inst, seq, env, module, at, extra) do
+    bin = Envelope.to_binary(env)
+
+    row =
+      Map.merge(
+        %{
+          module: module,
+          state: :pending,
+          attempts: 0,
+          at: at,
+          error: nil,
+          size: byte_size(bin),
+          source_id: env.source_id
+        },
+        extra
+      )
+
+    :ok =
+      Store.write(
+        inst,
+        [
+          {:put, :hooks, Keys.hook(seq), bin},
+          {:put, :deliveries, Keys.delivery(seq, 0), Deliveries.encode_row(row)}
+        ] ++ due_index_ops(inst, seq, 0, at, byte_size(bin), env.tenant_id || "default"),
+        sync: true
+      )
+  end
+
+  defp row!(inst, seq) do
+    assert {:ok, row} = Deliveries.row(inst, seq, 0)
+    row
+  end
+
+  defp failing(dispatch),
+    do: start(%{"src1" => %{sinks: [{AlwaysFail, []}]}}, dispatch: dispatch)
+
+  test "DEL-2: a row far past the old 84-attempt limit keeps retrying inside the 24 h horizon" do
+    inst = failing(%{retry: retry(base_ms: 60_000, max_attempts: nil)})
+    now = System.system_time(:millisecond)
+    first = now - 7 * @hour
+
+    write_row!(inst, 7, build_env("src1"), AlwaysFail, now, %{
+      attempts: 200,
+      first_attempt_at: first
+    })
+
+    assert {:ok, _} = Pipeline.tick(inst)
+
+    assert %{state: :pending, attempts: 201, first_attempt_at: ^first, at: at} = row!(inst, 7)
+    assert at > now
+    assert {:ok, %{total: 0}} = Ankusa.Queue.dead(inst, limit: 10)
+  end
+
+  test "DEL-2: a row past its horizon is dead-lettered by its next failure" do
+    inst = failing(%{retry: retry(base_ms: 60_000, max_attempts: nil)})
+    now = System.system_time(:millisecond)
+    env = build_env("src1")
+    first = now - 24 * @hour - 1_000
+    write_row!(inst, 7, env, AlwaysFail, now, %{attempts: 3, first_attempt_at: first})
+
+    assert {:ok, _} = Pipeline.tick(inst)
+
+    assert {:ok, %{total: 1, entries: [entry]}} = Ankusa.Queue.dead(inst, limit: 10)
+    assert entry.envelope.id == env.id
+    assert entry.reason == inspect({:sink, AlwaysFail, :always})
+    assert %{state: :dead, attempts: 4} = row!(inst, 7)
+  end
+
+  test "DEL-2: a retry is never due after the horizon" do
+    inst = failing(%{retry: retry(base_ms: 60_000, max_attempts: nil)})
+    now = System.system_time(:millisecond)
+    first = now - 24 * @hour + 5_000
+
+    write_row!(inst, 7, build_env("src1"), AlwaysFail, now, %{
+      attempts: 3,
+      first_attempt_at: first
+    })
+
+    assert {:ok, _} = Pipeline.tick(inst)
+
+    # the policy's backoff is 300 s; the horizon is 5 s away
+    assert %{state: :pending, attempts: 4, at: at} = row!(inst, 7)
+    assert at == first + 24 * @hour
+  end
+
+  test "DEL-2: an outage longer than the horizon dead-letters at the horizon, not at an attempt count" do
+    horizon = 1_500
+
+    inst =
+      failing(%{
+        breaker_failures: 0,
+        retry: retry(base_ms: 50, max_ms: 50, max_attempts: nil, max_elapsed_ms: horizon)
+      })
+
+    write_row!(inst, 7, build_env("src1"), AlwaysFail, System.system_time(:millisecond), %{})
+
+    assert await_dead(inst, 10_000) == 1
+
+    # at 100-200 ms a retry, far more attempts than the old default of 10 here
+    assert %{state: :dead, attempts: attempts, first_attempt_at: first, at: dead_at} =
+             row!(inst, 7)
+
+    assert attempts > 10
+    assert dead_at - first >= horizon
+    assert dead_at - first < horizon + 1_000
+  end
+
+  defp await_dead(inst, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+    Stream.repeatedly(fn ->
+      Process.sleep(50)
+      Pipeline.tick(inst)
+      {:ok, %{total: total}} = Ankusa.Queue.dead(inst, limit: 10)
+      total
+    end)
+    |> Enum.find(&(&1 > 0 or System.monotonic_time(:millisecond) > deadline))
+  end
+
+  test "DEL-2: a Retry-After is capped by dispatch.max_retry_after_ms, and never past the horizon" do
+    sources = %{"src1" => %{sinks: [{ThrottleSink, ms: 10 * @hour}]}}
+
+    capped =
+      start(sources, dispatch: %{max_retry_after_ms: 5_000, retry: retry(max_attempts: nil)})
+
+    before = System.system_time(:millisecond)
+    write_row!(capped, 7, build_env("src1"), ThrottleSink, before, %{})
+    assert {:ok, _} = Pipeline.tick(capped)
+    assert %{state: :pending, at: at} = row!(capped, 7)
+    assert at >= before + 5_000
+    assert at < System.system_time(:millisecond) + 5_001
+
+    # the cap is 1 h and the horizon 2 s away: the horizon wins
+    short =
+      start(sources,
+        dispatch: %{retry: retry(max_attempts: nil, max_elapsed_ms: 2_000)}
+      )
+
+    now = System.system_time(:millisecond)
+    write_row!(short, 7, build_env("src1"), ThrottleSink, now, %{first_attempt_at: now})
+    assert {:ok, _} = Pipeline.tick(short)
+    assert %{state: :pending, at: at} = row!(short, 7)
+    assert at == now + 2_000
+  end
+
+  test "DEL-2: a per-source retry override is honoured, and survives a restart" do
+    inst = unique_instance()
+    dir = unique_data_dir(inst)
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    dispatch = %{retry: retry(base_ms: 60_000, max_attempts: nil, max_elapsed_ms: 1_000_000)}
+    spec = %{"fail" => true, "sinks" => [%{"type" => "log"}]}
+
+    cfg1 = persistent_config(inst, dir, [:edge], dispatch)
+    start_supervised!({Ankusa.Instance, cfg1})
+
+    assert {:ok, _} =
+             Ankusa.SourceStore.put(
+               inst,
+               "acme",
+               "short",
+               Map.put(spec, "retry", %{"max_elapsed_ms" => 3_000}),
+               :create
+             )
+
+    assert {:ok, _} = Ankusa.SourceStore.put(inst, "acme", "plain", spec, :create)
+
+    now = System.system_time(:millisecond)
+    write_row!(inst, 7, build_env("acme.short"), AlwaysFail, now, %{})
+    write_row!(inst, 8, build_env("acme.plain"), AlwaysFail, now, %{})
+    stop_supervised!({Ankusa.Instance, inst})
+
+    # The source store reloads the override from disk; dispatch applies it.
+    start_supervised!(
+      {Ankusa.Instance, persistent_config(inst, dir, [:edge, :dispatch], dispatch)}
+    )
+
+    assert {:ok, _} = Pipeline.tick(inst)
+
+    assert %{first_attempt_at: short_first, at: short_at} = short = row!(inst, 7)
+    assert short.state == :pending
+    # the override's 3 s horizon clamps the 60 s backoff...
+    assert short_at == short_first + 3_000
+
+    assert %{first_attempt_at: plain_first, at: plain_at} = plain = row!(inst, 8)
+    assert plain.state == :pending
+    # ...while the other source keeps the instance's policy: a full 60 s
+    assert plain_at - plain_first >= 60_000
+    assert plain_at - plain_first < 61_000
+    stop_supervised!({Ankusa.Instance, inst})
+
+    # The horizon's start is in the row: it is the same after another restart
+    start_supervised!({Ankusa.Instance, persistent_config(inst, dir, [:edge], dispatch)})
+    assert %{first_attempt_at: ^short_first, at: ^short_at} = row!(inst, 7)
+  end
+
+  test "DEL-2: a row parked behind an open breaker is due by its horizon, and dead-lettered past it" do
+    inst =
+      failing(%{
+        breaker_failures: 1,
+        breaker_open_ms: 60_000,
+        breaker_max_open_ms: 60_000,
+        retry: retry(base_ms: 60_000, max_attempts: nil)
+      })
+
+    now = System.system_time(:millisecond)
+    write_row!(inst, 7, build_env("src1"), AlwaysFail, now, %{})
+    assert {:ok, _} = Pipeline.tick(inst)
+    # one failure opened the breaker
+    assert %{state: :pending, attempts: 1} = row!(inst, 7)
+
+    old = build_env("src1")
+    stale = now - 25 * @hour
+    write_row!(inst, 8, old, AlwaysFail, now, %{attempts: 4, first_attempt_at: stale})
+    near = now - 24 * @hour + 3_000
+
+    write_row!(inst, 9, build_env("src1"), AlwaysFail, now, %{attempts: 2, first_attempt_at: near})
+
+    assert {:ok, _} = Pipeline.tick(inst)
+
+    # past the horizon: dead, with no attempt made
+    assert {:ok, %{total: 1, entries: [entry]}} = Ankusa.Queue.dead(inst, limit: 10)
+    assert entry.envelope.id == old.id
+    assert entry.reason == inspect({:retry_horizon, AlwaysFail})
+    assert %{state: :dead, attempts: 4} = row!(inst, 8)
+
+    # inside it: parked, attempts unchanged, but due no later than the horizon
+    assert %{state: :pending, attempts: 2, at: at} = row!(inst, 9)
+    assert at == near + 24 * @hour
+  end
+
+  test "DEL-2: auth and config errors dead-letter at once and are counted per sink" do
+    inst =
+      start(%{
+        "src1" => %{sinks: [{ConfigErrorSink, []}, {PermanentSink, []}, {AlwaysFail, []}]}
+      })
+
+    handler = "config-errors-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:ankusa, :dispatch, :config_error],
+        &__MODULE__.forward_config_error/4,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    enqueue!(inst, build_env("src1"))
+    assert {:ok, _} = Pipeline.tick(inst)
+
+    assert_receive {:config_error, %{sink: ConfigErrorSink, source_id: "src1", tenant_id: "acme"}}
+    refute_receive {:config_error, _}, 100
+
+    # dead after one attempt each: both permanent ones; the transient one retries
+    assert {:ok, %{total: 2, entries: entries}} = Ankusa.Queue.dead(inst, limit: 10)
+
+    assert entries |> Enum.map(& &1.reason) |> Enum.sort() ==
+             Enum.sort([
+               inspect({:sink, ConfigErrorSink, {:permanent, {:config, :access_denied}}}),
+               inspect({:sink, PermanentSink, {:permanent, :bad_request}})
+             ])
+  end
+
+  @doc false
+  def forward_config_error(_event, _measurements, meta, pid),
+    do: send(pid, {:config_error, meta})
+
   # ── config helpers ─────────────────────────────────────────────────────────
 
-  defp persistent_config(inst, dir, roles) do
+  defp persistent_config(inst, dir, roles, dispatch \\ %{}) do
     Ankusa.Config.new(
       instance: inst,
       data_dir: dir,
       port: 0,
       roles: roles,
+      dispatch: dispatch,
       source_store: {Ankusa.SourceStore.Persistent, [decoder: &decode_source/2]}
     )
   end
@@ -846,6 +1147,12 @@ defmodule Ankusa.DispatchTest do
       dispatch: dispatch,
       source_store: {Ankusa.SourceStore.Static, sources: %{"src1" => %{sinks: sinks}}}
     )
+  end
+
+  # A source the store knows as failing, with an optional `retry` override.
+  defp decode_source(_source_id, %{"fail" => true} = spec) do
+    retry = for {key, value} <- Map.get(spec, "retry", %{}), do: {String.to_atom(key), value}
+    [sinks: [{AlwaysFail, []}]] ++ if(retry == [], do: [], else: [retry: retry])
   end
 
   defp decode_source(_source_id, %{"sinks" => [_ | _]}), do: [sinks: [{Ankusa.Sink.Log, []}]]

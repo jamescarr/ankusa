@@ -17,7 +17,11 @@ defmodule Ankusa.Queue.Deliveries do
   # The row value is a term: `%{module, state, attempts, at, error, size,
   # source_id}`; `at` is the due time while pending and the dead-letter time
   # once dead, `size` the stored hook's byte size, and `source_id` the hook's
-  # source (rows written before it existed lack the key: read the hook). A row
+  # source (rows written before it existed lack the key: read the hook).
+  # `first_attempt_at` (ms) is when dispatch first took the row, the start of
+  # its retry horizon (`Ankusa.RetryPolicy`); dispatch adds it the first time it
+  # resolves a row, so rows written before it existed get it then, and it is an
+  # additive key under the row versioning below. A row
   # revived by a replay job (`Ankusa.Dispatch.Replayer`) additionally carries
   # `replay: replay_id`, the job id the delivery is attributed to. Rows bind to
   # `(sink index, module)`; their opts are resolved from the *current* source
@@ -1005,7 +1009,8 @@ defmodule Ankusa.Queue.Deliveries do
   end
 
   # Move dead rows back to pending for a replay job: the revived row keeps its
-  # hook and gets `replay: replay_id`, `attempts: 0` and a due time of `now`.
+  # hook and gets `replay: replay_id`, `attempts: 0`, a due time of `now` and a
+  # fresh retry horizon (`first_attempt_at` dropped: dispatch stamps it again).
   # A dead key whose row is gone is deleted as an orphan. Returns the batch ops
   # and the number of rows actually revived.
   @spec revive_ops(atom(), [hit()], integer(), String.t()) ::
@@ -1037,6 +1042,7 @@ defmodule Ankusa.Queue.Deliveries do
         row =
           row
           |> Map.merge(%{state: :pending, attempts: 0, at: now, error: nil})
+          |> Map.delete(:first_attempt_at)
           |> Map.put(:replay, replay_id)
 
         {[
