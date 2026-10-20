@@ -31,6 +31,15 @@ defmodule Ankusa.BlobStore do
   asks the provider to encrypt every object a `put/4` writes, with a KMS key or
   the provider's own. It is per store, so it covers the segment store, the
   backup store and every claim store as each is configured.
+
+  ## Transport
+
+  The HTTP adapters share their transport options (`Ankusa.BlobStore.Options`):
+  one deadline per operation, jittered retries that honour `Retry-After`
+  (`Ankusa.BlobStore.Retry`), a breaker per bucket (`Ankusa.BlobStore.Breaker`),
+  multipart uploads above a size, integrity checksums
+  (`Ankusa.BlobStore.Checksum`) and a connection pool per endpoint
+  (`Ankusa.BlobStore.Pool`).
   """
 
   alias Ankusa.Config
@@ -39,6 +48,26 @@ defmodule Ankusa.BlobStore do
 
   @callback put(instance :: atom(), key :: String.t(), data :: iodata(), opts :: keyword()) ::
               :ok | {:error, term()}
+
+  @doc """
+  `put/4`, but only if no object exists under `key`: `{:error, :already_exists}`
+  when one does, with that object left exactly as it was. The adapters use the
+  store's own precondition (S3 and Azure `If-None-Match: *`, GCS
+  `ifGenerationMatch=0`, OCI `if-none-match: *`), so the check and the write are
+  one atomic request. `Ankusa.ClaimCheck` writes every pack with it: a reused
+  or colliding pack id then refuses instead of overwriting claims that are
+  already referenced.
+
+  An object that exists with exactly the bytes being written is `:ok`
+  (`same_object/5`): a retried request whose first attempt landed is not a
+  collision with another writer.
+  """
+  @callback put_if_absent(
+              instance :: atom(),
+              key :: String.t(),
+              data :: iodata(),
+              opts :: keyword()
+            ) :: :ok | {:error, :already_exists} | {:error, term()}
   @callback get(instance :: atom(), key :: String.t(), opts :: keyword()) ::
               {:ok, binary()} | {:error, term()}
   @callback get_range(
@@ -78,10 +107,35 @@ defmodule Ankusa.BlobStore do
     prefix <> key
   end
 
+  @doc """
+  Settle an `:already_exists`: `:ok` when `key` already holds exactly `data` (a
+  conditional `PUT` that landed, whose answer was lost and which was then sent
+  again, finds its own object), else `{:error, :already_exists}`. A store that
+  cannot be read back is `{:error, :already_exists}` too: the caller mints a new
+  key rather than assume.
+  """
+  @spec same_object(module(), atom(), String.t(), iodata(), keyword()) ::
+          :ok | {:error, :already_exists}
+  def same_object(mod, instance, key, data, opts) do
+    expected = IO.iodata_to_binary(data)
+
+    case mod.get(instance, key, opts) do
+      {:ok, ^expected} -> :ok
+      _other -> {:error, :already_exists}
+    end
+  end
+
   @spec put(atom(), scope(), String.t(), iodata()) :: :ok | {:error, term()}
   def put(instance, scope, key, data) do
     {mod, opts, _prefix} = resolve(instance, scope)
     mod.put(instance, key, data, opts)
+  end
+
+  @spec put_if_absent(atom(), scope(), String.t(), iodata()) ::
+          :ok | {:error, :already_exists} | {:error, term()}
+  def put_if_absent(instance, scope, key, data) do
+    {mod, opts, _prefix} = resolve(instance, scope)
+    mod.put_if_absent(instance, key, data, opts)
   end
 
   @spec get(atom(), scope(), String.t()) :: {:ok, binary()} | {:error, term()}
@@ -138,8 +192,9 @@ defmodule Ankusa.BlobStore do
   end
 
   @doc """
-  Check the `:sse` option of every blob store the config names
-  (`storage.blob_store`, `backup.blob_store`, `backup.secondary`, `claim_check.blob_stores`).
+  Check the `:sse` option and the transport options (`Ankusa.BlobStore.Options`)
+  of every blob store the config names (`storage.blob_store`,
+  `backup.blob_store`, `backup.secondary`, `claim_check.blob_stores`).
   """
   @spec validate_config!(Config.t()) :: :ok
   def validate_config!(%Config{storage: storage, backup: backup, claim_check: claim_check}) do
@@ -155,8 +210,12 @@ defmodule Ankusa.BlobStore do
     ]
     |> Kernel.++(claim_stores)
     |> Enum.each(fn
-      {where, {mod, opts}} when is_atom(mod) -> Ankusa.BlobStore.SSE.validate!(mod, opts, where)
-      _unset_or_unknown -> :ok
+      {where, {mod, opts}} when is_atom(mod) ->
+        Ankusa.BlobStore.SSE.validate!(mod, opts, where)
+        Ankusa.BlobStore.Options.validate!(mod, opts, where)
+
+      _unset_or_unknown ->
+        :ok
     end)
   end
 end

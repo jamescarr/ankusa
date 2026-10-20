@@ -68,6 +68,9 @@ defmodule Ankusa.Edge.DirectTest do
     end
 
     @impl true
+    def put_if_absent(instance, key, data, opts), do: put(instance, key, data, opts)
+
+    @impl true
     def get(_, _, _), do: {:error, :not_found}
     @impl true
     def get_range(_, _, _, _, _), do: {:error, :not_found}

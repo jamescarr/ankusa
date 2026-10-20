@@ -8,6 +8,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`s3` and `gcs` blocks take the object-store transport options (DUR-7).**
+  `timeout_ms`, `upload_timeout_ms`, `op_deadline_ms`, `multipart_threshold_bytes`,
+  `multipart_part_bytes`, `retries`, `breaker_failures`, `breaker_open_ms`,
+  `breaker_slow_ms`, `pool_size`, `pool_count` and `pool_timeout`, under `storage`,
+  `claim_check.store(s)` and `backup.store`/`secondary`, range-checked when the
+  instance starts. See [`configuration.md`](../../docs/configuration.md).
 - **`batcher.max_commits`, `group_commit_max_bytes`, `group_commit_max_records` and
   `group_commit_delay_ms` (DUR-4), and `batcher.partitions` defaults to 4.** YAML
   keys for the cross-partition group commit: the commits a partition keeps in

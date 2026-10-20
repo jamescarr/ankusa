@@ -41,10 +41,8 @@ defmodule Ankusa.BlobStore.Azure.ManagedIdentity do
 
   @doc false
   @spec token(keyword()) :: {:ok, String.t()} | :error
-  def token(opts) do
-    key =
-      {Keyword.get(opts, :endpoint, @default_endpoint),
-       Keyword.get(opts, :resource, @default_resource), Keyword.get(opts, :client_id)}
+  def token(opts \\ []) do
+    key = key(opts)
 
     case cached(key, System.system_time(:second)) do
       {:ok, token} ->
@@ -60,6 +58,21 @@ defmodule Ankusa.BlobStore.Azure.ManagedIdentity do
             :error
         end
     end
+  end
+
+  @doc """
+  Drop the cached token for `opts`: the next `token/1` asks IMDS for a new one.
+  `Ankusa.BlobStore.Azure` calls it (with the provider's arguments) on a `401`.
+  """
+  @spec invalidate(keyword()) :: :ok
+  def invalidate(opts \\ []) do
+    :ets.delete(table(), key(opts))
+    :ok
+  end
+
+  defp key(opts) do
+    {Keyword.get(opts, :endpoint, @default_endpoint),
+     Keyword.get(opts, :resource, @default_resource), Keyword.get(opts, :client_id)}
   end
 
   defp cached(key, now) do

@@ -637,6 +637,7 @@ whatever answers the sink) is the only shared state. See
 
 ```elixir
 @callback put(instance, key :: String.t(), data :: iodata(), opts :: keyword()) :: :ok | {:error, term()}
+@callback put_if_absent(instance, key, data, opts) :: :ok | {:error, :already_exists} | {:error, term()}
 @callback get(instance, key, opts) :: {:ok, binary()} | {:error, term()}
 @callback get_range(instance, key, offset, length, opts) :: {:ok, binary()} | {:error, term()}
 @callback delete(instance, key, opts) :: :ok
@@ -684,22 +685,99 @@ many claims under `claims/tenant=<t>/dt=<day>/<pack_id>`, or
 | --- | --- | --- |
 | `BlobStore.LocalFS` | none | Default. Durable writes: temp file fsync, rename, directory fsync; `put` returns `{:error, reason}` instead of raising. `get_range` uses `:file.pread/3`, never slurps the whole segment. |
 | `BlobStore.S3` | `aws_signature` + `req` | SigV4 signing via [`aws_signature`](https://hex.pm/packages/aws_signature), the implementation behind the official aws-elixir SDK, with HTTP through `Req`. Path-style addressing works unmodified against AWS, MinIO, Cloudflare R2, and the [floci](https://floci.io) emulator. `list/3` parses `ListObjectsV2` XML via stdlib `:xmerl`. Credentials: `:access_key_id`/`:secret_access_key` (+ `:session_token`), else `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`, else web identity (IRSA: `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`, through STS `AssumeRoleWithWebIdentity`), else the EC2 instance profile (IMDSv2); temporary credentials are cached until shortly before they expire. |
-| `BlobStore.GCS` | `req` | GCS JSON API. `:token_provider` opt (an MFA returning `{:ok, bearer_token}`) is required against real GCS. The adapter carries no OAuth2 dependency of its own; wire up whatever your deployment already uses (Goth, ADC). Unauthenticated against the `floci-gcp` emulator. |
+| `BlobStore.GCS` | `req` | GCS JSON API. `:token_provider` opt (an MFA returning `{:ok, bearer_token}`) is required against real GCS: `{Ankusa.BlobStore.GCS.MetadataServer, :token, []}` on GCE/GKE (the metadata server's token, cached until a minute before it expires), or whatever your deployment already uses (Goth, ADC). The adapter carries no OAuth2 dependency of its own. Unauthenticated against the `floci-gcp` emulator. |
 | `BlobStore.Azure` | `req` | Azure Blob REST. Carries **no credential dependency**, the same stance as GCS: a pre-generated `:sas_token` (Shared Access Signature), or a `:token_provider` MFA, including the built-in `Ankusa.BlobStore.Azure.ManagedIdentity`, the best credential for a service running on Azure (no secret, short-lived Entra ID tokens from IMDS). No Shared-Key signing of its own. Unauthenticated against the `floci-az` emulator. |
-| `BlobStore.OCI` | none | OCI Object Storage. The one adapter that signs its own requests, OCI has no bearer/SAS shortcut covering arbitrary `put`/`get`/`list`, using OTP's `:public_key` (RSA-SHA256 *Signature version 1*), no dependency. Two credential shapes: a static API key (`:tenancy_ocid`/`:user_ocid`/`:key_fingerprint`/`:private_key`), or the instance-principal / session-token output of the OCI SDK via `:key_id: "ST$<token>"` + `:private_key`. Signing is pinned against OCI's reference vectors in `test/ankusa/blob_store_oci_signing_test.exs`; `floci-oci` parses but never verifies the signature, so any locally generated key works there. |
+| `BlobStore.OCI` | none | OCI Object Storage. The one adapter that signs its own requests, OCI has no bearer/SAS shortcut covering arbitrary `put`/`get`/`list`, using OTP's `:public_key` (RSA-SHA256 *Signature version 1*), no dependency. Two credential shapes: a static API key (`:tenancy_ocid`/`:user_ocid`/`:key_fingerprint`/`:private_key`), or an instance principal: `key_provider: {Ankusa.BlobStore.OCI.InstancePrincipal, :credentials, [[region: "us-ashburn-1"]]}` runs the certificate federation (IMDS leaf cert, `auth.<region>.oraclecloud.com/v1/x509`, a short-lived `ST$` session token and key), caches it and refreshes it before it expires. A session token from the OCI SDK still works as `:key_id: "ST$<token>"` + `:private_key`, renewed by the caller. Signing is pinned against OCI's reference vectors in `test/ankusa/blob_store_oci_signing_test.exs`; `floci-oci` parses but never verifies the signature, so any locally generated key works there. |
+
+### Conditional writes, retries, checksums, multipart, pools
+
+**`put_if_absent/4` is how claim packs are written.** It is `put/4` that refuses
+to replace: S3 and Azure send `If-None-Match: *`, GCS `ifGenerationMatch=0`,
+OCI `if-none-match: *` (so the check and the write are one atomic request) and
+the answer for an existing key is `{:error, :already_exists}`, the original
+untouched. `LocalFS` checks for the file first (one node's keys are unique by
+construction). An object that already holds *exactly* the bytes being written is
+`:ok` (`Ankusa.BlobStore.same_object/5`, one read-back on the rare collision), so a
+write whose first attempt landed and whose answer was lost is not mistaken for
+another writer's. `Ankusa.ClaimCheck.check_in/4` uses it: a refused pack is
+written again under a **fresh pack id** (at most 3 attempts, then
+`{:unavailable, :pack_id_collision}`), so a reused or colliding id can never
+overwrite claims that are already referenced
+([`claim-check.md`](claim-check.md#storage)). Segments and backups keep plain
+`put/4`: their keys are unique per node and rewritten on purpose.
 
 **The HTTP adapters retry a transient failure** (`Ankusa.BlobStore.Retry`): a
 transport error (refused, reset, timed out) or a `408`, `429`, `500`, `502`,
-`503` or `504` is sent again after 200 ms, then after 1 s — three attempts in
-all by default — and S3 and OCI re-sign each attempt. Anything else (`404`,
-`403`, another `4xx`) is answered at once. The adapter option `:retries` is
-the number of extra attempts (`2`; `0` for a single attempt); like
-`:timeout_ms` it is Elixir config only. Each call is idempotent, a `PUT`
-writing the same bytes to the same key, so a timed-out write that did land is
-safe to repeat. A worst-case call is three timeouts plus the waits. `put`
+`503` or `504` is sent again after a **full-jitter** wait (a random time from none
+to 200 ms, then to 1 s, then to 5 s), three attempts in all by default, and S3
+and OCI re-sign each attempt. Anything else (`404`, `403`, another `4xx`) is
+answered at once. The adapter option `:retries` is the number of extra attempts
+(`2`; `0` for a single attempt). A `429` or `503` that carries a `Retry-After` (seconds
+or an HTTP date) makes the wait at least that long **if it fits in the time
+left**; if it does not, nothing sleeps and the call returns
+`{:error, {:throttled, seconds}}` at once, for the caller (dispatch, which has
+its own backoff) to schedule. Each call is idempotent, a `PUT` writing the same
+bytes to the same key, so a timed-out write that did land is safe to repeat. `put`
 hands the adapter's iodata to the HTTP client as is: a segment is not copied
-into one binary first. `LocalFS` does neither: a POSIX error is not
-transient.
+into one binary first. `LocalFS` does neither: a POSIX error is not transient.
+
+**One deadline per blob operation** (`op_deadline_ms`, default 120 s): every
+attempt, every wait, every multipart part and, for `check_in/4`, every pack-id
+retry and every store tried share one absolute deadline. An attempt runs under
+the smaller of its timeout (`timeout_ms`, 10 s, for a request that carries at
+most 1 MiB; `upload_timeout_ms`, 60 s, for one that carries more) and the time
+left; nothing is sent past it (`{:error, :deadline}`). So a slow bucket costs a
+dispatch task at most the deadline, never the product of the timeout, the retries,
+the pack-id retries and an uncapped `Retry-After`. A claim read stops at
+`claim_check.read_deadline_ms` instead.
+
+**A breaker per `{endpoint, bucket}`** (`Ankusa.BlobStore.Breaker`, shared by every
+store of the node that talks to that bucket) opens after `breaker_failures`
+(5) consecutive failures **or** when the p99 of the last 100 metadata-sized
+requests passes `breaker_slow_ms` (5 s), answers `{:error, :breaker_open}` without
+a request for `breaker_open_ms` (30 s), then lets one probe through. A throttle
+is an answer from a reachable store and never opens it; neither does a failure of
+this node (its connection pool gone or exhausted). `breaker_failures: 0` turns it
+off. Each transition emits `[:ankusa, :blob_store, :breaker]`.
+
+**Checksums.** Every `PUT` carries a digest the store validates (S3
+`x-amz-checksum-sha256`, GCS `x-goog-hash: md5=…`, Azure `Content-MD5` and
+`x-ms-blob-content-md5`, OCI `Content-MD5`), and a whole-object `GET` compares the
+digest the store sends back with the bytes received: a mismatch is `{:error,
+:integrity}`. A response with no digest (or an S3 composite one) is not checked; a
+range read is not (`Ankusa.BlobStore.Checksum`). The GCS header is the
+documented way to have GCS validate an upload; only the floci emulator has
+exercised it here.
+
+**Multipart above `multipart_threshold_bytes`** (8 MiB): a `put` of more bytes is
+cut into `multipart_part_bytes` (8 MiB; at least 5 MiB, a multiple of 256 KiB)
+pieces: an S3 or OCI multipart upload (create, parts each with `Content-MD5`,
+complete or commit, abort on failure), Azure Put Block per piece and one Put
+Block List, a GCS resumable upload in chunks. Each part has its own
+`upload_timeout_ms` inside the operation's one deadline, so a 16 MiB pack on a
+1 MiB/s link is two 8 MiB requests, not one that outlives a 10 s timeout
+(`test/ankusa/blob_store_multipart_test.exs`). A conditional upload that loses
+the race is aborted.
+
+**A connection pool per endpoint** (`Ankusa.BlobStore.Pool`): the instance
+starts one Finch pool for each distinct endpoint of `storage.blob_store`,
+`backup.blob_store`, `backup.secondary` and `claim_check.blob_stores`, sized by
+`pool_size` (32 connections), `pool_count` (1) and `pool_timeout` (5 s to check
+one out), instead of Req's shared default, which is the throughput ceiling and
+lets one slow bucket take connections from every other client. It verifies
+peers (TLS 1.2/1.3, the system trust store, or the store's `cacertfile`). A store
+with its own transport (`req_options: [finch: [name: MyFinch]]`) gets none.
+
+**Refreshing credentials.** On a `401` the adapter asks the `:token_provider` /
+`:key_provider` module to drop its cached token (`invalidate/n`, when it exports
+one) and sends the request once more with a fresh one. The built-in providers
+are `Ankusa.BlobStore.GCS.MetadataServer`, `Azure.ManagedIdentity` and
+`OCI.InstancePrincipal`; each also refreshes before the token expires.
+
+The transport options are Elixir config on the store (see the table in
+[`configuration.md`](configuration.md#library-configuration-elixir)) and, for `s3`
+and `gcs`, YAML keys of the same names under `storage.s3`, `storage.gcs` and the
+`s3`/`gcs` block of `claim_check.store(s)` and `backup.store`.
 
 **The HTTP adapters take `sse:`** — server-side encryption on every `put/4`
 (`%{type: :aes256}`, or `%{type: :kms, key_id: key}`): see

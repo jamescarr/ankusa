@@ -13,6 +13,32 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Object-store adapters: conditional puts, jittered retries, checksums, multipart,
+  pools, credential refresh (DUR-7).** `Ankusa.BlobStore.put_if_absent/4` (a new
+  callback every store implements; S3 and Azure `If-None-Match: *`, GCS
+  `ifGenerationMatch=0`, OCI `if-none-match: *`, `LocalFS` a file check) answers
+  `{:error, :already_exists}` and leaves the original alone; claim packs are written
+  with it, and `ClaimCheck.check_in/4` writes a refused pack again under a fresh pack
+  id (3 attempts, `[:ankusa, :claim_check, :pack_collision]`). **One absolute deadline
+  per blob operation** (`op_deadline_ms`, 120 s) covers every attempt, wait, multipart
+  part, pack-id retry and store tried. Retries use full jitter, honour `Retry-After`
+  when it fits the deadline and otherwise return `{:error, {:throttled, seconds}}` at
+  once (claim check-ins surface it as `{:unavailable, {:throttled, seconds}}`); a
+  breaker per `{endpoint, bucket}` (`breaker_failures`, `breaker_open_ms`,
+  `breaker_slow_ms`: it also opens on p99 latency) answers `{:error, :breaker_open}`
+  (`[:ankusa, :blob_store, :breaker]`). `upload_timeout_ms` (60 s) governs a request
+  that carries over 1 MiB, and a body over `multipart_threshold_bytes` (8 MiB) goes up
+  as an S3/OCI multipart upload, an Azure block list or a GCS resumable upload in
+  `multipart_part_bytes` pieces. Every `PUT` carries a digest (`x-amz-checksum-sha256`,
+  `x-goog-hash`, `Content-MD5`) and a `GET` verifies the one the store returns:
+  `{:error, :integrity}`. `pool_size`, `pool_count` and `pool_timeout` size a Finch
+  pool per endpoint that the instance starts (`Ankusa.BlobStore.Pool`), instead of
+  Req's shared default. New token providers `Ankusa.BlobStore.GCS.MetadataServer` and
+  `Ankusa.BlobStore.OCI.InstancePrincipal` (`key_provider:`), and on a `401` every
+  adapter drops the provider's cached token (`invalidate/n`) and retries once with a
+  fresh one. All options are range-checked at boot. Custom `Ankusa.BlobStore`
+  implementations must add `put_if_absent/4`. See
+  [`storage.md`](../../docs/storage.md#conditional-writes-retries-checksums-multipart-pools).
 - **Cross-partition group commit (DUR-4).** `Ankusa.Queue.Writer` takes every batch
   the batcher partitions have queued and commits them as one group: one synced
   store write (and, under `wal: :dual`, one intake publish), seqs dense across it,
@@ -757,8 +783,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `Ankusa.ClaimCheck.Stores`.
 - **Breaking:** `Ankusa.ClaimCheck.Ref`'s `object_key/2` and `key/1` take a
   layout: `Ankusa.ClaimCheck.Ref.object_key/3`, `Ankusa.ClaimCheck.Ref.key/2`.
-  `Ankusa.BlobStore.Retry`'s `run/2` is `Ankusa.BlobStore.Retry.run/3`, the
-  instance first.
+  `Ankusa.BlobStore.Retry`'s `run/2` became `run/3` (a later release added the
+  breaker scope and request kind: `Ankusa.BlobStore.Retry.run/5`), the instance
+  first.
 - `Ankusa.BlobStore.Retry` jitters each delay to between half and all of
   200 ms / 1 s / 5 s, so nodes throttled together don't retry in lockstep.
 - Metric labels with integer values (an HTTP status, a store index) are

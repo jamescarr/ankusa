@@ -569,6 +569,23 @@ storage:
     # The same `sse:` key is accepted by `claim_check.store(s)` and
     # `backup.store` entries. Unset: the bucket's own default encryption.
     # sse: {type: kms, key_id: "${S3_KMS_KEY_ARN}"}
+    # Transport options of the object store, the same keys on the `s3`/`gcs`
+    # block of `claim_check.store(s)` and `backup.store`. Every one is
+    # optional; the defaults are shown. Integers, range-checked at boot.
+    #   timeout_ms: 10000                 # one request of at most 1 MiB
+    #   upload_timeout_ms: 60000          # one request carrying more (a part, a chunk)
+    #   op_deadline_ms: 120000            # ONE deadline per blob operation: every attempt,
+    #                                     # multipart part and claim pack-id retry. A
+    #                                     # Retry-After that does not fit is returned at once.
+    #   multipart_threshold_bytes: 8388608  # a bigger object goes up as a multipart upload
+    #   multipart_part_bytes: 8388608       # its part size (>= 5 MiB, a multiple of 256 KiB)
+    #   retries: 2                        # extra attempts, full jitter, Retry-After honoured
+    #   breaker_failures: 5               # per {endpoint, bucket}; 0 = no breaker
+    #   breaker_open_ms: 30000
+    #   breaker_slow_ms: 5000             # the breaker also opens on p99 latency over this
+    #   pool_size: 32                     # connections of this endpoint's pool
+    #   pool_count: 1
+    #   pool_timeout: 5000                # ms to wait for a free connection
   # Used only when type: gcs.
   gcs:
     bucket: "${GCS_BUCKET}"
@@ -582,6 +599,9 @@ storage:
     # resource name and is required with `kms`). GCS encrypts everything at
     # rest anyway; `aes256` is accepted and sends nothing.
     # sse: {type: kms, key_id: "projects/p/locations/l/keyRings/r/cryptoKeys/k"}
+    # The same transport options as the `s3` block above (`timeout_ms`,
+    # `op_deadline_ms`, `upload_timeout_ms`, `multipart_*`, `breaker_*`,
+    # `pool_*`, `retries`) apply here.
 
 claim_check:
   # [env ANKUSA_CLAIM_CHECK_PORT] the gateway listener (:claim_check role).
