@@ -11,6 +11,8 @@ export type {
   ReplayPatch,
   ListDeadLettersParams,
   ListQuarantinedParams,
+  AuditPage,
+  ListAuditParams,
 } from "./client.js";
 export {
   AdminError,

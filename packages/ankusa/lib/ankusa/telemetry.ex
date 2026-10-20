@@ -30,6 +30,9 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :dispatch, :breaker]` | — | `:instance`, `:sink`, `:source_id`, `:tenant_id`, `:state` (`:open`, `:closed`) |
   | `[:ankusa, :dispatch, :state]` | `:running`, `:claimed`, `:claimed_bytes`, `:runnable`, `:breakers_open`, `:active_tenants` (the most tenants one scan visited since the last report) | `:instance` |
   | `[:ankusa, :store, :state]` | `:hooks`, `:deliveries`, `:disk_bytes`, `:next_seq` | `:instance` |
+  | `[:ankusa, :store, :write_failed]` | `:count` | `:instance`, `:class` (`:no_space`, `:io_error`, `:read_only`, `:corruption`, `:busy`, `:other`; `Ankusa.Store.failure_class/1`), `:reason` (the raw term; never a label). One per failed store write a process reported, and per failed readiness probe |
+  | `[:ankusa, :store, :reopened]` | `:duration` (the close plus the open: the WAL replay), `:unavailable_ms` (how long the store has been closed) | `:instance`, `:result` (`:ok`, `:error`, `:deferred`: put off because the disk still refuses a synced write, nothing closed, both measurements `0`), `:class` (why the open failed or was put off, `nil` on `:ok`). One per reopen attempt, whoever asked for it, including the store's own retries (5 s, doubling to 60 s, jittered) |
+  | `[:ankusa, :store, :unavailable]` | `:seconds` (how long the store has been closed; `0` at boot and once open again) | `:instance`, `:class` (why the open failed, `:none` once open) |
   | `[:ankusa, :queue, :state]` | `:pending` (first attempts waiting), `:scheduled` (retries waiting), `:inflight`, `:dead`, `:archive_pending`, `:claim_leases` (claim packs leased to live or just-reclaimed hooks), `:tenants`, `:oldest_due_age_ms` | `:instance` |
   | `[:ankusa, :tenant, :state]` | `:pending` (one event per tenant of the top 100 by pending) | `:instance`, `:tenant` |
   | `[:ankusa, :quarantine, :state]` | `:bytes`, `:entries` | `:instance` |

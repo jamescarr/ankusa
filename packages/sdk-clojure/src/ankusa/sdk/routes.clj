@@ -19,7 +19,7 @@
   | --- | --- | --- |
   | `InvalidRouteIdError` | false | unusable id, caught before the request |
   | `RouteNotFoundError` | false | `404` |
-  | `RoutesRejectedError` | false | any other `4xx` |
+  | `RoutesRejectedError` | false | any other `4xx` (`:scope` when the body carries it) |
   | `RoutesUnavailableError` | true | `5xx`, a redirect, a non-JSON body, or unreachable |
 
   Every call is one request: no retry, no followed redirect."
@@ -70,7 +70,8 @@
                   :field (field decoded :field)
                   :message message
                   :conflicting-id (field decoded :conflicting_id)
-                  :max-routes (field decoded :max_routes)})))
+                  :max-routes (field decoded :max_routes)
+                  :scope (field decoded :scope)})))
 
 (defn- response-body
   "The body bytes of a 2xx response, or the error `response` classifies as."

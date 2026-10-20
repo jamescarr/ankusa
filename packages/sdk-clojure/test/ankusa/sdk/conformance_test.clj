@@ -119,6 +119,7 @@
     "admin_config" (admin/config (admin/client base-url opts))
     "admin_dlq_list" (admin/list-dead-letters (admin/client base-url opts) (get input "params"))
     "admin_quarantine" (admin/list-quarantined (admin/client base-url opts) (get input "params"))
+    "admin_audit_list" (admin/list-audit (admin/client base-url opts) (get input "params"))
     "admin_replay_create" (admin/create-replay (admin/client base-url opts) (get input "spec"))
     "admin_replay_get" (admin/get-replay (admin/client base-url opts) (get input "id"))
     "admin_replay_list" (admin/list-replays (admin/client base-url opts))
@@ -126,6 +127,12 @@
                                                (get input "id")
                                                (get input "patch"))
     (throw (ex-info "unknown conformance operation" {:operation op}))))
+
+(defn- verification-json
+  "`result`'s `:verification` map as string-keyed JSON, or `nil`."
+  [result]
+  (when-let [v (:verification result)]
+    {"status" (:status v) "flagged" (:flagged v)}))
 
 (defn- normalize
   "`result` as the string-keyed snake_case JSON the vectors expect."
@@ -140,7 +147,8 @@
                      "content_type" (:content-type result)
                      "dedupe_key" (:dedupe-key result)
                      "replay_id" (:replay-id result)
-                     "idempotency_key" (:idempotency-key result)}
+                     "idempotency_key" (:idempotency-key result)
+                     "verification" (verification-json result)}
     "receive_delivery" {"verified" (:verified result)
                         "id" (:id result)
                         "source" (:source result)
@@ -148,7 +156,8 @@
                         "content_type" (:content-type result)
                         "dedupe_key" (:dedupe-key result)
                         "replay_id" (:replay-id result)
-                        "idempotency_key" (:idempotency-key result)}
+                        "idempotency_key" (:idempotency-key result)
+                        "verification" (verification-json result)}
     "decode_message" {"v" (:v result)
                       "id" (:id result)
                       "source_id" (:source-id result)
@@ -162,7 +171,8 @@
                       "dedupe_key" (:dedupe-key result)
                       "replay_id" (:replay-id result)
                       "idempotency_key" (:idempotency-key result)
-                      "headers" (:headers result)}
+                      "headers" (:headers result)
+                      "verification" (verification-json result)}
     "idempotency_key" {"key" result}
     "redeem" {"body" {"base64" (base64 result)}}
     "admin_metrics" {"text" result}

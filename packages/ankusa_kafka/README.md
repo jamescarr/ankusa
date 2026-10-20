@@ -44,15 +44,27 @@ non-default instance.
 **and** confirmed in a replicated topic, so a lost host loses nothing.
 
 ```elixir
-config :ankusa, :config,
-  wal: :dual,
-  intake: %{
-    type: :kafka,
-    node_id: "ankusa-a",
-    kafka: [brokers: ["kafka-1:9092", "kafka-2:9092", "kafka-3:9092"]]
-  },
-  backup: %{enabled: true, max_age_ms: 300_000, blob_store: {Ankusa.BlobStore.S3, bucket: "backups"}}
+config =
+  Ankusa.Config.new(
+    wal: :dual,
+    intake: %{
+      type: :kafka,
+      node_id: "ankusa-a",
+      kafka: [brokers: ["kafka-1:9092", "kafka-2:9092", "kafka-3:9092"]]
+    },
+    backup: %{
+      enabled: true,
+      max_age_ms: 300_000,
+      blob_store: {Ankusa.BlobStore.S3, bucket: "backups"}
+    }
+  )
+
+{:ok, _pid} = Ankusa.Instance.start_link(config)
 ```
+
+The autostarted default instance reads only `:autostart`, `:port`,
+`:data_dir`, `:roles` and `:sources` from application env; everything else
+takes effect through `Ankusa.Config.new/1` and `Ankusa.Instance`.
 
 The topic (`ankusa.intake.<fleet>`) is the operator's, and the adapter never
 creates one. `verify/1` refuses it at boot unless it has replication factor 3 or

@@ -12,10 +12,13 @@ archiving), and `claim_check` (the large-payload gateway), chosen per container
 with `ANKUSA_ROLES`:
 
 ```sh
-docker run -e ANKUSA_ROLES=edge ...              jamescarr/ankusa:edge   # ingest only
-docker run -e ANKUSA_ROLES=dispatch,storage ...  jamescarr/ankusa:edge   # delivery + archiving
-docker run -e ANKUSA_ROLES=claim_check ...       jamescarr/ankusa:edge   # large-payload gateway only
+docker run -e ANKUSA_ROLES=edge,dispatch,storage ...  jamescarr/ankusa:edge   # a store-backed node
+docker run -e ANKUSA_ROLES=claim_check ...            jamescarr/ankusa:edge   # gateway only
 ```
+
+The first three share one local store and therefore one BEAM node (see the
+constraint below); `claim_check` is the only role that can run as its own
+container. Under `wal.type: none`, `edge` alone is a complete node.
 
 One image, many deployments: *which* children start is a runtime config
 decision, never a build-time one. Embedding the library instead?
@@ -26,8 +29,11 @@ inside your own supervision tree.
 `roles` list (`[:edge, :dispatch, :storage]`) because it opens a port that
 serves stored payloads. A node running it alone needs no store, only
 blob-store credentials, and can be scaled independently
-from ingest/dispatch/storage exactly like any other role. It does no
-authentication: put a proxy, mesh, or network policy in front of it. See
+from ingest/dispatch/storage exactly like any other role. It authenticates its
+readers (`claim_check.auth`: a bearer token, OIDC access token or client
+certificate, holding `claims:read` and the claim's tenant), and `mode: none`
+is accepted only on loopback or with `allow_insecure: true`; a proxy or network
+policy in front is still a good idea. See
 [`claim-check.md`](claim-check.md) for the full contract and the worked
 `examples/rabbitmq-consumer/` deployment (an `ingest` service plus a
 separate `claim-check` service, same image, different `ANKUSA_ROLES`).
@@ -40,7 +46,8 @@ supported: there is no network-reachable store to point them at. The constraint
 does not apply to `:claim_check`, which only reads the blob store and can run
 on its own node.
 
-This whole paragraph is about `wal.type: disk`, the default. Under
+This whole paragraph is about the store-backed modes, `wal.type: disk` (the
+default) and `dual`. Under
 `wal.type: none` no hook is committed: the node runs the `edge` role with the
 queue's readers (`dispatch`, `storage`) dropped from `roles` automatically
 (`GET /health` on the admin port shows the effective list), needs no queue
@@ -118,7 +125,9 @@ synced write in the last second and no write has failed in the last 5 s
 (`200`, `{"status":"ready","store":"ok",…}`), or not (`503`,
 `Retry-After: 1`, `store` = `write_failed` or
 `store_unavailable` — a full volume, a latched RocksDB error, a store that is
-reopening). A node with no store (`wal.type: none`, a gateway) is ready while
+reopening — and `reason`, why: `no_space`, `io_error`, `read_only`,
+`corruption`, `busy`, `timeout`, `not_running` or `other`). A node with no
+store (`wal.type: none`, a gateway) is ready while
 it runs (`store: "none"`). Both
 are on the ingest port and on the admin port. Point a Kubernetes
 `livenessProbe` at `/health` and the `readinessProbe` at `:4000/ready` (a
@@ -480,7 +489,7 @@ Two 0.3 config keys now fail as unknown keys: `dispatch.poll_ms` (dispatch no
 longer polls — a commit wakes it, and it otherwise sleeps until the earliest
 due row) and an HTTP sink's `ordered` (deliveries are not ordered). In core,
 `wal: {Ankusa.WAL.DiskLog, _}` raises `ArgumentError` with a hint to use
-`wal: :disk`; any other value but `:disk` or `:none` raises too.
+`wal: :disk`; any other value but `:disk`, `:dual` or `:none` raises too.
 
 ## Rolling back a minor
 

@@ -8,6 +8,12 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `scope` on `AdminRejectedError` and `RoutesRejectedError`: the scope a
+  `403 forbidden` says the credential lacks (control planes require a
+  credential since Ankusa 0.6).
+- `verification` on parsed headers, decoded messages and received deliveries:
+  how Ankusa verified the hook at ingest (`{status, flagged}`, `null` from a
+  node older than the field).
 - `parse_claim_ref` and `ClaimCheckClient::redeem` accept signed, expiring v2
   refs (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`):
   `ParsedClaimRef::path()` ends in `?exp=&sig=` and `redeem` requests it as
@@ -21,6 +27,9 @@ this project follows [Semantic Versioning](https://semver.org/).
   the delivery must verify (as `verify_signature`); with none and no
   `allow_unsigned` it returns `InvalidSignatureError` (`invalid_secret`). The
   signature is judged before the hook id.
+- `AdminClient::list_audit`: `GET /v1/audit`, the audit trail (newest first,
+  paged by `cursor`/`limit`, filtered by `since`, `until`, `actor`, `action`,
+  `tenant`).
 
 ## [0.5.0] - 2026-10-14
 

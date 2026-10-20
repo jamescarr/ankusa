@@ -15,6 +15,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::claim_ref::parse_claim_ref;
+use crate::webhook::Verification;
 
 /// A decoded `v: 1` queue message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +50,9 @@ pub struct Message {
     pub idempotency_key: Option<String>,
     /// The forwarded provider request headers, lowercased.
     pub headers: BTreeMap<String, String>,
+    /// How Ankusa verified the hook at ingest; `None` from a node older than
+    /// the field.
+    pub verification: Option<Verification>,
 }
 
 impl Message {
@@ -183,6 +187,7 @@ pub fn decode_message(data: &[u8]) -> Result<Message, InvalidMessageError> {
     let idempotency_key = optional_string(&map, "idempotency_key")?;
     let headers = headers_field(&map)?;
     let sha256 = sha256_field(&map)?;
+    let verification = verification_field(&map)?;
 
     // Body form.
     let has_body = map.get("body_base64").is_some_and(|value| !value.is_null());
@@ -246,6 +251,7 @@ pub fn decode_message(data: &[u8]) -> Result<Message, InvalidMessageError> {
         replay_id,
         idempotency_key,
         headers,
+        verification,
     })
 }
 
@@ -316,9 +322,33 @@ fn is_lowercase_hex_64(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
+/// `verification` is absent or `null` (predates the field), or an object of
+/// a non-empty string `status` and a boolean `flagged`; any other shape is
+/// `invalid_field`. The status value itself is never validated: unknown
+/// statuses pass through untouched.
+fn verification_field(
+    map: &serde_json::Map<String, Value>,
+) -> Result<Option<Verification>, InvalidMessageError> {
+    match map.get("verification") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(fields)) => {
+            let status = match fields.get("status") {
+                Some(Value::String(status)) if !status.is_empty() => status.clone(),
+                _ => return Err(invalid("invalid_field", Some("verification"))),
+            };
+            let flagged = match fields.get("flagged") {
+                Some(Value::Bool(flagged)) => *flagged,
+                _ => return Err(invalid("invalid_field", Some("verification"))),
+            };
+            Ok(Some(Verification { status, flagged }))
+        }
+        Some(_) => Err(invalid("invalid_field", Some("verification"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{InvalidMessageError, decode_message};
+    use super::{InvalidMessageError, Verification, decode_message};
 
     fn err(data: &str) -> InvalidMessageError {
         decode_message(data.as_bytes()).expect_err("invalid message")
@@ -408,5 +438,42 @@ mod tests {
                 "sha256":"d9298a10d1b0735837dc4bd85dac641b0f3cef27a47e5d53a54f2f3f5b2fcffa"}"#,
         );
         assert_eq!(digest.code, "integrity");
+    }
+
+    #[test]
+    fn verification_absent_decodes_to_none() {
+        let message = decode_message(
+            br#"{"v":1,"id":"01a0","source_id":"s","received_at":1,"size":5,
+                "body_base64":"aGVsbG8="}"#,
+        )
+        .expect("valid message");
+        assert_eq!(message.verification, None);
+    }
+
+    #[test]
+    fn verification_flagged_is_true() {
+        let message = decode_message(
+            br#"{"v":1,"id":"01a0","source_id":"s","received_at":1,"size":5,
+                "body_base64":"aGVsbG8=",
+                "verification":{"status":"failed","flagged":true}}"#,
+        )
+        .expect("valid message");
+        assert_eq!(
+            message.verification,
+            Some(Verification {
+                status: "failed".to_owned(),
+                flagged: true,
+            })
+        );
+    }
+
+    #[test]
+    fn verification_malformed_is_an_invalid_field() {
+        let bad = err(
+            r#"{"v":1,"id":"01a0","source_id":"s","received_at":1,"size":5,
+                "body_base64":"aGVsbG8=","verification":"ok"}"#,
+        );
+        assert_eq!(bad.code, "invalid_field");
+        assert_eq!(bad.field, Some("verification"));
     }
 }

@@ -35,6 +35,28 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   earlier image, and an earlier node cannot read segments of format 1. See
   [`storage.md`](../../docs/storage.md#ankusacodec-and-segment-format).
 
+- **Store failure telemetry, `/ready` reasons and a reopen backoff (DUR-5).**
+  `[:ankusa, :store, :write_failed]` (one per failed write a process reported and
+  per failed readiness probe, with a `class` from the fixed set
+  `Ankusa.Store.failure_class/1` returns), `[:ankusa, :store, :reopened]` (one
+  per reopen attempt: `:duration` is the WAL replay, `:unavailable_ms` the outage so
+  far) and `[:ankusa, :store, :unavailable]` (`:seconds`, `0` at boot and once
+  open) feed `ankusa_store_write_failures_total{class}`,
+  `ankusa_store_reopen_total{result}`, `ankusa_store_unavailable_seconds` and
+  `ankusa_store_wal_replay_seconds`. `/ready`'s `503` body gains `reason`
+  (`no_space`, `io_error`, `read_only`, `corruption`, `busy`, `timeout`,
+  `not_running`, `other`). A store that fails to reopen retries by itself after
+  5 s, then twice as long each time up to 60 s, each wait jittered down by up to a
+  quarter (`retry_open_ms`, `retry_open_max_ms` store options). **Changed:**
+  `Ankusa.Store.ready/1` answers `{:error, {:store_unavailable | :write_failed,
+  class}}` instead of `{:error, :store_unavailable | :write_failed | raw_reason}`.
+  **Also:** the reopen a failed write asks for now waits until a synced write of
+  a small file next to the database works (`ankusa_store_reopen_total{result="deferred"}`)
+  instead of closing a database that still answers reads while the disk still
+  fails. The crash drills' EIO windows fail only the file data area (journal and
+  metadata stay up), their harness logs to stderr (it was silent), and they
+  check `/ready`'s `reason` and the `ankusa_store_*` series.
+  See `docs/storage.md#durability-corruption-full-disk`.
 - **Object-store adapters: conditional puts, jittered retries, checksums, multipart,
   pools, credential refresh (DUR-7).** `Ankusa.BlobStore.put_if_absent/4` (a new
   callback every store implements; S3 and Azure `If-None-Match: *`, GCS

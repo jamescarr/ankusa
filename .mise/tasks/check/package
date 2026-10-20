@@ -89,6 +89,9 @@ case "$kind" in
   npm)
     npm ci
     npm run typecheck
+    npm run generate:types
+    git diff --exit-code -- src/admin/admin-schema.d.ts src/claim-check/claim-check-schema.d.ts \
+      || fail "sdk-typescript: generated OpenAPI types are stale; run 'npm run generate:types' in packages/sdk-typescript and commit"
     npm run build
     npm test
     ;;

@@ -182,6 +182,39 @@ impl<T: Transport> AdminClient<T> {
         decode(response.body()).map_err(AdminError::Unavailable)
     }
 
+    /// `GET /v1/audit`: one page of the audit trail, newest first.
+    ///
+    /// # Errors
+    ///
+    /// [`AdminError`], as its variants document. Naming a tenant the caller
+    /// cannot see is [`AdminError::Rejected`] with scope `tenant:*`.
+    pub async fn list_audit(&self, params: &ListAuditParams) -> Result<AuditPage, AdminError> {
+        let mut query = Query::new();
+        if let Some(since) = params.since {
+            query.push_display("since", since);
+        }
+        if let Some(until) = params.until {
+            query.push_display("until", until);
+        }
+        if let Some(actor) = params.actor.as_deref() {
+            query.push_str("actor", actor);
+        }
+        if let Some(tenant) = params.tenant.as_deref() {
+            query.push_str("tenant", tenant);
+        }
+        if let Some(action) = params.action.as_deref() {
+            query.push_str("action", action);
+        }
+        if let Some(limit) = params.limit {
+            query.push_display("limit", limit);
+        }
+        if let Some(cursor) = params.cursor.as_deref() {
+            query.push_str("cursor", cursor);
+        }
+        let response = self.get(&format!("/v1/audit{}", query.finish())).await?;
+        decode(response.body()).map_err(AdminError::Unavailable)
+    }
+
     async fn get(&self, path_and_query: &str) -> Result<http::Response<Bytes>, AdminError> {
         let response = self
             .core
@@ -243,13 +276,19 @@ fn check(response: http::Response<Bytes>) -> Result<http::Response<Bytes>, Admin
         return Err(AdminError::Rejected {
             status,
             code: string("error"),
+            scope: string("scope"),
         });
     }
     if status.is_client_error() {
+        let body = error_body(response.body());
         return Err(AdminError::Rejected {
             status,
-            code: error_body(response.body())
+            code: body
                 .get("error")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            scope: body
+                .get("scope")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
         });
@@ -324,6 +363,56 @@ pub struct QuarantineEntry {
 pub struct QuarantinePage {
     /// The entries on this page.
     pub entries: Vec<QuarantineEntry>,
+}
+
+/// One row of the audit trail.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AuditEntry {
+    /// The row's place in commit order. Strictly increasing; the key of the
+    /// row.
+    pub seq: u64,
+    /// When the change was committed, as the node recorded it.
+    pub at: String,
+    /// The principal id; `system` for a change made from code.
+    pub actor: String,
+    /// The client address, behind `routes.trusted_proxies` the one
+    /// `X-Forwarded-For` names.
+    pub remote_ip: String,
+    /// `source.create|update|delete`, `rate_limit.put|delete`,
+    /// `quarantine.purge`, `replay.create|update|cancel`,
+    /// `route.create|update|delete`, `ip_rules.put`.
+    pub action: String,
+    /// The tenant, for rows that belong to one.
+    pub tenant: Option<String>,
+    /// The subject's id (`<tenant>.<name>` for a source, the route id, the
+    /// replay job id).
+    pub resource: String,
+    /// HMAC-SHA256 (hex) of the subject before the change; `null` when there
+    /// was none.
+    pub before_hash: String,
+    /// HMAC-SHA256 (hex) of the subject after the change; `null` for a
+    /// delete.
+    pub after_hash: String,
+    /// The request's `X-Request-Id`, or the id the node made up.
+    pub request_id: String,
+    /// `ok`, `failed`, or `interrupted`.
+    pub result: String,
+    /// The subject's revision after the change, for a subject that has one.
+    pub revision: Option<i64>,
+    /// Non-secret particulars: a purge's filter and count, a replay's kind, a
+    /// rate limit's numbers.
+    pub detail: serde_json::Map<String, serde_json::Value>,
+}
+
+/// One page of the audit trail, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AuditPage {
+    /// The rows on this page.
+    pub entries: Vec<AuditEntry>,
+    /// Pass as `cursor` for the next page; `None` on the last.
+    pub next_cursor: Option<String>,
 }
 
 /// A replay job.
@@ -448,6 +537,32 @@ pub struct ListQuarantinedParams {
     pub limit: Option<u32>,
 }
 
+/// The filters `GET /v1/audit` accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ListAuditParams {
+    /// Inclusive lower bound on `at`, unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<i64>,
+    /// Inclusive upper bound on `at`, unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<i64>,
+    /// The principal id that made the change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    /// Exact tenant. Naming one the caller cannot see is a `403`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    /// One action, such as `source.update` or `route.delete`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Page size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// The `next_cursor` of the previous page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
 /// Something the operator API would not do.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -466,6 +581,8 @@ pub enum AdminError {
         status: http::StatusCode,
         /// The API's `error` code, e.g. `invalid_filter`.
         code: Option<String>,
+        /// On a `403`: the scope the credential lacks.
+        scope: Option<String>,
     },
     /// No usable answer: a `5xx`, an unfollowed redirect, a timeout, a
     /// transport failure, or a success body that was not JSON.
@@ -580,7 +697,7 @@ mod tests {
     async fn a_missing_replay_is_a_rejection_with_the_body_code() {
         let client = client(Recording::new(404, r#"{"error":"replay_not_found"}"#));
         match client.get_replay("missing").await.expect_err("missing") {
-            AdminError::Rejected { status, code } => {
+            AdminError::Rejected { status, code, .. } => {
                 assert_eq!(status, http::StatusCode::NOT_FOUND);
                 assert_eq!(code.as_deref(), Some("replay_not_found"));
             }
