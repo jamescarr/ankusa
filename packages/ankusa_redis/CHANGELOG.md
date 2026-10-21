@@ -60,9 +60,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Requires `ankusa ~> 0.7` (`Ankusa.Sink.Messaging`, `Ankusa.Sink.Connections`);
+  publish core first.
 - `Ankusa.Sink.Redis` is built on core's `Ankusa.Sink.Messaging` and
-  `Ankusa.Sink.Connections` (requires the `ankusa` release that has them).
-  What it publishes is unchanged.
+  `Ankusa.Sink.Connections`. What it publishes is unchanged.
 
 ## [0.5.0] - 2026-10-14
 

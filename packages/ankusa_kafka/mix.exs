@@ -81,11 +81,11 @@ defmodule AnkusaKafka.MixProject do
         {:async_api_spex, path: "../async_api_spex", override: true}
       ]
     else
-      # `~> 0.6`, not older: a record the broker will never take is returned as
-      # `{:error, {:permanent, _}}`, which only core 0.6 dead-letters at once
-      # (0.5 would retry it for the whole policy), so Hex must never pair this
-      # with an older core. Publish core first.
-      [{:ankusa, "~> 0.6"}]
+      # `~> 0.7`, not older: the sink is built on `Ankusa.Sink.Messaging` and
+      # its brod clients on `Ankusa.Sink.Connections`, and `Ankusa.Intake.Kafka`
+      # implements `Ankusa.Intake`; core ships all three from 0.7.0, so Hex must
+      # never pair this with an older core. Publish core first.
+      [{:ankusa, "~> 0.7"}]
     end
   end
 end
