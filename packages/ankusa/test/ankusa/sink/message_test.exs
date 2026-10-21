@@ -207,4 +207,47 @@ defmodule Ankusa.Sink.MessageTest do
     assert decoded["headers"] == %{"x-a" => "1"}
     assert decoded["sha256"] == Base.encode16(:crypto.hash(:sha256, env.body), case: :lower)
   end
+
+  # ── transport metadata ────────────────────────────────────────────────────
+
+  test "headers/2 always carries the tenant header, empty without a tenant", %{ctx: ctx} do
+    env = envelope("x", %{tenant_id: nil})
+
+    assert Message.headers(env, ctx) == [
+             {"ankusa_id", env.id},
+             {"ankusa_source_id", "src"},
+             {"ankusa_tenant_id", ""},
+             {"ankusa_message_version", "1"},
+             {"ankusa_idempotency_key", Ankusa.Envelope.idempotency_key(env)},
+             {"content_type", "application/json"}
+           ]
+  end
+
+  test "headers/2 appends the dedupe key and the replay id when the hook has them",
+       %{ctx: ctx} do
+    env = envelope("x", %{dedupe_key: "evt_1"})
+
+    assert Message.headers(env, Map.put(ctx, :replay_id, "rid")) == [
+             {"ankusa_id", env.id},
+             {"ankusa_source_id", "src"},
+             {"ankusa_tenant_id", "t1"},
+             {"ankusa_message_version", "1"},
+             {"ankusa_idempotency_key", "t1:src:evt_1"},
+             {"content_type", "application/json"},
+             {"ankusa_dedupe_key", "evt_1"},
+             {"ankusa_replay_id", "rid"}
+           ]
+  end
+
+  test "delivery_id/2 is the hook's id, made distinct per replay", %{ctx: ctx} do
+    env = envelope("x")
+
+    assert Message.delivery_id(env, ctx) == env.id
+    assert Message.delivery_id(env, Map.put(ctx, :replay_id, "rid")) == env.id <> ":replay:rid"
+  end
+
+  test "fits/2 takes exactly max bytes and refuses one more as permanent" do
+    assert Message.fits(100, 100) == :ok
+    assert Message.fits(101, 100) == {:error, {:permanent, {:message_too_large, 101, 100}}}
+  end
 end

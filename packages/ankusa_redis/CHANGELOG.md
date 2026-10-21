@@ -58,6 +58,12 @@ follows [Semantic Versioning](https://semver.org/).
   previous-key entries to the current key, compare-and-set in batches, safe
   beside other nodes. Requires the `ankusa` release with `secrets`.
 
+### Changed
+
+- `Ankusa.Sink.Redis` is built on core's `Ankusa.Sink.Messaging` and
+  `Ankusa.Sink.Connections` (requires the `ankusa` release that has them).
+  What it publishes is unchanged.
+
 ## [0.5.0] - 2026-10-14
 
 ### Added

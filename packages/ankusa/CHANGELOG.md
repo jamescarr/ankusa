@@ -13,6 +13,22 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **`Ankusa.Sink.Messaging` and `Ankusa.Sink.Connections`: the shared shape of
+  a queue-style sink.** `use Ankusa.Sink.Messaging` and implement `publish/4`:
+  the injected `deliver/3` encodes the hook as `Ankusa.Sink.Message` (inline,
+  or its claim) and hands the payload over, and `inline_max_bytes/1` is
+  implemented for you; `resolve/2`/`static/1` read a "string or function of
+  the hook" option, `endpoints/1` a broker list (`"host:port"`,
+  `{host, port}`, or one comma-separated string).
+  `Ankusa.Sink.Connections.start_link/1` starts an adapter's
+  `<sink>.Supervisor` + `<sink>.Reaper` tree under `<sink>.TopSup`, and
+  `ensure/5` finds or starts a connection under it and touches it in the
+  reaper. `Ankusa.Sink.Message` gains `headers/2` (the `ankusa_*` transport
+  headers, tenant always present), `delivery_id/2` (`id`, or
+  `id:replay:<replay_id>`) and `fits/2` (the
+  `{:permanent, {:message_too_large, size, max}}` gate);
+  `Ankusa.HttpClient.authority/1` is public. `mise run new:adapter` scaffolds
+  the new shape. Docs: `packaging.md#adding-a-new-adapter-package`.
 - **Claim gateway integrity check, and gateway, sweep and archive metrics
   (CLM-1).** `claim_check.integrity_check` (`:manifest`, the default, or
   `:off`): the gateway holds every whole-claim `GET` to the sha256 its pack's
@@ -792,6 +808,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- `Ankusa.Sink.SQS` and `Ankusa.Sink.GooglePubSub` are built on
+  `Ankusa.Sink.Messaging`; what they send is unchanged.
 - **The quarantine pen no longer serializes every flagged hook (DUR-9).** A
   source's bucket is one ETS row updated with a compare-and-swap
   (`RateLimiter.hit_bucket/4`), the pen's byte count and the number of writes

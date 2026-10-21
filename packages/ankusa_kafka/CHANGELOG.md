@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Redpanda service stays for the sink's tests); `bench/partition_bench.exs` measures
   what one partition carries.
 
+### Changed
+
+- `Ankusa.Sink.Kafka` is built on core's `Ankusa.Sink.Messaging` and
+  `Ankusa.Sink.Connections` (requires the `ankusa` release that has them).
+  Records are unchanged; `:brokers` also takes one comma-separated
+  `"host:port,host:port"` string, and an entry without a port raises
+  `ArgumentError` instead of `MatchError`.
+
 ## [0.6.0] - 2026-10-14
 
 ### Added

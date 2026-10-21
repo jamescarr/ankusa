@@ -6,6 +6,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `Ankusa.Sink.RabbitMQ` is built on core's `Ankusa.Sink.Messaging` and
+  `Ankusa.Sink.Connections` (requires the `ankusa` release that has them).
+  What it publishes is unchanged.
+
 ## [0.6.0] - 2026-10-14
 
 ### Added
