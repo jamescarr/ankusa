@@ -10,6 +10,16 @@ name: Release (npm)
 # Requires an `NPM_TOKEN` repository secret: an npmjs.com Automation access
 # token (so it isn't blocked by 2FA-on-publish), scoped to publish. See
 # docs/releasing.md.
+#
+# npm also supports Trusted Publishing (OIDC), configured on npmjs.com for
+# this repo + workflow + `main`, but it can't be used yet: npm's registry
+# rejects this repo's immutable OIDC subject claim with a misleading
+# "package not found" (npm/cli#9969, open, untriaged). The repository
+# variable NPM_AUTH switches the auth path: unset or any value other than
+# "oidc" uses NPM_TOKEN (the default, below); "oidc" drops the token and
+# publishes via the configured trusted publisher. Flip it once npm fixes
+# #9969 — no other change is needed — then remove NPM_TOKEN's secret and
+# this comment.
 
 on:
   push:
@@ -55,10 +65,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+
+      # Token mode needs setup-node's registry-url: it writes the .npmrc
+      # line that makes NODE_AUTH_TOKEN below actually authenticate.
+      - name: Set up Node (token auth)
+        if: vars.NPM_AUTH != 'oidc'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+
+      # OIDC mode must NOT set registry-url: the placeholder it leaves in
+      # .npmrc for an unset NODE_AUTH_TOKEN turns npm's refusal into a
+      # misleading "package not found" instead of a clean auth error.
+      - name: Set up Node (OIDC auth)
+        if: vars.NPM_AUTH == 'oidc'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      # Trusted publishing needs npm >= 11.5.1; don't rely on whatever
+      # setup-node's Node 24 bundles.
+      - name: Upgrade npm for trusted publishing
+        if: vars.NPM_AUTH == 'oidc'
+        run: npm install -g npm@^11.5.1
 
       - name: npm ci
         working-directory: packages/sdk-typescript
@@ -71,7 +101,7 @@ jobs:
       - name: Publish package
         working-directory: packages/sdk-typescript
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ vars.NPM_AUTH != 'oidc' && secrets.NPM_TOKEN || '' }}
         run: npm publish --provenance --access public
 
       - name: Create GitHub release
