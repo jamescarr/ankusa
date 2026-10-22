@@ -98,10 +98,10 @@ defmodule Ankusa.Sink.SQS do
                              `Req.Test`); see `Ankusa.HttpClient`.
   """
 
-  @behaviour Ankusa.Sink
+  use Ankusa.Sink.Messaging
 
   alias Ankusa.{Envelope, HttpClient}
-  alias Ankusa.Sink.{Description, Message}
+  alias Ankusa.Sink.{Description, Message, Messaging}
 
   @default_max_message_bytes 1_048_576
   @default_timeout_ms 5_000
@@ -112,23 +112,17 @@ defmodule Ankusa.Sink.SQS do
   @permanent_codes ~w(InvalidMessageContents InvalidParameterValue InvalidParameterValueException)
 
   @impl true
-  def deliver(%Envelope{} = env, ctx, opts) do
+  def publish(payload, %Envelope{} = env, ctx, opts) do
     max = Keyword.get(opts, :max_message_bytes, @default_max_message_bytes)
+    attributes = attributes(env, ctx)
 
-    with {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)),
-         attributes = attributes(env, ctx),
-         :ok <- fits(payload, attributes, max),
+    with :ok <- Message.fits(size(payload, attributes), max),
          {:ok, creds} <- Ankusa.AWS.Credentials.get(opts) do
-      body = request_body(env, ctx, opts, payload, attributes)
-
       opts
-      |> send_message(creds, body)
+      |> send_message(creds, request_body(env, ctx, opts, payload, attributes))
       |> reply(payload)
     end
   end
-
-  @impl true
-  def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
 
   @impl true
   def describe(_subject, opts) do
@@ -137,7 +131,7 @@ defmodule Ankusa.Sink.SQS do
 
     %Description{
       protocol: "sqs",
-      host: authority(endpoint(opts) <> "/"),
+      host: HttpClient.authority(endpoint(opts) <> "/"),
       address: name,
       channel_bindings: %{
         "sqs" => %{
@@ -155,16 +149,11 @@ defmodule Ankusa.Sink.SQS do
 
   # SQS counts every attribute's name, data type and value toward the message
   # size limit, alongside the body.
-  defp fits(payload, attributes, max) do
-    size =
-      Enum.reduce(attributes, byte_size(payload), fn {name, attribute}, acc ->
-        acc + byte_size(name) + byte_size(attribute["DataType"]) +
-          byte_size(attribute["StringValue"])
-      end)
-
-    if size > max,
-      do: {:error, {:permanent, {:message_too_large, size, max}}},
-      else: :ok
+  defp size(payload, attributes) do
+    Enum.reduce(attributes, byte_size(payload), fn {name, attribute}, acc ->
+      acc + byte_size(name) + byte_size(attribute["DataType"]) +
+        byte_size(attribute["StringValue"])
+    end)
   end
 
   defp attributes(env, ctx) do
@@ -184,7 +173,7 @@ defmodule Ankusa.Sink.SQS do
   defp put_ordering(request, env, ctx, opts, true = _fifo?) do
     Map.merge(request, %{
       "MessageGroupId" => group(env, opts),
-      "MessageDeduplicationId" => deduplication_id(env, ctx)
+      "MessageDeduplicationId" => Message.delivery_id(env, ctx)
     })
   end
 
@@ -199,15 +188,7 @@ defmodule Ankusa.Sink.SQS do
   defp group(env, opts) do
     case Keyword.get(opts, :message_group_id) do
       nil -> "#{env.tenant_id}/#{env.source_id}"
-      group when is_binary(group) -> group
-      fun when is_function(fun, 1) -> fun.(env)
-    end
-  end
-
-  defp deduplication_id(env, ctx) do
-    case ctx[:replay_id] do
-      replay_id when is_binary(replay_id) -> env.id <> ":replay:" <> replay_id
-      _ -> env.id
+      group -> Messaging.resolve(group, env)
     end
   end
 
@@ -219,7 +200,7 @@ defmodule Ankusa.Sink.SQS do
     # signed header.
     headers =
       [
-        {"host", authority(url)},
+        {"host", HttpClient.authority(url)},
         {"content-type", "application/x-amz-json-1.0"},
         {"x-amz-target", "AmazonSQS.SendMessage"}
       ] ++
@@ -300,16 +281,10 @@ defmodule Ankusa.Sink.SQS do
     case Keyword.get(opts, :endpoint) do
       nil ->
         url = Keyword.fetch!(opts, :queue_url)
-        URI.parse(url).scheme <> "://" <> authority(url)
+        URI.parse(url).scheme <> "://" <> HttpClient.authority(url)
 
       endpoint ->
         String.trim_trailing(endpoint, "/")
     end
-  end
-
-  defp authority(url) do
-    %URI{host: host, port: port, scheme: scheme} = URI.parse(url)
-    default = if scheme == "https", do: 443, else: 80
-    if port == default, do: host, else: "#{host}:#{port}"
   end
 end

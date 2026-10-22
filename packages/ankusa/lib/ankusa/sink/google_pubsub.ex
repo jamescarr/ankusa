@@ -90,10 +90,10 @@ defmodule Ankusa.Sink.GooglePubSub do
                              `Req.Test`); see `Ankusa.HttpClient`.
   """
 
-  @behaviour Ankusa.Sink
+  use Ankusa.Sink.Messaging
 
   alias Ankusa.{Envelope, HttpClient}
-  alias Ankusa.Sink.{Description, Message}
+  alias Ankusa.Sink.{Description, Message, Messaging}
 
   @default_endpoint "https://pubsub.googleapis.com"
   @default_max_message_bytes 10_000_000
@@ -104,21 +104,18 @@ defmodule Ankusa.Sink.GooglePubSub do
   @permanent_statuses ~w(INVALID_ARGUMENT)
 
   @impl true
-  def deliver(%Envelope{} = env, ctx, opts) do
+  def publish(payload, %Envelope{} = env, ctx, opts) do
     max = Keyword.get(opts, :max_message_bytes, @default_max_message_bytes)
+    attributes = Map.new(Message.attributes(env, ctx))
+    key = Messaging.resolve(Keyword.get(opts, :ordering_key), env)
 
-    with {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)),
-         attributes = Map.new(Message.attributes(env, ctx)),
-         key = ordering_key(env, opts),
-         :ok <- fits(payload, attributes, key, max),
+    with :ok <- Message.fits(size(payload, attributes, key), max),
          {:ok, auth_headers} <- auth(opts) do
-      body = request_body(payload, attributes, key)
-
       HttpClient.request(
         :post,
         publish_url(opts),
         auth_headers ++ [{"content-type", "application/json"}],
-        body,
+        request_body(payload, attributes, key),
         Keyword.get(opts, :timeout_ms, @default_timeout_ms),
         Keyword.get(opts, :req_options, [])
       )
@@ -127,25 +124,22 @@ defmodule Ankusa.Sink.GooglePubSub do
   end
 
   @impl true
-  def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
-
-  @impl true
   def describe(_subject, opts) do
     project = Keyword.fetch!(opts, :project)
     topic = Keyword.fetch!(opts, :topic)
 
     message_bindings =
-      case Keyword.get(opts, :ordering_key) do
+      case Messaging.static(Keyword.get(opts, :ordering_key)) do
         key when is_binary(key) ->
           %{"googlepubsub" => %{"orderingKey" => key, "bindingVersion" => @binding_version}}
 
-        _ ->
+        nil ->
           %{}
       end
 
     %Description{
       protocol: "googlepubsub",
-      host: authority(endpoint(opts)),
+      host: HttpClient.authority(endpoint(opts)),
       address: "projects/#{project}/topics/#{topic}",
       channel_bindings: %{"googlepubsub" => %{"bindingVersion" => @binding_version}},
       message_bindings: message_bindings,
@@ -156,25 +150,12 @@ defmodule Ankusa.Sink.GooglePubSub do
     }
   end
 
-  defp ordering_key(env, opts) do
-    case Keyword.get(opts, :ordering_key) do
-      nil -> nil
-      key when is_binary(key) -> key
-      fun when is_function(fun, 1) -> fun.(env)
-    end
-  end
-
   # Pub/Sub counts the data, every attribute's name and value, and the ordering
   # key toward the message size limit.
-  defp fits(payload, attributes, key, max) do
-    size =
-      Enum.reduce(attributes, byte_size(payload) + byte_size(key || ""), fn {name, value}, acc ->
-        acc + byte_size(name) + byte_size(value)
-      end)
-
-    if size > max,
-      do: {:error, {:permanent, {:message_too_large, size, max}}},
-      else: :ok
+  defp size(payload, attributes, key) do
+    Enum.reduce(attributes, byte_size(payload) + byte_size(key || ""), fn {name, value}, acc ->
+      acc + byte_size(name) + byte_size(value)
+    end)
   end
 
   # No `:token_provider` sends no credential at all (an emulator). A provider
@@ -244,11 +225,5 @@ defmodule Ankusa.Sink.GooglePubSub do
 
   defp endpoint(opts) do
     opts |> Keyword.get(:endpoint, @default_endpoint) |> String.trim_trailing("/")
-  end
-
-  defp authority(url) do
-    %URI{host: host, port: port, scheme: scheme} = URI.parse(url)
-    default = if scheme == "https", do: 443, else: 80
-    if port == default, do: host, else: "#{host}:#{port}"
   end
 end

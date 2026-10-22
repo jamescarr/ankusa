@@ -6,6 +6,13 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `ankusa ~> 0.7` (`Ankusa.Sink.Messaging`, `Ankusa.Sink.Connections`);
+  publish core first.
+- `Ankusa.Sink.RabbitMQ` is built on core's `Ankusa.Sink.Messaging` and
+  `Ankusa.Sink.Connections`. What it publishes is unchanged.
+
 ## [0.6.0] - 2026-10-14
 
 ### Added

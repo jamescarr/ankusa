@@ -138,6 +138,17 @@ defmodule Ankusa.HttpClient do
     :exit, reason -> {:error, {:exit, reason}}
   end
 
+  @doc """
+  The `host`, or `host:port` when the port is not the scheme's default, of
+  `url` — a `host` header, a description's `:host`.
+  """
+  @spec authority(String.t()) :: String.t()
+  def authority(url) do
+    %URI{host: host, port: port, scheme: scheme} = URI.parse(url)
+    default = if scheme == "https", do: 443, else: 80
+    if port == default, do: host, else: "#{host}:#{port}"
+  end
+
   # A named pool owns the connection options; otherwise the request carries them.
   defp connect_option(url, timeout_ms, opts, tls) do
     if Keyword.has_key?(opts, :finch),

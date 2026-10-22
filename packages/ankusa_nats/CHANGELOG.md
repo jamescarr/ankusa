@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{:error, {:permanent, :max_payload_exceeded}}` and is dead-lettered at once.
   gnat 1.18 refuses it before sending; on 1.17 the server closed the
   connection, cutting off every publish in flight on it.
+- Requires `ankusa ~> 0.7` (`Ankusa.Sink.Messaging`, `Ankusa.Sink.Connections`);
+  publish core first.
+- `Ankusa.Sink.NATS` is built on core's `Ankusa.Sink.Messaging` and
+  `Ankusa.Sink.Connections`. Same headers and values; `ankusa_message_version`
+  now comes before `ankusa_idempotency_key`, the order `Ankusa.Sink.Kafka`
+  sends. An entry of `:servers` without a port raises `ArgumentError` instead
+  of `MatchError`.
 
 ## [0.6.0] - 2026-10-14
 
