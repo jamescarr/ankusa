@@ -509,7 +509,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/sink/message.ex:40-61,143-161`, `sink.ex`, `packages/ankusa_kafka/lib/ankusa/sink/kafka.ex`, `packages/ankusa_nats/lib/ankusa/sink/nats.ex`.
   *Evidence:* —
 
-- [ ] **DEL-1.a — ADR: opt-in ordering lanes** · P1 · Deps: TEN-3 `[design-gate]`
+- [x] **DEL-1.a — ADR: opt-in ordering lanes** · P1 · Deps: TEN-3 `[design-gate]`
   *Why:* delivery is unordered by design (`sink.ex:24-31`); decision taken: bring back per-key ordering as an opt-in per source/sink.
   *Change:* ADR deciding: `ordered: true` + `ordering_key: {mod, fun, args} | {:header, name} | {:json, path}` on a source's sink entry; lane = `{tenant, source, sink, key}` single-flight; retry blocks the lane only; lane state in a store index so restarts preserve it (a key-layout change registered through F6's registry, with fixture); SQS FIFO `MessageGroupId` = key, Pub/Sub `orderingKey` = key, Kafka record key = key, RabbitMQ/NATS/Redis documented as consumer-side; HTTP sequential per lane; replay respects lanes; metrics `ankusa_dispatch_lanes_blocked`.
   *Done when:* `docs/adr/0004-ordering-lanes.md` merged.
