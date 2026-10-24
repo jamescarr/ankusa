@@ -89,17 +89,17 @@ Each rule has a **Check** — the thing a reviewer (human or agent) does to conf
 3. **Implement.** Branch `hardening/<ID>-<slug>`, one task per PR, draft PR per the repo's git rules. Update the docs the behaviour touches in the same PR (`configuration.md` keys, the guarantees table in `architecture.md`, `testing.md` coverage, `delivery.md`/`storage.md` claims). Keep every ground rule; if the task as written would break one, fix the task text's *Change* (not its *Done when*) and say so in the Evidence line.
 4. **Prove.** Run the task's Proof commands exactly as written; run `mise run check:package <pkg>` for every touched package (all adapters and `ankusa_server` for a core change); `mise run bench:gate` if a hot-path file changed; `mise run check:conformance` if `conformance/` or any `packages/sdk-*` changed; `mise run check:examples` if `examples/` changed.
 5. **Record.** Check the box only if every Proof passed in this session. Replace `*Evidence:* —` with `*Evidence:* <YYYY-MM-DD> · PR #<n> · <commands run> · <2–5 key output lines>`. Never reword a task's *Done when* or *Proof*; never delete a task; never check a task whose proof was skipped or hand-written.
-6. **Blocked.** If a proof fails or a prerequisite is missing, leave the box unchecked, append `Blocked (<date>): <what failed> · <what was tried>`, and if the fix is a distinct piece of work append a new task at the end of the same phase with the next free ID in that phase. Move on to the next eligible task. A later run clears the `Blocked:` line when it resolves it.
-7. **Split.** A task that needs more than one PR is split in place into `<ID>.a`, `<ID>.b`, … ; the original *Done when* and *Proof* move to the last sub-task; earlier sub-tasks get their own narrower proof. Splitting never narrows the original acceptance.
+6. **Blocked.** If a proof fails or a prerequisite is missing, leave the box unchecked, append `Blocked (<date>): <what failed> · <what was tried>`, and if the fix is a distinct piece of work append a new task at the end of the Task list (never mid-file: `(after:)` tags are positional) with the next free ID in its phase and its own tag. Move on to the next eligible task. A later run clears the `Blocked:` line when it resolves it.
+7. **Split.** A task that needs more than one PR is split in place into `<ID>.a`, `<ID>.b`, … ; the original *Done when* and *Proof* move to the last sub-task; earlier sub-tasks get their own narrower proof. Splitting never narrows the original acceptance. With `(after:)` tags, never insert mid-file: keep the original line in place as the last sub-task, append the earlier sub-tasks at the end of the Task list, and add their ordinals to the original's tag.
 8. **Rebaseline.** A perf baseline changes only in a dedicated PR titled `perf: rebaseline <reason>` with the before/after numbers in the description.
 9. **Every tenth completed task:** run `mise run check` in full, then update the `Status:` line at the top of the Task list.
 10. **Never** mark a task done while its own acceptance fails, report a check that did not run, or narrow scope silently; say what failed and what is open.
 
 ## Task list
 
-Status: 0/64 done · P0 open: 29 · last updated: 2026-10-17
+Status: 45/69 done · P0 open: 2 (OPS-4, CON-1) · last updated: 2026-10-24
 
-Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with evidence), *Change* (what to build; module/config names are decided, not suggestions), *Done when* (observable acceptance), *Proof* (commands and expected output), *Anchors* (where to read first), *Evidence* (filled by the loop). Priorities: **P0** blocks a Salesforce deploy (loss, isolation, security, no recovery); **P1** needed before GA (ops, observability, scale ceilings); **P2** hardening.
+Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with evidence), *Change* (what to build; module/config names are decided, not suggestions), *Done when* (observable acceptance), *Proof* (commands and expected output), *Anchors* (where to read first), *Evidence* (filled by the loop). Priorities: **P0** blocks a Salesforce deploy (loss, isolation, security, no recovery); **P1** needed before GA (ops, observability, scale ceilings); **P2** hardening. A trailing `(after: N, …)` repeats the bullet's unchecked `Deps` as bullet ordinals (every checkbox bullet counted in file order, ticked ones included) plus any ordering a shared file forces; `/plan-loop` reads only the tag, so keep it and `Deps` in step, and renumber every tag after an inserted bullet in the same PR.
 
 ### Phase 0 — Gates (make every later task provable)
 
@@ -479,11 +479,11 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
 
 - [x] **DEL-2 — Retry horizon, per-source policy, explicit error classification** · P1 · Deps: F7
   *Why:* the retry policy is global with 84 attempts and no wall-clock deadline (`retry_policy/exponential.ex:8-30`, `config.ex:70`); `Retry-After` is capped at 1 h by a module attribute (`dispatch/pipeline.ex:80-81`); SQS `AccessDenied`/`QueueDoesNotExist` and Pub/Sub `PERMISSION_DENIED`/`NOT_FOUND` are retried for hours (`sink/sqs.ex:270-279`, `sink/google_pubsub.ex:226-233`).
-  *Change:* `retry: %{max_elapsed_ms}` (default 24 h) and per-source `retry:` on `Ankusa.Source`; `dispatch.max_retry_after_ms` (default 1 h); `first_attempt_at` persisted in the delivery row (F7 versioning); auth/config errors → `{:permanent, {:config, _}}` with `ankusa_dispatch_config_errors_total{sink}`; AWS `Throttling`/429/503 and Pub/Sub `RESOURCE_EXHAUSTED` → `{:retry_after, ms}` with full jitter; HTTP 409/425/451 classified explicitly and documented. *Amended (2026-10-20, DUR-2.c interaction):* the claim-expiry bound is `max(dispatch.retry max_elapsed_ms, every claim-using source's retry.max_elapsed_ms) + dlq.retention_days + redeem_grace_ms` (replacing the fixed 21-day horizon of the old 84-attempt policy), validated on every source create/update (`422 retry_exceeds_claim_expiry` when the source routes to a claim-checking sink in an object store and the bound exceeds `claim_check.bucket_expiry_days`) and at boot over configured and stored sources (persistent and Redis source stores), which refuse as DUR-2.c does; lifecycle sinks keep the global `dispatch.retry` horizon.
+  *Change:* `retry: %{max_elapsed_ms}` (default 24 h) and per-source `retry:` on `Ankusa.Source`; `dispatch.max_retry_after_ms` (default 1 h); `first_attempt_at` persisted in the delivery row (F7 versioning); auth/config errors → `{:permanent, {:config, _}}` with `ankusa_dispatch_config_errors_total{sink}`; AWS `Throttling`/429/503 and Pub/Sub `RESOURCE_EXHAUSTED` → `{:retry_after, ms}` with full jitter; HTTP 409/425/451 classified explicitly and documented.
   *Done when:* a property test shows no schedule exceeds the horizon; a 30 h sink outage dead-letters at 24 h, not 6 h; per-source override is honoured across a restart.
   *Proof:* `mix test test/ankusa/retry_policy_exponential_test.exs test/ankusa/dispatch_test.exs test/ankusa/sink/{sqs,google_pubsub}_test.exs` → the new cases.
   *Anchors:* `packages/ankusa/lib/ankusa/retry_policy/exponential.ex`, `dispatch/pipeline.ex:80-81,1302-1315`, `source.ex:8-33`, `sink/sqs.ex:252-279`, `sink/google_pubsub.ex:220-233`.
-  *Evidence:* 2026-10-20 · PR #163 · Proof command (`mix test` retry_policy_exponential/dispatch/sink sqs+google_pubsub: 58 passed incl. 1 property), `mise run check:package` for `ankusa` (1674 passed, 88.78 %), `ankusa_server` (183), `ankusa_redis` (78), `ankusa_nats` (14), `ankusa_rabbitmq` (32), `ankusa_kafka` (34), `mise run bench:gate` (main as `BENCH_REBASELINE=1` baseline, then the change, same machine), `MIX_ENV=test mix run bench/outage_bench.exs` · bench main → change: 512B ingest/s 25 681 → 25 625 (−0.2 %), p99 16.73 → 16.27 ms (limit 20.08); 10240B p99 24.61 → 20.33 ms; 512B-c32 p99 15.99 → 8.91 ms; PASS · **Amended Change (protocol §3):** claim-expiry bound = `max(dispatch.retry max_elapsed_ms, every claim-using source's retry.max_elapsed_ms) + dlq.retention_days + redeem_grace_ms` (default floor 32 days, was the fixed 21-day horizon of the 84-attempt policy), refused on source write (`422 retry_exceeds_claim_expiry`) and at boot for configured, Persistent and Redis-stored sources; **lifecycle sinks keep the global `dispatch.retry` horizon** (the cursor's head-of-line wait is bounded by it, 24 h by default, not by any source's). The default `redeem_grace_ms` (24 h) equals the default horizon. · **Sink-outage drill** (`bench/outage_bench.exs`, 100 000 hooks, about 830× the DUR-2.c drill's 120, default 24 h policy, breakers on): gauge tick during the fill 344 µs at 10 k, 345 µs at 50 k, 443 µs at 100 k rows (flat); after the first failure wave (100 000 `scheduled`, wave 10.5 s) gauge tick median 5.2 ms (max 7.5 ms) and dispatch scan tick (nothing due) median 5.0 ms (max 5.4 ms): **not flat against the empty store (~0.4 ms)**, the cost of tombstoned due-index keys the first wave leaves, and it grew 1.2 → 3.8 ms across the 30 000-row horizon-expiry wave; it stays under 8 ms at 100 k and was not measured past that, so the DUR-3.b follow-up (RocksDB compaction and cache sizing under a large due backlog) owns whether it keeps growing at 86 M rows. `archive_pending` equals the stored hook count (100 000, then 30 000) from ingest until the compactor runs and does not move with the horizon wave (30 000 dead rows, `archive_pending` constant); one `Compactor.tick/1` drained 30 000 in 497 ms. The 24 h default is kept.
+  *Evidence:* —
 
 - [ ] **DEL-3 — Owned, bounded HTTP connection pools** · P1 · Deps: —
   *Why:* Req's default Finch gives one pool per origin, 50 connections, `pool_max_idle_time: :infinity`, `conn_max_idle_time: :infinity`, HTTP/1 only; at 10⁵ tenant origins that is 10⁵ pools and millions of sockets with nothing reaping them.
@@ -493,7 +493,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/http_client.ex`, `application.ex`, `sink/reaper.ex`, `docs/deployment.md:197-214`.
   *Evidence:* —
 
-- [ ] **DEL-4 — SQS and Pub/Sub batching workers** · P1 · Deps: —
+- [ ] **DEL-4 — SQS and Pub/Sub batching workers** · P1 · Deps: — (after: 47)
   *Why:* one HTTP request per message (`sink/sqs.ex:214-250`, `sink/google_pubsub.ex:107-130`); `SendMessageBatch` (10) and Pub/Sub's 1 000-message `publish` are unused.
   *Change:* `Sink.SQS.Batcher` (linger 20 ms, max 10 entries / 256 KiB, bounded queue) and `Sink.GooglePubSub.Batcher` (max 1 000 / 10 MB); per-entry results mapped back (`Successful`/`Failed`, each classified); a delivery is answered only after its batch's response; rows stay claimed so a worker crash retries them.
   *Done when:* 10 k messages/s make ~10× / ~1 000× fewer requests; a partial failure dead-letters exactly the failed entries; a killed batcher loses nothing.
@@ -512,16 +512,16 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
 - [ ] **DEL-1.a — ADR: opt-in ordering lanes** · P1 · Deps: TEN-3 `[design-gate]`
   *Why:* delivery is unordered by design (`sink.ex:24-31`); decision taken: bring back per-key ordering as an opt-in per source/sink.
   *Change:* ADR deciding: `ordered: true` + `ordering_key: {mod, fun, args} | {:header, name} | {:json, path}` on a source's sink entry; lane = `{tenant, source, sink, key}` single-flight; retry blocks the lane only; lane state in a store index so restarts preserve it (a key-layout change registered through F6's registry, with fixture); SQS FIFO `MessageGroupId` = key, Pub/Sub `orderingKey` = key, Kafka record key = key, RabbitMQ/NATS/Redis documented as consumer-side; HTTP sequential per lane; replay respects lanes; metrics `ankusa_dispatch_lanes_blocked`.
-  *Done when:* `docs/adr/0003-ordering-lanes.md` merged.
+  *Done when:* `docs/adr/0004-ordering-lanes.md` merged.
   *Proof:* PR merged; links pass.
   *Anchors:* `packages/ankusa/lib/ankusa/sink.ex:24-31`, `dispatch/pipeline.ex:1094-1140`, `sink/sqs.ex:195-211`, `sink/google_pubsub.ex:118-120,159-165`.
   *Evidence:* —
 
-- [ ] **DEL-1.b — Implement ordering lanes** · P1 · Deps: DEL-1.a
+- [ ] **DEL-1.b — Implement ordering lanes** · P1 · Deps: DEL-1.a (after: 51, 47)
   *Change:* as decided in the ADR; `docs/delivery.md` ordering section rewritten.
   *Done when:* 100 hooks for one key delivered with a mid-stream retry arrive in order at the receiver; other keys stay concurrent; lanes survive a restart.
   *Proof:* `mix test test/ankusa/dispatch/ordering_test.exs` (new) → `ordered lane`, `other keys concurrent`, `survives restart`; `mise run bench:gate` → PASS.
-  *Anchors:* ADR 0003.
+  *Anchors:* ADR 0004.
   *Evidence:* —
 
 - [ ] **DEL-6 — Fleet replay with tenant/sink/error filters and bounded DLQ listing** · P1 · Deps: TEN-1.b
@@ -542,7 +542,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
 
 ### Phase 5 — Observability and operations
 
-- [ ] **OPS-1 — OpenTelemetry tracing end to end** · P1 · Deps: F7
+- [ ] **OPS-1 — OpenTelemetry tracing end to end** · P1 · Deps: F7 (after: 50)
   *Why:* no OpenTelemetry anywhere; `traceparent` is stored as an opaque header and forwarded but never parsed or linked (`telemetry.ex:9-46`, `edge/ingest.ex:312-320`, `sink/message.ex:96-99`); dispatch has no span, no duration.
   *Change:* `opentelemetry_api` in core (no-op without an SDK); `ankusa_server` adds `opentelemetry` + `opentelemetry_exporter` behind `tracing: %{enabled, otlp_endpoint, sample_ratio}`; `Edge.Router` extracts `traceparent`/`tracestate` into `Envelope.trace` (F7 field); spans `ankusa.ingest` (child of the provider's), `ankusa.verify`, `ankusa.commit`, `ankusa.dispatch.attempt` (linked to the ingest span from the stored context), `ankusa.claim_check`, `ankusa.replay`; propagation: `traceparent` header on `Sink.Http`, `traceparent`/`tracestate` fields plus the broker-native header in `Sink.Message`, CloudEvents `traceparent` extension on lifecycle events; conformance decode case for the fields.
   *Done when:* a `traceparent` sent to the edge reaches an SDK consumer unchanged and the in-memory exporter shows ingest → commit → dispatch spans sharing the trace id.
@@ -550,7 +550,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/telemetry.ex`, `edge/router.ex:56-74`, `edge/ingest.ex:184-188,312-331`, `dispatch/pipeline.ex:746-752,1273-1278`, `sink/message.ex:72-129`, `sink/http.ex:196-198`, `lifecycle.ex:39-56`.
   *Evidence:* —
 
-- [ ] **OPS-2 — Structured JSON logs with correlation, runtime log level** · P1 · Deps: SEC-1
+- [ ] **OPS-2 — Structured JSON logs with correlation, runtime log level** · P1 · Deps: SEC-1 (after: 55)
   *Why:* plain-text logs with `metadata: []`, no hook/tenant/source correlation, no runtime level change (`ankusa_server/config/config.exs:4`, `ankusa_server/application.ex:35-37`).
   *Change:* `AnkusaServer.LogFormatter` (one JSON object per line: `time, level, msg, instance, hook_id, tenant_id, source_id, sink, trace_id`); `Logger.metadata` set in `Edge.Router.capture/2`, `Ingest.ingest/4`, dispatch attempts, lifecycle publish, replay; `log: %{format: :json | :text, level}`; `Ankusa.LogLevel.set/1` + `PUT /v1/log-level` (scope `config:write`); the formatter redacts values of keys matching `secret|token|password|authorization|cookie`.
   *Done when:* a failing commit's log line parses as JSON with `source_id`/`tenant_id`; a request line carries `trace_id`; the level changes at runtime without restart and is audited.
@@ -558,7 +558,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa_server/lib/ankusa_server/application.ex:27-50`, `packages/ankusa_server/config/config.exs`, `packages/ankusa/lib/ankusa/edge/router.ex:56-74`.
   *Evidence:* —
 
-- [ ] **OPS-3 — SLI metrics: delivery latency, attempt duration, failure counters** · P1 · Deps: —
+- [ ] **OPS-3 — SLI metrics: delivery latency, attempt duration, failure counters** · P1 · Deps: — (after: 55)
   *Why:* `[:ankusa, :dispatch, :stop]` has no measurements (`telemetry.ex:24`, `pipeline.ex:1273-1278`); no end-to-end latency, no compactor/claim/backup failure counters, no SLO definitions.
   *Change:* measurements `attempt_ms` and `since_received_ms` on dispatch stop; histograms `ankusa_delivery_latency_seconds{tenant_id,sink,result}` (buckets to 60 s) and `ankusa_dispatch_attempt_duration_seconds{sink,result}`; `tenant_id` on `ankusa_ingest_duration_seconds`; counters `ankusa_compact_failures_total`, `ankusa_claim_check_failures_total{op}`, `ankusa_backup_failures_total`; the ground-rule SLO table referenced from `architecture.md#telemetry`.
   *Done when:* a `GateSink` delay shows up in the histogram `_sum`; every series in the SLO table exists on `/metrics`.
@@ -566,7 +566,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/telemetry.ex:24-30`, `dispatch/pipeline.ex:746-752,1273-1278`, `metrics.ex:46-47,159-179,251-271`.
   *Evidence:* —
 
-- [ ] **OPS-4 — Graceful drain on SIGTERM** · P0 · Deps: DUR-6
+- [ ] **OPS-4 — Graceful drain on SIGTERM** · P0 · Deps: DUR-6 (after: 59)
   *Why:* neither application defines `prep_stop/1`; readiness never flips; the ThousandIsland `shutdown_timeout` (15 s) equals the batcher's 15 s commit-start deadline, so a commit that starts late is killed mid-fsync and the provider sees a reset for a committed hook (`ankusa_server/application.ex:27-50`, `instance.ex:180-205`, `health.ex:3-22`).
   *Change:* `prep_stop/1` in `Ankusa.Application` and `AnkusaServer.Application`: `Ankusa.Health.drain(instance)` (`/ready` → `503 {"status":"draining"}`), sleep `listener.drain_delay_ms` (default 5 s), stop the edge listener with `shutdown_timeout = batcher.deadline_ms + commit p99 budget + 5 s` computed from config, wait until every batcher's in-flight count is 0 (bounded by `listener.drain_timeout_ms`, default 30 s), let dispatch flush outcomes, run the DUR-6 final checkpoint, then let the tree stop. `deployment.md`: `terminationGracePeriodSeconds ≥ drain_delay + drain_timeout + 10`.
   *Done when:* SIGTERM with 200 in-flight POSTs against a slow sink yields every request a `201` or `503`, zero connection resets, `/ready` 503 within 100 ms of the signal, and every `201` present after restart.
@@ -582,7 +582,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/health.ex`, `store.ex:345-355`, `metrics/gauges.ex:44-51`, `edge/publish.ex`.
   *Evidence:* —
 
-- [ ] **OPS-6 — Config reload and config schema version** · P1 · Deps: SEC-1, SEC-9
+- [ ] **OPS-6 — Config reload and config schema version** · P1 · Deps: SEC-1, SEC-9 (after: 56)
   *Why:* no key reloads without restart; no schema version; unknown root keys reject (`ankusa_server/config.ex:65,328`).
   *Change:* root key `config_version: 1` with a migration map in the loader; `SIGHUP` and `POST /v1/config/reload` (scope `config:write`) re-read the file, re-resolve secrets (SEC-9), and apply the declared reloadable set — `log`, `rate_limits`, static `sources` (secret rotation), `routes` seed, `dispatch.concurrency`, `dispatch.sink_concurrency`, `dispatch.tenants`, `metrics.detail`, `admin.gauge_interval_ms` — refusing with `409` and the list of non-reloadable keys that changed; one audit row per reload.
   *Done when:* changing `log.level` and a tenant rate limit then reloading takes effect without restart; changing `port` is refused naming the key.
@@ -590,7 +590,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa_server/lib/ankusa_server/config.ex:60-70,200-260,320-340`, `packages/ankusa/lib/ankusa/config.ex`, `source_store.ex:208-224`.
   *Evidence:* —
 
-- [ ] **OPS-7 — Alert rules, dashboards, runbooks, checked in CI** · P1 · Deps: OPS-3
+- [ ] **OPS-7 — Alert rules, dashboards, runbooks, checked in CI** · P1 · Deps: OPS-3 (after: 57)
   *Why:* nothing ships; `architecture.md:486-498` only asserts the metrics are "enough to alert".
   *Change:* `deploy/monitoring/prometheus-rules.yaml` (ack error ratio > 1 %, ack p99 > 1 s, `oldest_due_age > 300`, `dispatch_breakers_open > 0` for 5 m, `backup_age > 300`, `disk_free < 10 %`, `dlq_rows` growth, `subtree_down`, `intake_failures`, `tenant_overload` rate, `store_write_failures`), `deploy/monitoring/grafana/ankusa.json`, `docs/runbooks/{disk-full,dlq-growth,breaker-open,backup-stale,node-unready,intake-down,tenant-overload,store-write-failed}.md` each with symptom → metric → action → verification; `.mise/tasks/check/monitoring` running `promtool check rules` and verifying every alert's `runbook_url` resolves; wired into `check/_default` and `ci.yml`.
   *Done when:* CI fails on a broken rule or a missing runbook; every SLO row has an alert.
@@ -598,7 +598,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `docs/architecture.md:472-495`, `packages/ankusa/lib/ankusa/metrics.ex`, `.mise/tasks/check/_default`.
   *Evidence:* —
 
-- [ ] **OPS-8 — Helm chart, hardened pod spec, topology and multi-region guidance** · P1 · Deps: OPS-4, OPS-5
+- [ ] **OPS-8 — Helm chart, hardened pod spec, topology and multi-region guidance** · P1 · Deps: OPS-4, OPS-5 (after: 58, 59)
   *Why:* no chart/PDB/HPA/PVC guidance; the demo chart uses `emptyDir` for a store node and probes readiness on `/health`; no `securityContext` anywhere; multi-region is undefined.
   *Change:* `deploy/helm/ankusa`: StatefulSet for `wal.type: disk | dual`, Deployment for `wal.type: none`; `startupProbe`/`/health`/`/ready`; PDB `maxUnavailable: 1`; HPA on `ankusa_queue_pending` and CPU for stateless; `terminationGracePeriodSeconds` from OPS-4; `topologySpreadConstraints`; `securityContext` (non-root, read-only rootfs, `drop: [ALL]`, seccomp `RuntimeDefault`); NetworkPolicy restricting 4001–4003 to the operator namespace; PVC sizing table (`bytes/s × mean body × backlog goal × 2`); `helm lint`/`helm template` in `check:examples`. `docs/deployment.md` multi-region section: independent regional fleets, tenant → region pinning at the global LB, one intake topic per region, `backup.secondary` cross-region, no cross-region store.
   *Done when:* `helm template` renders for all three modes and passes `kubeconform`; the F5 fleet can run from the chart on kind via `mise run e2e`.
@@ -616,7 +616,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/sdk-elixir/lib/ankusa/sdk/{message,hook,webhook}.ex`, `packages/ankusa/lib/ankusa/sink/message.ex:84-85,205-221`, `conformance/features.json`.
   *Evidence:* —
 
-- [ ] **CON-2 — Wire-format evolution path and producer-side conformance** · P1 · Deps: OPS-1
+- [ ] **CON-2 — Wire-format evolution path and producer-side conformance** · P1 · Deps: OPS-1 (after: 55, 63)
   *Why:* decoders accept `v == 1` only, vectors are decoder-only, and nothing proves core's encoder matches the vectors (`sdk-elixir message.ex:158-160`, `conformance/features.json:2-30`); a `v: 2` would break all nine SDKs at once.
   *Change:* SDKs accept `min_supported ≤ v ≤ max_supported` (both exposed) and map each version to the current struct; a producer vector file generated by `mix ankusa.conformance.gen` from `Sink.Message.encode/3`, with `check.mjs` asserting produced JSON equals the vector; `decode_lifecycle` operation; `message.decode.v2_additive` cases (v2 = v1 + additive fields) that every SDK must accept; additive origin fields `instance` and `region` (from `Config`) on messages and an `x-ankusa-region` AsyncAPI extension.
   *Done when:* a field added to `encode/3` without a vector update fails `check:conformance`; all SDKs decode the v2-additive cases.
@@ -632,7 +632,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/dedupe.ex:40-48,111-158`, `envelope.ex:61-64`, `docs/configuration.md` (sources).
   *Evidence:* —
 
-- [ ] **CON-4 — Consumer failure policy, header symmetry, lifecycle delete payload** · P2 · Deps: CON-1
+- [ ] **CON-4 — Consumer failure policy, header symmetry, lifecycle delete payload** · P2 · Deps: CON-1 (after: 63, 64)
   *Why:* poison-message guidance stops at `retryable: false` (`sdk-elixir/README.md:205-209`); HTTP deliveries omit `received_at`/`size`/`sha256` (`sdk hook.ex:3-10`); `SinkMessageHeaders` requires `ankusa_tenant_id` that `attributes/2` may drop (`sink/message.ex:116-131` vs `async_api/schemas.ex:123-160`).
   *Change:* `docs/delivery.md` "Consumer failure policy" (decode errors and version mismatch are permanent → terminal queue, counted); conformance cases asserting `retryable: false` for `invalid_json`/`unsupported_version` in all SDKs; optional `x-ankusa-received-at` and `x-ankusa-body-sha256` on `Sink.Http` parsed by SDKs; `ankusa_tenant_id` optional in the header schema; per-transport header sets described in `Ankusa.AsyncApi`.
   *Done when:* conformance passes the new cases; the AsyncAPI document validates with the schema change.
@@ -642,7 +642,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
 
 ### Phase 7 — Hot-path polish
 
-- [ ] **PERF-1 — Allocation cuts on the request path** · P2 · Deps: F1
+- [ ] **PERF-1 — Allocation cuts on the request path** · P2 · Deps: F1 (after: 65)
   *Why:* `Hmac.signed_bytes` materialises a second body copy via `Regex.replace` (`verifier/hmac.ex:240-250`); `Envelope.header/2` re-downcases every lookup (`envelope.ex:51-57`); the `{:json, path}` dedupe preset decodes the whole body on the request process (`dedupe.ex:125-134`); the rate-limiter sweep is a full `select_delete` every 60 s (`rate_limiter.ex:105-114`).
   *Change:* build the signing template as an iolist once at `resolve_scheme` and pass iodata to `:crypto.mac/4`; `Envelope.header/2` compares against already-lowercased names; `dedupe.max_json_bytes` (default 1 MiB) → key `nil` above it; shard the rate-limiter table by `phash2(tenant, 16)` and sweep one shard per tick.
   *Done when:* allocations per verify of an 8 MB body halve; a 9 MB JSON body yields a nil key with unchanged p99; a 1 M-row sweep takes < 50 ms.
@@ -658,7 +658,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/claim_check/sweeper.ex:75-130`, `claim_check.ex:129-142`, `claim_check/pack.ex:45-77`.
   *Evidence:* —
 
-- [ ] **PERF-3 — Scale fixtures in CI: 10⁵ sources and tenants** · P2 · Deps: TEN-7, TEN-9
+- [ ] **PERF-3 — Scale fixtures in CI: 10⁵ sources and tenants** · P2 · Deps: TEN-7, TEN-9 (after: 41)
   *Why:* no test runs with more than a handful of sources; `GET /asyncapi.json` build time, `SourceStore` fetch p99 and metrics series count at 10⁵ are unmeasured.
   *Change:* `bench/scale_bench.exs` generating 10⁵ sources/tenants (10⁶ nightly) into `Static`, `Persistent` and `Redis` stores; measures `fetch/2` p99, document build time, `/metrics` series count and scrape time; thresholds in `baseline.json`; run in `bench:gate` (10⁵) and the soak job (10⁶).
   *Done when:* fetch p99 < 1 ms, document build < 5 s at 10⁵, series count independent of n.
