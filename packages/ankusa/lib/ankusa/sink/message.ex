@@ -1,8 +1,8 @@
 defmodule Ankusa.Sink.Message do
   @moduledoc """
   The wire format every queue-style sink publishes (`Sink.RabbitMQ`,
-  `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`, `Sink.SQS`), so a consumer parses one format
-  regardless of transport.
+  `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`, `Sink.SQS`, `Sink.GooglePubSub`), so
+  a consumer parses one format regardless of transport.
 
   A body of at most `inline_max_bytes` (default 64 KiB) rides inline,
   base64-encoded. Anything larger lives in the claim check and the message
@@ -126,6 +126,60 @@ defmodule Ankusa.Sink.Message do
     ]
     |> Enum.filter(fn {_name, value} -> is_binary(value) and value != "" end)
   end
+
+  @doc """
+  The metadata a sink with transport headers carries beside the body
+  (`Ankusa.Sink.Kafka`, `Ankusa.Sink.NATS`), as `{name, value}` pairs in this
+  order: `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
+  `ankusa_message_version` ("1"), `ankusa_idempotency_key`, `content_type`
+  ("application/json"), then `ankusa_dedupe_key` and `ankusa_replay_id` when
+  the hook carries them. Unlike `attributes/2`, `ankusa_tenant_id` is always
+  present — `""` without a tenant — because such a sink's description promises
+  the header set (`ankusa_headers: true`) and the AsyncAPI header schema
+  requires it.
+  """
+  @spec headers(Envelope.t(), Ankusa.Sink.ctx()) :: [{String.t(), String.t()}]
+  def headers(%Envelope{} = env, ctx) do
+    [
+      {"ankusa_id", env.id},
+      {"ankusa_source_id", env.source_id},
+      {"ankusa_tenant_id", env.tenant_id || ""},
+      {"ankusa_message_version", "1"},
+      {"ankusa_idempotency_key", Envelope.idempotency_key(env)},
+      {"content_type", "application/json"}
+    ] ++
+      for {name, value} <- [
+            {"ankusa_dedupe_key", env.dedupe_key},
+            {"ankusa_replay_id", ctx[:replay_id]}
+          ],
+          is_binary(value),
+          do: {name, value}
+  end
+
+  @doc """
+  The id a broker dedupes one delivery on: the hook's `id`, or
+  `id:replay:<replay_id>` for a replay, so a retry after a lost ack collapses
+  while a deliberate replay of the same hook is stored again (SQS's
+  `MessageDeduplicationId`, NATS's `Nats-Msg-Id`).
+  """
+  @spec delivery_id(Envelope.t(), Ankusa.Sink.ctx()) :: String.t()
+  def delivery_id(%Envelope{id: id}, ctx) do
+    case ctx[:replay_id] do
+      replay_id when is_binary(replay_id) -> id <> ":replay:" <> replay_id
+      _ -> id
+    end
+  end
+
+  @doc """
+  Refuse a message the transport would never take, before sending it:
+  `size` bytes (the sink's own accounting — value plus key, body plus
+  attributes) against `max`. Over it is `{:error, {:permanent,
+  {:message_too_large, size, max}}}`, dead-lettered at once.
+  """
+  @spec fits(non_neg_integer(), pos_integer()) ::
+          :ok | {:error, {:permanent, {:message_too_large, non_neg_integer(), pos_integer()}}}
+  def fits(size, max) when size > max, do: {:error, {:permanent, {:message_too_large, size, max}}}
+  def fits(_size, _max), do: :ok
 
   @doc """
   The provider request headers a sink may see, per the source's

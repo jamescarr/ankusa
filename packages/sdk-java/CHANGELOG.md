@@ -7,6 +7,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-22
+
 ### Added
 
 - `AdminClient.listAudit(ListAuditParams)`: `GET /v1/audit`, the audit trail
@@ -86,3 +88,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   different stack.
 - The language-neutral conformance runner (JUnit Jupiter, `ConformanceTest`), passing
   every vector in `conformance/cases`.
+
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-java-v0.1.0...HEAD
+[0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-java-v0.1.0

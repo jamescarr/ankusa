@@ -1,8 +1,8 @@
 defmodule Ankusa.Sink.Redis.Application do
   @moduledoc """
-  Boots a bare `DynamicSupervisor` that owns one Redix connection per
-  `{instance, url}`, started on demand by `Ankusa.Sink.Redis`'s `deliver/3`.
-  `ankusa` core doesn't know this package exists.
+  Starts the connection tree (`Ankusa.Sink.Connections`) for the Redix
+  connections `Ankusa.Sink.Redis` opens on demand from `publish/4`, one per
+  `{instance, url}`. `ankusa` core doesn't know this package exists.
 
   A disconnected or never-connected server never takes down ingest or
   dispatch: `deliver/3` returns `{:error, {:connection, reason}}` and the
@@ -12,14 +12,5 @@ defmodule Ankusa.Sink.Redis.Application do
   use Application
 
   @impl true
-  def start(_type, _args) do
-    children = [
-      {DynamicSupervisor, name: Ankusa.Sink.Redis.Supervisor, strategy: :one_for_one},
-      # Stops a connection no delivery has used for its `:idle_timeout_ms`.
-      {Ankusa.Sink.Reaper,
-       name: Ankusa.Sink.Redis.Reaper, supervisor: Ankusa.Sink.Redis.Supervisor}
-    ]
-
-    Supervisor.start_link(children, strategy: :one_for_one, name: Ankusa.Sink.Redis.TopSup)
-  end
+  def start(_type, _args), do: Ankusa.Sink.Connections.start_link(Ankusa.Sink.Redis)
 end

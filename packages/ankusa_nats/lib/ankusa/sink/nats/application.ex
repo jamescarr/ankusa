@@ -1,8 +1,8 @@
 defmodule Ankusa.Sink.NATS.Application do
   @moduledoc """
-  Boots a bare `DynamicSupervisor` that owns one gnat connection per
-  `{instance, connection}`, started on demand by `Ankusa.Sink.NATS`'s
-  `deliver/3`. `ankusa` core doesn't know this package exists.
+  Starts the connection tree (`Ankusa.Sink.Connections`) for the gnat
+  connections `Ankusa.Sink.NATS` opens on demand from `publish/4`, one per
+  `{instance, connection}`. `ankusa` core doesn't know this package exists.
 
   A disconnected or never-connected server never takes down ingest or
   dispatch: `deliver/3` returns `{:error, :not_connected}` and the source's
@@ -12,13 +12,5 @@ defmodule Ankusa.Sink.NATS.Application do
   use Application
 
   @impl true
-  def start(_type, _args) do
-    children = [
-      {DynamicSupervisor, name: Ankusa.Sink.NATS.Supervisor, strategy: :one_for_one},
-      # Stops a connection no delivery has used for its `:idle_timeout_ms`.
-      {Ankusa.Sink.Reaper, name: Ankusa.Sink.NATS.Reaper, supervisor: Ankusa.Sink.NATS.Supervisor}
-    ]
-
-    Supervisor.start_link(children, strategy: :one_for_one, name: Ankusa.Sink.NATS.TopSup)
-  end
+  def start(_type, _args), do: Ankusa.Sink.Connections.start_link(Ankusa.Sink.NATS)
 end

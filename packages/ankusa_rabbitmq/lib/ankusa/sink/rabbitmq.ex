@@ -46,24 +46,20 @@ defmodule Ankusa.Sink.RabbitMQ do
                               See `Ankusa.Sink.Reaper`
   """
 
-  @behaviour Ankusa.Sink
+  use Ankusa.Sink.Messaging
 
   alias Ankusa.Envelope
-  alias Ankusa.Sink.Description
-  alias Ankusa.Sink.Message
+  alias Ankusa.Sink.{Connections, Description, Messaging}
   alias Ankusa.Sink.RabbitMQ.Connection
   alias Ankusa.Sink.Reaper
 
   @impl true
-  def deliver(%Envelope{} = env, ctx, opts) do
-    exchange = Keyword.fetch!(opts, :exchange)
-    inline_max_bytes = Message.inline_max_bytes(opts)
+  def publish(payload, %Envelope{} = env, ctx, opts) do
+    with {:ok, pid} <- connection(ctx.instance, Keyword.fetch!(opts, :exchange), opts) do
+      routing_key =
+        Messaging.resolve(Keyword.get(opts, :routing_key, &default_routing_key/1), env)
 
-    with {:ok, name, pid, key} <- ensure_started(ctx.instance, exchange, opts),
-         {:ok, payload} <- Message.encode(env, ctx, inline_max_bytes) do
-      :ok = Reaper.touch(Ankusa.Sink.RabbitMQ.Reaper, {ctx.instance, key}, pid, idle_ms(opts))
-
-      Connection.publish(name, routing_key(env, opts), payload,
+      Connection.publish(pid, routing_key, payload,
         message_id: env.id,
         headers: amqp_headers(env, ctx)
       )
@@ -88,9 +84,6 @@ defmodule Ankusa.Sink.RabbitMQ do
 
   defp maybe_put_amqp(headers, name, value) when is_binary(value),
     do: [{name, :longstr, value} | headers]
-
-  @impl true
-  def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
 
   @impl true
   def describe(subject, opts) do
@@ -125,49 +118,43 @@ defmodule Ankusa.Sink.RabbitMQ do
 
   # Only a configured static routing key is a fixed address; a function
   # computes it per hook, so the document cannot name it.
-  defp address(%{source_id: source_id}, opts) do
-    case Keyword.get(opts, :routing_key) do
-      key when is_binary(key) -> key
-      fun when is_function(fun, 1) -> nil
-      nil -> "ankusa.#{source_id}"
-    end
-  end
+  defp address(%{source_id: source_id}, opts),
+    do: Messaging.static(Keyword.get(opts, :routing_key, "ankusa.#{source_id}"))
 
   # ── connection lifecycle ────────────────────────────────────────────────
 
-  # Registry first: the common case must not serialize every delivery through
-  # the DynamicSupervisor. One connection per `{url, exchange}`: two sinks for
-  # one exchange on different brokers never share one. The URL is in the key
-  # as a digest, because a registered name is printed by crash reports and
-  # `:sys.get_status/1` and the URL may carry a password; for the same reason
-  # the child spec carries it only inside a closure, which `inspect` prints
-  # without its captured values. The start returns before the connection
-  # dials, so a first publish may be `:not_connected`.
-  defp ensure_started(instance, exchange, opts) do
+  # One connection per `{url, exchange}`: two sinks for one exchange on
+  # different brokers never share one. The URL is in the key as a digest,
+  # because a registered name is printed by crash reports and
+  # `:sys.get_status/1` and the URL may carry a password. The start returns
+  # before the connection dials, so a first publish may be `:not_connected`.
+  defp connection(instance, exchange, opts) do
     url = Keyword.get(opts, :url, Connection.default_url())
     key = connection_key(url, exchange)
-    name = Ankusa.via(instance, key)
 
-    case Ankusa.whereis(instance, key) do
-      pid when is_pid(pid) ->
-        {:ok, name, pid, key}
+    Connections.ensure(
+      __MODULE__,
+      {instance, key},
+      fn -> Ankusa.whereis(instance, key) end,
+      fn -> connection_spec(instance, key, exchange, url, opts) end,
+      idle_ms(opts)
+    )
+  end
 
-      nil ->
-        conn_opts =
-          [instance: instance, name: name, exchange: exchange, url: fn -> url end] ++
-            Keyword.take(opts, [:exchange_type, :retry_ms, :confirm_timeout_ms, :max_inflight])
+  # The URL rides only inside a closure (`url: fn -> url end`), which `inspect`
+  # prints without its captured values: the child spec is in the supervisor's
+  # status and the URL may carry a password.
+  defp connection_spec(instance, key, exchange, url, opts) do
+    conn_opts =
+      [
+        instance: instance,
+        name: Ankusa.via(instance, key),
+        exchange: exchange,
+        url: fn -> url end
+      ] ++
+        Keyword.take(opts, [:exchange_type, :retry_ms, :confirm_timeout_ms, :max_inflight])
 
-        child = %{
-          id: {Connection, instance, key},
-          start: {Connection, :start_link, [conn_opts]}
-        }
-
-        case DynamicSupervisor.start_child(Ankusa.Sink.RabbitMQ.Supervisor, child) do
-          {:ok, pid} -> {:ok, name, pid, key}
-          {:error, {:already_started, pid}} -> {:ok, name, pid, key}
-          {:error, reason} -> {:error, reason}
-        end
-    end
+    %{id: {Connection, instance, key}, start: {Connection, :start_link, [conn_opts]}}
   end
 
   @doc false
@@ -175,13 +162,6 @@ defmodule Ankusa.Sink.RabbitMQ do
   @spec connection_key(String.t(), String.t()) :: {:rabbitmq_conn, {binary(), String.t()}}
   def connection_key(url, exchange),
     do: {:rabbitmq_conn, {binary_part(:crypto.hash(:sha256, url), 0, 16), exchange}}
-
-  defp routing_key(env, opts) do
-    case Keyword.get(opts, :routing_key, &default_routing_key/1) do
-      key when is_binary(key) -> key
-      fun when is_function(fun, 1) -> fun.(env)
-    end
-  end
 
   defp default_routing_key(env), do: "ankusa.#{env.source_id}"
 end
