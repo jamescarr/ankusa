@@ -6,9 +6,10 @@ defmodule Ankusa.Sink.Reaper do
   `ankusa_redis`) start one connection process per broker on the first
   delivery, under their own `DynamicSupervisor`. Without this, a source that is
   deleted, or re-pointed at another broker, leaves its connection open for the
-  life of the node. Each adapter runs one reaper next to its supervisor and
-  calls `touch/4` before every publish; a connection not touched for its
-  `idle_ms` is stopped through that supervisor (`DynamicSupervisor.terminate_child/2`,
+  life of the node. Each adapter's `Ankusa.Sink.Connections` tree runs one
+  reaper next to its supervisor, and `Ankusa.Sink.Connections.ensure/5` calls
+  `touch/4` before every publish; a connection not touched for its `idle_ms`
+  is stopped through that supervisor (`DynamicSupervisor.terminate_child/2`,
   so a `:permanent` child is removed, not restarted), and the next delivery
   that needs it starts a new one.
 

@@ -43,9 +43,10 @@ defmodule Ankusa.Sink.NATS do
     * **subject** — `:subject` (a static string, or a 1-arity fun over the
       `Ankusa.Envelope`).
     * **headers** — `Nats-Msg-Id` (`id`, or `id:replay:<replay_id>` on a
-      replay), then `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
-      `ankusa_idempotency_key`, `ankusa_message_version`, `content_type` — the
-      same set `Ankusa.Sink.Kafka` sets, plus `ankusa_dedupe_key` and
+      replay), then `Ankusa.Sink.Message.headers/2`: `ankusa_id`,
+      `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`,
+      `ankusa_idempotency_key`, `content_type` — the same set
+      `Ankusa.Sink.Kafka` sets, plus `ankusa_dedupe_key` and
       `ankusa_replay_id` when the hook carries them — so a consumer parses one
       set regardless of transport.
     * **body** — the `Ankusa.Sink.Message` JSON.
@@ -100,11 +101,10 @@ defmodule Ankusa.Sink.NATS do
   hang.
   """
 
-  @behaviour Ankusa.Sink
+  use Ankusa.Sink.Messaging
 
   alias Ankusa.Envelope
-  alias Ankusa.Sink.Description
-  alias Ankusa.Sink.Message
+  alias Ankusa.Sink.{Connections, Description, Message, Messaging}
   alias Ankusa.Sink.Reaper
 
   @default_publish_timeout_ms 5_000
@@ -118,19 +118,15 @@ defmodule Ankusa.Sink.NATS do
   @secret_settings [:password, :token, :nkey_seed]
 
   @impl true
-  def deliver(%Envelope{} = env, ctx, opts) do
-    subject = subject(env, opts)
+  def publish(payload, %Envelope{} = env, ctx, opts) do
     timeout = Keyword.get(opts, :publish_timeout_ms, @default_publish_timeout_ms)
     connection = Keyword.get(opts, :connection, :default)
 
-    with {:ok, conn} <- ensure_connection(ctx.instance, connection, opts, timeout),
-         {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)) do
-      publish(conn, subject, payload, headers(env, ctx), timeout)
+    with {:ok, conn} <- connection(ctx.instance, connection, opts, timeout) do
+      subject = Messaging.resolve(Keyword.fetch!(opts, :subject), env)
+      request_ack(conn, subject, payload, headers(env, ctx), timeout)
     end
   end
-
-  @impl true
-  def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
 
   @impl true
   def describe(subject, opts) do
@@ -147,18 +143,13 @@ defmodule Ankusa.Sink.NATS do
 
   # Only a configured static subject is a fixed address; a function computes it
   # per hook, so the document cannot name it.
-  defp address(_subject, opts) do
-    case Keyword.fetch!(opts, :subject) do
-      subject when is_binary(subject) -> subject
-      fun when is_function(fun, 1) -> nil
-    end
-  end
+  defp address(_subject, opts), do: Messaging.static(Keyword.fetch!(opts, :subject))
 
   # The publish is a request, not a `Gnat.pub/3`: `pub/3` returns once the bytes
   # are handed to the socket, while the whole point here is to wait for
   # JetStream's ack. gnat sends the publish with a reply inbox either way; only
   # `request/4` listens for the answer.
-  defp publish(conn, subject, payload, headers, timeout) do
+  defp request_ack(conn, subject, payload, headers, timeout) do
     case request(conn, subject, payload, headers, timeout) do
       {:ok, %{body: body}} when is_binary(body) and body != "" ->
         ack(body)
@@ -220,61 +211,29 @@ defmodule Ankusa.Sink.NATS do
     end
   end
 
-  defp headers(env, ctx) do
-    msg_id =
-      case ctx[:replay_id] do
-        r when is_binary(r) -> env.id <> ":replay:" <> r
-        _ -> env.id
-      end
-
-    [
-      {"Nats-Msg-Id", msg_id},
-      {"ankusa_id", env.id},
-      {"ankusa_source_id", env.source_id},
-      {"ankusa_tenant_id", env.tenant_id || ""},
-      {"ankusa_idempotency_key", Ankusa.Envelope.idempotency_key(env)},
-      {"ankusa_message_version", "1"},
-      {"content_type", "application/json"}
-    ]
-    |> maybe_header("ankusa_dedupe_key", env.dedupe_key)
-    |> maybe_header("ankusa_replay_id", ctx[:replay_id])
-  end
-
-  defp maybe_header(headers, _name, nil), do: headers
-  defp maybe_header(headers, name, value) when is_binary(value), do: headers ++ [{name, value}]
-
-  defp subject(env, opts) do
-    case Keyword.fetch!(opts, :subject) do
-      subject when is_binary(subject) -> subject
-      fun when is_function(fun, 1) -> fun.(env)
-    end
-  end
+  defp headers(env, ctx),
+    do: [{"Nats-Msg-Id", Message.delivery_id(env, ctx)} | Message.headers(env, ctx)]
 
   # ── connection lifecycle ────────────────────────────────────────────────
 
-  # `whereis` first: the common case must not serialize every delivery through
-  # the DynamicSupervisor. The supervisor answers its start at once and
-  # connects (and reconnects) on its own; the connection is there or it is not.
-  # The idle sweep stops the supervisor, which takes its connection with it.
-  @doc false
-  @spec ensure_connection(atom(), atom(), keyword(), pos_integer()) ::
-          {:ok, pid()} | {:error, term()}
-  def ensure_connection(instance, connection, opts, timeout) do
-    with {:ok, sup} <- ensure_supervisor(instance, connection, opts) do
-      idle = Reaper.idle_ms(opts, timeout + 1_000)
-      :ok = Reaper.touch(Ankusa.Sink.NATS.Reaper, {instance, {:nats_sup, connection}}, sup, idle)
+  # The supervisor answers its start at once and connects (and reconnects) on
+  # its own; the connection is there or it is not. The supervisor is the reaped
+  # process: the idle sweep stops it, which takes its connection with it.
+  defp connection(instance, connection, opts, timeout) do
+    key = {:nats_sup, connection}
 
+    with {:ok, _sup} <-
+           Connections.ensure(
+             __MODULE__,
+             {instance, key},
+             fn -> Ankusa.whereis(instance, key) end,
+             fn -> supervisor_spec(instance, connection, opts) end,
+             Reaper.idle_ms(opts, timeout + 1_000)
+           ) do
       case Ankusa.whereis(instance, {:nats_conn, connection}) do
         nil -> {:error, :not_connected}
         pid -> {:ok, pid}
       end
-    end
-  end
-
-  defp ensure_supervisor(instance, connection, opts) do
-    case Ankusa.whereis(instance, {:nats_sup, connection}) do
-      pid when is_pid(pid) -> {:ok, pid}
-      nil -> start_supervisor(instance, connection, opts)
     end
   end
 
@@ -283,26 +242,20 @@ defmodule Ankusa.Sink.NATS do
   # captured values, so the DynamicSupervisor's status and reports never show
   # them. Each secret is also a closure inside the settings (`hide_secret/1`),
   # so gnat's processes hold no plaintext either.
-  defp start_supervisor(instance, connection, opts) do
+  defp supervisor_spec(instance, connection, opts) do
     settings = %{
       connection_settings: servers(opts),
       name: Ankusa.via(instance, {:nats_conn, connection}),
       backoff_period: 2_000
     }
 
-    child = %{
+    %{
       id: {Gnat.ConnectionSupervisor, instance, connection},
       start:
         {__MODULE__, :start_connection_supervisor,
          [fn -> settings end, [name: Ankusa.via(instance, {:nats_sup, connection})]]},
       restart: :permanent
     }
-
-    case DynamicSupervisor.start_child(Ankusa.Sink.NATS.Supervisor, child) do
-      {:ok, pid} -> {:ok, pid}
-      {:error, {:already_started, pid}} -> {:ok, pid}
-      {:error, reason} -> {:error, reason}
-    end
   end
 
   @doc false
@@ -320,8 +273,10 @@ defmodule Ankusa.Sink.NATS do
 
     opts
     |> Keyword.fetch!(:servers)
-    |> server_list()
-    |> Enum.map(fn server -> Map.merge(overrides, server_settings(server)) end)
+    |> Messaging.endpoints()
+    |> Enum.map(fn {host, port} ->
+      Map.merge(overrides, %{host: to_charlist(host), port: port})
+    end)
   end
 
   # gnat (>= 1.18) calls a zero-arity function for these at each handshake, so
@@ -330,24 +285,6 @@ defmodule Ankusa.Sink.NATS do
     do: {key, fn -> value end}
 
   defp hide_secret(pair), do: pair
-
-  # `:servers` is a list of `"host:port"` strings or `{host, port}` tuples; a
-  # YAML loader may also hand over one comma-separated string.
-  defp server_list(servers) when is_binary(servers) do
-    servers
-    |> String.split(",")
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-  end
-
-  defp server_list(servers), do: servers
-
-  defp server_settings({host, port}), do: %{host: to_charlist(host), port: port}
-
-  defp server_settings(host_port) when is_binary(host_port) do
-    [host, port] = String.split(host_port, ":", parts: 2)
-    %{host: to_charlist(host), port: String.to_integer(port)}
-  end
 
   defp put_opt(map, _key, nil), do: map
   defp put_opt(map, key, value), do: Map.put(map, key, value)
