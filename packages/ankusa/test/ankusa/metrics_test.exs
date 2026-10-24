@@ -239,6 +239,29 @@ defmodule Ankusa.MetricsTest do
     refute scrape =~ ~r/ankusa_backup_verify_failed_total\{[^}]*target="primary"/
   end
 
+  test "dropped forwarded headers are counted per reason, never per source" do
+    inst = start_instance().instance
+
+    for {reason, count} <- [bytes: 2, bytes: 1, count: 4] do
+      Ankusa.Telemetry.emit([:sink, :headers_dropped], %{count: count}, %{
+        instance: inst,
+        source_id: "demo",
+        tenant_id: "default",
+        reason: reason
+      })
+    end
+
+    scrape = Ankusa.Metrics.scrape(inst)
+
+    assert scrape =~
+             ~r/^ankusa_sink_headers_dropped_total\{[^}]*reason="bytes"[^}]*\} 3$/m
+
+    assert scrape =~
+             ~r/^ankusa_sink_headers_dropped_total\{[^}]*reason="count"[^}]*\} 4$/m
+
+    refute scrape =~ ~r/^ankusa_sink_headers_dropped_total\{[^}]*source_id=/m
+  end
+
   test "the store's failure series follow its write failures and reopens" do
     config = start_instance()
     inst = config.instance

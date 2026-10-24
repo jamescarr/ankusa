@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `:max_message_bytes` (default 1 MiB, NATS's `max_payload`; DEL-5). A message
+  over it is never sent: an inline body whose base64 would not fit is checked
+  in and published as a claim, and a body over the limit by itself is
+  `{:permanent, {:message_too_large, size, max}}` without a server call.
+  Requires an `ankusa` release with the `max_message_bytes` sink callback;
+  publish core first.
+
 ### Changed
 
 - Requires `gnat ~> 1.18`. The sink hands `:password`, `:token` and

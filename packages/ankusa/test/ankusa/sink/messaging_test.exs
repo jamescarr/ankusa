@@ -91,6 +91,37 @@ defmodule Ankusa.Sink.MessagingTest do
     assert Ankusa.Sink.inline_max_bytes(Echo, inline_max_bytes: 10) == {:ok, 10}
   end
 
+  defmodule Capped do
+    use Ankusa.Sink.Messaging
+
+    @impl true
+    def max_message_bytes(opts), do: Keyword.get(opts, :cap, 50)
+
+    @impl true
+    def publish(payload, env, ctx, opts) do
+      send(opts[:to], {:published, payload, env, ctx})
+      :ok
+    end
+  end
+
+  test "max_message_bytes/1 defaults to the :max_message_bytes option, 1 MiB, and is overridable" do
+    assert Echo.max_message_bytes([]) == 1_048_576
+    assert Echo.max_message_bytes(max_message_bytes: 4_096) == 4_096
+    assert Capped.max_message_bytes([]) == 50
+  end
+
+  test "a body over the sink's limit by itself is permanent and publish/4 never runs", %{ctx: ctx} do
+    env = envelope(:binary.copy("a", 200))
+
+    assert Echo.deliver(env, ctx, to: self(), inline_max_bytes: 1_000, max_message_bytes: 100) ==
+             {:error, {:permanent, {:message_too_large, 200, 100}}}
+
+    assert Capped.deliver(env, ctx, to: self(), inline_max_bytes: 1_000) ==
+             {:error, {:permanent, {:message_too_large, 200, 50}}}
+
+    refute_receive {:published, _, _, _}
+  end
+
   test "a per-hook option resolves for a hook, and only a string is static" do
     env = envelope("x")
     fun = fn env -> env.source_id end

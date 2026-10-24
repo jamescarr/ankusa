@@ -112,7 +112,8 @@ jobs:
       # adapter sink `use`s, and `Ankusa.Sink.Connections`, which every adapter
       # `Application` starts, are new; DEL-2: `Ankusa.RetryPolicy.validate_opt!/3` and
       # `Ankusa.ClaimCheck.validate_stored_horizons!/2`, called by the image's loader and
-      # `ankusa_redis`'s source store, are new).
+      # `ankusa_redis`'s source store, are new; DEL-5: `Ankusa.Sink.Message.max_bytes/1`,
+      # which every adapter sink's `use Ankusa.Sink.Messaging` calls, is new).
       # The `v` is in the restore prefix too, so bumping it still misses.
       # A mix.lock change alone matches the prefix: the entry built from the
       # previous lockfile is restored, `mix deps.get --check-locked` fetches
@@ -125,9 +126,9 @@ jobs:
           path: |
             packages/${{ matrix.package }}/deps
             packages/${{ matrix.package }}/_build
-          key: mix-v12-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
+          key: mix-v13-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
           restore-keys: |
-            mix-v12-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
+            mix-v13-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
       # sdk-go has no dependencies outside the standard library, but
       # `go test -race -count=1` rebuilds the race-instrumented standard
       # library and the package on every run — 39 s of a 77 s job; locally the

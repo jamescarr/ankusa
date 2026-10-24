@@ -8,6 +8,15 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **Forwarded-header caps and sink message limits (DEL-5).** A source takes
+  `max_headers` (default 64) and `forward_headers_max_bytes` (default 16384):
+  a forwarded header past either is dropped whole and counted in
+  `ankusa_sink_headers_dropped_total{reason}`. `rabbitmq`, `nats` and `redis`
+  sinks take `max_message_bytes` (defaults 134217728, 1048576, 536870912).
+  A message over a sink's limit is checked in as a claim, or, when the body is
+  over it by itself, dead-lettered at once as `message_too_large` with no
+  broker call. Both source keys are positive integers; `reference.yml` and
+  `configuration.md` document them.
 - **`egress.pools` section (DEL-3).** `pool_size` (32), `pool_count` (1),
   `pool_timeout` (5000), `pool_max_idle_ms` (60000), `conn_max_idle_ms` (30000),
   `max_pools` (1024), `max_pools_per_tenant` (256) and `protocols` (`[http1,
