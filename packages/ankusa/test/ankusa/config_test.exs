@@ -34,6 +34,51 @@ defmodule Ankusa.ConfigTest do
     assert config.batcher.max_queue == 5
   end
 
+  describe "the egress.pools section" do
+    test "defaults to bounded, idle-swept pools" do
+      assert %{
+               pool_size: 32,
+               pool_count: 1,
+               pool_timeout: 5_000,
+               pool_max_idle_ms: 60_000,
+               conn_max_idle_ms: 30_000,
+               max_pools: 1_024,
+               max_pools_per_tenant: 256,
+               protocols: [:http1, :http2]
+             } = Config.new().egress.pools
+    end
+
+    test "merges over the defaults, and every number is range checked" do
+      config = Config.new(egress: [pools: [pool_size: 4]])
+
+      assert %{pool_size: 4, max_pools: 1_024} = config.egress.pools
+      # The policy beside it keeps its defaults, and a policy key keeps the pools'.
+      assert config.egress.deny_hosts == ["metadata.google.internal"]
+      assert %{pool_size: 32} = Config.new(egress: [allow_hosts: ["hooks.example"]]).egress.pools
+
+      for {key, bad, message} <- [
+            {:pool_size, 0, "an integer from 1 to 1024"},
+            {:pool_size, 1_025, "an integer from 1 to 1024"},
+            {:pool_count, 65, "an integer from 1 to 64"},
+            {:pool_timeout, 600_001, "an integer from 1 to 600000"},
+            {:max_pools, 65_537, "an integer from 1 to 65536"},
+            {:max_pools_per_tenant, 0, "an integer from 1 to 65536"},
+            {:pool_max_idle_ms, 0, "a positive integer"},
+            {:conn_max_idle_ms, -1, "a positive integer"},
+            {:protocols, [], "a non-empty list of :http1 and :http2"},
+            {:protocols, [:http3], "a non-empty list of :http1 and :http2"}
+          ] do
+        assert_raise ArgumentError, ~r/egress\.pools\.#{key} must be #{message}/, fn ->
+          Config.new(egress: [pools: [{key, bad}]])
+        end
+      end
+
+      assert_raise ArgumentError, ~r/egress\.pools\.pool_sizes/, fn ->
+        Config.new(egress: [pools: [pool_sizes: 1]])
+      end
+    end
+  end
+
   describe "the routes section" do
     test "defaults to off, with an ETS store and no trusted proxies" do
       config = Config.new()

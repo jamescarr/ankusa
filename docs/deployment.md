@@ -226,8 +226,11 @@ Throughput is therefore bounded by `dispatch.concurrency`, not by sink
 latency, and `dispatch.max_inflight` / `dispatch.max_inflight_bytes` bound how
 much claimed, unfinished work a stalled destination can hold. Raise
 `concurrency` to push more requests at the destination: for `Sink.Http`, keep
-Req's Finch pool (default 50 connections) at least that large, or deliveries
-queue on pool checkout.
+`egress.pools.pool_size` (default 32, per receiver address) at least that large, or
+deliveries to one receiver queue on pool checkout (boot warns when it is smaller).
+Pools are bounded per node (`egress.pools.max_pools`, default 1,024) and closed when
+idle; keep `max_pools × pool_size` under `ulimit -n`. See
+[Outbound connection pools](configuration.md#outbound-connection-pools).
 
 Measured numbers from a full ingest → dispatch → consumer run are recorded in
 [`testing.md`](testing.md#load-and-end-to-end-kind--oban).

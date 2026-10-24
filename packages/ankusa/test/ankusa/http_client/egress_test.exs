@@ -270,27 +270,29 @@ defmodule Ankusa.HttpClient.EgressTest do
                )
     end
 
-    test "https is left alone: the certificate check is what binds the connection to the name" do
-      zone = %{"hooks.example" => [@public]}
-
-      assert {:ok, %{url: "https://hooks.example/h", headers: [], connect_options: []}} =
-               Egress.pin("https://hooks.example/h", Egress.default_policy(),
-                 resolver: resolver(zone)
-               )
-    end
-
-    test "https is pinned, with the name as the TLS hostname, for a sink that skips verification" do
+    test "https is pinned too, with the name as the TLS hostname" do
       zone = %{"hooks.example" => [@public]}
 
       assert {:ok, pinned} =
                Egress.pin("https://hooks.example/h", Egress.default_policy(),
-                 resolver: resolver(zone),
-                 pin_https: true
+                 resolver: resolver(zone)
                )
 
       assert pinned.url == "https://93.184.216.34/h"
       assert pinned.headers == [{"host", "hooks.example"}]
       assert pinned.connect_options == [hostname: "hooks.example"]
+    end
+
+    test "an IPv6-only https target is pinned with the name as the TLS hostname" do
+      zone = %{"v6.example" => [{0x2001, 0xDB8, 0, 0, 0, 0, 0, 1}]}
+
+      assert {:ok, pinned} =
+               Egress.pin("https://v6.example/h", Egress.default_policy(),
+                 resolver: resolver(zone)
+               )
+
+      assert pinned.url == "https://[2001:db8::1]/h"
+      assert pinned.connect_options == [hostname: "v6.example", transport_opts: [inet6: true]]
     end
 
     test "an IPv6-only target is pinned with brackets and an inet6 transport" do
