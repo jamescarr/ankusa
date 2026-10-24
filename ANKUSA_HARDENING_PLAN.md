@@ -509,13 +509,13 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/sink/message.ex:40-61,143-161`, `sink.ex`, `packages/ankusa_kafka/lib/ankusa/sink/kafka.ex`, `packages/ankusa_nats/lib/ankusa/sink/nats.ex`.
   *Evidence:* —
 
-- [ ] **DEL-1.a — ADR: opt-in ordering lanes** · P1 · Deps: TEN-3 `[design-gate]`
+- [x] **DEL-1.a — ADR: opt-in ordering lanes** · P1 · Deps: TEN-3 `[design-gate]`
   *Why:* delivery is unordered by design (`sink.ex:24-31`); decision taken: bring back per-key ordering as an opt-in per source/sink.
   *Change:* ADR deciding: `ordered: true` + `ordering_key: {mod, fun, args} | {:header, name} | {:json, path}` on a source's sink entry; lane = `{tenant, source, sink, key}` single-flight; retry blocks the lane only; lane state in a store index so restarts preserve it (a key-layout change registered through F6's registry, with fixture); SQS FIFO `MessageGroupId` = key, Pub/Sub `orderingKey` = key, Kafka record key = key, RabbitMQ/NATS/Redis documented as consumer-side; HTTP sequential per lane; replay respects lanes; metrics `ankusa_dispatch_lanes_blocked`.
   *Done when:* `docs/adr/0004-ordering-lanes.md` merged.
   *Proof:* PR merged; links pass.
   *Anchors:* `packages/ankusa/lib/ankusa/sink.ex:24-31`, `dispatch/pipeline.ex:1094-1140`, `sink/sqs.ex:195-211`, `sink/google_pubsub.ex:118-120,159-165`.
-  *Evidence:* —
+  *Evidence:* 2026-10-24 · PR #170 · `mise run check:links` (under the shared lock), CI on the PR · `no relative links escaping README.md/docs/`, exit 0; `docs/adr/0004-ordering-lanes.md` (Context, Decision 1-8, Consequences, Proof) and its `docs/adr/README.md` row added; no product code changed. The ADR registers store format 7 → 8 (`OrderingLanes`, stamp only, fixture `store-v8`), the `?O`/`?H`/`?P` index families, due kinds 2/3 and counters 10-12 for DEL-1.b.
 
 - [ ] **DEL-1.b — Implement ordering lanes** · P1 · Deps: DEL-1.a (after: 51, 47)
   *Change:* as decided in the ADR; `docs/delivery.md` ordering section rewritten.
