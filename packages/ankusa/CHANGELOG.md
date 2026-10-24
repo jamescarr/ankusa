@@ -30,6 +30,30 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   (`ankusa_sink_headers_dropped_total{reason="count" | "bytes"}`). `Sink.Http`
   is capped too. Sources that forward more than 64 headers, or more than 16 KiB
   of them, lose the excess: raise the two keys to keep them.
+- **Owned, bounded HTTP connection pools (DEL-3).** Every `Ankusa.HttpClient`
+  request that does not name its own transport (`Sink.Http`, SQS, Pub/Sub, JWKS and
+  secret-provider fetches) goes through `Ankusa.HttpClient.Pools`, one Finch for the
+  node (`Ankusa.HttpClient.Finch`, started with the application) with a pool per
+  receiver address and connection profile per instance, instead of Req's default of
+  one 50-connection pool per origin that is never closed. New `egress.pools` config
+  (inside the `egress` section, so `Ankusa.Config` keeps its 31 struct fields):
+  `pool_size` (32), `pool_count` (1), `pool_timeout` (5000), `pool_max_idle_ms`
+  (60000), `conn_max_idle_ms` (30000), `max_pools` (1024), `max_pools_per_tenant`
+  (256) and `protocols` (`[:http1, :http2]`, so HTTP/2 negotiates by ALPN), all
+  range-checked, and a per-sink `pool: [pool_size:, pool_count:, pool_timeout:,
+  protocols:]` on `Sink.Http`. An idle-pool sweep (every 30 s, mirroring
+  `Sink.Reaper`) closes pools idle for `pool_max_idle_ms`; deleting a source closes
+  its idle pools; at a ceiling the least recently used idle pool (the tenant's own,
+  for `max_pools_per_tenant`) is closed to make room, and with every pool serving a
+  request the call is `{:error, {:unavailable, :pool_limit}}`, retried. Boot warns
+  when `pool_size * pool_count` is below `dispatch.concurrency` or `max_pools *
+  pool_size * pool_count` passes `ulimit -n`. Gauge `ankusa_http_pools`
+  (`[:ankusa, :http, :state]`), counters `ankusa_http_pool_closed_total{reason}` and
+  `ankusa_http_pool_refused_total{scope}`. `Ankusa.HttpClient.request/6` takes the
+  pool context options `:instance`, `:tenant`, `:source` and `:pool`. Tests:
+  `http_client_test.exs`, `sink/http_test.exs`, `config_test.exs`; `bench/pools_bench.exs`.
+  See [`delivery.md`](../../docs/delivery.md#sinkhttp-connection-pools).
+
 - **`Ankusa.Sink.Messaging` and `Ankusa.Sink.Connections`: the shared shape of
   a queue-style sink.** `use Ankusa.Sink.Messaging` and implement `publish/4`:
   the injected `deliver/3` encodes the hook as `Ankusa.Sink.Message` (inline,
@@ -353,13 +377,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `Sink.Http.describe/2` reports `computed: [...]` and `payload: :body` in the
   new `Sink.Description` fields of those names (`payload: :message`, the
   default, is what the AsyncAPI document keeps; `host` may now be `nil`).
-  Computed URLs connect through `Ankusa.Sink.Http.Pool`, one bounded Finch per
-  instance started by `Ankusa.Instance` (4 connections per origin, an origin's
-  pool closed after 30 s idle, new origins refused with
-  `{:error, :pool_origins_exhausted}` past 4,096, gauge
-  `ankusa_sink_http_pool_origins`), instead of Req's pool per origin that is
-  never closed; owned pools for every outbound client are DEL-3, which replaces
-  it. A computed `:url` cannot also set `:cacertfile` or `:allow_insecure_tls`.
+  Computed URLs connect through the owned pools of DEL-3 below (the per-instance
+  `Ankusa.Sink.Http.Pool` this entry first shipped was folded into them).
   `finch` is now a declared dependency (already locked through Req).
   `HttpClient` honours `req_options: [finch: [name: pool]]`, which raised
   before (Req refuses `:finch` beside the `:connect_options` it always set); the
@@ -825,6 +844,17 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- **`Sink.Http` pins `https` destinations too (DEL-3).** `Egress.pin/3` always
+  rewrites the URL to the address it validated (with the name as the TLS
+  `hostname`, so the certificate is still checked against the name), and the
+  connection pool is keyed by that address, so every connection a pool opens goes
+  to the checked address and a name rebound after the check cannot reach the
+  private network through an open pool. Its `:pin_https` option is gone. A computed
+  `:url` may now combine with `:cacertfile` and `:allow_insecure_tls` (the TLS
+  options are the pool's), and the `{:permanent, {:computed, :url, :tls_override}}`
+  and `:unpinnable` results no longer exist. `Sink.Http.Pool` and the gauge
+  `ankusa_sink_http_pool_origins` are replaced by `Ankusa.HttpClient.Pools` and
+  `ankusa_http_pools`.
 - **Retry horizon: 24 hours by wall clock, not 84 attempts; per-source `retry:`;
   explicit error classes (DEL-2).** Every delivery now gets `max_elapsed_ms`
   (default 24 h, `dispatch.retry`'s option, 1 s to 30 days) from its first

@@ -122,7 +122,7 @@ defmodule AnkusaServer.Config do
                   signing_key final_timeout_ms max_age_ms require_fresh)
   @source_store_keys ~w(type url namespace tick_ms timeout_ms load_timeout_ms)
   @lifecycle_keys ~w(sinks)
-  @egress_keys ~w(allow_insecure_http deny_cidrs allow_cidrs allow_hosts deny_hosts)
+  @egress_keys ~w(allow_insecure_http deny_cidrs allow_cidrs allow_hosts deny_hosts pools)
   @routes_keys ~w(enabled max_routes memory_budget_bytes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
   @routes_store_keys ~w(type url namespace tick_ms timeout_ms load_timeout_ms)
   # Keys a Redis store owns (`routes.store`, `source_store`); the other store
@@ -144,6 +144,7 @@ defmodule AnkusaServer.Config do
   @rate_limit_sources_keys ~w(default)
   @source_limit_keys ~w(bytes_per_second burst_bytes)
   @quarantine_keys ~w(burst rate max_bytes retention_days)
+  @egress_pools_keys ~w(pool_size pool_count pool_timeout pool_max_idle_ms conn_max_idle_ms max_pools max_pools_per_tenant protocols)
   @audit_keys ~w(retention_days max_rows max_bytes outbox_max_backlog)
   @queue_keys ~w(dlq rocksdb)
   @dlq_keys ~w(retention_days max_rows max_bytes)
@@ -1726,6 +1727,39 @@ defmodule AnkusaServer.Config do
     ]
   end
 
+  # ── egress.pools ────────────────────────────────────────────────────────────
+
+  # Types only; the ranges are core's (`Ankusa.Config`), so `check-config` and an
+  # embedded boot fail with the same message.
+  defp egress_pools(egress) do
+    path = ["egress", "pools"]
+    pools = section!(egress, "pools", @egress_pools_keys, ["egress"])
+
+    []
+    |> put_opt(:pool_size, int_opt(pools, "pool_size", path))
+    |> put_opt(:pool_count, int_opt(pools, "pool_count", path))
+    |> put_opt(:pool_timeout, int_opt(pools, "pool_timeout", path))
+    |> put_opt(:pool_max_idle_ms, int_opt(pools, "pool_max_idle_ms", path))
+    |> put_opt(:conn_max_idle_ms, int_opt(pools, "conn_max_idle_ms", path))
+    |> put_opt(:max_pools, int_opt(pools, "max_pools", path))
+    |> put_opt(:max_pools_per_tenant, int_opt(pools, "max_pools_per_tenant", path))
+    |> put_opt(:protocols, protocols_opt(pools, path))
+  end
+
+  # `http1` and `http2`, a list or one comma-separated string; the closed list is
+  # checked before any atom is made.
+  defp protocols_opt(pools, path) do
+    case pools["protocols"] do
+      nil ->
+        nil
+
+      value ->
+        value
+        |> string_list!(path ++ ["protocols"])
+        |> Enum.map(&String.to_existing_atom(enum!(&1, ~w(http1 http2), path ++ ["protocols"])))
+    end
+  end
+
   # ── audit ───────────────────────────────────────────────────────────────────
 
   # Types only; the range is core's (`Ankusa.Config`), so `check-config` and an
@@ -1827,7 +1861,16 @@ defmodule AnkusaServer.Config do
     end
   end
 
-  defp egress_section(doc), do: [egress: Map.new(egress_given(doc))]
+  # `egress.pools` is core's, not part of the policy the sinks' URLs are judged
+  # by: it goes to `Ankusa.Config` only, which merges it over its defaults.
+  defp egress_section(doc) do
+    given = Map.new(egress_given(doc))
+
+    case egress_pools(section!(doc, "egress", @egress_keys, [])) do
+      [] -> [egress: given]
+      pools -> [egress: Map.put(given, :pools, Map.new(pools))]
+    end
+  end
 
   defp egress_policy!(doc) do
     Map.merge(Ankusa.HttpClient.Egress.default_policy(), Map.new(egress_given(doc)))

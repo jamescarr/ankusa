@@ -17,6 +17,13 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   over it by itself, dead-lettered at once as `message_too_large` with no
   broker call. Both source keys are positive integers; `reference.yml` and
   `configuration.md` document them.
+- **`egress.pools` section (DEL-3).** `pool_size` (32), `pool_count` (1),
+  `pool_timeout` (5000), `pool_max_idle_ms` (60000), `conn_max_idle_ms` (30000),
+  `max_pools` (1024), `max_pools_per_tenant` (256) and `protocols` (`[http1,
+  http2]`) size and bound the outbound HTTP connection pools every HTTP sink
+  delivery goes through; core range-checks them when the config loads. See the
+  `ankusa` changelog, [`configuration.md`](../../docs/configuration.md#outbound-connection-pools)
+  and the `egress.pools` block of `config-examples/reference.yml`.
 - **`dispatch.retry.max_elapsed_ms`, `dispatch.max_retry_after_ms` and a per-source
   `retry` block (DEL-2).** `max_elapsed_ms` (default `86400000`, 24 h) is the
   horizon after which a delivery still failing is dead-lettered, so

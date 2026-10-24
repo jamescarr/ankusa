@@ -34,22 +34,22 @@ defmodule Ankusa.HttpClient.Egress do
   multi-homed service. IPv4-mapped IPv6 addresses (`::ffff:127.0.0.1`) are
   matched as the IPv4 address they stand for.
 
-  ## Pinning, and the window that remains
+  ## Pinning
 
-  `pin/3` returns what to send instead of the URL it was given:
+  `pin/3` returns what to send instead of the URL it was given: the URL names the
+  checked IP address and a `host` header carries the name, so the connection
+  cannot go anywhere the check did not look and nothing is left to rebind. For
+  `https` the connection options also carry `hostname: name`, which Mint uses for
+  SNI and for the certificate check, so the peer must still present a certificate
+  valid for the *name* (peer verification cannot be switched off without
+  `allow_insecure_tls`, see `Ankusa.HttpClient`).
 
-    * `http` (only reachable with `:allow_insecure_http`): the URL names the
-      checked IP address and a `host` header carries the name, so the connection
-      cannot go anywhere the check did not look. Nothing is left to rebind.
-    * `https`: the URL is unchanged and the client resolves the name again when
-      it connects. A name rebound to an internal address in that gap still has to
-      present a certificate valid for the name, which the service behind a
-      private address does not hold; peer verification is what closes it (it
-      cannot be switched off without `allow_insecure_tls`, see
-      `Ankusa.HttpClient`). Pinning an `https` URL to an address needs a
-      connection pool of its own per hostname (Req starts a Finch instance for
-      every distinct `:connect_options`), which is unbounded for tenant-supplied
-      URLs, so it is done only for a sink that disabled verification (`pin_https: true`).
+  Every connection a pool opens to the pinned URL goes to that address:
+  `Ankusa.HttpClient.Pools` keeps one pool per pinned address and `hostname`, and
+  `pin/3` runs again, resolving the name afresh, before every request. A name that
+  later resolves to a denied address is refused on that request, before any pool
+  is touched; one that resolves to another public address gets a pool of its own,
+  and the old one is swept once idle.
 
   Reasons in `{:error, {:egress_denied, reason}}` carry the host and the
   offending address, never the URL: it may hold credentials.
@@ -107,13 +107,13 @@ defmodule Ankusa.HttpClient.Egress do
   @doc """
   `validate_target/3`, returning what to send: see "Pinning".
 
-  Takes `validate_target/3`'s options and `:pin_https` (default `false`).
+  Takes `validate_target/3`'s options.
   """
   @spec pin(String.t(), policy(), keyword()) ::
           {:ok, pinned()} | {:error, {:egress_denied, reason()}}
   def pin(url, policy, opts \\ []) do
     case check(url, policy, opts) do
-      {:ok, uri, addresses} -> {:ok, build_pin(uri, url, addresses, opts)}
+      {:ok, uri, addresses} -> {:ok, build_pin(uri, addresses)}
       {:error, reason} -> {:error, {:egress_denied, reason}}
     end
   end
@@ -264,21 +264,16 @@ defmodule Ankusa.HttpClient.Egress do
 
   # ── the pin ─────────────────────────────────────────────────────────────────
 
-  defp build_pin(%URI{scheme: scheme} = uri, url, addresses, opts) do
-    if String.downcase(scheme) == "http" or Keyword.get(opts, :pin_https, false) do
-      address = Enum.find(addresses, &(tuple_size(&1) == 4)) || hd(addresses)
-      host = Net.to_string(address)
+  # `check/3` has admitted only `http` and `https`: both are pinned.
+  defp build_pin(%URI{} = uri, addresses) do
+    address = Enum.find(addresses, &(tuple_size(&1) == 4)) || hd(addresses)
+    host = Net.to_string(address)
 
-      pinned = %{uri | host: host, authority: nil} |> URI.to_string()
-
-      %{
-        url: pinned,
-        headers: [{"host", host_header(uri)}],
-        connect_options: connect_options(uri, address)
-      }
-    else
-      %{url: url, headers: [], connect_options: []}
-    end
+    %{
+      url: %{uri | host: host, authority: nil} |> URI.to_string(),
+      headers: [{"host", host_header(uri)}],
+      connect_options: connect_options(uri, address)
+    }
   end
 
   # The name the URL carried, as the `host` header and (https) the name the peer

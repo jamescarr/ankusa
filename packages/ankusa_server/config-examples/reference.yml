@@ -812,6 +812,36 @@ egress:
   allow_hosts: []
   # Names refused before any lookup; wins over allow_hosts.
   deny_hosts: [metadata.google.internal]
+  # The outbound HTTP connection pools: every HTTP sink delivery (and the SQS,
+  # Pub/Sub, JWKS and secret-provider calls) goes through one pool per receiver
+  # address, bounded in connections, count and idle time. The values shown are the
+  # defaults. Ranges are checked at startup.
+  pools:
+    # HTTP/1 connections per pool, and shards per pool. Several sinks posting to
+    # one receiver share a pool: keep pool_size * pool_count at or above
+    # dispatch.concurrency (startup warns when it is not), or deliveries to that
+    # receiver queue on a free connection. A sink can override the three of
+    # pool_size, pool_count and pool_timeout in Elixir config with `pool:`.
+    pool_size: 32
+    pool_count: 1
+    # How long a request waits for a free connection before that attempt fails
+    # as a transport error (retried), in ms.
+    pool_timeout: 5000
+    # A pool with no request in flight for this long is closed (swept every
+    # 30 s), and so is a source's idle pool when the source is deleted; a
+    # connection idle for conn_max_idle_ms is not reused.
+    pool_max_idle_ms: 60000
+    conn_max_idle_ms: 30000
+    # Ceilings on live pools: per node instance, and per tenant (the tenant
+    # whose delivery opened the pool). At a ceiling the least recently used idle
+    # pool is closed to make room; with none idle the request is refused as
+    # {unavailable, pool_limit} and retried. max_pools * pool_size * pool_count
+    # is the most connections this can open: startup warns when it passes
+    # `ulimit -n`.
+    max_pools: 1024
+    max_pools_per_tenant: 256
+    # HTTP versions a connection may negotiate (ALPN): http1, http2, or both.
+    protocols: [http1, http2]
 
 lifecycle:
   # Where a lifecycle event goes when a source or route is created, updated, or

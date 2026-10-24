@@ -99,7 +99,7 @@ is the [key reference](#ankusa-config) below.
 | `tenants` | `max` (1000000, an integer from 1 to 4294967294). How many tenants the node's store hands a dense ordinal to ([ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md)); the hook of one past it is refused with `503 {"error":"tenant_limit"}` and `Retry-After: 300`. Tenants it already knows are never refused, and a tenant keeps its ordinal forever. Per node |
 | `queue` | `dlq` (`retention_days` 30, `max_rows` 10000000, `max_bytes` 53687091200; see [`delivery.md`](delivery.md)) and `rocksdb`: the RocksDB settings of the node's store, read at open: `block_cache_bytes` (67108864), `bloom_bits_per_key` (10; 0 = off), `max_open_files` (65536; -1 = no limit), `compaction_style` (`level` \| `universal`), `rate_limiter_bytes_per_sec` (0 = unlimited), `max_background_jobs` (4), `write_buffer_bytes` (a map of the column families `default`, `hooks`, `deliveries`, `index`, `archive`, `quarantine`, `audit`, `tenants`, `counters`, each at least 65536). See [`storage.md`](storage.md#rocksdb-tuning-and-the-index-filters) |
 | `lifecycle` | `sinks` (required and non-empty when the section is present; omit the section to turn events off). Sinks, shaped like a source's, that receive a CloudEvent when a source or route is created, updated, or deleted. See [AsyncAPI and lifecycle events](asyncapi.md) |
-| `egress` | `allow_insecure_http` (`false`: `http` sink URLs fail the load), `deny_cidrs` (loopback, RFC 1918, carrier-grade NAT, link-local, unique-local IPv6 and the unspecified addresses; setting it replaces the list), `allow_cidrs` (`[]`), `allow_hosts` (`[]`), `deny_hosts` (`[metadata.google.internal]`). Where `type: http` sinks may connect, checked on every attempt. See [Egress](#egress) |
+| `egress` | `allow_insecure_http` (`false`: `http` sink URLs fail the load), `deny_cidrs` (loopback, RFC 1918, carrier-grade NAT, link-local, unique-local IPv6 and the unspecified addresses; setting it replaces the list), `allow_cidrs` (`[]`), `allow_hosts` (`[]`), `deny_hosts` (`[metadata.google.internal]`), `pools` (`pool_size` (32), `pool_count` (1), `pool_timeout` (5000), `pool_max_idle_ms` (60000), `conn_max_idle_ms` (30000), `max_pools` (1024), `max_pools_per_tenant` (256), `protocols` (`[http1, http2]`)). Where `type: http` sinks may connect, checked on every attempt; and `egress.pools`, the outbound HTTP connection pools: one per receiver address, bounded in connections, count and idle time. See [Egress](#egress) and [Outbound connection pools](#outbound-connection-pools) |
 
 `storage.s3`/`storage.gcs` are read only when the matching
 `type` is set. See
@@ -470,7 +470,7 @@ section is **deep-merged** over the defaults, so pass only the keys you want to
 change: `:listener`, `:batcher`, `:dispatch`, `:storage`, `:claim_check`,
 `:backup`, `:admin`, `:metrics`, `:routes`, `:rate_limits`, `:dedupe`,
 `:fleet`, `:quarantine`, `:queue`, `:archive`, `:lifecycle`, `:audit`,
-`:tenants`, `:egress`, `:secrets` and `:intake`.
+`:tenants`, `:egress` (`egress.pools` is merged one level down), `:secrets` and `:intake`.
 
 The example lists the keys `Ankusa.Config.new/1` accepts, at their defaults. As `config :ankusa` app env, the autostarted default instance reads only `:autostart`, `:port`, `:data_dir`, `:roles` and `:sources`; pass the rest to `Ankusa.Config.new/1` or an `Ankusa.Instance` child spec.
 
@@ -592,7 +592,17 @@ config :ankusa,
                    100.64.0.0/10 169.254.0.0/16 ::/128 ::1/128 fc00::/7 fe80::/10),
     allow_cidrs: [],
     allow_hosts: [],
-    deny_hosts: ["metadata.google.internal"]
+    deny_hosts: ["metadata.google.internal"],
+    pools: %{
+      pool_size: 32,
+      pool_count: 1,
+      pool_timeout: 5_000,
+      pool_max_idle_ms: 60_000,
+      conn_max_idle_ms: 30_000,
+      max_pools: 1_024,
+      max_pools_per_tenant: 256,
+      protocols: [:http1, :http2]
+    }
   }
 ```
 
@@ -647,6 +657,11 @@ config :ankusa,
 | `dispatch.breaker_open_ms`, `dispatch.breaker_max_open_ms` | `30_000`, `300_000` | How long a breaker stays open, doubling per consecutive open up to the max; one probe attempt then closes it or reopens it. In memory: a restart closes every breaker. |
 | `dispatch.retry` | `{Ankusa.RetryPolicy.Exponential, []}` | `{module, opts}` implementing `Ankusa.RetryPolicy`: the instance's policy; a source's `retry:` lays options over `opts`. Whatever the module, `opts[:max_elapsed_ms]` (default `86_400_000`, 24 h; 1000 to 2 592 000 000) is the horizon: a delivery still failing that long after its first attempt is dead-lettered. The shipped policy's other options: `base_ms` (100), `max_ms` (300 000), `max_attempts` (`nil`: unlimited), `jitter` (`true`). |
 | `dispatch.max_retry_after_ms` | `3_600_000` | The longest pause a sink's `Retry-After` or throttle answer (`{:retry_after, ms, _}`) can impose on one retry. 1000 to 86 400 000. The horizon still ends the delivery. |
+| `egress.pools.pool_size`, `egress.pools.pool_count` | `32`, `1` | HTTP/1 connections per pool, and shards per pool, of the pool each receiver address gets (`Ankusa.HttpClient.Pools`). Integers 1 to 1024 and 1 to 64. Several sinks posting to one receiver share one pool, so keep `pool_size * pool_count` at or above `dispatch.concurrency`: boot warns when it is not, and a pool smaller than the concurrency that can reach it caps that receiver's throughput at `pool_size ÷ latency` with nothing to say so. A sink overrides them with `pool: [pool_size:, pool_count:, pool_timeout:, protocols:]`. |
+| `egress.pools.pool_timeout` | `5_000` | How long a request waits for a free connection of its pool; then that attempt fails as a transport error and is retried. 1 to 600000. |
+| `egress.pools.pool_max_idle_ms`, `egress.pools.conn_max_idle_ms` | `60_000`, `30_000` | A pool with no request in flight for `pool_max_idle_ms` is closed by the sweep (every 30 s), and so is a deleted source's idle pool at once; a connection idle for `conn_max_idle_ms` is not reused. Positive integers. |
+| `egress.pools.max_pools`, `egress.pools.max_pools_per_tenant` | `1_024`, `256` | The most live pools of the instance, and the most one tenant's deliveries opened. At a ceiling the least recently used idle pool (the tenant's own, for its ceiling) is closed to make room; when every pool in scope has a request in flight the request is refused as `{:error, {:unavailable, :pool_limit}}` and retried. `max_pools * pool_size * pool_count` is the most connections this can open: boot warns when it passes `ulimit -n`. Integers 1 to 65536. Gauge `ankusa_http_pools`, counters `ankusa_http_pool_closed_total{reason}` and `ankusa_http_pool_refused_total{scope}`. |
+| `egress.pools.protocols` | `[:http1, :http2]` | The HTTP versions a pooled connection may negotiate (ALPN). `[:http2]` alone multiplexes one connection per shard (`pool_size` does not apply). |
 | `storage.blob_store` | `{Ankusa.BlobStore.LocalFS, []}` | `{module, opts}` implementing `Ankusa.BlobStore`. See [`storage.md`](storage.md). |
 | `storage.key_prefix` | `""` | Prepended to the key of every new segment: `""`, or one or more `name/` parts (`[A-Za-z0-9._-]`). Nodes sharing one bucket each take their own, or share the prefix and differ by `intake.node_id` (the dated layout puts the node in the key). The archive catalogue records each segment's full key, so changing the prefix moves only new segments; archived ones are still read where they were written. Claims are never prefixed. |
 | `storage.codec` | `{Ankusa.Codec.Raw, []}` | `{module, opts}` implementing `Ankusa.Codec`: segment record framing. A module that exports `id/0` has that one-byte id written in the segment header (`Raw` is `1`). |
@@ -1382,15 +1397,16 @@ egress:
   reason}}`, like a `401`. Fix the policy or the URL, then replay. A name that
   does not resolve is retried. The reason names the host and the address, never
   the URL, which may carry credentials.
-- **Pinning.** An `http` delivery connects to the address that was checked (the
-  URL is rewritten to it, with the name in the `host` header), so nothing is left
-  to rebind. An `https` delivery keeps the name and the client resolves it again
-  when it connects, so a name rebound to an internal address in that gap still has
-  to present a certificate valid for the name, which the service behind it does
-  not hold: peer verification is what closes the window. A sink with
-  `allow_insecure_tls: true` has no such check, so its connection is pinned too
-  (pinning every `https` URL would cost Req a connection pool per hostname, which
-  tenant-supplied URLs make unbounded).
+- **Pinning.** Every delivery connects to the address that was checked: the URL
+  is rewritten to it, with the name in the `host` header, and for `https` the
+  name is also the TLS `hostname`, so the certificate is still checked against
+  the name (SNI included). The connection pool is keyed by that address and name,
+  so every connection a pool opens goes to the validated address and nothing
+  resolves the name again; a name that moves is checked on its next attempt,
+  before a pool is touched, and one that moves to another public address gets a
+  pool of its own. Tests: `sink/http_test.exs` (`every connection of a pool goes
+  to the pinned address`, `a name that turns private between two deliveries
+  through one pool is denied on the second`), `http_client/egress_test.exs`.
 
 TLS verification is on for every outbound `https` connection (object stores, SQS,
 Pub/Sub, HTTP sinks): the peer's chain and hostname, TLS 1.2 or 1.3, against the
@@ -1404,6 +1420,32 @@ The policy covers `Sink.Http`. The queue sinks (`rabbitmq`, `kafka`, `nats`,
 `redis`, `sqs`, `google_pubsub`) connect to the broker endpoints in their own
 config, and the object stores, SQS credentials and the cloud metadata clients to
 their configured endpoints; none of those URLs comes from a tenant.
+
+#### Outbound connection pools
+
+Every outbound HTTP request that does not name a transport of its own
+(`Sink.Http` deliveries, SQS, Pub/Sub, JWKS and secret-provider fetches) goes
+through `Ankusa.HttpClient.Pools`, not Req's default of one 50-connection pool per
+origin that is never closed. A pool is started on demand for each receiver
+address and TLS profile, per instance, and is bounded by `egress.pools`:
+
+| | |
+| --- | --- |
+| Cap | `egress.pools.pool_size` × `pool_count` connections per pool (32 × 1); `max_pools` live pools per instance (1,024) and `max_pools_per_tenant` per tenant (256), so a tenant with a thousand receivers only ever churns its own pools |
+| Sweep | every 30 s a pool with no request in flight for `pool_max_idle_ms` (60 s) is closed; a connection idle for `conn_max_idle_ms` (30 s) is not reused; a deleted source's idle pools are closed at once |
+| Metric | gauge `ankusa_http_pools`; counters `ankusa_http_pool_closed_total{reason}` (`idle`, `evicted`, `source`) and `ankusa_http_pool_refused_total{scope}` (`tenant`, `instance`) |
+| Refusal | at a ceiling the least recently used idle pool is closed to make room; with every pool in scope serving a request, `{:error, {:unavailable, :pool_limit}}`, retried after the retry policy's backoff. A request that cannot check a connection out within `pool_timeout` fails that attempt as a transport error, also retried |
+
+Connections negotiate HTTP/2 where the receiver offers it (ALPN, `protocols`). Size
+`pool_size` for the concurrency that can reach one receiver: several sinks posting
+to one endpoint share a pool, up to `dispatch.concurrency` attempts at once, and a
+pool of 8 against a 100 ms receiver tops out at 80 requests a second. Boot warns
+when `pool_size * pool_count` is below `dispatch.concurrency`, or when `max_pools *
+pool_size * pool_count` is more than `ulimit -n`. A sink can set its own
+`pool: [pool_size:, pool_count:, pool_timeout:, protocols:]`; a request with its own
+`req_options: [finch: [name: …]]` (the object stores' `Ankusa.BlobStore.Pool`) or
+`plug:` keeps that transport. Tests: `http_client_test.exs` (`pool reaped`,
+`http2`, the two ceilings, the refusal), `bench/pools_bench.exs` (10⁵ origins).
 
 ### Configuring a source
 
