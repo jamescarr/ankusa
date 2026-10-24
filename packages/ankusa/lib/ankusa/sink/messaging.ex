@@ -43,6 +43,20 @@ defmodule Ankusa.Sink.Messaging do
   @callback publish(payload :: binary(), Envelope.t(), Ankusa.Sink.ctx(), opts :: keyword()) ::
               :ok | {:error, Ankusa.Sink.failure()}
 
+  @doc """
+  The largest message this sink publishes. Implemented for you: the
+  `:max_message_bytes` option, default 1 MiB (`Ankusa.Sink.Message.max_bytes/1`).
+  Override it for a transport with another limit or another option name.
+
+  `Ankusa.Sink.Message.encode/4` checks the message against it before
+  `publish/4` runs: a message over it goes to the claim check, and a body that
+  is over it by itself is `{:error, {:permanent, {:message_too_large, size,
+  max}}}` without a publish. A transport that counts more than the payload
+  (a key, attributes) still gates its own total with
+  `Ankusa.Sink.Message.fits/2`.
+  """
+  @callback max_message_bytes(opts :: keyword()) :: pos_integer()
+
   defmacro __using__(_opts) do
     quote do
       @behaviour Ankusa.Sink
@@ -54,17 +68,25 @@ defmodule Ankusa.Sink.Messaging do
 
       @impl Ankusa.Sink
       def inline_max_bytes(opts), do: Ankusa.Sink.Message.inline_max_bytes(opts)
+
+      @impl Ankusa.Sink.Messaging
+      def max_message_bytes(opts), do: Ankusa.Sink.Message.max_bytes(opts)
+
+      defoverridable max_message_bytes: 1
     end
   end
 
   @doc """
   `c:Ankusa.Sink.deliver/3` for a sink that `use`s this module: encode, then
   `mod.publish/4`. A failed claim check-in is `{:error, {:claim_check,
-  reason}}`, and `publish/4` never runs.
+  reason}}`, and a message over `c:max_message_bytes/1` that no claim check can
+  shrink is `{:error, {:permanent, {:message_too_large, size, max}}}`;
+  `publish/4` never runs for either.
   """
   @spec deliver(module(), Envelope.t(), Ankusa.Sink.ctx(), keyword()) :: :ok | {:error, term()}
   def deliver(mod, %Envelope{} = env, ctx, opts) do
-    with {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)),
+    with {:ok, payload} <-
+           Message.encode(env, ctx, Message.inline_max_bytes(opts), mod.max_message_bytes(opts)),
          do: mod.publish(payload, env, ctx, opts)
   end
 

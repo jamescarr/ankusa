@@ -25,6 +25,23 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `/v1/config` (none is a secret). They live in existing sections, so
   `Ankusa.Config` keeps its 31 struct fields.
 
+- **Message size preflight and forwarded-header caps (DEL-5).** A queue sink
+  that `use`s `Ankusa.Sink.Messaging` now checks every message against its
+  `c:Ankusa.Sink.Messaging.max_message_bytes/1` (implemented for you: the
+  `:max_message_bytes` option, default 1 MiB) before `publish/4`, in
+  `Ankusa.Sink.Message.encode/4`. An inline body whose base64 message would not
+  fit is checked in and published as a claim; a body that is over the limit by
+  itself is `{:permanent, {:message_too_large, size, max}}`, dead-lettered at
+  once with no broker call. `Message.max_bytes/1` and
+  `default_max_message_bytes/0` are new. `Sink.GooglePubSub` (10 MB) overrides
+  the default; `Sink.SQS` keeps `:max_message_bytes`.
+- **`max_headers` (64) and `forward_headers_max_bytes` (16 KiB) on
+  `Ankusa.Source`.** `Ankusa.Sink.Message.forwarded_headers/2` now takes a
+  sink `ctx` (or a bare mode, as before) and drops a header past either cap,
+  whole, emitting `[:ankusa, :sink, :headers_dropped]`
+  (`ankusa_sink_headers_dropped_total{reason="count" | "bytes"}`). `Sink.Http`
+  is capped too. Sources that forward more than 64 headers, or more than 16 KiB
+  of them, lose the excess: raise the two keys to keep them.
 - **Owned, bounded HTTP connection pools (DEL-3).** Every `Ankusa.HttpClient`
   request that does not name its own transport (`Sink.Http`, SQS, Pub/Sub, JWKS and
   secret-provider fetches) goes through `Ankusa.HttpClient.Pools`, one Finch for the

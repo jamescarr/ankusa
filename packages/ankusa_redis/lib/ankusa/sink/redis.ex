@@ -65,6 +65,8 @@ defmodule Ankusa.Sink.Redis do
                               (`rediss://` for TLS), passed to `Redix.start_link/2`
     * `:channel`            — required; a string, or `(Envelope.t() -> String.t())`
     * `:inline_max_bytes`   — default 64 KiB (65,536), configurable
+    * `:max_message_bytes`  — the largest message published; default
+                              `536_870_912`, Redis's `proto-max-bulk-len` (512 MiB)
     * `:publish_timeout_ms` — how long `deliver/3` waits for the `PUBLISH`
                               reply; default `5_000`
     * `:idle_timeout_ms`    — close the connection after this long without a
@@ -80,6 +82,12 @@ defmodule Ankusa.Sink.Redis do
   alias Ankusa.Sink.Reaper
 
   @default_publish_timeout_ms 5_000
+
+  @default_max_message_bytes 536_870_912
+
+  @impl Ankusa.Sink.Messaging
+  def max_message_bytes(opts),
+    do: Keyword.get(opts, :max_message_bytes, @default_max_message_bytes)
 
   @impl true
   def publish(payload, %Envelope{} = env, ctx, opts) do

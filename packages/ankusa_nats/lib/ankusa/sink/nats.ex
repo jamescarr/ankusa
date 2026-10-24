@@ -31,6 +31,12 @@ defmodule Ankusa.Sink.NATS do
   publish larger than the server's `max_payload` is refused by gnat before it is
   sent, and is dead-lettered at once.
 
+  A message over `:max_message_bytes` (1 MiB by default) is refused before the
+  connection is used, with no server call: an inline body whose base64 does not
+  fit goes through the claim check instead, and a body that is over the limit by
+  itself is `{:error, {:permanent, {:message_too_large, size, max}}}` (see
+  `Ankusa.Sink.Message`).
+
   A publish whose ack is lost can still have been stored, so delivery is
   at-least-once. Every publish sets `Nats-Msg-Id` to the hook's `id` — or
   `id:replay:<replay_id>` for a replay — so JetStream's duplicate window
@@ -78,6 +84,14 @@ defmodule Ankusa.Sink.NATS do
                                per attempt) at a time.
     * `:subject`             — required; a string, or `(Envelope.t() -> String.t())`
     * `:inline_max_bytes`    — default 64 KiB (65,536), configurable
+    * `:max_message_bytes`   — the largest message published; default
+                               `1_048_576`, NATS's default `max_payload` (1 MiB).
+                               A message over it never reaches the server: an
+                               inline body whose base64 does not fit is checked
+                               in instead, and a body that is over it by itself
+                               is `{:error, {:permanent, {:message_too_large,
+                               size, max}}}`. Raise it with the server's
+                               `max_payload`
     * `:publish_timeout_ms`  — how long `deliver/3` waits for the JetStream
                                publish ack; default `5_000`
     * `:connection`          — atom naming the gnat connection; default `:default`

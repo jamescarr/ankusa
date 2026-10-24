@@ -56,6 +56,10 @@ defmodule Ankusa.Sink do
           # which provider request headers travel into the sink message
           # (`Ankusa.Sink.Message.forwarded_headers/2`); absent means `:default`
           optional(:forward_headers) => :default | [String.t()],
+          # the source's caps on those headers (count; name plus value bytes);
+          # absent means 64 and 16 KiB
+          optional(:max_headers) => pos_integer(),
+          optional(:forward_headers_max_bytes) => pos_integer(),
           optional(atom()) => term()
         }
 

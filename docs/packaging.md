@@ -240,7 +240,10 @@ release, many roles, config decides what boots. See
    and implements `publish/4`: the hook arrives already encoded as
    `Ankusa.Sink.Message`, and `Ankusa.Sink.Message.headers/2`,
    `delivery_id/2` and `fits/2` cover the shared metadata, dedupe id and
-   size gate. The scaffold's `Application` starts the adapter's
+   size gate. The message is already checked against
+   `max_message_bytes/1` (default 1 MiB, the `:max_message_bytes` option;
+   override it for a transport with another limit) before `publish/4` runs,
+   so `publish/4` only gates what it adds (a key, attributes). The scaffold's `Application` starts the adapter's
    `Ankusa.Sink.Connections` tree; `Ankusa.Sink.Connections.ensure/5` finds
    or starts a broker connection under it and keeps the idle reaper
    informed. Register any supervised process (a connection pool, a channel)

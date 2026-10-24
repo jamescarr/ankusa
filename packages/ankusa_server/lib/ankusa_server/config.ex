@@ -167,7 +167,7 @@ defmodule AnkusaServer.Config do
   # A rotation window needs two keys; a handful covers any overlap a provider
   # forces. More is a misconfiguration (each key costs an HMAC per hook).
   @max_secrets 8
-  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers store_headers trust_url_tenant retry)
+  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers max_headers forward_headers_max_bytes store_headers trust_url_tenant retry)
   @dedupe_keys ~w(preset header json ttl_seconds)
   @dedupe_presets %{
     "github" => :github,
@@ -184,12 +184,12 @@ defmodule AnkusaServer.Config do
   @verify_client_cert_keys ~w(type fingerprints subjects)
   @log_sink_keys ~w(type)
   @http_sink_keys ~w(type url method headers timeout_ms secret allow_unsigned max_response_bytes cacertfile allow_insecure_tls)
-  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_inflight idle_timeout_ms)
+  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_message_bytes max_inflight idle_timeout_ms)
   @kafka_sink_keys ~w(type brokers topic key inline_max_bytes max_record_bytes ssl sasl idle_timeout_ms)
   @sasl_keys ~w(mechanism username password)
-  @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth idle_timeout_ms)
+  @nats_sink_keys ~w(type servers subject inline_max_bytes max_message_bytes publish_timeout_ms tls auth idle_timeout_ms)
   @nats_auth_keys ~w(username password token nkey_seed jwt)
-  @redis_sink_keys ~w(type url channel inline_max_bytes publish_timeout_ms idle_timeout_ms)
+  @redis_sink_keys ~w(type url channel inline_max_bytes max_message_bytes publish_timeout_ms idle_timeout_ms)
   @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token)
   @google_pubsub_sink_keys ~w(type project topic endpoint ordering_key inline_max_bytes max_message_bytes timeout_ms auth token)
 
@@ -2056,6 +2056,11 @@ defmodule AnkusaServer.Config do
       |> Keyword.put(:sinks, sinks!(source, path))
       |> put_opt(:dedupe, dedupe(source, path))
       |> put_opt(:forward_headers, forward_headers(source, path))
+      |> put_opt(:max_headers, positive_int_opt(source, "max_headers", path))
+      |> put_opt(
+        :forward_headers_max_bytes,
+        positive_int_opt(source, "forward_headers_max_bytes", path)
+      )
       |> put_opt(:store_headers, store_headers(source, path))
       |> put_opt(:trust_url_tenant, bool_opt(source, "trust_url_tenant", path))
       |> put_opt(:retry, source_retry(source, path))
@@ -2155,6 +2160,21 @@ defmodule AnkusaServer.Config do
       other ->
         raise ConfigError,
           message: type_error(path ++ ["forward_headers"], "a list of header names", other)
+    end
+  end
+
+  # Like `int_opt/3`, for keys that name a size or a count: zero and below are
+  # a misconfiguration, refused with the key's dotted path.
+  defp positive_int_opt(map, key, path) do
+    case int_opt(map, key, path) do
+      nil ->
+        nil
+
+      n when n > 0 ->
+        n
+
+      n ->
+        raise ConfigError, message: "#{render_path(path ++ [key])}: must be > 0, got #{n}"
     end
   end
 
@@ -2617,6 +2637,7 @@ defmodule AnkusaServer.Config do
          |> put_opt(:exchange_type, atom_enum_opt(sink, "exchange_type", @exchange_types, path))
          |> put_opt(:routing_key, string_opt(sink, "routing_key", path))
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+         |> put_opt(:max_message_bytes, positive_int_opt(sink, "max_message_bytes", path))
          |> put_opt(:max_inflight, int_opt(sink, "max_inflight", path))
          |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))}
 
@@ -2644,6 +2665,7 @@ defmodule AnkusaServer.Config do
             subject: required_string!(sink, "subject", path)
           ]
           |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+          |> put_opt(:max_message_bytes, positive_int_opt(sink, "max_message_bytes", path))
           |> put_opt(:publish_timeout_ms, int_opt(sink, "publish_timeout_ms", path))
           |> put_opt(:tls, bool_opt(sink, "tls", path))
           |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))
@@ -2659,6 +2681,7 @@ defmodule AnkusaServer.Config do
            channel: required_string!(sink, "channel", path)
          ]
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+         |> put_opt(:max_message_bytes, positive_int_opt(sink, "max_message_bytes", path))
          |> put_opt(:publish_timeout_ms, int_opt(sink, "publish_timeout_ms", path))
          |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))}
 

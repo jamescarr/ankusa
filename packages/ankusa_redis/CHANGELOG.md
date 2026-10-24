@@ -8,6 +8,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `:max_message_bytes` on `Ankusa.Sink.Redis` (default 512 MiB, Redis's bulk
+  limit; DEL-5): the size preflight of `Ankusa.Sink.Messaging`. Requires an
+  `ankusa` release with the `max_message_bytes` sink callback; publish core
+  first.
 - **Streaming loads and incremental writes for 10⁶ entries (TEN-9).** The route
   store and the source store read their hash a page at a time (`HSCAN … COUNT
   1000`, `Ankusa.Redis.Scan`) instead of one `HGETALL`, with `timeout_ms`

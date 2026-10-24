@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Ankusa.Sink.Kafka` implements `max_message_bytes/1` from `:max_record_bytes`
+  (DEL-5): an inline record whose base64 value would pass it is produced as a
+  claim instead of being refused, and a body that is over it by itself is
+  `{:permanent, {:message_too_large, size, max}}` without a broker call.
+  Requires an `ankusa` release with the `max_message_bytes` sink callback;
+  publish core first.
+
 - **`Ankusa.Intake.Kafka`: the intake log of `wal.type: dual` (DUR-1.b.b,
   [ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)).** Every acked hook is also a record in a replicated Kafka
   topic before the `201`. A brod client of its own

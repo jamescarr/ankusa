@@ -113,7 +113,9 @@ defmodule Ankusa.Edge.Publish do
       source_id: env.source_id,
       tenant_id: env.tenant_id,
       attempt: 1,
-      forward_headers: source.forward_headers
+      forward_headers: source.forward_headers,
+      max_headers: source.max_headers,
+      forward_headers_max_bytes: source.forward_headers_max_bytes
     }
 
     case claim_needed(source.sinks, env) do

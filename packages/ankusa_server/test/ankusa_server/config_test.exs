@@ -1541,6 +1541,84 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message =~ "a list of header names"
   end
 
+  test "max_headers and forward_headers_max_bytes parse, reach the Source, and must be positive" do
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          sources:
+            a: {verify: {type: none}, max_headers: 8, forward_headers_max_bytes: 2048, sinks: [{type: log}]}
+            b: {verify: {type: none}, sinks: [{type: log}]}
+          """),
+        env: %{}
+      ).config
+
+    sources = config.source_store |> elem(1) |> Keyword.fetch!(:sources)
+
+    assert sources["a"][:max_headers] == 8
+    assert sources["a"][:forward_headers_max_bytes] == 2048
+    refute Keyword.has_key?(sources["b"], :max_headers)
+    refute Keyword.has_key?(sources["b"], :forward_headers_max_bytes)
+
+    a = Ankusa.Source.new("a", sources["a"])
+    assert {a.max_headers, a.forward_headers_max_bytes} == {8, 2048}
+    b = Ankusa.Source.new("b", sources["b"])
+    assert {b.max_headers, b.forward_headers_max_bytes} == {64, 16_384}
+
+    for {key, value} <- [max_headers: 0, forward_headers_max_bytes: -5] do
+      path =
+        tmp_config("""
+        sources:
+          demo: {verify: {type: none}, #{key}: #{value}, sinks: [{type: log}]}
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ "sources.demo.#{key}"
+      assert error.message =~ "must be > 0"
+    end
+  end
+
+  test "rabbitmq, nats and redis sinks take max_message_bytes, and it must be positive" do
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          sources:
+            demo:
+              verify: {type: none}
+              sinks:
+                - {type: rabbitmq, exchange: ex, max_message_bytes: 2048}
+                - {type: nats, servers: ["h:4222"], subject: s, max_message_bytes: 4096}
+                - {type: redis, url: "redis://h", channel: c, max_message_bytes: 8192}
+          """),
+        env: %{}
+      ).config
+
+    sources = config.source_store |> elem(1) |> Keyword.fetch!(:sources)
+
+    assert [
+             {Ankusa.Sink.RabbitMQ, rabbitmq},
+             {Ankusa.Sink.NATS, nats},
+             {Ankusa.Sink.Redis, redis}
+           ] = sources["demo"][:sinks]
+
+    assert {rabbitmq[:max_message_bytes], nats[:max_message_bytes], redis[:max_message_bytes]} ==
+             {2048, 4096, 8192}
+
+    path =
+      tmp_config("""
+      sources:
+        demo:
+          verify: {type: none}
+          sinks:
+            - {type: nats, servers: ["h:4222"], subject: s, max_message_bytes: 0}
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "sources.demo.sinks"
+    assert error.message =~ "max_message_bytes"
+  end
+
   test "DEL-2: dispatch.retry.max_elapsed_ms and dispatch.max_retry_after_ms load, with core's ranges" do
     default = Config.load!(path: tmp_config("{}\n"), env: %{}).config.dispatch
     assert default.max_retry_after_ms == 3_600_000
