@@ -51,6 +51,11 @@ this project follows [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Depends on `openapi-fetch ^0.17.0` (was `^0.13.0`).
+- The generated admin types (`src/admin/admin-schema.d.ts`) follow the server's new
+  `GET /ready` body (OPS-5): `Readiness` lists one `CheckState` (`ok`, `failing`
+  or `draining`) per readiness check (`store`, `intake`, `sinks`, `disk`,
+  `backlog`, `backup`) and `reasons`; `store` is no longer `none`,
+  `store_unavailable` or `write_failed`, and `backup` no longer `fresh`/`stale`.
 
 ## [0.5.0] - 2026-10-14
 

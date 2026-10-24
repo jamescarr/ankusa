@@ -171,7 +171,7 @@ This release writes v0. The release after it writes v1, so a rollback of
   and checks the `503`s, the `/ready` flip and the resume
   ([`testing.md`](testing.md#crash-consistency-drill-mise-run-testcrash)).
 - A failing store is visible without reading logs. `/ready` answers `503` with
-  `store` (`"write_failed"` or `"store_unavailable"`) and a `reason` from a
+  `store: "failing"` and `reasons.store` from a
   fixed set: `no_space`, `io_error`, `read_only`, `corruption`, `busy`,
   `timeout`, `not_running`, `other` (`Ankusa.Store.failure_class/1`). The
   scrape carries `ankusa_store_write_failures_total{class}` (every failed
@@ -460,10 +460,10 @@ is the hooks acked since the last backup.
   secondary is restored from instead (`restored from the SECONDARY backup` is
   logged at warning level). With both unusable the boot is refused with the
   primary's reason.
-- **Freshness.** With `backup.max_age_ms`, `/ready` says `"backup": "fresh"` or
-  `"stale"` (last successful backup older than that, or the uploader not
-  running); a stale backup only turns the node unready with
-  `backup.require_fresh: true`.
+- **Freshness.** With `backup.max_age_ms`, `/ready` says `"backup": "ok"` or
+  `"backup": "failing"` with `reasons.backup: "stale"` (last successful backup
+  older than that, or the uploader not running); a stale backup only turns the
+  node unready with `backup.require_fresh: true`.
 - **Restore.** A store directory with no `CURRENT` file holds no database. With
   `backup.enabled`, `Ankusa.Store` then restores `LATEST` before opening:
   every file is checked against the manifest's size and sha256 and written

@@ -697,6 +697,26 @@ defmodule Ankusa.Admin.RouterTest do
              "redis://fleet:[REDACTED]@redis.internal:6379"
   end
 
+  test "GET /v1/config shows the readiness keys (OPS-5) as they are: none is a secret" do
+    config =
+      test_config(
+        roles: [:edge],
+        admin: %{enabled: true},
+        listener: %{ready_sink_error_window_ms: 2_500, ready_min_free_bytes: 10_737_418_240},
+        queue: %{max_oldest_due_ms: 300_000}
+      )
+
+    put_config(config)
+
+    conn = call(config.instance, :get, "/v1/config")
+    assert conn.status == 200
+
+    decoded = JSON.decode!(conn.resp_body)
+    assert decoded["listener"]["ready_sink_error_window_ms"] == 2_500
+    assert decoded["listener"]["ready_min_free_bytes"] == 10_737_418_240
+    assert decoded["queue"]["max_oldest_due_ms"] == 300_000
+  end
+
   test "GET /v1/config shows a {module, fun, args} callback without its args" do
     config =
       test_config(

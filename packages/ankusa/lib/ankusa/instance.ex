@@ -281,6 +281,7 @@ defmodule Ankusa.Instance do
             {Ankusa.Edge.RateLimiter, opts}
           ] ++
           batcher_children(config, opts) ++
+          sink_error_children(config, opts) ++
           [
             {Bandit,
              Listener.bandit_options(config, config.listener.tls) ++
@@ -319,6 +320,12 @@ defmodule Ankusa.Instance do
   # ingest publishes to the sinks in the request instead.
   defp batcher_children(%Config{wal: :none}, _opts), do: []
   defp batcher_children(_config, opts), do: [{Ankusa.Edge.BatcherSupervisor, opts}]
+
+  # `wal: :none` only: the last failed publish per sink, which the `sinks`
+  # readiness check reads (`Ankusa.Health.SinkErrors`). Before the listener, so
+  # the table exists before the first request publishes.
+  defp sink_error_children(%Config{wal: :none}, opts), do: [{Ankusa.Health.SinkErrors, opts}]
+  defp sink_error_children(_config, _opts), do: []
 
   defp routes_children(config, opts) do
     if routes?(config) do

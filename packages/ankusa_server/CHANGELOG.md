@@ -10,6 +10,15 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **Readiness keys (OPS-5).** `node.min_free_bytes` (unset): `/ready` answers `503`
+  with `disk: failing` while `data_dir`'s file system has fewer bytes free.
+  `health.sink_error_window_ms` (5000): under `wal.type: none`, a sink whose last
+  publish failed within this long ago makes `/ready` `503` with `sinks: failing`.
+  `queue.max_oldest_due_ms` (unset): past it `/ready` carries `backlog: failing`,
+  a label that never makes the node unready. See `config-examples/reference.yml`.
+  `/ready`'s body now lists every check with `ok`/`failing`/`draining` and
+  `reasons` (see the `ankusa` changelog for the wire change).
+
 - **Forwarded-header caps and sink message limits (DEL-5).** A source takes
   `max_headers` (default 64) and `forward_headers_max_bytes` (default 16384):
   a forwarded header past either is dropped whole and counted in

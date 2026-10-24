@@ -120,26 +120,42 @@ and copy the whole `<data_dir>`; `segments/` is immutable and can be copied
 while it runs. If segments live in S3/GCS, the store directory is all you need.
 
 **Liveness and readiness are two probes.** `GET /health` says the process
-answers. `GET /ready` says this node can take a hook: its store accepted a
-synced write in the last second and no write has failed in the last 5 s
-(`200`, `{"status":"ready","store":"ok",…}`), or not (`503`,
-`Retry-After: 1`, `store` = `write_failed` or
-`store_unavailable` — a full volume, a latched RocksDB error, a store that is
-reopening — and `reason`, why: `no_space`, `io_error`, `read_only`,
-`corruption`, `busy`, `timeout`, `not_running` or `other`). A node with no
-store (`wal.type: none`, a gateway) is ready while
-it runs (`store: "none"`). Both
-are on the ingest port and on the admin port. Point a Kubernetes
-`livenessProbe` at `/health` and the `readinessProbe` at `:4000/ready` (a
-probe from outside the pod hits the pod address, and `:4002` binds loopback
-unless `admin.ip` says otherwise), so a node with a full disk leaves the
-load balancer instead of being restarted in a loop. The image's
+answers. `GET /ready` says this node can take a hook, by running every check
+that applies to its config and listing each one's state:
+
+```json
+{"status": "ready", "instance": "default", "store": "ok", "backlog": "failing",
+ "reasons": {"backlog": "over_threshold"}}
+```
+
+A state is `ok`, `failing` or `draining`; `reasons` appears only while a check
+is not `ok` and names why, from a fixed set. A check that does not apply (no
+store, no threshold set, another `wal` mode) has no key. The node answers `503`
+(`status: "unavailable"`, `Retry-After: 1`) when a check that **gates** is not
+`ok`, `200` otherwise:
+
+| Check | Applies when | Failing means (`reasons.<check>`) | `503`? |
+| --- | --- | --- | --- |
+| `store` | the node runs the local store (any `edge`, `dispatch` or `storage` role, the admin API, or a persistent source store: every node but a claim-check-only gateway, `wal.type: none` included) | the store did not take a synced write in the last second, or a write failed in the last 5 s: a full volume, a latched RocksDB error, a store that is reopening. Reason: `no_space`, `io_error`, `read_only`, `corruption`, `busy`, `timeout`, `not_running` or `other` | yes |
+| `intake` | `wal.type: dual` | `down` (the breaker is open and the log is not answering) or `recovering` (boot replay is running) | yes |
+| `sinks` | `wal.type: none` | `publish_failed`: a sink failed its last publish within `health.sink_error_window_ms` (the provider's retry is the only retry in this mode, so a broker that refuses everything leaves the load balancer). A sink that publishes again clears itself at once | yes |
+| `disk` | `node.min_free_bytes` is set | `below_floor` (the file system holding `data_dir` has fewer bytes free; the node drains before the store hits `ENOSPC`) or `unmeasured` (no `:os_mon`, or `df` took over 2 s) | yes |
+| `backlog` | `queue.max_oldest_due_ms` is set | `over_threshold`: the oldest due delivery has waited longer. A label, so a node that is behind stays in the load balancer and the alert (`ankusa_queue_oldest_due_age_seconds`) says so | no |
+| `backup` | `backup.enabled` and `backup.max_age_ms` | `stale`: the last successful backup is older than `max_age_ms` | only with `backup.require_fresh` |
+
+A node with none of these checks (a claim-check-only gateway: no store)
+is ready while it runs. Both probes are on the ingest port and on the admin
+port. Point a Kubernetes `livenessProbe` at `/health` and the `readinessProbe`
+at `:4000/ready` (a probe from outside the pod hits the pod address, and `:4002`
+binds loopback unless `admin.ip` says otherwise), so a node with a full disk
+leaves the load balancer instead of being restarted in a loop. The image's
 `HEALTHCHECK` runs `docker-entrypoint healthcheck`, which asks `/ready` on the
 ingest port and falls back to the admin port, then the metrics port, for a node
 without `:edge` or whose ingest listener terminates TLS (the probe is plain
 HTTP), so
 `docker ps` shows `unhealthy` while the store refuses writes and `healthy`
-again once space frees.
+again once space frees. The body's key names are the ones in the table; only the
+status code is for a probe to act on.
 
 **Attaching to a running node.** `docker exec -it <ctr> docker-entrypoint
 remote` opens an IEx shell inside the node; `docker exec <ctr>
@@ -305,8 +321,9 @@ this host AND confirmed in the intake log <topic> (acks=all, min.insync.replicas
 replicas=3) before every 2xx: …`). Every key is in
 [`configuration.md`](configuration.md).
 
-**3. Watch it.** `GET /ready` reports `intake`: `up`, `down` (breaker open and the
-log not answering: the load balancer drains the node) or `recovering` (boot replay
+**3. Watch it.** `GET /ready` reports `intake`: `ok`, or `failing` with
+`reasons.intake` `down` (breaker open and the log not answering: the load
+balancer drains the node) or `recovering` (boot replay
 running). `GET /v1/wal` has an `intake` object (`node`, `partition`, `offset`,
 `watermark`, `pending`, `state`). `ankusa_intake_publish_duration_seconds`,
 `ankusa_intake_failures_total{class}`, `ankusa_intake_pending_records`,
@@ -324,7 +341,7 @@ on an empty volume and the same config; there is nothing else to do:
    hook acked since the backup is written back under its original seq, once
    (a duplicate or reordered record changes nothing), and the hooks above the
    watermark are republished.
-3. It reports ready and serves. Until then `/ready` is 503 (`intake: recovering`).
+3. It reports ready and serves. Until then `/ready` is 503 (`intake: failing`, reason `recovering`).
 
 Hooks the lost node had already delivered after that backup are delivered again by
 the replacement (same hook id, same `idempotency_key`): consumers dedupe, and the
