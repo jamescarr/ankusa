@@ -63,7 +63,7 @@ defmodule Bench.Pools do
         ip: {127, 0, 0, 1},
         port: port,
         startup_log: false,
-        thousand_island_options: [num_acceptors: 32, max_connections: 100_000]
+        thousand_island_options: [num_acceptors: 32, num_connections: 100_000]
       )
 
     port
@@ -152,6 +152,7 @@ defmodule Bench.Pools do
   end
 end
 
+alias Ankusa.HttpClient
 alias Bench.Pools, as: B
 
 origins = B.env("ORIGINS", 100_000)
