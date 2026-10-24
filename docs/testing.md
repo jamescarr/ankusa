@@ -570,10 +570,15 @@ pool opens goes to the address the egress check validated (a name that resolves
 nowhere else still connects, verified against the name), and a name that turns
 private between two deliveries through one pool is denied on the second, before
 the pool is touched. `bench/pools_bench.exs` (`MIX_ENV=test mix run
-bench/pools_bench.exs`, minutes) sends one request to each of 10⁵ origins at the
-dispatch concurrency and checks that live pools never pass `max_pools`, nothing
-is refused, and no pool or socket is left after the sweep; it also compares the
-owned pool with Req's default at one origin, against an instant and a 100 ms sink.
+bench/pools_bench.exs`, under a minute; raise `ulimit -n` first, as it holds
+about 2 100 descriptors at its peak) sends one request to each of 10⁵ origins at
+the dispatch concurrency and checks that live pools never pass `max_pools`,
+nothing is refused, and no pool or socket is left after the sweep (it prints the
+peak pools, client sockets, file descriptors and RSS, and the same after the
+sweep). It also compares the owned pool with Req's default at one origin
+(median of five alternating rounds): the 100 ms sink must keep 90 % of the
+default's requests per second; the zero-latency sink's ratio is printed and not
+gated, since there it measures the pool's per-request bookkeeping alone.
 
 The `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
 `blob_store_gcs_test.exs`, `blob_store_azure_integration_test.exs`,

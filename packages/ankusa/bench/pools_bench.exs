@@ -3,7 +3,7 @@
 #     MIX_ENV=test mix run bench/pools_bench.exs
 #
 # Tunables (environment): ORIGINS (100000), MAX_POOLS (1024), CONCURRENCY (32, the
-# dispatch default), REQUESTS (3200, per throughput cell).
+# dispatch default), REQUESTS (3200, per instant-sink round), ROUNDS (5).
 #
 # Part 1 sends one request to each of ORIGINS distinct origins through
 # `Ankusa.HttpClient`, CONCURRENCY at a time, every origin a distinct tenant and
@@ -22,8 +22,10 @@
 # against a sink that answers instantly and against one that takes 100 ms (the
 # case a pool smaller than the concurrency would silently cap at
 # `pool_size / 0.1 s`), through the owned pool and through Req's default pool, which
-# is what the same request used before. Passes only if the owned pool keeps at
-# least 90 % of the default pool's requests per second at the slow sink.
+# is what the same request used before; the median of ROUNDS alternating rounds each.
+# Passes only if the owned pool keeps at least 90 % of the default pool's requests
+# per second at the slow sink. The instant-sink ratio is reported, not gated: it
+# measures the per-request cost of the pool bookkeeping alone, and is noisy.
 #
 # Exits 1 when a check fails. Not part of `mise run bench:gate`: 10^5 origins take
 # minutes.
@@ -195,18 +197,22 @@ results =
   1..origins
   |> Task.async_stream(
     fn i ->
+      # `linger: {true, 0}`: closing a connection resets it instead of leaving the
+      # client port in TIME_WAIT. This run closes ~10^5 connections to loopback in
+      # seconds; without it the host's ~16 000 ephemeral ports run out
+      # (`:eaddrnotavail`), which says nothing about the pools.
       HttpClient.request(:get, url, [], nil, 5_000,
         instance: instance,
         tenant: "tenant-#{i}",
-        connect_options: [hostname: "origin-#{i}.bench"]
+        connect_options: [hostname: "origin-#{i}.bench", transport_opts: [linger: {true, 0}]]
       )
     end,
     max_concurrency: concurrency,
     timeout: :infinity
   )
-  |> Enum.reduce(%{ok: 0, error: 0}, fn
+  |> Enum.reduce(%{ok: 0, error: 0, first_error: nil}, fn
     {:ok, {:ok, 200, _}}, acc -> %{acc | ok: acc.ok + 1}
-    _other, acc -> %{acc | error: acc.error + 1}
+    other, acc -> %{acc | error: acc.error + 1, first_error: acc.first_error || other}
   end)
 
 elapsed_s = (System.monotonic_time(:millisecond) - started) / 1000
@@ -228,6 +234,8 @@ IO.puts(
     "#{Float.round(origins / elapsed_s, 1)} origins/s over #{Float.round(elapsed_s, 1)} s"
 )
 
+if results.first_error, do: IO.puts("  first failure: #{inspect(results.first_error)}")
+
 # Everything goes idle: the sweep closes the pools, and their connections with them.
 Process.sleep(1_200)
 :ok = Ankusa.HttpClient.Pools.sweep_now()
@@ -245,12 +253,20 @@ part1 = [
 
 # ── Part 2: one origin, unchanged throughput ──────────────────────────────────
 
-IO.puts("\nPart 2: one origin, #{concurrency} at a time, #{requests} requests per cell")
+rounds = B.env("ROUNDS", 5)
+
+IO.puts("\nPart 2: one origin, #{concurrency} at a time, median of #{rounds} alternating rounds")
 
 one = B.instance(%{})
 
+median = fn values -> values |> Enum.sort() |> Enum.at(div(length(values), 2)) end
+
 cells =
-  for {label, delay} <- [{"instant sink", 0}, {"100 ms sink", 100}] do
+  for {label, delay, per_round} <- [
+        {"instant sink", 0, requests},
+        # 100 ms a request: `concurrency * 10` requests is a second per round.
+        {"100 ms sink", 100, concurrency * 10}
+      ] do
     sink_port = B.listener(delay)
     sink_url = "http://127.0.0.1:#{sink_port}/"
 
@@ -258,8 +274,15 @@ cells =
     B.rate(concurrency * 2, concurrency, B.owned(sink_url, one))
     B.rate(concurrency * 2, concurrency, B.default_req(sink_url))
 
-    owned = B.rate(requests, concurrency, B.owned(sink_url, one))
-    default = B.rate(requests, concurrency, B.default_req(sink_url))
+    samples =
+      for _ <- 1..rounds do
+        owned = B.rate(per_round, concurrency, B.owned(sink_url, one))
+        default = B.rate(per_round, concurrency, B.default_req(sink_url))
+        {owned, default}
+      end
+
+    owned = median.(Enum.map(samples, &elem(&1, 0)))
+    default = median.(Enum.map(samples, &elem(&1, 1)))
 
     IO.puts(
       "  #{String.pad_trailing(label, 13)} owned pool #{Float.round(owned, 1)}/s   " <>
