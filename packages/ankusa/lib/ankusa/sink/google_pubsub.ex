@@ -103,9 +103,13 @@ defmodule Ankusa.Sink.GooglePubSub do
   # Pub/Sub refusing the message itself: no retry changes the answer.
   @permanent_statuses ~w(INVALID_ARGUMENT)
 
+  @impl Ankusa.Sink.Messaging
+  def max_message_bytes(opts),
+    do: Keyword.get(opts, :max_message_bytes, @default_max_message_bytes)
+
   @impl true
   def publish(payload, %Envelope{} = env, ctx, opts) do
-    max = Keyword.get(opts, :max_message_bytes, @default_max_message_bytes)
+    max = max_message_bytes(opts)
     attributes = Map.new(Message.attributes(env, ctx))
     key = Messaging.resolve(Keyword.get(opts, :ordering_key), env)
 

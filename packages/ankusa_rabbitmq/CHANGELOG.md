@@ -6,6 +6,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `:max_message_bytes` (default 128 MiB, RabbitMQ's `max_message_size`; DEL-5):
+  the size preflight of `Ankusa.Sink.Messaging`. Requires an `ankusa` release
+  with the `max_message_bytes` sink callback; publish core first.
+
 ### Changed
 
 - Requires `ankusa ~> 0.7` (`Ankusa.Sink.Messaging`, `Ankusa.Sink.Connections`);

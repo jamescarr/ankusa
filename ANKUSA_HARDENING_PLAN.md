@@ -501,7 +501,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/sink/sqs.ex:106-131,158-250`, `sink/google_pubsub.ex:98-130,159-233`.
   *Evidence:* —
 
-- [ ] **DEL-5 — Message size preflight and forwarded-header caps** · P1 · Deps: —
+- [x] **DEL-5 — Message size preflight and forwarded-header caps** · P1 · Deps: —
   *Why:* only SQS/Pub/Sub enforce size; Kafka/NATS rely on the broker and retry an oversize body for hours; `forwarded_headers/2` has no count or byte cap, so a large-header provider can push a small body over a broker limit (`sink/message.ex:40-46,143-161`).
   *Change:* `Sink.Message.max_bytes/1` per sink (from `c:max_message_bytes/1`, default per adapter) checked before publish → `{:permanent, :message_too_large}` or claim-check when the body alone fits; `forward_headers_max_bytes` (16 KiB) and `max_headers` (64) on `Source`/YAML, enforced in `forwarded_headers/2` with `ankusa_sink_headers_dropped_total`; document the `inline_max_bytes × 4/3 + metadata` budget.
   *Done when:* a 1 MiB header value still yields a message under the SQS limit with a counted drop; a > 1 MiB inline body to Kafka is permanent without a broker call.

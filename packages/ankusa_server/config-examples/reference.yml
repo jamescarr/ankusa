@@ -914,6 +914,8 @@ sources:
       tolerance_seconds: 300
     # dedupe: stripe   # a preset (github | standard_webhooks | svix | shopify | stripe), or {header: X-Event-Id} / {json: data.id}, plus optional ttl_seconds (259200)
     # forward_headers: [stripe-signature]   # absent = every header except auth/framing/hop-by-hop and x-ankusa-*
+    # max_headers: 64   # at most this many forwarded headers per message; the rest are dropped (ankusa_sink_headers_dropped_total{reason="count"})
+    # forward_headers_max_bytes: 16384   # at most this many bytes of forwarded header names and values per message; a header that would pass it is dropped whole (reason="bytes")
     # store_headers: {drop: [x-internal-auth], hash: [x-tenant-token]}   # absent = the http.store_headers lists above
     # At least one. Every sink is tried on every delivered hook.
     sinks:
@@ -948,6 +950,9 @@ sources:
         exchange_type: topic
         routing_key: "ankusa.stripe"
         inline_max_bytes: 8192
+        # The largest message published (default 128 MiB, RabbitMQ's default
+        # max_message_size).
+        max_message_bytes: 134217728
         # Publishes awaiting a broker confirm on this connection; past it a
         # publish fails fast as busy (retried) instead of queueing.
         max_inflight: 256
@@ -978,6 +983,10 @@ sources:
         # covers this subject has to exist.
         subject: "${NATS_SUBJECT}"
         inline_max_bytes: 8192
+        # The largest message published (default 1 MiB, the server's max_payload).
+        # A bigger inline message is checked in instead; a body that is too big
+        # by itself is dead-lettered at once, with no server call.
+        max_message_bytes: 1048576
         # How long to wait for JetStream's publish ack.
         publish_timeout_ms: 5000
         tls: false
@@ -997,6 +1006,8 @@ sources:
         # Static string only (a fun is an embedding API, not a config surface).
         channel: "ankusa.stripe"
         inline_max_bytes: 8192
+        # The largest message published (default 512 MiB, Redis's own limit).
+        max_message_bytes: 536870912
         # How long to wait for Redis to answer the PUBLISH.
         publish_timeout_ms: 5000
       - type: sqs

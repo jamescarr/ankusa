@@ -426,7 +426,7 @@ defmodule Ankusa.Sink.Http do
         signature
 
     forwarded =
-      Message.forwarded_headers(env, ctx[:forward_headers] || :default)
+      Message.forwarded_headers(env, ctx)
       |> Enum.reject(fn {name, _value} -> owned?(name, own) or owned?(name, opts_headers) end)
 
     headers = forwarded ++ own ++ pin_headers(pinned, opts_headers) ++ opts_headers

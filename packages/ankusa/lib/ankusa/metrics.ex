@@ -322,6 +322,14 @@ defmodule Ankusa.Metrics do
           tags: [:instance] ++ ids ++ [:result, :sink]
         )
       ),
+      sum(
+        "ankusa.sink.headers_dropped.total",
+        scoped(own,
+          event_name: [:ankusa, :sink, :headers_dropped],
+          measurement: :count,
+          tags: [:instance] ++ ids ++ [:reason]
+        )
+      ),
       counter(
         "ankusa.dispatch.breaker.transitions.total",
         scoped(own,

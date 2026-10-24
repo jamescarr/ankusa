@@ -8,6 +8,15 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **Forwarded-header caps and sink message limits (DEL-5).** A source takes
+  `max_headers` (default 64) and `forward_headers_max_bytes` (default 16384):
+  a forwarded header past either is dropped whole and counted in
+  `ankusa_sink_headers_dropped_total{reason}`. `rabbitmq`, `nats` and `redis`
+  sinks take `max_message_bytes` (defaults 134217728, 1048576, 536870912).
+  A message over a sink's limit is checked in as a claim, or, when the body is
+  over it by itself, dead-lettered at once as `message_too_large` with no
+  broker call. Both source keys are positive integers; `reference.yml` and
+  `configuration.md` document them.
 - **`claim_check.integrity_check` (`off` or `manifest`, default `manifest`).** The
   claim gateway checks every whole-claim `GET` against the sha256 its pack's
   manifest records and answers `502 integrity_mismatch` on a difference;

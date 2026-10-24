@@ -418,6 +418,21 @@ and `x-ankusa-replay-id`; a message carries `id`, `source_id`, `tenant_id`,
 `received_at`, `content_type`, `size`, `sha256`, `dedupe_key`, `replay_id`,
 `idempotency_key`, `verification`, `headers` and the body (or claim).
 
+**Forwarded headers are capped** so a provider with large headers cannot push a
+small body over a transport limit: per source, `max_headers` (64) names and
+`forward_headers_max_bytes` (16 KiB) of names plus values
+([`configuration.md`](configuration.md#sources)). Names are considered in order
+of arrival; a header past either cap is dropped whole (never truncated), and
+each drop is counted as `ankusa_sink_headers_dropped_total{reason="count" |
+"bytes"}` (`[:ankusa, :sink, :headers_dropped]`). The budget for one queue
+message is therefore `inline_max_bytes × 4/3` (base64) plus about 1 KiB of
+envelope plus at most `forward_headers_max_bytes`; the default 64 KiB is about
+106 KiB. Before publishing, every queue sink checks the message against its
+limit (`max_message_bytes`; `max_record_bytes` for Kafka): an inline message
+over it is checked in and sent as a claim instead, and a body that is over it
+by itself (`inline_max_bytes` at least its size) is dead-lettered at once as
+`{:permanent, {:message_too_large, size, max}}`, with no broker call.
+
 **Verification.** Every delivery says how the hook was verified at ingest:
 `x-ankusa-verification` on `Sink.Http` and the message's `verification` object
 on a queue sink, `{"status": "ok" | "failed" | "skipped", "flagged": bool}`.
@@ -597,7 +612,9 @@ it. Delivery is at-least-once anyway, and consumers dedupe on the
 `message.max.bytes`; raise it with the topic's `max.message.bytes`) is refused
 before it is produced, and a broker `message_too_large`, `invalid_message` or
 `invalid_record` is permanent too. Retrying any of them for days would only
-fill the log.
+fill the log. A raised `:inline_max_bytes` does not make that a trap: an inline
+message whose base64 would pass `:max_record_bytes` is checked in and sent as a
+claim, and only a body that is over the limit by itself is refused.
 
 **Client lifecycle**: one brod client per `(instance, :client)`, started on
 demand by the first `deliver/3` call under `ankusa_kafka`'s own
@@ -646,11 +663,15 @@ acknowledgement, `{"stream":"ANKUSA","seq":42}`, awaited up to
 a permission violation, or no answering stream all come back as
 `{:error, reason}`. Note that an error ack carries `"seq": 0` *and* an
 `"error"` in the same body, so a sink that only checks for a stream name and a
-sequence would report a refused hook as delivered. The one permanent error is
-`{:permanent, :max_payload_exceeded}`: a message over the server's
-`max_payload` (1 MiB by default) is refused by gnat before it is sent, and is
-dead-lettered at once rather than retried. It takes an `:inline_max_bytes`
-raised past that limit; at the default (64 KiB) a larger body is claim-checked.
+sequence would report a refused hook as delivered. Two errors are permanent:
+`{:permanent, :max_payload_exceeded}`, a message over the server's
+`max_payload` (1 MiB by default) that gnat refuses before sending it, and
+`{:permanent, {:message_too_large, size, max}}`, below.
+Both are dead-lettered at once rather than retried. The sink checks the
+size limit itself first, as `:max_message_bytes` (default 1,048,576): an
+inline message over it is claim-checked instead, and a body that is over it by
+itself (an `:inline_max_bytes` raised past it) is refused with no server call.
+Raise `:max_message_bytes` together with the server's `max_payload`.
 
 **The subject is the address, the headers are the metadata.** Each message
 carries the same headers the Kafka sink sets — always `ankusa_id`,
