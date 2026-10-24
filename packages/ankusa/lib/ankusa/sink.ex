@@ -41,7 +41,7 @@ defmodule Ankusa.Sink do
   millisecond) and tolerate redelivery.
   """
 
-  alias Ankusa.Envelope
+  alias Ankusa.{Envelope, Trace}
 
   @type ctx :: %{
           required(:instance) => atom(),
@@ -214,4 +214,51 @@ defmodule Ankusa.Sink do
     :exit, reason -> {:error, {:exit, reason}}
     :throw, value -> {:error, {:throw, value}}
   end
+
+  @doc """
+  Run one delivery attempt of `env` inside an `ankusa.dispatch.attempt` span
+  (`Ankusa.Trace`): a child of the hook's stored trace context and linked to it,
+  so every attempt of a hook, however late, is in its trace. `fun` is the whole
+  attempt, and may return `:ok`, `{:error, reason}`, or either of those paired
+  with anything (`Ankusa.Dispatch.Pipeline` also reports a claim it checked in).
+  A failure marks the span with its class (`permanent`, `retry_after`,
+  `transient`), never the reason. With no OpenTelemetry SDK running this is
+  `fun.()`.
+  """
+  @spec attempt(module(), Envelope.t(), pos_integer(), String.t() | nil, (-> result)) :: result
+        when result: :ok | {:error, term()} | {:ok | {:error, term()}, term()}
+  def attempt(mod, %Envelope{} = env, number, replay_id, fun) when is_function(fun, 0) do
+    Trace.span(
+      "ankusa.dispatch.attempt",
+      [
+        kind: :producer,
+        parent: env.trace,
+        link: env.trace,
+        attributes: fn ->
+          %{
+            "ankusa.sink" => inspect(mod),
+            "ankusa.attempt" => number,
+            "ankusa.hook.id" => env.id,
+            "ankusa.source_id" => env.source_id,
+            "ankusa.tenant_id" => env.tenant_id || "default"
+          }
+          |> put_replay(replay_id)
+        end
+      ],
+      fn ->
+        result = fun.()
+        mark_failed(result)
+        result
+      end
+    )
+  end
+
+  defp put_replay(attributes, replay_id) when is_binary(replay_id),
+    do: Map.put(attributes, "ankusa.replay_id", replay_id)
+
+  defp put_replay(attributes, _none), do: attributes
+
+  defp mark_failed(:ok), do: :ok
+  defp mark_failed({:error, reason}), do: Trace.error(reason |> classify() |> elem(0))
+  defp mark_failed({result, _extra}), do: mark_failed(result)
 end

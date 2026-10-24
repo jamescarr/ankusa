@@ -161,7 +161,9 @@ class ConformanceTest < Minitest::Test
         "replay_id" => message.replay_id,
         "idempotency_key" => message.to_h[:idempotency_key],
         "headers" => message.headers,
-        "verification" => verification_hash(message.verification)
+        "verification" => verification_hash(message.verification),
+        "traceparent" => message.traceparent,
+        "tracestate" => message.tracestate
       }
     when "idempotency_key"
       include_replay = input.fetch("include_replay", false)

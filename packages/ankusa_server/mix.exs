@@ -46,6 +46,12 @@ defmodule AnkusaServer.MixProject do
       # Signs the secret manager's requests (`AnkusaServer.SecretProvider.AwsSecretsManager`);
       # the requirement core holds, so the lock does not change.
       {:aws_signature, "~> 0.4"},
+      # The OpenTelemetry SDK and the OTLP exporter behind `tracing.enabled`
+      # (`AnkusaServer.Tracing`). `runtime: false` and `:load` in the release: the
+      # image starts them only when tracing is on, so a node with it off runs
+      # core's no-op `opentelemetry_api` and nothing else.
+      {:opentelemetry, "~> 1.5", runtime: false},
+      {:opentelemetry_exporter, "~> 1.8", runtime: false},
       # Static analysis gates run by `mise run check:package` (dev only).
       {:credo, "~> 1.7", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: :dev, runtime: false},
@@ -57,7 +63,11 @@ defmodule AnkusaServer.MixProject do
     [
       ankusa: [
         include_executables_for: [:unix],
-        applications: [ankusa_server: :permanent]
+        applications: [
+          ankusa_server: :permanent,
+          opentelemetry: :load,
+          opentelemetry_exporter: :load
+        ]
       ]
     ]
   end

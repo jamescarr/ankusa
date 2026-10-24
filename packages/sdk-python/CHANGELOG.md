@@ -8,6 +8,10 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Message.traceparent` and `Message.tracestate`: the hook's W3C trace context
+  from the message, verbatim (`None` when none); a non-string value is
+  `invalid_field`.
+
 - `scope` on `AdminRejectedError` and `RoutesRejectedError`: the scope a
   `403 forbidden` says the credential lacks (control planes require a
   credential since Ankusa 0.6).

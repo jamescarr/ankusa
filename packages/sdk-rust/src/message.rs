@@ -53,6 +53,12 @@ pub struct Message {
     /// How Ankusa verified the hook at ingest; `None` from a node older than
     /// the field.
     pub verification: Option<Verification>,
+    /// The hook's W3C `traceparent`, verbatim: continue the trace from it.
+    /// `None` when the message carries none (or comes from a node older than
+    /// the field).
+    pub traceparent: Option<String>,
+    /// The W3C `tracestate` that goes with `traceparent`, verbatim.
+    pub tracestate: Option<String>,
 }
 
 impl Message {
@@ -185,6 +191,8 @@ pub fn decode_message(data: &[u8]) -> Result<Message, InvalidMessageError> {
     let dedupe_key = optional_string(&map, "dedupe_key")?;
     let replay_id = optional_string(&map, "replay_id")?;
     let idempotency_key = optional_string(&map, "idempotency_key")?;
+    let traceparent = optional_string(&map, "traceparent")?;
+    let tracestate = optional_string(&map, "tracestate")?;
     let headers = headers_field(&map)?;
     let sha256 = sha256_field(&map)?;
     let verification = verification_field(&map)?;
@@ -252,6 +260,8 @@ pub fn decode_message(data: &[u8]) -> Result<Message, InvalidMessageError> {
         idempotency_key,
         headers,
         verification,
+        traceparent,
+        tracestate,
     })
 }
 

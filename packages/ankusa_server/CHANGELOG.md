@@ -8,6 +8,15 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **OpenTelemetry tracing (OPS-1).** `tracing: {enabled, otlp_endpoint,
+  sample_ratio}` (off by default; `http://localhost:4318`; `1.0`) starts the
+  OpenTelemetry SDK and the OTLP/HTTP exporter before the instance, with a
+  parent-based sampler over `sample_ratio`. The endpoint may not carry
+  `user:password`; collector credentials are the standard
+  `OTEL_EXPORTER_OTLP_HEADERS`. With it off, only core's no-op API runs and a
+  hook's `traceparent` still reaches the consumer unchanged. Not part of
+  `/v1/config`: it configures the image, not an instance, and holds no secret.
+
 - **Forwarded-header caps and sink message limits (DEL-5).** A source takes
   `max_headers` (default 64) and `forward_headers_max_bytes` (default 16384):
   a forwarded header past either is dropped whole and counted in

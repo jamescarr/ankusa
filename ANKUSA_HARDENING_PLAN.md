@@ -542,7 +542,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
 
 ### Phase 5 — Observability and operations
 
-- [ ] **OPS-1 — OpenTelemetry tracing end to end** · P1 · Deps: F7 (after: 50)
+- [x] **OPS-1 — OpenTelemetry tracing end to end** · P1 · Deps: F7 (after: 50)
   *Why:* no OpenTelemetry anywhere; `traceparent` is stored as an opaque header and forwarded but never parsed or linked (`telemetry.ex:9-46`, `edge/ingest.ex:312-320`, `sink/message.ex:96-99`); dispatch has no span, no duration.
   *Change:* `opentelemetry_api` in core (no-op without an SDK); `ankusa_server` adds `opentelemetry` + `opentelemetry_exporter` behind `tracing: %{enabled, otlp_endpoint, sample_ratio}`; `Edge.Router` extracts `traceparent`/`tracestate` into `Envelope.trace` (F7 field); spans `ankusa.ingest` (child of the provider's), `ankusa.verify`, `ankusa.commit`, `ankusa.dispatch.attempt` (linked to the ingest span from the stored context), `ankusa.claim_check`, `ankusa.replay`; propagation: `traceparent` header on `Sink.Http`, `traceparent`/`tracestate` fields plus the broker-native header in `Sink.Message`, CloudEvents `traceparent` extension on lifecycle events; conformance decode case for the fields.
   *Done when:* a `traceparent` sent to the edge reaches an SDK consumer unchanged and the in-memory exporter shows ingest → commit → dispatch spans sharing the trace id.

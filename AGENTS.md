@@ -17,7 +17,7 @@ flowchart LR
 
 | Path | What |
 | --- | --- |
-| `packages/ankusa` | Core Mix project: edge/store/storage/dispatch machinery + every zero-external-dep default adapter. No adapter deps (`bandit`, `plug`, `cidr`, `req`, `aws_signature`, `rocksdb`, `telemetry_metrics`/`telemetry_metrics_prometheus_core`, `nebulex`/`nebulex_local`, `async_api_spex` only). |
+| `packages/ankusa` | Core Mix project: edge/store/storage/dispatch machinery + every zero-external-dep default adapter. No adapter deps (`bandit`, `plug`, `cidr`, `req`, `aws_signature`, `rocksdb`, `telemetry_metrics`/`telemetry_metrics_prometheus_core`, `nebulex`/`nebulex_local`, `opentelemetry_api` (a no-op without the SDK `ankusa_server` ships), `async_api_spex` only). |
 | `packages/ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats` | One sink adapter each (`Sink.RabbitMQ`/`Kafka`/`NATS`), path-depend on `ankusa` + one broker client (`amqp`/`brod`/`gnat`). `ankusa_kafka` also ships `Ankusa.Intake.Kafka`, the intake log of `wal.type: dual` (ADR 0002). Own `docker-compose.yml` for local broker infra (`ankusa_kafka`'s has a three-broker KRaft cluster beside Redpanda). |
 | `packages/ankusa_redis` | Redis adapters: the route store (`Ankusa.Routes.Store.Redis` — definitions in Redis, shared by every edge node) and the pub/sub sink (`Ankusa.Sink.Redis`). Path-depends on `ankusa` + one client (`redix`). Own `docker-compose.yml` (Redis on `:6399`). |
 | `packages/async_api_spex` | Generic AsyncAPI 3.0 library, no Ankusa code (structs, `use AsyncApiSpex.Schema`/`Message`/`Channel`/`Spec` — the last three decorate an app's existing structs and publishing modules into a document — validator, `AsyncApiSpex.Plug.RenderSpec`, `mix async_api_spex.gen`). Core depends on it for `Ankusa.AsyncApi`; every project that path-depends on core and builds in `:prod` (the adapters, `ankusa_server`, the examples) pins it by path with `override: true`. Publish it to Hex before core. |
@@ -45,7 +45,8 @@ Why the package split (and when a new adapter earns its own package):
 | Ops / cross-cutting | `application.ex`, `config.ex`, `instance.ex` + `instance/{isolated,registry_watch}.ex` (failure domains, registry watch), `source.ex`, `source_store.ex` + `source_store/persistent.ex`, `lifecycle.ex` + `lifecycle/publisher.ex`, `async_api.ex` + `async_api/schemas.ex`, `envelope.ex`, `codec.ex` + `codec/raw.ex`, `admin/router.ex`, `admin/redact.ex`, `telemetry.ex`, `metrics.ex`, `http.ex`, `http_client.ex` + `http_client/egress.ex` (every outbound request, and the egress policy `Sink.Http` is checked against), `aws/credentials.ex` (AWS credential chain for S3 and SQS), `ulid.ex`, `uuid_v7.ex` |
 
 `packages/ankusa_server/lib/ankusa_server`: `application.ex`, `cli.ex`,
-`config.ex` (YAML → core config), `config_error.ex`, `gcp_token.ex`.
+`config.ex` (YAML → core config), `config_error.ex`, `gcp_token.ex`,
+`tracing.ex` (starts the OpenTelemetry SDK and OTLP exporter when `tracing.enabled`).
 
 ### Docs index
 

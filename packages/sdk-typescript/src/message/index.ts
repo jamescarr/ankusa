@@ -39,6 +39,13 @@ export type Message = {
   headers: Record<string, string>;
   /** How Ankusa verified the hook at ingest; `null` from a node older than the field. */
   verification: Verification | null;
+  /**
+   * The hook's W3C `traceparent`, verbatim: continue the trace from it. `null`
+   * when the message carries none (or comes from a node older than the field).
+   */
+  traceparent: string | null;
+  /** The W3C `tracestate` that goes with `traceparent`, verbatim; `null` when none. */
+  tracestate: string | null;
   /** The decoded inline body (non-enumerable); `null` for a claim message. */
   body: Uint8Array | null;
 };
@@ -131,7 +138,15 @@ export function decodeMessage(data: string | Uint8Array): Message {
   if (typeof size !== "number" || !Number.isInteger(size) || size < 0) {
     throw new InvalidMessageError("invalid_field", "size");
   }
-  for (const key of ["tenant_id", "content_type", "dedupe_key", "replay_id", "idempotency_key"] as const) {
+  for (const key of [
+    "tenant_id",
+    "content_type",
+    "dedupe_key",
+    "replay_id",
+    "idempotency_key",
+    "traceparent",
+    "tracestate",
+  ] as const) {
     const value = raw[key];
     if (!(value === undefined || value === null || typeof value === "string")) {
       throw new InvalidMessageError("invalid_field", key);
@@ -206,6 +221,8 @@ export function decodeMessage(data: string | Uint8Array): Message {
     idempotency_key: (raw.idempotency_key ?? null) as string | null,
     headers,
     verification,
+    traceparent: (raw.traceparent ?? null) as string | null,
+    tracestate: (raw.tracestate ?? null) as string | null,
   } as Message;
   // Non-enumerable, so a decoded message still serializes to exactly the wire
   // shape (and deep-equals the conformance vectors).

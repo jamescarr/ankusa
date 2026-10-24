@@ -77,6 +77,7 @@ is the [key reference](#ankusa-config) below.
 | `listener` | Limits for every HTTP listener, and the ingest port's TLS: `max_connections` (20000), `num_acceptors` (null = two per scheduler), `read_timeout_ms` (10000), `body_read_timeout_ms` (15000), `request_deadline_ms` (30000), `max_requests_per_connection` (1000), `max_header_count` (64), `max_header_length` (16384), `http2` (`false`), `tls` (`certfile`, `keyfile`, `cacertfile`, `verify` = `verify_none` \| `verify_peer`, `versions`, `ciphers`). See [Listeners](#listeners-limits-tls-and-mtls) |
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it, and then needs `auth`), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled), `tls` (a TLS block, like `listener.tls`), `auth` (who may call it: `mode` = `none` \| `token` \| `jwt` \| `mtls`, `allow_insecure`, `tokens`, `jwt`, `mtls`; see [Control-plane authentication](#control-plane-authentication)) |
 | `metrics` | `enabled` (`false`), `port` (4004), `ip` (`127.0.0.1`), `tls`. A listener that serves only `/metrics`, `/health` and `/ready`. See [A separate metrics listener](#a-separate-metrics-listener) |
+| `tracing` | `enabled` (`false`), `otlp_endpoint` (`http://localhost:4318`), `sample_ratio` (`1.0`; 0 to 1). Image only. Starts the OpenTelemetry SDK and the OTLP exporter. See [Tracing](#tracing) |
 | `batcher` | `partitions` (4), `max_batch` (256), `max_commits` (64), `group_commit_max_bytes` (4194304), `group_commit_max_records` (1024), `group_commit_delay_ms` (1), `max_delay_ms` (0), `max_queue` (10000), `max_queue_bytes` (268435456) |
 | `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `sink_concurrency` (8; null = only `concurrency`), `breaker_failures` (5; 0 disables breakers), `breaker_open_ms` (30000), `breaker_max_open_ms` (300000), `tenants` (`default` and one entry per tenant id, each any of `max_inflight` (1024), `max_inflight_bytes` (33554432), `concurrency` (16)), `max_retry_after_ms` (3600000; 1000 to 86400000), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (null: no attempt limit), `retry.jitter` (`true`), `retry.max_elapsed_ms` (86400000, 24 h; 1000 to 2592000000: the wall-clock horizon, see [Retry horizon](delivery.md#retry-horizon)). See [`delivery.md`](delivery.md#a-slow-or-dead-sink) and [Dispatch fairness between tenants](delivery.md#fairness-between-tenants) |
 | `wal` | `type` (`disk` \| `dual` \| `none`; the queue's mode — the name is historical; `dual` also confirms every hook in the intake log, see `intake`), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
@@ -105,6 +106,33 @@ is the [key reference](#ankusa-config) below.
 `type` is set. See
 [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/reference.yml)
 for every key with its comment and the alternatives.
+
+### Tracing
+
+`tracing` (image only; not a key of `%Ankusa.Config{}`) turns on OpenTelemetry
+tracing of every hook, from the provider's request to the consumer:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Start the OpenTelemetry SDK and the OTLP/HTTP exporter before the instance. Off, the image runs only core's no-op `opentelemetry_api`. |
+| `otlp_endpoint` | `http://localhost:4318` | The collector; spans go to `<otlp_endpoint>/v1/traces`. `http://` or `https://` with a host and **no** `user:password`: the load fails, without echoing the value. |
+| `sample_ratio` | `1.0` | 0 to 1, else the load fails. The share of new traces kept; the sampler is parent-based, so a request that carries a sampled `traceparent` is always traced. |
+
+With tracing off, a `traceparent` (and `tracestate`) sent to the edge still
+reaches every consumer byte for byte: on `Sink.Http` as headers, in queue
+messages as the `traceparent`/`tracestate` fields and the broker-native
+`traceparent`/`tracestate` header or attribute, on lifecycle events as the
+CloudEvents extension. Nothing is recorded. With it on, the hook stores the
+`ankusa.ingest` span's context instead (same trace id, `tracestate` carried), and
+these spans make it one trace: `ankusa.ingest` (a child of the provider's),
+`ankusa.verify`, `ankusa.commit`, `ankusa.dispatch.attempt` (one per attempt,
+a child of the stored context and linked to it), `ankusa.claim_check`,
+`ankusa.replay`, `ankusa.lifecycle.event`.
+
+The SDK's own `OTEL_*` environment variables take precedence over this section.
+The collector's credentials are the standard `OTEL_EXPORTER_OTLP_HEADERS`: no
+secret lives in this file, so the section needs no redaction and is not in
+`GET /v1/config`.
 
 ### Sources
 
