@@ -17,8 +17,8 @@ defmodule Ankusa.Dispatch.OrderingTest do
 
   import Ankusa.TestHelpers
 
-  alias Ankusa.{Envelope, Ordering, Queue}
   alias Ankusa.Edge.Ingest
+  alias Ankusa.{Envelope, Ordering, Queue}
   alias Ankusa.Queue.Deliveries
   alias Ankusa.Queue.Deliveries.{Counters, Lanes}
   alias Ankusa.Sink.Log

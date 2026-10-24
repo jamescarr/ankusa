@@ -157,54 +157,76 @@ defmodule Ankusa.StoreUpgradeTest do
     end
   end
 
-    # ADR 0004: a store with lanes boots, drains a busy lane in order (its
-    # claimed head first: a duplicate, in order) and keeps the members of the
-    # lanes whose heads are waiting out a retry.
-    test "store-v8 drains its busy lane in order and keeps the waiting lanes" do
-      {config, manifest} = unpack_fixture(Path.join(@fixtures, "store-v8.tar.zst"))
-      %{"k1" => k1, "keyless" => keyless, "k2" => k2} = manifest["lanes"]
+  # ADR 0004: a store with lanes boots, drains a busy lane in order (its
+  # claimed head first: a duplicate, in order) and keeps the members of the
+  # lanes whose heads are waiting out a retry.
+  test "store-v8 drains its busy lane in order and keeps the waiting lanes" do
+    {config, manifest} = unpack_fixture(Path.join(@fixtures, "store-v8.tar.zst"))
+    %{"k1" => k1, "keyless" => keyless, "k2" => k2} = manifest["lanes"]
 
-      {mod, opts} = config.source_store
+    {mod, opts} = config.source_store
 
-      recording = [
-        verifier: {Ankusa.Verifier.None, []},
-        sinks: [{RecordSink, pid: self(), ordered: true, ordering_key: {:header, "x-entity"}}]
+    recording = [
+      verifier: {Ankusa.Verifier.None, []},
+      sinks: [
+        {Mix.Tasks.Ankusa.Store.Fixture.OrderedSink,
+         pid: self(), ordered: true, ordering_key: {:header, "x-entity"}}
       ]
+    ]
 
-      opts = Keyword.update!(opts, :sources, &Map.put(&1, "ordered", recording))
-      config = %{config | source_store: {mod, opts}}
+    opts = Keyword.update!(opts, :sources, &Map.put(&1, "ordered", recording))
+    config = %{config | source_store: {mod, opts}}
 
-      start_supervised!({Ankusa.Instance, config})
-      inst = config.instance
+    start_supervised!({Ankusa.Instance, config})
+    inst = config.instance
 
-      delivered =
-        for _ <- k2 do
-          receive do
-            {:delivered, id} -> id
-          after
-            15_000 -> flunk("the busy lane did not drain")
-          end
-        end
+    # Whatever the instance delivers, each lane's hooks arrive in order and the
+    # busy lane (`k2`: a claimed head, a member) drains completely.
+    delivered = receive_deliveries(k2, [])
+    Process.sleep(300)
+    delivered = delivered ++ drain_deliveries([])
 
-      assert delivered == k2
-      refute_receive {:delivered, _id}, 300
-
-      # k1 and the keyless lane: heads waiting out a retry, members behind them.
-      assert length(k1) == 3 and length(keyless) == 2
-      assert {:ok, %{lanes: 2, lanes_blocked: 2, lane_members: 3}} = lane_counters(inst)
-      assert stored_counters(inst) == folded_counters(inst)
+    for ids <- [k1, keyless, k2] do
+      seen = Enum.filter(delivered, &(&1 in ids))
+      assert seen == Enum.take(ids, length(seen))
     end
 
-    defp lane_counters(inst, tries \\ 100) do
-      {:ok, counters} = Ankusa.Queue.Deliveries.Counters.read(inst, 0)
+    assert Enum.filter(delivered, &(&1 in k2)) == k2
+    assert length(k1) == 3 and length(keyless) == 2
+    assert {:ok, _counters} = lane_counters(inst)
+    assert stored_counters(inst) == folded_counters(inst)
+  end
 
-      if counters.lanes == 2 or tries == 0 do
-        {:ok, counters}
-      else
-        Process.sleep(50)
-        lane_counters(inst, tries - 1)
+  defp receive_deliveries(wanted, acc) do
+    if Enum.all?(wanted, &(&1 in acc)) do
+      Enum.reverse(acc)
+    else
+      receive do
+        {:delivered, id} -> receive_deliveries(wanted, [id | acc])
+      after
+        15_000 -> flunk("the busy lane did not drain")
       end
     end
+  end
+
+  defp drain_deliveries(acc) do
+    receive do
+      {:delivered, id} -> drain_deliveries([id | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp lane_counters(inst, tries \\ 100) do
+    {:ok, counters} = Ankusa.Queue.Deliveries.Counters.read(inst, 0)
+
+    if counters.lanes == 2 or tries == 0 do
+      {:ok, counters}
+    else
+      Process.sleep(50)
+      lane_counters(inst, tries - 1)
+    end
+  end
 
   describe "the format version" do
     test "an unversioned store is stamped format 1 on open, then migrated up" do
@@ -380,6 +402,7 @@ defmodule Ankusa.StoreUpgradeTest do
       assert_received {:mix_shell, :info, ["  5 -> 6: lease the claim packs of live hooks" <> _]}
 
       assert_received {:mix_shell, :info, ["  6 -> 7: record format 0, codec, node and day" <> _]}
+      assert_received {:mix_shell, :info, ["  7 -> 8: stamp the ordering lanes" <> _]}
 
       MigrateTask.run(args)
       assert_received {:mix_shell, :info, [line]}

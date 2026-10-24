@@ -52,9 +52,20 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
     @behaviour Ankusa.Sink
 
     # A head waits an hour out a retry, like `RetrySink`, so a lane's rows are
-    # still in the store whenever the fixture is booted.
+    # still in the store whenever the fixture is booted. A test that boots the
+    # fixture hands it a `:pid` (the row binds to this module) and it reports
+    # what it is given instead.
     @impl true
-    def deliver(_env, _ctx, _opts), do: {:error, {:retry_after, 3_600_000, :fixture}}
+    def deliver(env, _ctx, opts) do
+      case Keyword.fetch(opts, :pid) do
+        {:ok, pid} ->
+          send(pid, {:delivered, env.id})
+          :ok
+
+        :error ->
+          {:error, {:retry_after, 3_600_000, :fixture}}
+      end
+    end
   end
 
   @instance :fixture

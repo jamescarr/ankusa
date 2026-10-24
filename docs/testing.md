@@ -1102,11 +1102,12 @@ A hot-path change must not make ingest slower unnoticed, so
 [`bench/gate.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/gate.exs)
 runs the bench for `BODY_BYTES` 512 and 10240 (`N=20000`, `CONCURRENCY=256`,
 `SINK_LATENCY_MS=5`) and for 512 bytes at `CONCURRENCY=32`, three runs each,
-takes the median of every metric per cell (`512B`, `10240B`, `512B-c32`),
+takes the median of every metric per cell (`512B`, `10240B`, `512B-c32`,
+`512B-ordered`),
 writes `packages/ankusa/bench/last.json`, and compares it with the checked-in
 [`bench/baseline.json`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/baseline.json)
 (`{"512B": {"ingest_per_s", "p50_ms", "p99_ms", "end_to_end_per_s"}, "10240B":
-{...}, "512B-c32": {...}, "runner": "<class>"}`). It prints a table with the
+{...}, "512B-c32": {...}, "512B-ordered": {...}, "runner": "<class>"}`). It prints a table with the
 delta per metric and fails when a cell's `p99_ms` is above 1.2× the baseline or
 its `ingest_per_s` below 0.8× it:
 

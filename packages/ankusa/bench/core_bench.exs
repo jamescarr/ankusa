@@ -65,11 +65,11 @@ config =
          "bench" => [
            verifier: {Ankusa.Verifier.None, []},
            on_verify_failure: :accept_flag,
-          sinks: [
-            {Bench.Sink,
-             [latency_ms: latency_ms] ++
-               if(ordered?, do: [ordered: true, ordering_key: {:header, "x-entity"}], else: [])}
-          ]
+           sinks: [
+             {Bench.Sink,
+              [latency_ms: latency_ms] ++
+                if(ordered?, do: [ordered: true, ordering_key: {:header, "x-entity"}], else: [])}
+           ]
          ]
        }}
   )
