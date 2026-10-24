@@ -960,8 +960,9 @@ defmodule Ankusa.Sink.HttpTest do
     end
 
     # A real https listener whose certificate (SAN `san`) chains to a private CA,
-    # and an instance whose egress policy lets `localhost` and loopback addresses
-    # through, with the given `http_pools`.
+    # and an instance of its own (the node's pool rows are keyed by instance, so a
+    # test never counts another's pools) whose egress policy lets `localhost` and
+    # loopback addresses through, with the given `http_pools`.
     defp pool_fixture(san, pools) do
       %{cert: cert, key: key, ca: ca} = Ankusa.TestHelpers.tls_fixture(san)
       port = Ankusa.TestHelpers.free_port()
@@ -977,17 +978,19 @@ defmodule Ankusa.Sink.HttpTest do
          startup_log: false}
       )
 
+      instance = Ankusa.TestHelpers.unique_instance()
+
       Ankusa.put_config(
         Ankusa.Config.new(
-          instance: @instance,
+          instance: instance,
           egress: %{allow_hosts: ["localhost"], allow_cidrs: ["127.0.0.0/8"]},
           http_pools: pools
         )
       )
 
-      on_exit(fn -> :persistent_term.erase({Ankusa, :config, @instance}) end)
+      on_exit(fn -> :persistent_term.erase({Ankusa, :config, instance}) end)
 
-      %{port: port, ca: ca, ctx: %{instance: @instance, attempt: 1}}
+      %{port: port, ca: ca, ctx: %{instance: instance, attempt: 1}}
     end
 
     # `name` resolves to whatever `answers` holds, and nothing else resolves.
@@ -1012,7 +1015,7 @@ defmodule Ankusa.Sink.HttpTest do
                )
 
       assert_received {:request, "/static"}
-      assert Pools.count(@instance) == 1
+      assert Pools.count(ctx.instance) == 1
 
       for tenant <- ["acme", "globex"] do
         assert :ok =
@@ -1027,13 +1030,13 @@ defmodule Ankusa.Sink.HttpTest do
       end
 
       # One receiver, one TLS profile: the static sink and both tenants share a pool.
-      assert Pools.count(@instance) == 1
+      assert Pools.count(ctx.instance) == 1
 
       # An origin nobody delivers to is reaped: no pool per tenant receiver for the
       # life of the node.
       Process.sleep(80)
       assert :ok = Pools.sweep_now()
-      assert Pools.count(@instance) == 0
+      assert Pools.count(ctx.instance) == 0
     end
 
     test "every connection of a pool goes to the pinned address, verified against the name" do
@@ -1053,7 +1056,7 @@ defmodule Ankusa.Sink.HttpTest do
       assert results == [:ok, :ok]
       assert_received {:request, "/x"}
       assert_received {:request, "/x"}
-      assert Pools.count(@instance) == 1
+      assert Pools.count(ctx.instance) == 1
 
       # The pinned address is not the identity: a name the certificate does not
       # cover is refused even though it reaches the same listener.
@@ -1082,7 +1085,7 @@ defmodule Ankusa.Sink.HttpTest do
 
       assert :ok = deliver.()
       assert_received {:request, "/x"}
-      assert Pools.count(@instance) == 1
+      assert Pools.count(ctx.instance) == 1
 
       # The pool is open and its connection idle; the name now answers an address on
       # the private network, then the metadata service. Each attempt is checked
@@ -1109,7 +1112,7 @@ defmodule Ankusa.Sink.HttpTest do
       Agent.update(answers, fn _ -> [{127, 0, 0, 1}] end)
       assert :ok = deliver.()
       assert_received {:request, "/x"}
-      assert Pools.count(@instance) == 1
+      assert Pools.count(ctx.instance) == 1
     end
   end
 end
