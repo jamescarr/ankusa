@@ -347,22 +347,117 @@ defmodule Ankusa.ClaimCheckTest do
         )
       end
 
-      # 21 (default retry policy) + 30 (queue.dlq.retention_days) + 1 (24 h grace)
+      # 1 (the default 24 h retry horizon) + 30 (queue.dlq.retention_days) + 1 (24 h grace)
       assert_raise ArgumentError,
-                   ~r/bucket_expiry_days is 51 but a claim can be needed for 52 days/,
-                   fn -> ClaimCheck.validate_config!(config.(51, %{})) end
+                   ~r/bucket_expiry_days is 31 but a claim can be needed for 32 days/,
+                   fn -> ClaimCheck.validate_config!(config.(31, %{})) end
 
-      assert :ok = ClaimCheck.validate_config!(config.(52, %{}))
+      assert :ok = ClaimCheck.validate_config!(config.(32, %{}))
 
-      # A longer grace raises the floor: 2 days of grace make it 53.
+      # A longer grace raises the floor: 2 days of grace make it 33.
       assert_raise ArgumentError,
-                   ~r/for 53 days/,
+                   ~r/for 33 days/,
                    fn ->
-                     ClaimCheck.validate_config!(config.(52, %{redeem_grace_ms: 172_800_000}))
+                     ClaimCheck.validate_config!(config.(32, %{redeem_grace_ms: 172_800_000}))
                    end
 
       # A LocalFS claim store has leases instead: the key is not consulted.
       assert :ok = ClaimCheck.validate_config!(Config.new(claim_check: %{bucket_expiry_days: 1}))
+    end
+
+    @sqs {Ankusa.Sink.SQS,
+          queue_url: "https://sqs.us-east-1.amazonaws.com/1/q", region: "us-east-1"}
+    @day_ms 86_400_000
+
+    test "the horizon is the longest of the global and every claim-using source's max_elapsed_ms" do
+      s3 = {Ankusa.BlobStore.S3, bucket: "b", region: "us-east-1"}
+
+      config = fn days, dispatch, sources ->
+        Config.new(
+          storage: %{blob_store: s3},
+          dispatch: dispatch,
+          claim_check: %{bucket_expiry_days: days},
+          source_store: {Ankusa.SourceStore.Static, sources: sources}
+        )
+      end
+
+      long = %{"long" => [sinks: [@sqs], retry: [max_elapsed_ms: 10 * @day_ms]]}
+
+      # global 1 day, but a configured claim-using source retries for 10: 10 + 30 + 1 = 41
+      assert_raise ArgumentError,
+                   ~r/bucket_expiry_days is 40 .* 41 days \(retry horizon 10 \+/,
+                   fn ->
+                     ClaimCheck.validate_config!(config.(40, %{}, long))
+                   end
+
+      assert :ok = ClaimCheck.validate_config!(config.(41, %{}, long))
+
+      # a source with no claim-checking sink does not count (Log has no inline threshold)
+      quiet = %{
+        "quiet" => [sinks: [{Ankusa.Sink.Log, []}], retry: [max_elapsed_ms: 10 * @day_ms]]
+      }
+
+      assert :ok = ClaimCheck.validate_config!(config.(32, %{}, quiet))
+
+      # the global horizon counts whatever the sources are: 7 + 30 + 1 = 38
+      global = %{retry: {Ankusa.RetryPolicy.Exponential, [max_elapsed_ms: 7 * @day_ms]}}
+
+      assert_raise ArgumentError, ~r/bucket_expiry_days is 37 .* 38 days/, fn ->
+        ClaimCheck.validate_config!(config.(37, global, %{}))
+      end
+
+      assert :ok = ClaimCheck.validate_config!(config.(38, global, %{}))
+    end
+
+    test "check_retry_horizon/2 refuses a source that outlives the bucket rule" do
+      s3 = {Ankusa.BlobStore.S3, bucket: "b", region: "us-east-1"}
+
+      config = fn days ->
+        Config.new(storage: %{blob_store: s3}, claim_check: %{bucket_expiry_days: days})
+      end
+
+      source = fn sinks, retry ->
+        Ankusa.Source.new("acme.hook", sinks: sinks, retry: retry)
+      end
+
+      long = source.([@sqs], max_elapsed_ms: 10 * @day_ms)
+
+      assert {:error, message} = ClaimCheck.check_retry_horizon(config.(40), long)
+      assert message =~ "source acme.hook"
+      assert message =~ "claim_check.bucket_expiry_days is 40"
+      assert message =~ "retry.max_elapsed_ms"
+
+      assert :ok = ClaimCheck.check_retry_horizon(config.(41), long)
+      # no override: the global horizon, already checked at boot
+      assert :ok = ClaimCheck.check_retry_horizon(config.(40), source.([@sqs], nil))
+      # no claim-checking sink: nothing to expire
+      assert :ok =
+               ClaimCheck.check_retry_horizon(
+                 config.(1),
+                 source.([{Ankusa.Sink.Log, []}], max_elapsed_ms: 10 * @day_ms)
+               )
+
+      # undeclared bucket rule: boot warns, a write is not refused
+      assert :ok = ClaimCheck.check_retry_horizon(config.(nil), long)
+      # LocalFS claims have leases, not a bucket rule
+      assert :ok =
+               ClaimCheck.check_retry_horizon(
+                 Config.new(claim_check: %{bucket_expiry_days: 1}),
+                 long
+               )
+    end
+
+    test "validate_stored_horizons!/2 refuses a stored source that outlives the bucket rule" do
+      s3 = {Ankusa.BlobStore.S3, bucket: "b", region: "us-east-1"}
+      config = Config.new(storage: %{blob_store: s3}, claim_check: %{bucket_expiry_days: 40})
+      fine = Ankusa.Source.new("acme.fine", sinks: [@sqs])
+      long = Ankusa.Source.new("acme.long", sinks: [@sqs], retry: [max_elapsed_ms: 10 * @day_ms])
+
+      assert :ok = ClaimCheck.validate_stored_horizons!(config, [fine])
+
+      assert_raise ArgumentError, ~r/source acme.long: its retry horizon \(10 days\)/, fn ->
+        ClaimCheck.validate_stored_horizons!(config, [fine, long])
+      end
     end
 
     @tag :capture_log
@@ -378,7 +473,7 @@ defmodule Ankusa.ClaimCheckTest do
         end)
 
       assert log =~ "claim_check.bucket_expiry_days is not declared"
-      assert log =~ "no earlier than 52 days"
+      assert log =~ "no earlier than 32 days"
     end
 
     test "retention is judged against the claim stores, not the segment store" do

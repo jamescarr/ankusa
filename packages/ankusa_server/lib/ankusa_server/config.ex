@@ -91,9 +91,9 @@ defmodule AnkusaServer.Config do
   @tls_verifies ~w(verify_none verify_peer)
   @tls_versions %{"tlsv1.2" => :"tlsv1.2", "tlsv1.3" => :"tlsv1.3"}
   @batcher_keys ~w(partitions max_batch max_commits group_commit_max_bytes group_commit_max_records group_commit_delay_ms max_delay_ms max_queue max_queue_bytes)
-  @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms sink_concurrency breaker_failures breaker_open_ms breaker_max_open_ms retry tenants)
+  @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms sink_concurrency breaker_failures breaker_open_ms breaker_max_open_ms max_retry_after_ms retry tenants)
   @dispatch_tenant_keys ~w(max_inflight max_inflight_bytes concurrency)
-  @retry_keys ~w(base_ms max_ms max_attempts jitter)
+  @retry_keys ~w(base_ms max_ms max_attempts jitter max_elapsed_ms)
   @wal_keys ~w(type publish_timeout_ms)
   @intake_types ~w(kafka)
   @intake_keys ~w(type node_id fleet topic kafka publish_timeout_ms reconcile_deadline_ms breaker_failures probe_ms retry_after_s offset_flush_ms pending max_record_bytes recover_on_boot verify_topic)
@@ -165,7 +165,7 @@ defmodule AnkusaServer.Config do
   # A rotation window needs two keys; a handful covers any overlap a provider
   # forces. More is a misconfiguration (each key costs an HMAC per hook).
   @max_secrets 8
-  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers store_headers trust_url_tenant)
+  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers store_headers trust_url_tenant retry)
   @dedupe_keys ~w(preset header json ttl_seconds)
   @dedupe_presets %{
     "github" => :github,
@@ -946,6 +946,7 @@ defmodule AnkusaServer.Config do
         |> put_opt(:breaker_open_ms, int_opt(dispatch, "breaker_open_ms", ["dispatch"]))
         |> put_opt(:breaker_max_open_ms, int_opt(dispatch, "breaker_max_open_ms", ["dispatch"]))
         |> put_opt(:retry, retry_policy(retry))
+        |> put_opt(:max_retry_after_ms, int_opt(dispatch, "max_retry_after_ms", ["dispatch"]))
         |> put_opt(:tenants, dispatch_tenants(dispatch))
     ]
   end
@@ -996,13 +997,41 @@ defmodule AnkusaServer.Config do
     if retry == %{} do
       nil
     else
-      {Ankusa.RetryPolicy.Exponential,
-       []
-       |> put_opt(:base_ms, int_opt(retry, "base_ms", path))
-       |> put_opt(:max_ms, int_opt(retry, "max_ms", path))
-       |> put_opt(:max_attempts, int_opt(retry, "max_attempts", path))
-       |> put_opt(:jitter, bool_opt(retry, "jitter", path))}
+      {Ankusa.RetryPolicy.Exponential, retry_opts(retry, path)}
     end
+  end
+
+  # `sources.<id>.retry`: options laid over the instance's `dispatch.retry`.
+  # Absent is no override; the ranges are core's (`Ankusa.RetryPolicy`), reported
+  # here with the key's path.
+  defp source_retry(source, path) do
+    case source["retry"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["retry"]
+        opts = retry_opts(section!(value, @retry_keys, path), path)
+
+        try do
+          for {key, value} <- opts,
+              do: Ankusa.RetryPolicy.validate_opt!(key, value, render_path(path))
+
+          opts
+        rescue
+          error in ArgumentError ->
+            reraise ConfigError, [message: Exception.message(error)], __STACKTRACE__
+        end
+    end
+  end
+
+  defp retry_opts(retry, path) do
+    []
+    |> put_opt(:base_ms, int_opt(retry, "base_ms", path))
+    |> put_opt(:max_ms, int_opt(retry, "max_ms", path))
+    |> put_opt(:max_attempts, int_opt(retry, "max_attempts", path))
+    |> put_opt(:jitter, bool_opt(retry, "jitter", path))
+    |> put_opt(:max_elapsed_ms, int_opt(retry, "max_elapsed_ms", path))
   end
 
   # ── wal ─────────────────────────────────────────────────────────────────────
@@ -1962,6 +1991,7 @@ defmodule AnkusaServer.Config do
       |> put_opt(:forward_headers, forward_headers(source, path))
       |> put_opt(:store_headers, store_headers(source, path))
       |> put_opt(:trust_url_tenant, bool_opt(source, "trust_url_tenant", path))
+      |> put_opt(:retry, source_retry(source, path))
 
     check_sink_schemes!(opts[:sinks], egress, path)
     opts

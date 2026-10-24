@@ -109,12 +109,12 @@ defmodule Ankusa.Sink.GooglePubSubIntegrationTest do
     assert message["orderingKey"] == "k"
   end
 
-  test "a topic that was never created is a transient error, retried rather than dropped", %{
+  test "a topic that was never created is a permanent config error, dead-lettered at once", %{
     topic: topic
   } do
     assert {:error, reason} =
              GooglePubSub.deliver(envelope(), %{attempt: 1}, opts(topic <> "-never"))
 
-    assert {:transient, _} = Sink.classify(reason)
+    assert {:permanent, {:config, {:pubsub, 404, "NOT_FOUND", _message}}} = Sink.classify(reason)
   end
 end

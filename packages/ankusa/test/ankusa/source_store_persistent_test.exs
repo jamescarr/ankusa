@@ -238,6 +238,68 @@ defmodule Ankusa.SourceStorePersistentTest do
     assert long_msg =~ "name"
   end
 
+  # ── retry horizon vs the claim bucket's lifecycle rule ──────────────────────
+
+  describe "a source's retry horizon against claim_check.bucket_expiry_days" do
+    @day_ms 86_400_000
+    @s3 {Ankusa.BlobStore.S3, bucket: "b", region: "us-east-1"}
+    @long %{"sinks" => [%{"type" => "sqs"}], "retry" => %{"max_elapsed_ms" => 10 * @day_ms}}
+
+    test "a write past the rule is refused and stores nothing" do
+      # 40 days: the 1-day default horizon + 30 of DLQ + 1 of grace + 8 to spare
+      {config, _pid} =
+        start_store(storage: %{blob_store: @s3}, claim_check: %{bucket_expiry_days: 40})
+
+      instance = config.instance
+
+      assert {:error, :retry_exceeds_claim_expiry, message} =
+               SourceStore.put(instance, "acme", "long", @long, :create)
+
+      assert message =~ "its retry horizon (10 days)"
+      assert SourceStore.get(instance, "acme", "long") == :error
+
+      within = put_in(@long, ["retry", "max_elapsed_ms"], 5 * @day_ms)
+      assert {:ok, _} = SourceStore.put(instance, "acme", "within", within, :create)
+
+      # an update past the rule is refused and leaves the stored source as it was
+      assert {:error, :retry_exceeds_claim_expiry, _} =
+               SourceStore.put(instance, "acme", "within", @long, :update)
+
+      assert {:ok, %{spec: ^within}} = SourceStore.get(instance, "acme", "within")
+    end
+
+    @tag :capture_log
+    test "a stored source that outlives a rule declared later refuses boot" do
+      # No rule declared yet: the write is accepted (boot only warns)
+      {config, pid} = start_store(storage: %{blob_store: @s3})
+      instance = config.instance
+      assert {:ok, _} = SourceStore.put(instance, "acme", "long", @long, :create)
+
+      strict = %{config | claim_check: %{config.claim_check | bucket_expiry_days: 40}}
+      stop(pid)
+      stop_supervised!({Ankusa.Audit, instance})
+      stop_supervised!({Store, instance})
+      put_config(strict)
+      start_supervised!({Store, instance: instance})
+      start_supervised!({Ankusa.Audit, instance: instance})
+
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stack}} =
+               Persistent.start_link(instance: instance)
+
+      assert message =~ "source acme.long: its retry horizon (10 days)"
+      assert message =~ "claim_check.bucket_expiry_days is 40"
+
+      # with the rule raised to cover it (10 + 30 + 1), the same data boots
+      roomy = %{config | claim_check: %{config.claim_check | bucket_expiry_days: 41}}
+      put_config(roomy)
+      {:ok, pid2} = Persistent.start_link(instance: instance)
+      on_exit(fn -> stop(pid2) end)
+      assert {:ok, %{source_id: "acme.long"}} = SourceStore.get(instance, "acme", "long")
+    end
+  end
+
   # ── persistence across a restart ────────────────────────────────────────────
 
   test "sources reload across a store restart" do
@@ -855,12 +917,17 @@ defmodule Ankusa.SourceStorePersistentTest do
         [
           sinks: Enum.map(sinks, &sink/1),
           trust_url_tenant: Map.get(spec, "trust_url_tenant", false)
-        ]
+        ] ++ retry_opts(spec)
 
       _ ->
         raise ArgumentError, "sinks must be a non-empty list"
     end
   end
+
+  defp retry_opts(%{"retry" => %{} = retry}),
+    do: [retry: for({key, value} <- retry, do: {String.to_atom(key), value})]
+
+  defp retry_opts(_spec), do: []
 
   # A decoder that simulates schema drift: it rejects every spec carrying a
   # `verify` block, but still accepts the plain log specs the tests write.
@@ -869,5 +936,10 @@ defmodule Ankusa.SourceStorePersistentTest do
 
   defp sink(%{"type" => "log"}), do: {Ankusa.Sink.Log, []}
   defp sink(%{"type" => "http", "url" => url}), do: {Ankusa.Sink.Http, [url: url]}
+
+  defp sink(%{"type" => "sqs"}),
+    do:
+      {Ankusa.Sink.SQS, queue_url: "https://sqs.us-east-1.amazonaws.com/1/q", region: "us-east-1"}
+
   defp sink(other), do: raise(ArgumentError, "unknown sink: #{inspect(other)}")
 end

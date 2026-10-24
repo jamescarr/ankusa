@@ -75,6 +75,7 @@ defmodule Ankusa.SourceStore do
             ) ::
               {:ok, stored()}
               | {:error, :invalid, String.t()}
+              | {:error, :retry_exceeds_claim_expiry, String.t()}
               | {:error, :exists}
               | {:error, :not_found}
               | {:error, :store_unavailable}
@@ -98,6 +99,7 @@ defmodule Ankusa.SourceStore do
             ) ::
               {:ok, stored()}
               | {:error, :invalid, String.t()}
+              | {:error, :retry_exceeds_claim_expiry, String.t()}
               | {:error, :exists}
               | {:error, :not_found}
               | {:error, :store_unavailable}
@@ -152,7 +154,10 @@ defmodule Ankusa.SourceStore do
   `tenant` and `name` are validated here, before the store sees them, so a bad
   identity is `{:error, :invalid, message}` no matter which store is configured.
   A store that exports neither `put/6` nor `put/5` is read-only:
-  `{:error, :read_only}`.
+  `{:error, :read_only}`. A source that routes to a claim-checking sink in an
+  object store whose retry horizon outlasts `claim_check.bucket_expiry_days`
+  (`Ankusa.ClaimCheck.check_retry_horizon/2`) is
+  `{:error, :retry_exceeds_claim_expiry, message}`.
 
   Options: `audit:` the `Ankusa.Audit.Context` of the change (default
   `Ankusa.Audit.Context.system/0`).
@@ -160,6 +165,7 @@ defmodule Ankusa.SourceStore do
   @spec put(atom(), String.t(), String.t(), map(), :create | :update, keyword()) ::
           {:ok, stored()}
           | {:error, :invalid, String.t()}
+          | {:error, :retry_exceeds_claim_expiry, String.t()}
           | {:error, :exists}
           | {:error, :not_found}
           | {:error, :store_unavailable}

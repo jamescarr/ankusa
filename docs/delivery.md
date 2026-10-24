@@ -122,8 +122,10 @@ emits `[:ankusa, :dispatch, :breaker]` (counted on `/metrics` as
 
 Two consequences to know: breakers live in the dispatch process's memory, so a
 restart closes them all and the first wave after it can again hold slots for
-one `attempt_timeout_ms`; and parked rows spend no attempts, so while a
-breaker stays open a row's retry horizon is not bounded by wall-clock time.
+one `attempt_timeout_ms`; and parked rows spend no attempts, but they do age:
+a row parked behind an open breaker is due again no later than its [retry
+horizon](#retry-horizon), and is dead-lettered there, so a breaker that stays
+open for longer than a delivery's `max_elapsed_ms` dead-letters its backlog.
 A test or a deployment that wants every failure to reach the DLQ on the
 retry policy's schedule sets `breaker_failures: 0`.
 
@@ -206,13 +208,18 @@ raised exception, throw, or exit is treated as `{:error, ...}` too, and so is
 any other return value (`{:error, {:bad_return, value}}`) on every path:
 dispatch, lifecycle events, and the `wal: :none` ack.
 
-**Error classes.** Two reason shapes change what dispatch does:
+**Error classes.** Three reason shapes change what dispatch does:
 
 | `reason` | Dispatch |
 | --- | --- |
 | `{:permanent, term}` | Dead-letter after this attempt, whatever the policy had left; does not count towards the circuit breaker. For what retrying cannot fix: a `410 Gone`, a record the broker will never take. |
-| `{:retry_after, ms, term}` | Next attempt no sooner than `ms` (capped at one hour) or the policy's backoff, whichever is later; the policy still decides when to give up. |
+| `{:permanent, {:config, term}}` | A permanent failure that is the operator's to fix, not the hook's: a credential the destination refuses (`AccessDenied`, `PERMISSION_DENIED`), a queue or topic that does not exist. Dead-letters like any `{:permanent, _}`, and counts in `ankusa_dispatch_config_errors_total{sink}` (the alert that a source needs a config fix and then a DLQ replay). |
+| `{:retry_after, ms, term}` | Next attempt no sooner than `ms` (capped at `dispatch.max_retry_after_ms`, default one hour) or the policy's backoff, whichever is later; the policy still decides when to give up. |
 | anything else | Transient: the retry policy. |
+
+Whatever the class, a delivery still failing `max_elapsed_ms` (default 24 h,
+per source: `retry:`) after its first attempt is dead-lettered; see [Retry
+horizon](#retry-horizon).
 
 `Ankusa.Sink.classify/1` returns the class of a reason.
 
@@ -289,8 +296,10 @@ turn verification off.
 | Status | Result |
 | --- | --- |
 | `2xx` | `:ok` |
-| `400`, `401`, `403`, `404`, `410`, `413`, `422` | `{:permanent, {:status, s}}`: dead-letter now. A credential or `secret` fix is followed by a DLQ replay, not hours of retries against a receiver that keeps refusing. |
+| `400`, `401`, `403`, `404`, `410`, `413`, `422`, `451` | `{:permanent, {:status, s}}`: dead-letter now. A credential or `secret` fix is followed by a DLQ replay, not hours of retries against a receiver that keeps refusing; a `451` is the receiver refusing this sender for legal reasons, which no retry changes. |
 | `408`, `429`, `5xx` with `Retry-After` (seconds or an HTTP-date) | `{:retry_after, ms, {:status, s}}` |
+| `425` | `{:retry_after, ms, {:status, 425}}`: the `Retry-After`, else a full-jitter pause (1 to `min(30 s, 500 ms · 2^(attempt-1))`). `Too Early` means the receiver will take it shortly |
+| `409` | transient `{:status, 409}`: the receiver's state (a lock, a missing parent) usually moves; a conflict that does not is bounded by the retry horizon |
 | anything else, a transport failure, a timeout | transient: the retry policy |
 
 With `secret` (a `whsec_…` secret, or a list while rotating) every delivery
@@ -769,8 +778,9 @@ sinks: [
 
 **It never creates the queue.** A queue's type, retention, visibility timeout,
 redrive policy and encryption are an operator's contract. A queue that does
-not exist is `{:error, {:sqs, 400, "QueueDoesNotExist", message}}`, into the
-retry policy and then the DLQ, the way `Sink.NATS` treats a missing stream.
+not exist is `{:error, {:permanent, {:config, {:sqs, 400, "QueueDoesNotExist",
+message}}}}`: dead-lettered at once, since only an operator creating the queue
+fixes it, and a DLQ replay then re-sends the hooks, the way `Sink.NATS` treats a missing stream.
 
 **`deliver/3` returns `:ok` only once SQS has the message.** That is a `200`
 from `SendMessage` whose `MD5OfMessageBody` matches the MD5 of the body sent;
@@ -781,8 +791,10 @@ durable for [direct mode](#direct-mode). The other outcomes:
 | --- | --- |
 | body + attributes over `max_message_bytes` (1 MiB, SQS's limit) | permanent `{:message_too_large, size, max}`, before any request |
 | SQS refuses the message itself: `InvalidMessageContents`, `InvalidParameterValue` | permanent `{:sqs, status, code, message}`: dead-lettered at once |
-| any other SQS error: `QueueDoesNotExist`, `AccessDenied`, throttling, a 5xx | transient `{:sqs, status, code, message}`: the retry policy |
-| a non-2xx that is not an SQS error document (a proxy) | transient `{:status, status, body}` |
+| SQS refuses this sink's credentials or queue: `AccessDenied`, `QueueDoesNotExist`, `InvalidClientTokenId`, `UnrecognizedClientException`, `SignatureDoesNotMatch`, `InvalidAccessKeyId`, `MissingAuthenticationToken` | `{:permanent, {:config, {:sqs, status, code, message}}}`: dead-lettered at once, counted in `ankusa_dispatch_config_errors_total{sink}`; fix the source, then replay |
+| throttling: `Throttling`, `ThrottlingException`, `RequestThrottled`, `TooManyRequestsException`, `ServiceUnavailable`, or any `429`/`503` | `{:retry_after, ms, {:sqs, status, code, message}}`, `ms` a full-jitter draw (1 to `min(30 s, 500 ms · 2^(attempt-1))`) |
+| any other SQS error: a 5xx, an expired token | transient `{:sqs, status, code, message}`: the retry policy |
+| a non-2xx that is not an SQS error document (a proxy) | transient `{:status, status, body}`; a `429`/`503` is a `{:retry_after, ms, _}` |
 | a `200` with a mismatched MD5, no credentials, a transport failure | transient |
 
 **FIFO when the queue URL ends `.fifo`** (AWS requires the suffix). Each send
@@ -835,8 +847,9 @@ sinks: [
 
 **It never creates the topic or a subscription.** Retention, schema,
 encryption and who may subscribe are an operator's contract. A topic that does
-not exist is `{:error, {:pubsub, 404, "NOT_FOUND", message}}`, into the retry
-policy and then the DLQ. A topic with **no subscription** (and no topic
+not exist is `{:error, {:permanent, {:config, {:pubsub, 404, "NOT_FOUND",
+message}}}}`: dead-lettered at once, since only an operator creating the topic
+fixes it, and a DLQ replay then re-publishes the hooks. A topic with **no subscription** (and no topic
 message retention) answers `200` and discards the message: the sink cannot
 detect it.
 
@@ -849,8 +862,10 @@ The other outcomes:
 | --- | --- |
 | data + attributes + ordering key over `max_message_bytes` (10 MB, Pub/Sub's limit) | permanent `{:message_too_large, size, max}`, before any request |
 | Pub/Sub refuses the message itself: `INVALID_ARGUMENT` | permanent `{:pubsub, status, "INVALID_ARGUMENT", message}`: dead-lettered at once |
-| any other Pub/Sub error: `NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED`, `RESOURCE_EXHAUSTED`, `UNAVAILABLE` | transient `{:pubsub, status, google_status, message}`: the retry policy |
-| a non-200 that is not a Google error document (a proxy) | transient `{:status, status, body}` |
+| Pub/Sub refuses this sink's credentials or destination: `PERMISSION_DENIED`, `UNAUTHENTICATED`, `NOT_FOUND` (topic) | `{:permanent, {:config, {:pubsub, status, google_status, message}}}`: dead-lettered at once, counted in `ankusa_dispatch_config_errors_total{sink}`; fix the source, then replay |
+| `RESOURCE_EXHAUSTED`, or any `429`/`503` | `{:retry_after, ms, {:pubsub, status, google_status, message}}`, `ms` a full-jitter draw (1 to `min(30 s, 500 ms · 2^(attempt-1))`) |
+| any other Pub/Sub error: `UNAVAILABLE`, `INTERNAL`, … | transient `{:pubsub, status, google_status, message}`: the retry policy |
+| a non-200 that is not a Google error document (a proxy) | transient `{:status, status, body}`; a `429`/`503` is a `{:retry_after, ms, _}` |
 | a `200` that does not name one message id, a transport failure | transient |
 | the `:token_provider` answers `:error` | transient `:no_credentials`, no request sent |
 
@@ -886,16 +901,53 @@ capped binary exponential backoff with optional full jitter.
 | --- | --- |
 | `:base_ms` | `100` |
 | `:max_ms` | `300_000` (ceiling before jitter) |
-| `:max_attempts` | `84` |
+| `:max_attempts` | `nil`: no attempt limit, the horizon below is the bound |
 | `:jitter` | `true`. Multiplies the delay by a random factor in `[0.5, 1.0]` |
+| `:max_elapsed_ms` | `86_400_000` (24 h): the horizon. Not read by the policy; every policy and every source's `retry:` shares the key |
 
-The defaults retry for about 6 hours: 100 ms doubling to the 5-minute cap by
-attempt 13, then 5 minutes apart until attempt 84 (21 709.5 s without jitter;
-jitter halves a delay at worst, so 3–6 h). Set `max_attempts` lower to
-dead-letter sooner.
+The defaults retry for 24 hours: 100 ms doubling to the 5-minute cap by
+attempt 13, then 5 to 2.5 minutes apart (jitter halves a delay at worst), so
+roughly 290 to 580 attempts before the dead letter. Set `max_elapsed_ms` lower
+to dead-letter sooner, or `max_attempts` to bound the count.
 
-Set dispatch-wide via `config.dispatch.retry`; there's currently no
-per-source override (see [`configuration.md`](configuration.md)).
+### Retry horizon
+
+Whatever the policy answers, dispatch gives every delivery `max_elapsed_ms`
+from its **first attempt** (the moment dispatch first took the row; it is kept
+in the delivery row as `first_attempt_at`, so it survives a restart, and a row
+written before the field existed starts its horizon when the new release first
+takes it). A delivery that fails at or after that time is dead-lettered, and no
+retry is ever scheduled later than it (`Ankusa.RetryPolicy.schedule/5`): the
+last attempt runs *on* the horizon. A 30-hour outage of a sink therefore
+dead-letters its hooks at 24 hours, not at the policy's attempt count, and a
+DLQ replay (which gives the row a fresh horizon) re-drives them.
+
+Rows *parked* behind an open circuit breaker (see [A slow or dead
+sink](#a-slow-or-dead-sink)) spend no attempts but not forever: a parked row
+comes due no later than its horizon, and one that is parked again at or past it
+is dead-lettered as `{:retry_horizon, module}` without another attempt.
+
+`Retry-After` and throttle answers (`{:retry_after, ms, _}`) are capped by
+`dispatch.max_retry_after_ms` (default 1 h) and by the horizon.
+
+A source overrides the instance's policy with `retry:` (`base_ms`, `max_ms`,
+`max_attempts`, `jitter`, `max_elapsed_ms`; see
+[`configuration.md`](configuration.md#sources)): its deliveries run under the
+instance's options with those laid over them. The source is read when a row is
+claimed, so a change applies to the backlog like any other source change.
+
+**Claim-checked sources are bounded by the bucket's lifecycle rule.** A body in
+an object store is deleted by the bucket's own lifecycle rule
+(`claim_check.bucket_expiry_days`), which cannot see that the hook is still
+retrying. That rule has to outlast `max_elapsed_ms` + the DLQ retention + the
+redeem grace, so a source with a longer `retry.max_elapsed_ms` is refused (`422
+retry_exceeds_claim_expiry` from the admin API; boot refuses a stored one) when
+it routes to a claim-checking sink and the rule is declared. The shipped 24 h
+default needs 1 + `queue.dlq.retention_days` + the grace in days, not the 21
+days the old 84-attempt default was assumed to need. Lifecycle events
+(`Ankusa.Lifecycle`) have no source: they run under the instance's
+`dispatch.retry` and its horizon, so one failing lifecycle sink holds the
+cursor for at most that long.
 
 ## Dead letters and replay
 

@@ -9,18 +9,28 @@ defmodule Ankusa.Sink do
 
   ## Error classes
 
-  Two shapes of `reason` change what dispatch does with a failure:
+  Three shapes of `reason` change what dispatch does with a failure:
 
     * `{:permanent, term}` — retrying cannot help (a `410 Gone`, a record the
       broker will never take). The row is dead-lettered after this attempt,
       whatever attempts the retry policy had left, and the failure does not
       count towards the sink's circuit breaker.
-    * `{:retry_after, ms, term}` — the sink asked for a pause (`Retry-After`).
-      The next attempt is no sooner than `ms` (capped at an hour) or the
-      policy's own backoff, whichever is later; the policy still decides when
-      to give up.
+    * `{:permanent, {:config, term}}` — a permanent failure that is the
+      operator's to fix, not the hook's: a credential the destination refuses
+      (`AccessDenied`, `PERMISSION_DENIED`), a queue or topic that does not
+      exist. It dead-letters like any `{:permanent, _}` and also counts in
+      `ankusa_dispatch_config_errors_total{sink}`, the alert that says a source
+      needs a config fix and then a DLQ replay.
+    * `{:retry_after, ms, term}` — the sink asked for a pause (`Retry-After`, or
+      a throttle: AWS `Throttling`, Pub/Sub `RESOURCE_EXHAUSTED`). The next
+      attempt is no sooner than `ms` (capped at `dispatch.max_retry_after_ms`,
+      default one hour) or the policy's own backoff, whichever is later; the
+      policy still decides when to give up.
 
-  Every other `reason` is transient and follows the retry policy.
+  Every other `reason` is transient and follows the retry policy. Whatever the
+  class, a delivery that is still failing `max_elapsed_ms` after its first
+  attempt (default 24 hours, per source: `retry:`) is dead-lettered
+  (`Ankusa.RetryPolicy`).
 
   Deliveries are **not ordered**: hooks for one sink may be delivered in any
   order, and a retry runs after whatever is due before it. A Kafka partition key
@@ -52,6 +62,10 @@ defmodule Ankusa.Sink do
   @typedoc "What `c:deliver/3` may return; see \"Error classes\"."
   @type failure :: {:permanent, term()} | {:retry_after, pos_integer(), term()} | term()
 
+  @typedoc "What `classify/1` answers."
+  @type class ::
+          {:permanent, term()} | {:retry_after, pos_integer(), term()} | {:transient, term()}
+
   @callback deliver(Envelope.t(), ctx(), opts :: keyword()) :: :ok | {:error, failure()}
 
   @doc """
@@ -59,13 +73,28 @@ defmodule Ankusa.Sink do
   term}`, `{:retry_after, ms, term}` with a positive integer `ms`, or
   `{:transient, reason}` for anything else.
   """
-  @spec classify(term()) ::
-          {:permanent, term()} | {:retry_after, pos_integer(), term()} | {:transient, term()}
+  @spec classify(term()) :: class()
   def classify({:permanent, _term} = reason), do: reason
 
   def classify({:retry_after, ms, _term} = reason) when is_integer(ms) and ms > 0, do: reason
 
   def classify(reason), do: {:transient, reason}
+
+  @throttle_base_ms 500
+  @throttle_cap_ms 30_000
+
+  @doc """
+  The pause a sink asks for when its destination throttles it and says nothing
+  about how long (`{:retry_after, ms, reason}`): full jitter, a uniform draw
+  from `1..min(30_000, 500 * 2^(attempt - 1))` milliseconds, so every throttled
+  delivery of a source does not come back in the same instant. `attempt` is
+  `ctx.attempt`.
+  """
+  @spec throttle_after_ms(pos_integer()) :: pos_integer()
+  def throttle_after_ms(attempt) when is_integer(attempt) and attempt >= 1 do
+    ceiling = min(@throttle_cap_ms, @throttle_base_ms * Integer.pow(2, min(attempt - 1, 20)))
+    :rand.uniform(ceiling)
+  end
 
   @doc """
   The largest body this sink sends inline, or `nil` if it never uses the claim

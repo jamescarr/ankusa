@@ -336,6 +336,13 @@ defmodule Ankusa.Metrics do
           tags: [:instance] ++ ids ++ [:sink]
         )
       ),
+      counter(
+        "ankusa.dispatch.config_errors.total",
+        scoped(own,
+          event_name: [:ankusa, :dispatch, :config_error],
+          tags: [:instance, :sink]
+        )
+      ),
       sum(
         "ankusa.replay.moved.total",
         scoped(own,

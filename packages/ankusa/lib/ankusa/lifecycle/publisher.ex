@@ -23,8 +23,11 @@ defmodule Ankusa.Lifecycle.Publisher do
   only moves once every sink confirmed the row or gave up on it, so rows are
   delivered in `seq` order and one failing sink holds the events behind that row
   back from all of them. A failed job is retried after the delay
-  `config.dispatch.retry` gives (an `Ankusa.RetryPolicy`); when the policy gives
-  up the event is dropped *for that sink* (and can be replayed). An attempt that
+  `config.dispatch.retry` gives (an `Ankusa.RetryPolicy`), until the policy gives
+  up or the job is `retry.max_elapsed_ms` (default 24 hours) past its first
+  attempt: the instance's `dispatch.retry`, not a source's, so that horizon is
+  how long one failing sink can hold the cursor. Then
+  the event is dropped *for that sink* (and can be replayed). An attempt that
   has not returned after `config.dispatch.attempt_timeout_ms` is killed and
   counts as a failed attempt.
 
@@ -60,6 +63,7 @@ defmodule Ankusa.Lifecycle.Publisher do
           subject: String.t(),
           sink: {module(), keyword()},
           attempt: pos_integer(),
+          first_attempt_at: integer(),
           row: pos_integer(),
           batch: reference() | nil,
           replay: String.t() | nil
@@ -127,6 +131,7 @@ defmodule Ankusa.Lifecycle.Publisher do
        instance: instance,
        sinks: config.lifecycle.sinks,
        retry: config.dispatch.retry,
+       max_retry_after_ms: config.dispatch.max_retry_after_ms,
        attempt_timeout_ms: config.dispatch.attempt_timeout_ms,
        sup: sup,
        loaded?: false,
@@ -208,6 +213,7 @@ defmodule Ankusa.Lifecycle.Publisher do
                 subject: row.resource,
                 sink: sink,
                 attempt: 1,
+                first_attempt_at: System.system_time(:millisecond),
                 row: row.seq,
                 batch: nil,
                 replay: replay_id
@@ -385,6 +391,7 @@ defmodule Ankusa.Lifecycle.Publisher do
             subject: row.resource,
             sink: sink,
             attempt: 1,
+            first_attempt_at: System.system_time(:millisecond),
             row: seq,
             batch: nil,
             replay: nil
@@ -490,17 +497,26 @@ defmodule Ankusa.Lifecycle.Publisher do
   defp finished(state, job, {:error, reason}), do: retry(state, job, reason)
 
   defp retry(state, job, reason) do
-    {retry_mod, retry_opts} = state.retry
     {mod, _opts} = job.sink
+    now = System.system_time(:millisecond)
 
-    backoff =
+    # The instance's policy, not a source's (lifecycle sinks belong to none):
+    # `dispatch.retry`'s horizon bounds the wait behind the cursor.
+    schedule =
       if job.replay && job.attempt >= @replay_attempts,
         do: :give_up,
-        else: retry_mod.backoff(job.attempt, retry_opts)
+        else:
+          Ankusa.RetryPolicy.schedule(
+            state.retry,
+            Sink.classify(reason),
+            %{attempts: job.attempt, first_attempt_at: job.first_attempt_at},
+            now,
+            state.max_retry_after_ms
+          )
 
-    case backoff do
-      {:retry, delay} ->
-        Process.send_after(self(), {:retry, %{job | attempt: job.attempt + 1}}, delay)
+    case schedule do
+      {:retry, at} ->
+        Process.send_after(self(), {:retry, %{job | attempt: job.attempt + 1}}, max(at - now, 0))
         state
 
       :give_up ->

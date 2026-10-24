@@ -397,6 +397,28 @@ defmodule Ankusa.LifecycleTest do
       assert {:ok, _} = SourceStore.get(config.instance, "acme", "billing")
     end
 
+    test "a sink with no attempt limit is dropped at dispatch.retry's horizon" do
+      attach([[:ankusa, :lifecycle, :dropped]])
+
+      # 1 s is the smallest horizon; max_attempts nil is the shipped default
+      retry =
+        {Ankusa.RetryPolicy.Exponential,
+         base_ms: 1, max_ms: 5, jitter: false, max_elapsed_ms: 1_000}
+
+      config =
+        start_instance(
+          dispatch: [retry: retry],
+          lifecycle: %{sinks: [{CaptureSink, to: self(), outcome: :error}]}
+        )
+
+      started = System.monotonic_time(:millisecond)
+      {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :create)
+
+      assert_receive {:telemetry, [:ankusa, :lifecycle, :dropped], %{reason: :gave_up}}, 5_000
+      assert System.monotonic_time(:millisecond) - started >= 1_000
+      assert {:ok, _} = SourceStore.get(config.instance, "acme", "billing")
+    end
+
     test "a broken sink does not hold back another" do
       attach([[:ankusa, :lifecycle, :dropped]])
 
