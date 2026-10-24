@@ -138,6 +138,17 @@ defmodule Ankusa.Sink.GooglePubSubTest do
     assert [%{"orderingKey" => "stripe-x"}] = request["messages"]
   end
 
+  test "an ordered sink's orderingKey is the lane's key, over any ordering_key of the sink",
+       %{capture: capture} do
+    ctx = %{attempt: 1, ordering_key: "cus_1", lane: "abc"}
+
+    assert :ok = GooglePubSub.deliver(envelope(), ctx, opts(ordering_key: "legacy"))
+
+    {_, _, _, request} = sent(capture)
+    assert [%{"orderingKey" => "cus_1", "attributes" => attributes}] = request["messages"]
+    assert attributes["ankusa_ordering_key"] == "cus_1"
+  end
+
   test "no tenant leaves out ankusa_tenant_id; a replay carries ankusa_replay_id",
        %{capture: capture} do
     assert :ok =

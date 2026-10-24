@@ -2504,6 +2504,90 @@ defmodule AnkusaServer.ConfigTest do
     assert pubsub[:token_provider] == {AnkusaServer.GcpToken, :metadata, []}
   end
 
+  test "ordered and ordering_key (ADR 0004) are translated on every queue and HTTP sink" do
+    path =
+      tmp_config("""
+      sources:
+        lanes:
+          sinks:
+            - {type: http, url: "https://sink.invalid/h", allow_unsigned: true,
+               ordered: true, ordering_key: {header: X-Entity-Id}}
+            - {type: kafka, brokers: ["b:9092"], topic: t, ordered: true,
+               ordering_key: {json: data.object.customer}}
+            - {type: sqs, queue_url: "https://sqs.us-east-1.amazonaws.com/1/h.fifo",
+               region: us-east-1, ordered: true}
+            - {type: google_pubsub, project: p, topic: t, ordered: true,
+               ordering_key: {header: x-entity-id}}
+            - {type: rabbitmq, exchange: e, ordered: true}
+            - {type: nats, servers: ["n:4222"], subject: s, ordered: true}
+            - {type: redis, url: "redis://redis:6379", channel: c, ordered: true}
+            - {type: redis, url: "redis://redis:6379", channel: c, ordered: false}
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+    {Ankusa.SourceStore.Static, store} = config.source_store
+    source = Ankusa.Source.new("lanes", store[:sources]["lanes"])
+
+    assert source.ordering == [
+             {:ordered, {:header, "x-entity-id"}},
+             {:ordered, {:json, ["data", "object", "customer"]}},
+             {:ordered, nil},
+             {:ordered, {:header, "x-entity-id"}},
+             {:ordered, nil},
+             {:ordered, nil},
+             {:ordered, nil},
+             nil
+           ]
+
+    # The sinks are handed neither option.
+    for {_mod, opts} <- source.sinks do
+      refute Keyword.has_key?(opts, :ordered)
+      refute Keyword.has_key?(opts, :ordering_key)
+    end
+  end
+
+  test "ordered / ordering_key: every rejected form names its path" do
+    for {sink, message} <- [
+          {~s({type: http, url: "https://sink.invalid/h", allow_unsigned: true, ordered: "yes"}),
+           "ordered"},
+          {~s({type: kafka, brokers: ["b:9092"], topic: t, ordered: true, ordering_key: {header: a, json: b}}),
+           "set exactly one of header, json"},
+          {~s({type: kafka, brokers: ["b:9092"], topic: t, ordered: true, ordering_key: {other: a}}),
+           "unknown key"},
+          {~s({type: kafka, brokers: ["b:9092"], topic: t, ordered: true, ordering_key: plain}),
+           "ordering_key must be"},
+          {~s({type: kafka, brokers: ["b:9092"], topic: t, ordering_key: {header: a}}),
+           "needs ordered: true"},
+          {~s({type: sqs, queue_url: "https://sqs.us-east-1.amazonaws.com/1/h", region: us-east-1, ordered: true}),
+           "FIFO queue"},
+          {~s({type: google_pubsub, project: p, topic: t, ordered: true, ordering_key: plain}),
+           "ordering_key must be"}
+        ] do
+      path = tmp_config("sources:\n  a:\n    sinks: [#{sink}]\n")
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ "sources.a", sink
+      assert error.message =~ message, sink
+    end
+  end
+
+  test "an unordered google_pubsub sink keeps its plain ordering_key string" do
+    path =
+      tmp_config("""
+      sources:
+        a:
+          sinks: [{type: google_pubsub, project: p, topic: t, ordering_key: stripe}]
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+    {Ankusa.SourceStore.Static, store} = config.source_store
+    source = Ankusa.Source.new("a", store[:sources]["a"])
+
+    assert source.ordering == nil
+    assert [{Ankusa.Sink.GooglePubSub, opts}] = source.sinks
+    assert opts[:ordering_key] == "stripe"
+  end
+
   test "an sqs sink requires queue_url and names an unknown key" do
     path =
       tmp_config("""

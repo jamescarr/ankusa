@@ -33,6 +33,7 @@ defmodule Ankusa.Dispatch.Replayer do
     BlobStore,
     Dedupe,
     Lifecycle,
+    Ordering,
     SourceStore,
     Store,
     Telemetry,
@@ -802,6 +803,7 @@ defmodule Ankusa.Dispatch.Replayer do
                 bin: bin,
                 size: size,
                 sinks: indexes,
+                lanes: replay_lanes(instance, source, env, indexes),
                 replay_id: job.id,
                 source_id: env.source_id,
                 tenant_id: env.tenant_id
@@ -858,6 +860,15 @@ defmodule Ankusa.Dispatch.Replayer do
       :ok -> {:ok, state, job, moved, false}
       {:ok, _n} -> {:ok, state, job, moved, false}
       {:error, reason} -> {:error, state, job, reason}
+    end
+  end
+
+  # The lanes of the sinks an archive replay re-drives: the stored hook is the
+  # envelope the lane is resolved from (ADR 0004, section 2).
+  defp replay_lanes(instance, source, env, indexes) do
+    case Ordering.lanes(instance, source, env) do
+      nil -> nil
+      lanes -> Enum.map(indexes, fn {i, _mod} -> Enum.at(lanes, i) end)
     end
   end
 
@@ -980,6 +991,7 @@ defmodule Ankusa.Dispatch.Replayer do
              %{
                envelope: %{env | dedupe_key: Dedupe.key(source.dedupe, env)},
                sinks: source.sinks,
+               lanes: Ordering.lanes(instance, source, env),
                dedupe_ttl_ms: source.dedupe && source.dedupe.ttl_ms
              }}
 

@@ -181,15 +181,15 @@ defmodule AnkusaServer.Config do
   @verify_token_keys ~w(type secret location header param)
   @verify_client_cert_keys ~w(type fingerprints subjects)
   @log_sink_keys ~w(type)
-  @http_sink_keys ~w(type url method headers timeout_ms secret allow_unsigned max_response_bytes cacertfile allow_insecure_tls)
-  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_inflight idle_timeout_ms)
-  @kafka_sink_keys ~w(type brokers topic key inline_max_bytes max_record_bytes ssl sasl idle_timeout_ms)
+  @http_sink_keys ~w(type url method headers timeout_ms secret allow_unsigned max_response_bytes cacertfile allow_insecure_tls ordered ordering_key)
+  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_inflight idle_timeout_ms ordered ordering_key)
+  @kafka_sink_keys ~w(type brokers topic key inline_max_bytes max_record_bytes ssl sasl idle_timeout_ms ordered ordering_key)
   @sasl_keys ~w(mechanism username password)
-  @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth idle_timeout_ms)
+  @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth idle_timeout_ms ordered ordering_key)
   @nats_auth_keys ~w(username password token nkey_seed jwt)
-  @redis_sink_keys ~w(type url channel inline_max_bytes publish_timeout_ms idle_timeout_ms)
-  @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token)
-  @google_pubsub_sink_keys ~w(type project topic endpoint ordering_key inline_max_bytes max_message_bytes timeout_ms auth token)
+  @redis_sink_keys ~w(type url channel inline_max_bytes publish_timeout_ms idle_timeout_ms ordered ordering_key)
+  @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token ordered ordering_key)
+  @google_pubsub_sink_keys ~w(type project topic endpoint ordering_key inline_max_bytes max_message_bytes timeout_ms auth token ordered)
 
   @roles ~w(edge dispatch storage claim_check)
   @routes_store_types ~w(ets redis)
@@ -1994,7 +1994,19 @@ defmodule AnkusaServer.Config do
       |> put_opt(:retry, source_retry(source, path))
 
     check_sink_schemes!(opts[:sinks], egress, path)
+    check_ordering!(opts[:sinks], path)
     opts
+  end
+
+  # The grammar of `ordered` / `ordering_key` is core's (`Ankusa.Ordering`): a bad
+  # one is refused here, with the path, when the file is read or the API call
+  # arrives, not when the source is built.
+  defp check_ordering!(sinks, path) do
+    Ankusa.Ordering.normalize_sinks!(List.last(path), sinks)
+    :ok
+  rescue
+    error in ArgumentError ->
+      reraise ConfigError, [message: "#{render_path(path)}: #{error.message}"], __STACKTRACE__
   end
 
   # `nil`, a preset name (`github`, `stripe`, …), or a map with exactly one of
@@ -2537,6 +2549,7 @@ defmodule AnkusaServer.Config do
           |> put_opt(:cacertfile, string_opt(sink, "cacertfile", path))
           |> put_opt(:allow_insecure_tls, bool_opt(sink, "allow_insecure_tls", path))
           |> put_opt(:allow_unsigned, bool_opt(sink, "allow_unsigned", path))
+          |> ordering(sink, path)
 
         validate_http_sink!(opts, path)
         {Ankusa.Sink.Http, opts}
@@ -2551,7 +2564,8 @@ defmodule AnkusaServer.Config do
          |> put_opt(:routing_key, string_opt(sink, "routing_key", path))
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
          |> put_opt(:max_inflight, int_opt(sink, "max_inflight", path))
-         |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))}
+         |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))
+         |> ordering(sink, path)}
 
       "kafka" ->
         check_keys!(sink, @kafka_sink_keys, path)
@@ -2566,7 +2580,8 @@ defmodule AnkusaServer.Config do
          |> put_opt(:max_record_bytes, int_opt(sink, "max_record_bytes", path))
          |> put_opt(:ssl, bool_opt(sink, "ssl", path))
          |> put_opt(:sasl, sasl(sink["sasl"], path ++ ["sasl"]))
-         |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))}
+         |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))
+         |> ordering(sink, path)}
 
       "nats" ->
         check_keys!(sink, @nats_sink_keys, path)
@@ -2581,7 +2596,7 @@ defmodule AnkusaServer.Config do
           |> put_opt(:tls, bool_opt(sink, "tls", path))
           |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))
 
-        {Ankusa.Sink.NATS, connection ++ nats_auth(sink["auth"], path ++ ["auth"])}
+        {Ankusa.Sink.NATS, connection ++ nats_auth(sink["auth"], path ++ ["auth"]) |> ordering(sink, path)}
 
       "redis" ->
         check_keys!(sink, @redis_sink_keys, path)
@@ -2593,7 +2608,8 @@ defmodule AnkusaServer.Config do
          ]
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
          |> put_opt(:publish_timeout_ms, int_opt(sink, "publish_timeout_ms", path))
-         |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))}
+         |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))
+         |> ordering(sink, path)}
 
       "sqs" ->
         check_keys!(sink, @sqs_sink_keys, path)
@@ -2610,7 +2626,8 @@ defmodule AnkusaServer.Config do
          |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))
          |> put_opt(:access_key_id, string_opt(sink, "access_key_id", path))
          |> put_opt(:secret_access_key, string_opt(sink, "secret_access_key", path))
-         |> put_opt(:session_token, string_opt(sink, "session_token", path))}
+         |> put_opt(:session_token, string_opt(sink, "session_token", path))
+         |> ordering(sink, path)}
 
       "google_pubsub" ->
         check_keys!(sink, @google_pubsub_sink_keys, path)
@@ -2621,12 +2638,36 @@ defmodule AnkusaServer.Config do
             topic: required_string!(sink, "topic", path)
           ]
           |> put_opt(:endpoint, string_opt(sink, "endpoint", path))
-          |> put_opt(:ordering_key, string_opt(sink, "ordering_key", path))
+          |> ordering(sink, path)
           |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
           |> put_opt(:max_message_bytes, int_opt(sink, "max_message_bytes", path))
           |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))) ++ gcp_auth!(sink, path)}
     end
   end
+
+  # `ordered` and `ordering_key` (ADR 0004): a sink option read by core, not by the
+  # sink module. `ordering_key` is `{header: name}` or `{json: "a.b"}`; the plain
+  # string stays what it was on `google_pubsub` (an unordered sink's own key), and
+  # core rejects it anywhere else.
+  defp ordering(opts, sink, path) do
+    opts
+    |> put_opt(:ordered, bool_opt(sink, "ordered", path))
+    |> put_opt(:ordering_key, ordering_key(sink["ordering_key"], path ++ ["ordering_key"]))
+  end
+
+  defp ordering_key(nil, _path), do: nil
+
+  defp ordering_key(key, path) when is_map(key) do
+    spec = section!(key, ~w(header json), path)
+
+    case {spec["header"], spec["json"]} do
+      {header, nil} when is_binary(header) -> {:header, header}
+      {nil, json} when is_binary(json) -> {:json, json}
+      _ -> raise ConfigError, message: "#{render_path(path)}: set exactly one of header, json"
+    end
+  end
+
+  defp ordering_key(key, path), do: expect_string(key, path)
 
   defp headers(nil, _path), do: nil
 

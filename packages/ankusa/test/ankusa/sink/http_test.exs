@@ -240,6 +240,25 @@ defmodule Ankusa.Sink.HttpTest do
     refute Map.has_key?(h, "x-ankusa-replay-id")
   end
 
+  test "an ordered sink carries the lane's key as x-ankusa-ordering-key", %{capture: capture} do
+    env = envelope(%{headers: [{"x-ankusa-ordering-key", "forged"}]})
+
+    assert :ok =
+             Sink.Http.deliver(
+               env,
+               %{attempt: 1, ordering_key: "cus_1", lane: "abc", forward_headers: :default},
+               opts("/hooks")
+             )
+
+    assert [{"POST", "/hooks", headers, _body}] = Agent.get(capture, & &1)
+    assert [{"x-ankusa-ordering-key", "cus_1"}] = Enum.filter(headers, &(elem(&1, 0) == "x-ankusa-ordering-key"))
+
+    Agent.update(capture, fn _ -> [] end)
+    assert :ok = Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/hooks"))
+    assert [{"POST", "/hooks", headers, _body}] = Agent.get(capture, & &1)
+    refute Map.has_key?(Map.new(headers), "x-ankusa-ordering-key")
+  end
+
   describe "responses" do
     defp respond(status, headers \\ [], body \\ "") do
       Req.Test.stub(__MODULE__, fn conn ->

@@ -177,6 +177,23 @@ defmodule Ankusa.Sink.SQSTest do
     assert request["MessageGroupId"] == "/stripe"
   end
 
+  test "an ordered sink's group is the lane's key (not message_group_id), and it travels as an attribute",
+       %{capture: capture} do
+    ctx = %{attempt: 1, ordering_key: "cus_1", lane: "abc"}
+
+    assert :ok = SQS.deliver(envelope(), ctx, opts("hooks.fifo", message_group_id: "ignored"))
+
+    {_, _, _, _, _, request} = sent(capture)
+    assert request["MessageGroupId"] == "cus_1"
+    assert request["MessageAttributes"]["ankusa_ordering_key"]["StringValue"] == "cus_1"
+
+    # The keyless lane's key is the default group, `tenant/source`.
+    Agent.update(capture, fn _ -> [] end)
+    assert :ok = SQS.deliver(envelope(), %{ctx | ordering_key: "acme/stripe"}, opts())
+    {_, _, _, _, _, request} = sent(capture)
+    assert request["MessageGroupId"] == "acme/stripe"
+  end
+
   test "the signature reproduces from what was sent: service sqs, these headers, these bytes",
        %{capture: capture} do
     assert :ok = SQS.deliver(envelope(), %{attempt: 1}, opts())

@@ -517,7 +517,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/sink.ex:24-31`, `dispatch/pipeline.ex:1094-1140`, `sink/sqs.ex:195-211`, `sink/google_pubsub.ex:118-120,159-165`.
   *Evidence:* 2026-10-24 · PR #170 · `mise run check:links` (under the shared lock), CI on the PR · `no relative links escaping README.md/docs/`, exit 0; `docs/adr/0004-ordering-lanes.md` (Context, Decision 1-8, Consequences, Proof) and its `docs/adr/README.md` row added; no product code changed. The ADR registers store format 7 → 8 (`OrderingLanes`, stamp only, fixture `store-v8`), the `?O`/`?H`/`?P` index families, due kinds 2/3 and counters 10-12 for DEL-1.b.
 
-- [ ] **DEL-1.b — Implement ordering lanes** · P1 · Deps: DEL-1.a (after: 51, 47)
+- [x] **DEL-1.b — Implement ordering lanes** · P1 · Deps: DEL-1.a (after: 51, 47)
   *Change:* as decided in the ADR; `docs/delivery.md` ordering section rewritten.
   *Done when:* 100 hooks for one key delivered with a mid-stream retry arrive in order at the receiver; other keys stay concurrent; lanes survive a restart.
   *Proof:* `mix test test/ankusa/dispatch/ordering_test.exs` (new) → `ordered lane`, `other keys concurrent`, `survives restart`; `mise run bench:gate` → PASS.

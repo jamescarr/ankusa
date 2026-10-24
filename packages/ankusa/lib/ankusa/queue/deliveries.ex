@@ -28,6 +28,14 @@ defmodule Ankusa.Queue.Deliveries do
   # at delivery time, so a config fix applies to the backlog and no fun or
   # secret is ever persisted.
   #
+  # Ordering lanes (ADR 0004, `Deliveries.Lanes`): a row of an ordered sink also
+  # carries `lane` (16 bytes) and `ordering_key`. It is a member (`?O`, waiting its
+  # turn, in `seq` order, with no due row), the head of its lane (`?H` plus a due
+  # row of kind 2 or 3, or a claim) or dead. Only the head is ever claimed; its
+  # terminal transition (`delivered_ops/5`, `dead_ops/8`, `orphan_ops/6`) carries a
+  # `{:lane_release, ord, lane}` placeholder that the Pipeline expands
+  # (`Lanes.expand/3`) in the step that writes the batch.
+  #
   # Op builders are pure and return `[Ankusa.Store.op()]`; the caller decides
   # when (and with what durability) to write them.
 
@@ -35,7 +43,7 @@ defmodule Ankusa.Queue.Deliveries do
 
   alias Ankusa.ClaimCheck.Ref
   alias Ankusa.{Envelope, Store}
-  alias Ankusa.Queue.Deliveries.Counters
+  alias Ankusa.Queue.Deliveries.{Counters, Lanes}
   alias Ankusa.Queue.{Reclaim, Tenants}
   alias Ankusa.Store.{Keys, Sweep}
 
@@ -100,7 +108,7 @@ defmodule Ankusa.Queue.Deliveries do
           sink: integer(),
           size: integer(),
           ord: pos_integer(),
-          kind: 0 | 1
+          kind: 0 | 1 | 2 | 3
         }
 
   # ── reads ─────────────────────────────────────────────────────────────────
@@ -117,10 +125,13 @@ defmodule Ankusa.Queue.Deliveries do
   end
 
   # A due row's `kind`: 0 a first attempt (ingest, replay revival, recovery,
-  # expansion), 1 a retry. It is what keeps the `pending` and `scheduled`
-  # counters exact without a clock.
+  # expansion), 1 a retry, 2 the first attempt of a lane head and 3 a retry of
+  # one (ADR 0004). It is what keeps the `pending` and `scheduled` counters exact
+  # without a clock, and `lanes_blocked` exact for the heads waiting out a retry.
   @first_attempt 0
   @retry 1
+  @lane_first Lanes.first_attempt_kind()
+  @lane_retry Lanes.retry_kind()
 
   # Markers examined per read of the earliest due time, and tenants looked at
   # in the first bucket, and markers of skipped tenants passed over.
@@ -306,7 +317,10 @@ defmodule Ankusa.Queue.Deliveries do
   of its range, not from a scan cursor: a row a stalled commit made visible
   beneath the cursor must keep its marker. Returns whether the tenant has no due
   row at all. `opts` (`:after_read`, `:after_delete`: a function called between
-  the steps) exist for the test that interleaves a commit with each step.
+  the steps) exist for the test that interleaves a commit with each step. With
+  `lanes: true` a tenant that still has a lane marker (`?P`: a member waiting for
+  its fsync) keeps its active markers, so the next scan visits it and the sweep
+  promotes the member (ADR 0004, section 4.6); it is reported as not drained.
   """
   @spec sweep_markers(atom(), pos_integer(), [integer()], integer(), keyword()) ::
           {:ok, boolean()} | {:error, term()}
@@ -323,15 +337,27 @@ defmodule Ankusa.Queue.Deliveries do
           {:ok, first == nil}
 
         stale ->
-          with :ok <-
-                 Store.write(instance, Enum.map(stale, &{:delete, :index, Keys.active(&1, ord)}),
-                   sync: false
-                 ),
-               :ok <- between(opts, :after_delete),
-               :ok <- restore_markers(instance, ord, stale, first_bucket) do
-            {:ok, first == nil}
+          with {:ok, held?} <- lanes_held?(instance, ord, opts) do
+            if held?,
+              do: {:ok, false},
+              else: delete_stale(instance, ord, stale, first, first_bucket, opts)
           end
       end
+    end
+  end
+
+  defp lanes_held?(instance, ord, opts) do
+    if Keyword.get(opts, :lanes, false), do: Lanes.any_marker?(instance, ord), else: {:ok, false}
+  end
+
+  defp delete_stale(instance, ord, stale, first, first_bucket, opts) do
+    with :ok <-
+           Store.write(instance, Enum.map(stale, &{:delete, :index, Keys.active(&1, ord)}),
+             sync: false
+           ),
+         :ok <- between(opts, :after_delete),
+         :ok <- restore_markers(instance, ord, stale, first_bucket) do
+      {:ok, first == nil}
     end
   end
 
@@ -362,7 +388,7 @@ defmodule Ankusa.Queue.Deliveries do
   end
 
   @doc "A due row, and its active marker: a due row is never written without one."
-  @spec due_ops(pos_integer(), integer(), pos_integer(), integer(), integer(), 0 | 1) ::
+  @spec due_ops(pos_integer(), integer(), pos_integer(), integer(), integer(), 0..3) ::
           [Store.op()]
   def due_ops(ord, at, seq, sink, size, kind) do
     [
@@ -396,12 +422,14 @@ defmodule Ankusa.Queue.Deliveries do
   end
 
   @doc """
-  Whether `op` puts an active-tenant marker (`due_ops/6`). A marker is shared by
-  every due row of its tenant in that second, so undoing a batch
-  (`Ankusa.Queue.Writer`, a failed fsync) must leave it: a stale one is swept.
+  Whether `op` puts an active-tenant marker (`due_ops/6`) or a lane marker
+  (`Lanes.member_ops/6`). A marker is shared by every due row (or member) of its
+  tenant (or lane), so undoing a batch (`Ankusa.Queue.Writer`, a failed fsync)
+  must leave it: a stale one is swept.
   """
   @spec active_marker_put?(Store.op()) :: boolean()
   def active_marker_put?({:put, :index, <<?A, _::binary>>, _value}), do: true
+  def active_marker_put?({:put, :index, <<?P, _::binary>>, _value}), do: true
   def active_marker_put?(_op), do: false
 
   @doc """
@@ -488,34 +516,38 @@ defmodule Ankusa.Queue.Deliveries do
 
   @doc """
   The undelivered rows of `source_id` in this node's queue: `pending` rows sit
-  in the due index (due now or waiting out a backoff), `inflight` rows are
-  claimed by the Pipeline. Walks both indexes — O(backlog) — unless `tenant:`
-  names the one tenant the source's rows belong to (an API-managed source owned
-  by a tenant): then it reads only that tenant's ranges.
+  in the due index (due now or waiting out a backoff) or, in an ordering lane,
+  wait their turn as members; `inflight` rows are claimed by the Pipeline. Walks
+  the indexes — O(backlog) — unless `tenant:` names the one tenant the source's
+  rows belong to (an API-managed source owned by a tenant): then it reads only
+  that tenant's ranges.
   """
   @spec pending_for_source(atom(), String.t(), keyword()) ::
           {:ok, %{pending: non_neg_integer(), inflight: non_neg_integer()}} | {:error, term()}
   def pending_for_source(instance, source_id, opts \\ []) do
     count = fn rows, n -> {:cont, n + length(rows)} end
 
-    with {:ok, pending} <- fold_source(instance, :due, source_id, 0, count, opts),
+    with {:ok, due} <- fold_source(instance, :due, source_id, 0, count, opts),
+         {:ok, members} <- fold_source(instance, :lane_members, source_id, 0, count, opts),
          {:ok, inflight} <- fold_source(instance, :inflight, source_id, 0, count, opts) do
-      {:ok, %{pending: pending, inflight: inflight}}
+      {:ok, %{pending: due + members, inflight: inflight}}
     end
   end
 
   @doc """
-  Folds the rows of `source_id` held in index `family` (`:due` or
-  `:inflight`): `fun.(rows, acc)` runs once per #{@source_chunk} index keys
+  Folds the rows of `source_id` held in index `family` (`:due`, `:inflight` or
+  `:lane_members`): `fun.(rows, acc)` runs once per #{@source_chunk} index keys
   examined, with the matching rows decoded, and returns `{:cont, acc}` or
   `{:halt, acc}`. A row written before rows carried `source_id` is matched by
   its hook's; an index key whose row or hook is gone is skipped. The scan
   reads a snapshot, so `fun` may move the rows it is given. `opts[:tenant]`
   restricts the scan to one tenant's range (a tenant with no rows reads none).
+  A lane member's entry has `kind: :member`; `source_from/1` names where it
+  leaves from.
   """
   @spec fold_source(
           atom(),
-          :due | :inflight,
+          :due | :inflight | :lane_members,
           String.t(),
           acc,
           ([source_row()], acc -> {:cont, acc} | {:halt, acc}),
@@ -523,7 +555,7 @@ defmodule Ankusa.Queue.Deliveries do
         ) :: {:ok, acc} | {:error, term()}
         when acc: term()
   def fold_source(instance, family, source_id, acc, fun, opts \\ [])
-      when family in [:due, :inflight] do
+      when family in [:due, :inflight, :lane_members] do
     case source_range(instance, family, Keyword.get(opts, :tenant)) do
       :empty -> {:ok, acc}
       {:error, reason} -> {:error, reason}
@@ -539,11 +571,20 @@ defmodule Ankusa.Queue.Deliveries do
 
   defp source_range(instance, family, tenant) do
     case Tenants.ord(instance, tenant) do
-      {:ok, ord} -> {:ok, Keys.range(<<if(family == :due, do: ?D, else: ?F), ord::32>>)}
+      {:ok, ord} -> {:ok, Keys.range(<<source_prefix(family), ord::32>>)}
       :not_found -> :empty
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp source_prefix(:due), do: ?D
+  defp source_prefix(:inflight), do: ?F
+  defp source_prefix(:lane_members), do: ?O
+
+  @doc "Where a row of `fold_source/6` leaves from, as `dead_ops/8` and `orphan_ops/6` take it."
+  @spec source_from(map()) :: from()
+  def source_from(%{kind: :member, key: key}), do: {:member, key}
+  def source_from(%{kind: kind, key: key}), do: {:due, key, kind}
 
   defp fold_source_range(instance, family, range, source_id, acc, fun) do
     scan =
@@ -587,6 +628,11 @@ defmodule Ankusa.Queue.Deliveries do
   defp index_entry(:inflight, key, <<size::32>>) do
     {ord, seq, sink} = Keys.decode_inflight(key)
     %{key: key, ord: ord, seq: seq, sink: sink, size: size}
+  end
+
+  defp index_entry(:lane_members, key, <<size::32>>) do
+    {ord, lane, seq, sink} = Keys.decode_lane_member(key)
+    %{key: key, ord: ord, lane: lane, seq: seq, sink: sink, size: size, kind: :member}
   end
 
   # `chunk` is newest-first, as the fold built it.
@@ -640,29 +686,71 @@ defmodule Ankusa.Queue.Deliveries do
 
   # ── transitions ───────────────────────────────────────────────────────────
 
+  # Claimed rows read per `deliveries` read when `recover_inflight/2` looks for
+  # lane heads.
+  @recover_chunk 500
+
   @doc """
   After a restart nothing is running, so every claimed row is due again, as a
-  first attempt. The claim key's value is the stored size, which the due key
-  needs.
+  first attempt (the first attempt of a lane head, kind 2, when its row names a
+  lane: its `?H` is untouched and the members behind it stay, ADR 0004 section
+  4.7). The claim key's value is the stored size, which the due key needs.
   """
   @spec recover_inflight(atom(), integer()) :: {:ok, non_neg_integer()} | {:error, term()}
   def recover_inflight(instance, now) do
     %{lo: lo, hi: hi} = Keys.family(:inflight)
 
-    with {:ok, ops} <-
+    with {:ok, claimed} <-
            Store.fold(instance, :inflight, {lo, hi}, [], fn key, <<size::32>>, acc ->
-             {ord, seq, sink} = Keys.decode_inflight(key)
-
-             {:cont,
-              [
-                {:delete, :index, key}
-                | due_ops(ord, now, seq, sink, size, @first_attempt) ++
-                    Counters.ops([{ord, :inflight, -1}, {ord, :pending, 1}]) ++ acc
-              ]}
+             {:cont, [{key, size} | acc]}
            end),
+         {:ok, kinds} <- recover_kinds(instance, claimed),
+         ops = Enum.flat_map(Enum.zip(claimed, kinds), &recover_ops(&1, now)),
          :ok <- Store.write(instance, coalesce(ops), sync: true) do
-      {:ok, Enum.count(ops, &match?({:delete, :index, <<?F, _::binary>>}, &1))}
+      {:ok, length(claimed)}
     end
+  end
+
+  defp recover_kinds(_instance, []), do: {:ok, []}
+
+  defp recover_kinds(instance, claimed) do
+    claimed
+    |> Enum.chunk_every(@recover_chunk)
+    |> Enum.reduce_while({:ok, []}, fn chunk, {:ok, acc} ->
+      keys =
+        Enum.map(chunk, fn {key, _size} ->
+          {_ord, seq, sink} = Keys.decode_inflight(key)
+          Keys.delivery(seq, sink)
+        end)
+
+      case Store.multi_get(instance, :deliveries, keys) do
+        {:ok, rows} -> {:cont, {:ok, [Enum.map(rows, &recover_kind/1) | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, kinds} -> {:ok, kinds |> Enum.reverse() |> List.flatten()}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp recover_kind({:ok, bin}) do
+    case decode_row(bin) do
+      {:ok, %{lane: lane}} when is_binary(lane) -> @lane_first
+      _ -> @first_attempt
+    end
+  end
+
+  defp recover_kind(:not_found), do: @first_attempt
+
+  defp recover_ops({{key, size}, kind}, now) do
+    {ord, seq, sink} = Keys.decode_inflight(key)
+
+    [
+      {:delete, :index, key}
+      | due_ops(ord, now, seq, sink, size, kind) ++
+          Counters.ops([{ord, :inflight, -1}, {ord, :pending, 1}])
+    ]
   end
 
   @doc "Move rows from pending to claimed, in one batch."
@@ -673,28 +761,89 @@ defmodule Ankusa.Queue.Deliveries do
         [
           {:delete, :index, due.key},
           {:put, :index, Keys.inflight(due.ord, due.seq, due.sink), <<due.size::32>>}
-          | Counters.ops([{due.ord, due_field(due.kind), -1}, {due.ord, :inflight, 1}])
+          | Counters.ops(
+              [{due.ord, due_field(due.kind), -1}, {due.ord, :inflight, 1}] ++
+                blocked(due.ord, due.kind)
+            )
         ]
       end)
 
     Store.write(instance, coalesce(ops), sync: false)
   end
 
-  defp due_field(@first_attempt), do: :pending
-  defp due_field(@retry), do: :scheduled
+  defp due_field(kind) when kind in [@first_attempt, @lane_first], do: :pending
+  defp due_field(kind) when kind in [@retry, @lane_retry], do: :scheduled
+
+  # A lane head leaving the due index as a retry is a head no longer waiting.
+  defp blocked(ord, @lane_retry), do: [{ord, :lanes_blocked, -1}]
+  defp blocked(_ord, _kind), do: []
+
+  defp lane?(%{lane: lane}) when is_binary(lane), do: true
+  defp lane?(_row), do: false
 
   # ── op builders ───────────────────────────────────────────────────────────
 
   @doc """
+  A new delivery row: `module` bound at ack time, due at `at`, the stored hook's
+  `size` and its `source_id`. `opts`: `:replay` (a job id, on a row a replay
+  job or a released quarantine hook makes) and `:lane` (`{lane, key}`, on a row
+  of an ordered sink, ADR 0004). The one place a delivery row's shape is built
+  for a new hook.
+  """
+  @spec new_row(module(), integer(), integer(), String.t(), keyword()) :: map()
+  def new_row(module, at, size, source_id, opts \\ []) do
+    base = %{
+      module: module,
+      state: :pending,
+      attempts: 0,
+      at: at,
+      error: nil,
+      size: size,
+      source_id: source_id
+    }
+
+    base =
+      case Keyword.get(opts, :replay) do
+        replay when is_binary(replay) -> Map.put(base, :replay, replay)
+        _ -> base
+      end
+
+    case Keyword.get(opts, :lane) do
+      {lane, key} when is_binary(lane) and is_binary(key) ->
+        Map.merge(base, %{lane: lane, ordering_key: key})
+
+      nil ->
+        base
+    end
+  end
+
+  @doc """
   The rows of a new delivery (ingest, archive replay, expansion): its row, a
   first-attempt due row with its marker, and the `pending` and `bytes`
-  deltas.
+  deltas. With a `lane` (ADR 0004: the row of an ordered sink) the delivery
+  joins the lane instead: a member (`?O`) and the lane's marker, no due row, and
+  `lane_members +1`; the Pipeline promotes it when it is the lane's turn.
   """
-  @spec new_ops(pos_integer(), integer(), pos_integer(), integer(), integer(), binary()) ::
-          [Store.op()]
-  def new_ops(ord, at, seq, sink, size, row_bin) do
+  @spec new_ops(
+          pos_integer(),
+          integer(),
+          pos_integer(),
+          integer(),
+          integer(),
+          binary(),
+          Lanes.lane() | nil
+        ) :: [Store.op()]
+  def new_ops(ord, at, seq, sink, size, row_bin, lane \\ nil)
+
+  def new_ops(ord, at, seq, sink, size, row_bin, nil) do
     [{:put, :deliveries, Keys.delivery(seq, sink), row_bin}] ++
       due_ops(ord, at, seq, sink, size, @first_attempt) ++
+      Counters.ops([{ord, :pending, 1}, {ord, :bytes, size}])
+  end
+
+  def new_ops(ord, at, seq, sink, size, row_bin, lane) do
+    [{:put, :deliveries, Keys.delivery(seq, sink), row_bin}] ++
+      Lanes.member_ops(ord, at, seq, sink, size, lane) ++
       Counters.ops([{ord, :pending, 1}, {ord, :bytes, size}])
   end
 
@@ -705,25 +854,35 @@ defmodule Ankusa.Queue.Deliveries do
       Counters.ops([{ord, :archive_pending, 1}])
   end
 
-  @doc "A delivered row is gone; the marker tells `Ankusa.Queue.Reclaim` to look at its hook."
-  def delivered_ops(ord, seq, sink, size) do
+  @doc """
+  A delivered row is gone; the marker tells `Ankusa.Queue.Reclaim` to look at its
+  hook. With the `row` of a lane head the batch carries the lane's release.
+  """
+  def delivered_ops(ord, seq, sink, size, row \\ nil) do
     [
       {:delete, :deliveries, Keys.delivery(seq, sink)},
       {:delete, :index, Keys.inflight(ord, seq, sink)},
       {:put, :index, Keys.cleared(seq, 0, sink), <<>>}
-    ] ++ Counters.ops([{ord, :inflight, -1}, {ord, :bytes, -size}])
+    ] ++ Counters.ops([{ord, :inflight, -1}, {ord, :bytes, -size}]) ++ Lanes.release_op(ord, row)
   end
 
-  @doc "A claimed row back to pending at `at`, as a retry. `row` carries the new attempt count."
+  @doc """
+  A claimed row back to pending at `at`, as a retry. `row` carries the new attempt
+  count. A lane head stays the head: its due row is kind 3 and `lanes_blocked`
+  counts it until it is claimed again.
+  """
   def retry_ops(ord, seq, sink, row, at, error) do
     row = %{row | at: at, error: error}
+
+    {kind, blocked} =
+      if lane?(row), do: {@lane_retry, [{ord, :lanes_blocked, 1}]}, else: {@retry, []}
 
     [
       {:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)},
       {:delete, :index, Keys.inflight(ord, seq, sink)}
     ] ++
-      due_ops(ord, at, seq, sink, row.size, @retry) ++
-      Counters.ops([{ord, :inflight, -1}, {ord, :scheduled, 1}])
+      due_ops(ord, at, seq, sink, row.size, kind) ++
+      Counters.ops([{ord, :inflight, -1}, {ord, :scheduled, 1}] ++ blocked)
   end
 
   @unknown_source "unknown"
@@ -737,18 +896,33 @@ defmodule Ankusa.Queue.Deliveries do
   def owner(%Envelope{source_id: source_id, id: id}, _row), do: {source_id, id}
   def owner(_undecoded, row), do: {Map.get(row, :source_id) || @unknown_source, nil}
 
-  @typedoc "Where a row leaves from: the claim, or a due key (and its `kind`)."
-  @type from :: :inflight | {:due, binary(), 0 | 1}
+  @typedoc """
+  Where a row leaves from: the claim, a due key (and its `kind`), or a lane's
+  member key.
+  """
+  @type from :: :inflight | {:due, binary(), 0..3} | {:member, binary()}
 
   defp leave(:inflight, ord, seq, sink),
-    do: {[{:delete, :index, Keys.inflight(ord, seq, sink)}], {ord, :inflight, -1}}
+    do: {[{:delete, :index, Keys.inflight(ord, seq, sink)}], [{ord, :inflight, -1}]}
 
   defp leave({:due, key, kind}, ord, _seq, _sink),
-    do: {[{:delete, :index, key}], {ord, due_field(kind), -1}}
+    do: {[{:delete, :index, key}], [{ord, due_field(kind), -1} | blocked(ord, kind)]}
+
+  defp leave({:member, key}, ord, _seq, _sink),
+    do: {[{:delete, :index, key}], [{ord, :pending, -1}, {ord, :lane_members, -1}]}
+
+  # Only a lane's head releases its lane when it leaves; a member leaves nothing behind.
+  defp release(:inflight, ord, row), do: Lanes.release_op(ord, row)
+
+  defp release({:due, _key, kind}, ord, row) when kind in [@lane_first, @lane_retry],
+    do: Lanes.release_op(ord, row)
+
+  defp release(_from, _ord, _row), do: []
 
   @doc """
   Dead-letter the row. `row` carries the final attempt count; `env` is the
-  hook or its decode error (see `owner/2`).
+  hook or its decode error (see `owner/2`). A lane head's batch carries the
+  lane's release: a poison hook must not hold its key forever.
   """
   @spec dead_ops(
           from(),
@@ -764,26 +938,33 @@ defmodule Ankusa.Queue.Deliveries do
   def dead_ops(from, ord, seq, sink, row, at, error, env) do
     row = %{row | state: :dead, at: at, error: error}
     {source_id, id} = owner(env, row)
-    {leaves, delta} = leave(from, ord, seq, sink)
+    {leaves, deltas} = leave(from, ord, seq, sink)
 
     [{:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)}] ++
       leaves ++
       [
         {:put, :index, Keys.dead(at, seq, sink), :erlang.term_to_binary({source_id, id, ord})},
         {:put, :index, Keys.dead_by_tenant(ord, at, seq, sink), <<>>}
-      ] ++ Counters.ops([delta, {ord, :dead, 1}, {ord, :dead_bytes, row_size(row)}])
+      ] ++
+      Counters.ops(deltas ++ [{ord, :dead, 1}, {ord, :dead_bytes, row_size(row)}]) ++
+      release(from, ord, row)
   end
 
   defp row_size(%{size: size}) when is_integer(size), do: size
   defp row_size(_row), do: 0
 
-  @doc "A row whose delivery row or hook is gone: drop it and what it counted."
-  @spec orphan_ops(from(), pos_integer(), pos_integer(), integer(), integer()) :: [Store.op()]
-  def orphan_ops(from, ord, seq, sink, size) do
-    {leaves, delta} = leave(from, ord, seq, sink)
+  @doc """
+  A row whose delivery row or hook is gone: drop it and what it counted. Given
+  the `row` of a lane head (the hook is gone, the row is not), the batch carries
+  the lane's release.
+  """
+  @spec orphan_ops(from(), pos_integer(), pos_integer(), integer(), integer(), map() | nil) ::
+          [Store.op()]
+  def orphan_ops(from, ord, seq, sink, size, row \\ nil) do
+    {leaves, deltas} = leave(from, ord, seq, sink)
 
     [{:delete, :deliveries, Keys.delivery(seq, sink)}] ++
-      leaves ++ Counters.ops([delta, {ord, :bytes, -size}])
+      leaves ++ Counters.ops(deltas ++ [{ord, :bytes, -size}]) ++ release(from, ord, row)
   end
 
   @doc """
@@ -1058,7 +1239,7 @@ defmodule Ankusa.Queue.Deliveries do
            {:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)}
            | dead_gone(key, ord, seq, sink)
          ] ++
-           due_ops(ord, now, seq, sink, size, @first_attempt) ++
+           requeue_ops(ord, now, seq, sink, size, row) ++
            Counters.ops([{ord, :dead, -1}, {ord, :dead_bytes, -size}, {ord, :pending, 1}]), n + 1}
 
       {:error, reason} ->
@@ -1073,6 +1254,15 @@ defmodule Ankusa.Queue.Deliveries do
   defp revive_row(key, seq, sink, ord, :not_found, _now, _replay_id, n) do
     {dead_gone(key, ord, seq, sink) ++ Counters.ops([{ord, :dead, -1}]), n}
   end
+
+  # A revived row of a lane re-enters as a member, not as a due row (ADR 0004,
+  # section 4.8): it runs when it is the lowest waiting member, never beside the
+  # head, and before any later member.
+  defp requeue_ops(ord, now, seq, sink, size, %{lane: lane}) when is_binary(lane),
+    do: Lanes.member_ops(ord, now, seq, sink, size, lane)
+
+  defp requeue_ops(ord, now, seq, sink, size, _row),
+    do: due_ops(ord, now, seq, sink, size, @first_attempt)
 
   # Both dead keys of a row, from the global key.
   defp dead_gone(key, ord, seq, sink) do
@@ -1578,32 +1768,12 @@ defmodule Ankusa.Queue.Deliveries do
     end
   end
 
+  # Due rows first (a lane head's `?H` goes with its due row), then the lane
+  # members (`?O`: pending rows with no due row), then the tenant's lane markers.
   defp purge_chunk(instance, ord, :pending) do
-    {lower, upper} = Keys.range(<<?D, ord::32>>)
-
-    with {:ok, {_n, rows}} <-
-           Store.fold(instance, :due, {lower, upper}, {0, []}, fn key,
-                                                                  <<size::32, kind::8>>,
-                                                                  {n, acc} ->
-             acc = [{key, size, kind} | acc]
-             if n + 1 >= @purge_chunk, do: {:halt, {n + 1, acc}}, else: {:cont, {n + 1, acc}}
-           end) do
-      ops =
-        Enum.flat_map(rows, fn {key, size, kind} ->
-          {_ord, _at, seq, sink} = Keys.decode_due(key)
-
-          [
-            {:delete, :index, key},
-            {:delete, :deliveries, Keys.delivery(seq, sink)},
-            {:put, :index, Keys.cleared(seq, 0, sink), <<>>}
-            | Counters.ops([{ord, due_field(kind), -1}, {ord, :bytes, -size}])
-          ]
-        end)
-
-      finish_purge(instance, rows, ops, fn {key, _size, _kind} ->
-        {_ord, _at, seq, sink} = Keys.decode_due(key)
-        {seq, sink}
-      end)
+    case purge_due(instance, ord) do
+      {:ok, 0} -> purge_members(instance, ord)
+      other -> other
     end
   end
 
@@ -1616,7 +1786,16 @@ defmodule Ankusa.Queue.Deliveries do
                                                                        {n, acc} ->
              acc = [{key, size} | acc]
              if n + 1 >= @purge_chunk, do: {:halt, {n + 1, acc}}, else: {:cont, {n + 1, acc}}
-           end) do
+           end),
+         {:ok, heads} <-
+           head_ops(
+             instance,
+             ord,
+             for({key, _size} <- rows) do
+               {_ord, seq, sink} = Keys.decode_inflight(key)
+               {seq, sink}
+             end
+           ) do
       ops =
         Enum.flat_map(rows, fn {key, size} ->
           {_ord, seq, sink} = Keys.decode_inflight(key)
@@ -1629,7 +1808,7 @@ defmodule Ankusa.Queue.Deliveries do
           ]
         end)
 
-      finish_purge(instance, rows, ops, fn {key, _size} ->
+      finish_purge(instance, rows, heads ++ ops, fn {key, _size} ->
         {_ord, seq, sink} = Keys.decode_inflight(key)
         {seq, sink}
       end)
@@ -1661,6 +1840,132 @@ defmodule Ankusa.Queue.Deliveries do
         end)
 
       finish_purge(instance, keys, ops, fn {_ord, _at, seq, sink} -> {seq, sink} end)
+    end
+  end
+
+  defp purge_due(instance, ord) do
+    {lower, upper} = Keys.range(<<?D, ord::32>>)
+
+    with {:ok, {_n, rows}} <-
+           Store.fold(instance, :due, {lower, upper}, {0, []}, fn key,
+                                                                  <<size::32, kind::8>>,
+                                                                  {n, acc} ->
+             acc = [{key, size, kind} | acc]
+             if n + 1 >= @purge_chunk, do: {:halt, {n + 1, acc}}, else: {:cont, {n + 1, acc}}
+           end),
+         {:ok, heads} <-
+           head_ops(
+             instance,
+             ord,
+             for({key, _size, kind} <- rows, kind in [@lane_first, @lane_retry]) do
+               {_ord, _at, seq, sink} = Keys.decode_due(key)
+               {seq, sink}
+             end
+           ) do
+      ops =
+        Enum.flat_map(rows, fn {key, size, kind} ->
+          {_ord, _at, seq, sink} = Keys.decode_due(key)
+
+          [
+            {:delete, :index, key},
+            {:delete, :deliveries, Keys.delivery(seq, sink)},
+            {:put, :index, Keys.cleared(seq, 0, sink), <<>>}
+            | Counters.ops(
+                [{ord, due_field(kind), -1}, {ord, :bytes, -size}] ++ blocked(ord, kind)
+              )
+          ]
+        end)
+
+      finish_purge(instance, rows, heads ++ ops, fn {key, _size, _kind} ->
+        {_ord, _at, seq, sink} = Keys.decode_due(key)
+        {seq, sink}
+      end)
+    end
+  end
+
+  defp purge_members(instance, ord) do
+    {lower, upper} = Keys.range(<<?O, ord::32>>)
+
+    with {:ok, {_n, rows}} <-
+           Store.fold(instance, :lane_members, {lower, upper}, {0, []}, fn key,
+                                                                           <<size::32>>,
+                                                                           {n, acc} ->
+             acc = [{key, size} | acc]
+             if n + 1 >= @purge_chunk, do: {:halt, {n + 1, acc}}, else: {:cont, {n + 1, acc}}
+           end) do
+      case rows do
+        [] ->
+          with :ok <- purge_lane_markers(instance, ord), do: {:ok, 0}
+
+        _ ->
+          ops =
+            Enum.flat_map(rows, fn {key, size} ->
+              {_ord, _lane, seq, sink} = Keys.decode_lane_member(key)
+
+              [
+                {:delete, :index, key},
+                {:delete, :deliveries, Keys.delivery(seq, sink)},
+                {:put, :index, Keys.cleared(seq, 0, sink), <<>>}
+                | Counters.ops([
+                    {ord, :pending, -1},
+                    {ord, :bytes, -size},
+                    {ord, :lane_members, -1}
+                  ])
+              ]
+            end)
+
+          finish_purge(instance, rows, ops, fn {key, _size} ->
+            {_ord, _lane, seq, sink} = Keys.decode_lane_member(key)
+            {seq, sink}
+          end)
+      end
+    end
+  end
+
+  # Once the tenant has no member left: a marker with no member is stale.
+  defp purge_lane_markers(instance, ord) do
+    {lower, upper} = Keys.range(<<?P, ord::32>>)
+
+    with {:ok, {_n, keys}} <-
+           Store.fold(instance, :lane_markers, {lower, upper}, {0, []}, fn key,
+                                                                           _value,
+                                                                           {n, acc} ->
+             acc = [key | acc]
+             if n + 1 >= @purge_chunk, do: {:halt, {n + 1, acc}}, else: {:cont, {n + 1, acc}}
+           end) do
+      case keys do
+        [] ->
+          :ok
+
+        _ ->
+          with :ok <- Store.write(instance, Enum.map(keys, &{:delete, :index, &1}), sync: true),
+               do: purge_lane_markers(instance, ord)
+      end
+    end
+  end
+
+  # The `?H` of the lane each of `pairs` (`{seq, sink}`, rows about to be purged
+  # from `?D`/`?F`) heads, and `lanes -1` for it.
+  defp head_ops(_instance, _ord, []), do: {:ok, []}
+
+  defp head_ops(instance, ord, pairs) do
+    keys = Enum.map(pairs, fn {seq, sink} -> Keys.delivery(seq, sink) end)
+
+    with {:ok, rows} <- Store.multi_get(instance, :deliveries, keys) do
+      {:ok,
+       Enum.flat_map(rows, fn
+         {:ok, bin} ->
+           case decode_row(bin) do
+             {:ok, %{lane: lane}} when is_binary(lane) ->
+               [{:delete, :index, Keys.lane_head(ord, lane)} | Counters.ops([{ord, :lanes, -1}])]
+
+             _ ->
+               []
+           end
+
+         :not_found ->
+           []
+       end)}
     end
   end
 

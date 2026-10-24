@@ -546,22 +546,18 @@ defmodule Ankusa.Queue.Writer do
                                } = entry, seq},
                               ops ->
           ord = Map.fetch!(admission.ords, Tenants.normalize(entry.tenant_id))
+          lanes = Map.get(entry, :lanes) || List.duplicate(nil, length(sinks))
 
           row_ops =
-            Enum.flat_map(sinks, fn {index, mod} ->
+            sinks
+            |> Enum.zip(lanes)
+            |> Enum.flat_map(fn {{index, mod}, lane} ->
               row =
-                Deliveries.encode_row(%{
-                  module: mod,
-                  state: :pending,
-                  attempts: 0,
-                  at: now,
-                  error: nil,
-                  size: size,
-                  source_id: source_id,
-                  replay: replay_id
-                })
+                Deliveries.encode_row(
+                  Deliveries.new_row(mod, now, size, source_id, replay: replay_id, lane: lane)
+                )
 
-              Deliveries.new_ops(ord, now, seq, index, size, row)
+              Deliveries.new_ops(ord, now, seq, index, size, row, lane && elem(lane, 0))
             end)
 
           [{:put, :hooks, Keys.hook(seq), bin} | row_ops] ++ ops
@@ -1558,11 +1554,13 @@ defmodule Ankusa.Queue.Writer do
       size = byte_size(bin)
       ord = Map.fetch!(ords, Tenants.normalize(env.tenant_id))
 
-      # `rows` are the delivery rows `Ankusa.Queue` encoded, one per sink
+      # `rows` are the `{delivery row, lane or nil}` `Ankusa.Queue` encoded, one per sink
       row_ops =
         rows
         |> Enum.with_index()
-        |> Enum.flat_map(fn {row, i} -> Deliveries.new_ops(ord, now, seq, i, size, row) end)
+        |> Enum.flat_map(fn {{row, lane}, i} ->
+          Deliveries.new_ops(ord, now, seq, i, size, row, lane)
+        end)
 
       archive_ops = if archive?, do: Deliveries.archive_ops(ord, seq, size), else: []
 

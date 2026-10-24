@@ -19,12 +19,31 @@ defmodule Ankusa.Dispatch.Pipeline do
   Up to `dispatch.concurrency` deliveries run at a time. A window
   (`dispatch.max_inflight` rows, `dispatch.max_inflight_bytes` of stored hook)
   bounds claimed-but-unfinished work, so a dead sink cannot walk the pipeline
-  into an OOM. Deliveries are not ordered: two hooks for one sink may run in
-  either order, and a retry runs after whatever is due before it.
+  into an OOM. Deliveries are not ordered unless a sink entry opts in: two hooks
+  for one sink may run in either order, and a retry runs after whatever is due
+  before it.
   An attempt that has not returned after `dispatch.attempt_timeout_ms` (default
   30 s) is killed and counts as a failed attempt, `{:attempt_timeout, ms}`, so a
   hung sink frees its slot; the fallback claim check-in runs inside the same
   deadline.
+
+  ## Ordering lanes
+
+  A sink entry with `ordered: true` (`Ankusa.Ordering`, ADR 0004) delivers the
+  hooks of one lane (`{tenant, source, sink, key}`) one at a time, in the order
+  they were committed on this node (`seq`). Only a lane's *head* is a due row or
+  a claim; the hooks behind it are *members* (`Deliveries.Lanes`), in the store
+  and nowhere else: a waiting lane holds no slot, no window room and no process.
+  A retry or a breaker park rewrites the head's due row and blocks its lane
+  alone. Every terminal transition of a head (delivered, dead-lettered,
+  `{:permanent, _}`, `:sink_gone`, an orphaned row) releases its lane in the
+  batch that writes it: the next member becomes the head, so a poison hook never
+  holds its key forever. Once per visit of a tenant, before the due fold, a sweep
+  promotes members that have no head (a writer committed one into an idle lane)
+  and heals a head whose row is gone; it runs only while the node holds a member
+  at all (`lane_members`), so a deployment with no ordered sink pays one counter
+  read per scan. Only this process moves lane state, except the queue writer's
+  blind puts of a new member and its marker.
 
   ## Per-tenant fairness
 
@@ -90,8 +109,9 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   require Logger
 
-  alias Ankusa.{ClaimCheck, Envelope, RetryPolicy, Sink, SourceStore, Store, Telemetry}
+  alias Ankusa.{ClaimCheck, Envelope, Ordering, RetryPolicy, Sink, SourceStore, Store, Telemetry}
   alias Ankusa.Queue.{Deliveries, Reclaim, Syncer, Tenants}
+  alias Ankusa.Queue.Deliveries.{Counters, Lanes}
   alias Ankusa.Sink.Message
   alias Ankusa.Store.Keys
   alias Ankusa.Tenant.Gate
@@ -104,6 +124,9 @@ defmodule Ankusa.Dispatch.Pipeline do
   # each. A crash inside the window redelivers those hooks, which at-least-once
   # allows and the next synced commit would have flushed anyway.
   @flush_ms 10
+  # An outcome that releases a lane's head is written this soon: the lane's next
+  # hook waits for it.
+  @lane_flush_ms 1
   @flush_entries 256
   # A scan visits the tenants the active index names (`Deliveries.active_tenants/3`)
   # and claims from each one's due range, from that tenant's cursor on, so it
@@ -360,6 +383,9 @@ defmodule Ankusa.Dispatch.Pipeline do
        served: MapSet.new(),
        # tenants whose `ankusa_dispatch_tenant_inflight` was last reported nonzero
        reported_tenants: MapSet.new(),
+       # whether the node holds any lane member, read once per scan: the sweep of
+       # lane markers runs only then
+       lanes?: false,
        # sink key => queue of claimed jobs ready to run; `rings` maps a tenant
        # ordinal to the queue of its keys whose queue is non-empty (once each, in
        # round-robin order) and `ring` holds every tenant that has such a key,
@@ -444,14 +470,21 @@ defmodule Ankusa.Dispatch.Pipeline do
     now = now_ms()
     error = inspect({:source_gone, source_id}, limit: 50, printable_limit: 4096)
 
-    result =
-      Deliveries.fold_source(state.instance, :due, source_id, {state, 0, :ok}, fn
+    dead_letter = fn family, acc ->
+      Deliveries.fold_source(state.instance, family, source_id, acc, fn
         rows, {state, n, :ok} ->
           case dead_letter_rows(state, rows, now, error) do
             {:ok, state, dead} -> {:cont, {state, n + dead, :ok}}
             {:error, reason} -> {:halt, {state, n, {:error, reason}}}
           end
       end)
+    end
+
+    # The members of the source's lanes first, so a dead head's release finds
+    # none of the source's own hooks behind it.
+    result =
+      with {:ok, {state, n, :ok}} <- dead_letter.(:lane_members, {state, 0, :ok}),
+           do: dead_letter.(:due, {state, n, :ok})
 
     case result do
       {:ok, {state, n, :ok}} -> {:reply, {:ok, n}, state}
@@ -639,6 +672,7 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   defp scan(state) do
     dispatch = state.config.dispatch
+    state = lanes_present(state)
     # A group the queue writer has applied but the syncer has not fsynced yet is
     # not due: the hook was not acked, and a delivery of it would outrun its
     # durability (`Ankusa.Queue.Syncer.visible/2`). The syncer wakes this process
@@ -756,16 +790,18 @@ defmodule Ankusa.Dispatch.Pipeline do
     else
       ask = Enum.min([share, acc.left, limits.max_inflight - rows])
       budget = min(acc.budget, limits.max_inflight_bytes - bytes)
-      take(state, ord, buckets, now, {ask, share, budget}, acc)
+      # Before the due fold, so a member promoted now is claimed in this scan.
+      {state, more?} = sweep_lanes(state, ord, now, share)
+      take(state, ord, buckets, now, {ask, share, budget, more?}, acc)
     end
   end
 
-  defp take(state, ord, buckets, now, {ask, share, budget}, acc) do
+  defp take(state, ord, buckets, now, {ask, share, budget, more?}, acc) do
     floor = Map.get(state.cursors, ord, 0)
 
     case Deliveries.due_for_tenant(state.instance, ord, now, floor, ask, budget) do
       {:ok, dues} ->
-        took(state, ord, buckets, now, share, dues, acc)
+        took(state, ord, buckets, now, {share, more?}, dues, acc)
 
       {:error, reason} ->
         Logger.error("[ankusa] dispatch could not scan the store, retrying: #{inspect(reason)}")
@@ -773,13 +809,13 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
-  defp took(state, ord, buckets, now, share, dues, acc) do
+  defp took(state, ord, buckets, now, {share, more?}, dues, acc) do
     case claim_tenant(state, ord, dues, now) do
       {:ok, state} ->
         n = length(dues)
         bytes = Enum.reduce(dues, 0, &(&1.size + &2))
         state = tidy_tenant(state, ord, buckets, now)
-        wanting = if n >= share, do: [{ord, []} | acc.wanting], else: acc.wanting
+        wanting = if n >= share or more?, do: [{ord, []} | acc.wanting], else: acc.wanting
 
         {:ok, state,
          %{
@@ -793,6 +829,39 @@ defmodule Ankusa.Dispatch.Pipeline do
 
       {:error, state} ->
         {:error, state}
+    end
+  end
+
+  # The node's lane members, one counter read per scan: `lanes?` gates every
+  # other cost of the lanes (the sweep, the marker check of the tidy).
+  defp lanes_present(state) do
+    case Counters.read_field(state.instance, [0], :lane_members) do
+      {:ok, [members]} -> %{state | lanes?: members > 0}
+      {:error, _reason} -> state
+    end
+  end
+
+  # ADR 0004, section 4.6: promote members of idle lanes, heal stale heads. The
+  # ops go through `write/2` like every other Pipeline write, so the cursor of
+  # the tenant comes down to the rows just made due. `more?` says the sweep hit
+  # its limit with work done, so the visit goes again.
+  defp sweep_lanes(%{lanes?: false} = state, _ord, _now, _share), do: {state, false}
+
+  defp sweep_lanes(state, ord, now, share) do
+    case Lanes.sweep(state.instance, ord, now, share) do
+      {:ok, ops, more?} ->
+        case write(state, ops) do
+          {:ok, state} ->
+            {state, more?}
+
+          {:error, reason} ->
+            Logger.warning("[ankusa] lane sweep of tenant #{ord} failed: #{inspect(reason)}")
+            {state, false}
+        end
+
+      {:error, reason} ->
+        Logger.warning("[ankusa] lane sweep of tenant #{ord} failed: #{inspect(reason)}")
+        {state, false}
     end
   end
 
@@ -910,7 +979,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   # work).
   defp tidy_tenant(state, ord, buckets, now) do
     if Enum.any?(buckets, &(&1 < div(now, 1000))) do
-      case Deliveries.sweep_markers(state.instance, ord, buckets, now) do
+      case Deliveries.sweep_markers(state.instance, ord, buckets, now, lanes: state.lanes?) do
         {:ok, true} ->
           %{state | cursors: Map.delete(state.cursors, ord)}
 
@@ -982,7 +1051,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   defp resolve_one(%{env: nil} = item, {state, ops, pairs, jobs, sources}, _now) do
     Logger.error("[ankusa] hook #{item.seq} is missing; dropping its delivery row #{item.sink}")
 
-    drop = Deliveries.orphan_ops(:inflight, item.ord, item.seq, item.sink, item.size)
+    drop = Deliveries.orphan_ops(:inflight, item.ord, item.seq, item.sink, item.size, item.row)
 
     {state, drop ++ ops, pairs, jobs, sources}
   end
@@ -1179,14 +1248,13 @@ defmodule Ankusa.Dispatch.Pipeline do
         end)
 
       {ops, dead} =
-        Enum.reduce(rows, {[], []}, fn %{seq: seq, sink: sink, key: key, row: row} = entry,
-                                       {ops, dead} ->
-          from = {:due, key, entry.kind}
+        Enum.reduce(rows, {[], []}, fn %{seq: seq, sink: sink, row: row} = entry, {ops, dead} ->
+          from = Deliveries.source_from(entry)
 
           case Map.fetch!(envs, seq) do
             nil ->
               Logger.error("[ankusa] hook #{seq} is missing; dropping its delivery row #{sink}")
-              {Deliveries.orphan_ops(from, entry.ord, seq, sink, entry.size) ++ ops, dead}
+              {Deliveries.orphan_ops(from, entry.ord, seq, sink, entry.size, row) ++ ops, dead}
 
             env ->
               dead_ops = Deliveries.dead_ops(from, entry.ord, seq, sink, row, now, error, env)
@@ -1194,7 +1262,8 @@ defmodule Ankusa.Dispatch.Pipeline do
           end
         end)
 
-      with :ok <- Store.write(state.instance, Deliveries.coalesce(ops), sync: true) do
+      with {:ok, ops} <- Lanes.expand(state.instance, ops, now_ms()),
+           :ok <- Store.write(state.instance, Deliveries.coalesce(ops), sync: true) do
         state =
           Enum.reduce(dead, state, fn {env, row}, state ->
             state
@@ -1217,6 +1286,7 @@ defmodule Ankusa.Dispatch.Pipeline do
       attempts: attempts,
       sink: module,
       source_id: source_id,
+      ordered: ordered?(row),
       tenant_id: tenant_id
     })
 
@@ -1229,6 +1299,10 @@ defmodule Ankusa.Dispatch.Pipeline do
 
     %{state | settled: state.settled + 1}
   end
+
+  # A row of an ordering lane (ADR 0004): `ordered` in the metadata of the stop
+  # event.
+  defp ordered?(row), do: is_binary(Map.get(row, :lane))
 
   # The tenant a dead row's hook belonged to; a hook that did not decode has no
   # tenant to name, so it is the default tenant's.
@@ -1789,6 +1863,21 @@ defmodule Ankusa.Dispatch.Pipeline do
         _ -> ctx
       end
 
+    # A lane head: the key the sink orders by (`"tenant/source"` for the keyless
+    # lane) and the lane's id, for logs (ADR 0004, section 6).
+    ctx =
+      case Map.get(row, :lane) do
+        lane when is_binary(lane) ->
+          Map.merge(ctx, %{
+            ordering_key:
+              Ordering.sink_key(Map.get(row, :ordering_key, ""), env.tenant_id, env.source_id),
+            lane: Base.encode16(lane, case: :lower)
+          })
+
+        _ ->
+          ctx
+      end
+
     if claim, do: Map.put(ctx, :claim, claim), else: ctx
   end
 
@@ -1836,11 +1925,12 @@ defmodule Ankusa.Dispatch.Pipeline do
             attempts: attempts,
             sink: mod,
             source_id: job.env.source_id,
+            ordered: ordered?(job.row),
             tenant_id: Tenants.normalize(job.env.tenant_id)
           })
 
           {%{state | settled: state.settled + 1} |> bump_replay(job.row, :delivered),
-           Deliveries.delivered_ops(job.ord, job.seq, job.sink, job.size),
+           Deliveries.delivered_ops(job.ord, job.seq, job.sink, job.size, job.row),
            [cleared(job.seq, job.sink)]}
 
         {:error, reason} ->
@@ -2007,14 +2097,17 @@ defmodule Ankusa.Dispatch.Pipeline do
     }
   end
 
-  # Every Pipeline write goes through here. Once it is in, the rows it made due
-  # (a retry, an expansion) are visible to scans, so their tenants' cursors must
-  # be at or under the earliest of them: a scan that ran while the write was
-  # buffered, or failing and waiting for housekeeping, may have raised one past.
+  # Every Pipeline write goes through here. A lane head's release is still a
+  # placeholder until now (`Lanes.expand/3`): the next member is read in the step
+  # that writes the batch, and a batch that fails is rebuilt on the next try. Once
+  # it is in, the rows it made due (a retry, an expansion, a promoted member) are
+  # visible to scans, so their tenants' cursors must be at or under the earliest of
+  # them: a scan that ran while the write was buffered, or failing and waiting for
+  # housekeeping, may have raised one past.
   defp write(state, ops) do
-    case Store.write(state.instance, Deliveries.coalesce(ops), sync: false) do
-      :ok -> {:ok, lower_cursors_for(state, ops)}
-      {:error, reason} -> {:error, reason}
+    with {:ok, ops} <- Lanes.expand(state.instance, ops, now_ms()),
+         :ok <- Store.write(state.instance, Deliveries.coalesce(ops), sync: false) do
+      {:ok, lower_cursors_for(state, ops)}
     end
   end
 
@@ -2033,11 +2126,18 @@ defmodule Ankusa.Dispatch.Pipeline do
   defp buffer(state, ops, pairs) do
     state = %{state | buffer: [{ops, pairs} | state.buffer], buffered: state.buffered + 1}
 
-    if state.buffered >= @flush_entries do
-      state |> flush() |> refill()
-    else
-      arm_flush(state)
+    cond do
+      state.buffered >= @flush_entries -> state |> flush() |> refill()
+      # A release makes the lane's next hook due: do not make it wait the whole
+      # flush window, a lane's throughput is one delivery round trip.
+      Enum.any?(ops, &Lanes.placeholder?/1) -> flush_soon(state)
+      true -> arm_flush(state)
     end
+  end
+
+  defp flush_soon(state) do
+    if state.flush_timer, do: Process.cancel_timer(state.flush_timer)
+    %{state | flush_timer: Process.send_after(self(), :flush, @lane_flush_ms)}
   end
 
   defp arm_flush(%{flush_timer: nil} = state),

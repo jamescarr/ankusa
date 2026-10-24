@@ -78,6 +78,7 @@ defmodule Ankusa.Sink.RabbitMQ do
     [{"ankusa_idempotency_key", :longstr, Envelope.idempotency_key(env)}]
     |> maybe_put_amqp("ankusa_dedupe_key", env.dedupe_key)
     |> maybe_put_amqp("ankusa_replay_id", ctx[:replay_id])
+    |> maybe_put_amqp("ankusa_ordering_key", ctx[:ordering_key])
   end
 
   defp maybe_put_amqp(headers, _name, nil), do: headers

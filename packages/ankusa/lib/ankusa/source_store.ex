@@ -411,6 +411,7 @@ defmodule Ankusa.SourceStore.Static do
     updated = %Config{config | source_store: {__MODULE__, Keyword.put(opts, :sources, sources)}}
 
     Ankusa.Queue.validate_config!(updated)
+    Ankusa.Ordering.validate_config!(updated)
     Ankusa.Verifier.validate_config!(updated)
     Ankusa.Verifier.validate_shared!(updated)
     Ankusa.HttpClient.Egress.validate_config!(updated)

@@ -194,23 +194,31 @@ defmodule Ankusa.Sink.SQS do
 
   defp put_ordering(request, env, ctx, opts, true = _fifo?) do
     Map.merge(request, %{
-      "MessageGroupId" => group(env, opts),
+      "MessageGroupId" => group(env, ctx, opts),
       "MessageDeduplicationId" => Message.delivery_id(env, ctx)
     })
   end
 
   # SQS rejects `MessageDeduplicationId` on a standard queue; a group id is only
   # sent when configured (fair queues).
-  defp put_ordering(request, env, _ctx, opts, false = _fifo?) do
+  defp put_ordering(request, env, ctx, opts, false = _fifo?) do
     if Keyword.get(opts, :message_group_id) != nil,
-      do: Map.put(request, "MessageGroupId", group(env, opts)),
+      do: Map.put(request, "MessageGroupId", group(env, ctx, opts)),
       else: request
   end
 
-  defp group(env, opts) do
-    case Keyword.get(opts, :message_group_id) do
-      nil -> "#{env.tenant_id}/#{env.source_id}"
-      group -> Messaging.resolve(group, env)
+  # An ordered sink's group is the lane's key (`ctx.ordering_key`, ADR 0004), not
+  # `:message_group_id`: the group is the unit SQS keeps in order.
+  defp group(env, ctx, opts) do
+    case ctx[:ordering_key] do
+      key when is_binary(key) ->
+        key
+
+      _ ->
+        case Keyword.get(opts, :message_group_id) do
+          nil -> "#{env.tenant_id}/#{env.source_id}"
+          group -> Messaging.resolve(group, env)
+        end
     end
   end
 

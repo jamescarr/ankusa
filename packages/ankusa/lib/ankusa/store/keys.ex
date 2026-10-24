@@ -98,6 +98,22 @@ defmodule Ankusa.Store.Keys do
   def active(bucket, ord), do: <<?A, bucket::64, ord::32>>
   def archive_pending(seq), do: <<?a, seq::64>>
 
+  # Ordering lanes (ADR 0004). `lane` is the 16-byte lane id
+  # (`Ankusa.Ordering.lane_id/3`), the tenant ordinal leads every key. A member
+  # is a pending row waiting its turn, in `seq` order; the head is the one row of
+  # the lane that is in `?D` or `?F`; the marker says "this lane may have a
+  # member and no head". No code outside `Ankusa.Queue.Deliveries` (and its
+  # `Lanes` part) builds a `?O`, `?H` or `?P` key.
+  def lane_member(ord, lane, seq, sink) when byte_size(lane) == 16,
+    do: <<?O, ord::32, lane::binary-16, seq::64, sink::16>>
+
+  def lane_head(ord, lane) when byte_size(lane) == 16, do: <<?H, ord::32, lane::binary-16>>
+  def lane_marker(ord, lane) when byte_size(lane) == 16, do: <<?P, ord::32, lane::binary-16>>
+
+  # Every member of one lane (`range/1` of this is the lane's members).
+  def lane_members_prefix(ord, lane) when byte_size(lane) == 16,
+    do: <<?O, ord::32, lane::binary-16>>
+
   # The format 2 layout, which only the format 2 -> 3 migration and the 0.3
   # import (`Ankusa.Store.Migrate`, which writes it for the migration to move)
   # still use.
@@ -129,7 +145,7 @@ defmodule Ankusa.Store.Keys do
 
   # `counters` column family: one merge-operand row per tenant and field, plus
   # the node aggregate under ordinal 0 (`Ankusa.Queue.Deliveries.Counters`).
-  def counter(ord, field) when field in 1..9, do: <<ord::32, field::8>>
+  def counter(ord, field) when field in 1..12, do: <<ord::32, field::8>>
 
   # Ingest dedupe: `?u` maps a provider event key to
   # `<<expires_at::64, original_id::binary>>`, and `?e` is its expiry-sweep
@@ -183,6 +199,12 @@ defmodule Ankusa.Store.Keys do
   def decode_dead(<<?x, at::64, seq::64, sink::16>>), do: {at, seq, sink}
   def decode_dead_by_tenant(<<?X, ord::32, at::64, seq::64, sink::16>>), do: {ord, at, seq, sink}
   def decode_active(<<?A, bucket::64, ord::32>>), do: {bucket, ord}
+
+  def decode_lane_member(<<?O, ord::32, lane::binary-16, seq::64, sink::16>>),
+    do: {ord, lane, seq, sink}
+
+  def decode_lane_head(<<?H, ord::32, lane::binary-16>>), do: {ord, lane}
+  def decode_lane_marker(<<?P, ord::32, lane::binary-16>>), do: {ord, lane}
   def decode_due_v2(<<?d, at::64, seq::64, sink::16>>), do: {at, seq, sink}
   def decode_inflight_v2(<<?f, seq::64, sink::16>>), do: {seq, sink}
   def decode_cleared(<<?c, seq::64, kind::8, sink::16>>), do: {seq, kind, sink}
@@ -232,6 +254,7 @@ defmodule Ankusa.Store.Keys do
   @ff18 <<@ff10::binary, @ff8::binary>>
   @ff16 <<@ff8::binary, @ff8::binary>>
   @ff4 <<0xFF, 0xFF, 0xFF, 0xFF>>
+  @ff20 <<@ff4::binary, @ff16::binary>>
 
   @families %{
     hooks: %{cf: :hooks, lo: <<0::64>>, hi: @ff8},
@@ -245,6 +268,9 @@ defmodule Ankusa.Store.Keys do
     tenant_ords: %{cf: :tenants, lo: <<?n>>, hi: <<?n, 0xFF>>},
     counters: %{cf: :counters, lo: <<0::40>>, hi: <<@ff4::binary, 0xFF>>},
     archive_pending: %{cf: :index, lo: <<?a>>, hi: <<?a, @ff8::binary>>},
+    lane_members: %{cf: :index, lo: <<?O>>, hi: <<?O, @ff20::binary, @ff10::binary>>},
+    lane_heads: %{cf: :index, lo: <<?H>>, hi: <<?H, @ff20::binary>>},
+    lane_markers: %{cf: :index, lo: <<?P>>, hi: <<?P, @ff20::binary>>},
     cleared: %{cf: :index, lo: <<?c>>, hi: <<?c, @ff11::binary>>},
     claims: %{cf: :index, lo: <<?k>>, hi: <<?k, @ff8::binary>>},
     claim_leases: %{cf: :index, lo: <<?l>>, hi: <<?l, 0xFF>>},

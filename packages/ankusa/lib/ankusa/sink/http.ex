@@ -429,6 +429,7 @@ defmodule Ankusa.Sink.Http do
         tenant_header(env.tenant_id) ++
         dedupe_header(env.dedupe_key) ++
         replay_header(ctx[:replay_id]) ++
+        ordering_header(ctx[:ordering_key]) ++
         signature
 
     forwarded =
@@ -568,6 +569,13 @@ defmodule Ankusa.Sink.Http do
 
   defp replay_header(replay_id) when is_binary(replay_id), do: [{"x-ankusa-replay-id", replay_id}]
   defp replay_header(_), do: []
+
+  # An ordered sink's lane key (ADR 0004): HTTP deliveries of a lane are
+  # sequential, and the receiver can see which lane this one is in.
+  defp ordering_header(key) when is_binary(key) and key != "",
+    do: [{"x-ankusa-ordering-key", key}]
+
+  defp ordering_header(_), do: []
 
   defp tenant_header(tenant_id) when is_binary(tenant_id), do: [{"x-ankusa-tenant", tenant_id}]
   defp tenant_header(_), do: []

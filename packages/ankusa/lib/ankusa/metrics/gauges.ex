@@ -150,6 +150,8 @@ defmodule Ankusa.Metrics.Gauges do
         dedupe: max(counters.dedupe, 0),
         dead_bytes: max(counters.dead_bytes, 0),
         claim_leases: max(counters.claim_leases, 0),
+        lanes: max(counters.lanes, 0),
+        lanes_blocked: max(counters.lanes_blocked, 0),
         dlq_full: if(Ankusa.Queue.DlqReaper.full?(instance), do: 1, else: 0),
         tenants: tenants,
         oldest_due_age_ms: if(oldest, do: max(0, now - oldest), else: 0)
