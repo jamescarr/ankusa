@@ -91,6 +91,10 @@ class Message:
     # How Ankusa verified the hook at ingest; None from a node older than
     # the field.
     verification: Verification | None
+    # The hook's W3C trace context, verbatim: continue the trace from it. None
+    # when the message carries none (or comes from a node older than the fields).
+    traceparent: str | None = None
+    tracestate: str | None = None
 
 
 def _is_int(value: Any) -> TypeGuard[int]:
@@ -167,6 +171,8 @@ def decode_message(data: str | bytes) -> Message:
     dedupe_key = _optional_string(payload, "dedupe_key")
     replay_id = _optional_string(payload, "replay_id")
     idempotency_key = _optional_string(payload, "idempotency_key")
+    traceparent = _optional_string(payload, "traceparent")
+    tracestate = _optional_string(payload, "tracestate")
 
     forwarded = payload.get("headers")
     headers: dict[str, str] = {}
@@ -231,6 +237,8 @@ def decode_message(data: str | bytes) -> Message:
         idempotency_key=idempotency_key,
         headers=headers,
         verification=verification,
+        traceparent=traceparent,
+        tracestate=tracestate,
     )
 
 

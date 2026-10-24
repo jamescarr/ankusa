@@ -239,6 +239,55 @@ defmodule Ankusa.Sink.MessageTest do
            ]
   end
 
+  describe "trace context" do
+    @traceparent "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+    test "an inline message carries traceparent and tracestate, null when the hook has none",
+         %{ctx: ctx} do
+      traced = envelope("x", %{trace: %{traceparent: @traceparent, tracestate: "a=1"}})
+      assert {:ok, json} = Message.encode(traced, ctx, 100)
+      assert %{"traceparent" => @traceparent, "tracestate" => "a=1"} = JSON.decode!(json)
+
+      assert {:ok, json} = Message.encode(envelope("x"), ctx, 100)
+      decoded = JSON.decode!(json)
+      assert Map.fetch!(decoded, "traceparent") == nil
+      assert Map.fetch!(decoded, "tracestate") == nil
+    end
+
+    test "a claim message carries them too", %{ctx: ctx} do
+      env =
+        envelope(String.duplicate("x", 50), %{
+          trace: %{traceparent: @traceparent, tracestate: nil}
+        })
+
+      assert {:ok, json} = Message.encode(env, ctx, 10)
+      decoded = JSON.decode!(json)
+      assert is_binary(decoded["claim"])
+      assert decoded["traceparent"] == @traceparent
+      assert Map.fetch!(decoded, "tracestate") == nil
+    end
+
+    test "headers/2 and attributes/2 end with the pairs, tracestate only when there is one",
+         %{ctx: ctx} do
+      with_state = envelope("x", %{trace: %{traceparent: @traceparent, tracestate: "a=1"}})
+      without = envelope("x", %{trace: %{traceparent: @traceparent, tracestate: nil}})
+
+      assert Enum.take(Message.headers(with_state, ctx), -2) ==
+               [{"traceparent", @traceparent}, {"tracestate", "a=1"}]
+
+      assert Enum.take(Message.attributes(with_state, ctx), -2) ==
+               [{"traceparent", @traceparent}, {"tracestate", "a=1"}]
+
+      assert List.last(Message.headers(without, ctx)) == {"traceparent", @traceparent}
+      refute List.keymember?(Message.headers(without, ctx), "tracestate", 0)
+      refute List.keymember?(Message.attributes(without, ctx), "tracestate", 0)
+
+      plain = envelope("x")
+      refute List.keymember?(Message.headers(plain, ctx), "traceparent", 0)
+      refute List.keymember?(Message.attributes(plain, ctx), "traceparent", 0)
+    end
+  end
+
   test "delivery_id/2 is the hook's id, made distinct per replay", %{ctx: ctx} do
     env = envelope("x")
 

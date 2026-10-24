@@ -34,6 +34,14 @@ mise run check:package ankusa         # no external infra needed
 mise run test:integration             # +22 tests against the floci emulators (see below)
 ```
 
+`test/ankusa/tracing_test.exs` (OPS-1) is the proof that a hook is one trace: it
+starts the OpenTelemetry SDK with the in-memory `:otel_exporter_pid` and asserts
+`one trace across stages` (ingest, verify, commit and dispatch spans share the
+provider's trace id, the attempt links to the ingest span, the delivered
+`traceparent` is the ingest span's), and, with no SDK, that a `traceparent` reaches
+the queue message and `Sink.Http` unchanged. It tears the SDK down, and the
+tracers it parked in `:persistent_term`, so no other test sees it.
+
 The always-on tests cover:
 
 - **Stored-header policy** (`stored_headers_test.exs`, `edge_test.exs`,

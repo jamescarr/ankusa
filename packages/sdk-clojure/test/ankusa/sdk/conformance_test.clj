@@ -172,7 +172,9 @@
                       "replay_id" (:replay-id result)
                       "idempotency_key" (:idempotency-key result)
                       "headers" (:headers result)
-                      "verification" (verification-json result)}
+                      "verification" (verification-json result)
+                      "traceparent" (:traceparent result)
+                      "tracestate" (:tracestate result)}
     "idempotency_key" {"key" result}
     "redeem" {"body" {"base64" (base64 result)}}
     "admin_metrics" {"text" result}

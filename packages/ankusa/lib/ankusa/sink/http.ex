@@ -49,7 +49,10 @@ defmodule Ankusa.Sink.Http do
   `x-ankusa-tenant` are always added, plus `x-ankusa-verification-flagged: true`
   when a failed check was let through by `on_verify_failure: accept_flag` (treat
   that hook as unverified), `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when
-  the hook carries them, and `webhook-id`/`webhook-timestamp`/`webhook-signature`
+  the hook carries them, `traceparent` (and `tracestate`) when it carries a
+  trace context (`Ankusa.Trace`: the provider's own, or the ingest span's with an
+  OpenTelemetry SDK; a provider's header is replaced, not forwarded beside it),
+  and `webhook-id`/`webhook-timestamp`/`webhook-signature`
   with a `:secret` (always, unless `allow_unsigned: true`).
   Provider request headers are forwarded per the source's `forward_headers`
   option (see `Ankusa.Sink.Message.forwarded_headers/2`); a forwarded name that
@@ -422,6 +425,7 @@ defmodule Ankusa.Sink.Http do
         tenant_header(env.tenant_id) ++
         dedupe_header(env.dedupe_key) ++
         replay_header(ctx[:replay_id]) ++
+        trace_headers(env.trace) ++
         signature
 
     forwarded =
@@ -558,6 +562,19 @@ defmodule Ankusa.Sink.Http do
 
   defp replay_header(replay_id) when is_binary(replay_id), do: [{"x-ankusa-replay-id", replay_id}]
   defp replay_header(_), do: []
+
+  # The hook's W3C trace context (`Ankusa.Trace`), as the standard headers. Owned
+  # like the identity headers: a provider's own `traceparent` is not forwarded
+  # beside it. A hook with no trace sends none.
+  defp trace_headers(%{traceparent: traceparent} = trace) do
+    [{"traceparent", traceparent}] ++
+      case Map.get(trace, :tracestate) do
+        state when is_binary(state) and state != "" -> [{"tracestate", state}]
+        _ -> []
+      end
+  end
+
+  defp trace_headers(_no_trace), do: []
 
   defp tenant_header(tenant_id) when is_binary(tenant_id), do: [{"x-ankusa-tenant", tenant_id}]
   defp tenant_header(_), do: []
