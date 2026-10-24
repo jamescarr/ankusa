@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-24
+
 ### Added
 
 - `Ankusa.SDK.ClaimRef.parse/1` and `Ankusa.SDK.ClaimCheck.redeem/3` accept
@@ -111,6 +113,7 @@ follows [Semantic Versioning](https://semver.org/).
 - The language-neutral conformance runner
   (`test/conformance_test.exs`), passing every vector in `conformance/cases`.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.5.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.6.0...HEAD
+[0.6.0]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.5.0...sdk-elixir-v0.6.0
 [0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.3.0...sdk-elixir-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-elixir-v0.3.0

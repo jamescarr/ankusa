@@ -6,6 +6,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-24
+
 ### Added
 
 - `scope` on `AdminRejectedError` and `RoutesRejectedError`: the scope a
@@ -92,6 +94,7 @@ this project follows [Semantic Versioning](https://semver.org/).
   the crate drives its own HTTP client or none at all), and `ClientBuilder`
   for shared base URL, headers, and timeout.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-rust-v0.5.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-rust-v0.6.0...HEAD
+[0.6.0]: https://github.com/jamescarr/ankusa/compare/sdk-rust-v0.5.0...sdk-rust-v0.6.0
 [0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-rust-v0.3.0...sdk-rust-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-rust-v0.3.0

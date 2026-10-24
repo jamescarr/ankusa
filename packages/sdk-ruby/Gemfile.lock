@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    ankusa-sdk (0.5.0)
+    ankusa-sdk (0.6.0)
 
 GEM
   remote: https://rubygems.org/
@@ -71,7 +71,7 @@ DEPENDENCIES
   standard (~> 1.56)
 
 CHECKSUMS
-  ankusa-sdk (0.5.0)
+  ankusa-sdk (0.6.0)
   ast (2.4.3) sha256=954615157c1d6a382bc27d690d973195e79db7f55e9765ac7c481c60bdb4d383
   drb (2.2.3) sha256=0b00d6fdb50995fe4a45dea13663493c841112e4068656854646f418fda13373
   json (3.1.0) sha256=3ce7ccf8fde58960177a3a756c31f292a4c1e1dedee884547096a5b0604e3bd8
