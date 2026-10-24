@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img">
+  <title>Ankusa</title>
+  <!-- static/ankusa.png is this drawing rendered at 1024x1024 in Chromium with a
+       transparent background; ImageMagick's built-in SVG renderer draws only the tile. -->
+  <rect width="512" height="512" rx="88" fill="#0A0F1C"/>
+  <!-- Drawn upright (spike up, hook on the right), then turned 45 degrees clockwise. -->
+  <g transform="rotate(45 256 256)">
+    <!-- spike: a leaf blade, lit face and shaded face -->
+    <path d="M256 -26 L274 80 L268 136 L244 136 L238 80 Z" fill="#DCE8F7"/>
+    <path d="M256 -26 L256 136 L244 136 L238 80 Z" fill="#AFC3DE"/>
+    <!-- hook: leaves the collar, sweeps out and down, point aimed back at the shaft -->
+    <path d="M266 134 C320 116 362 146 362 196 C362 228 340 250 294 258 C322 238 336 218 334 196 C332 168 304 160 266 174 Z" fill="#DCE8F7"/>
+    <path d="M294 258 C322 238 336 218 334 196 C332 168 304 160 266 174 L266 163 C308 152 344 166 347 196 C349 222 332 244 294 258 Z" fill="#AFC3DE"/>
+    <!-- shaft -->
+    <rect x="241" y="172" width="30" height="298" fill="#1F7AEC"/>
+    <rect x="246" y="182" width="6" height="284" rx="3" fill="#62A6FF"/>
+    <!-- collar: the gold knop the spike and hook rise from -->
+    <path d="M238 128 C246 122 266 122 274 128 L280 150 C281 168 272 180 256 182 C240 180 231 168 232 150 Z" fill="#F5B301"/>
+    <ellipse cx="245" cy="150" rx="4" ry="13" fill="#FFD75E"/>
+    <!-- bands -->
+    <rect x="236" y="236" width="40" height="16" rx="5" fill="#F5B301"/>
+    <rect x="236" y="380" width="40" height="10" rx="4" fill="#F5B301"/>
+    <rect x="236" y="396" width="40" height="10" rx="4" fill="#F5B301"/>
+    <!-- pommel -->
+    <rect x="237" y="466" width="38" height="12" rx="4" fill="#F5B301"/>
+    <circle cx="256" cy="500" r="25" fill="#F5B301"/>
+    <circle cx="248" cy="491" r="7" fill="#FFD75E"/>
+  </g>
+</svg>

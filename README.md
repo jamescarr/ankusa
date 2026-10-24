@@ -11,16 +11,41 @@
 
 _**Don't fight the traffic. Steer it.**_
 
-Ankusa is a self-hosted webhook receiver. Point Stripe, GitHub, or any provider
-at it and it verifies the signature, writes the hook down, and only then answers
-`2xx`; delivery to your workers happens afterwards, with retries, a dead-letter
-queue, and replay. It is for teams that need a durable inbox in front of their
-consumers without operating a stream processor just to accept a POST. One
-container is a complete receiver; more containers are a fleet, not a rewrite.
+Ankusa is a framework for ingesting webhooks from any provider, durably, at
+any scale. Point Stripe, GitHub, Shopify, or your own services at it: each hook
+is verified, written to durable storage, and only then answered `2xx`.
+Delivery to your workers comes after, over HTTP or the queue you already run,
+with retries, a dead-letter queue, and replay.
 
-That is the whole promise: **a `2xx` means the hook is stored somewhere that
-survives the failure you are worried about.** Which "somewhere" is one config
-key, `wal.type`. Nothing else in this README matters as much:
+Each source and tenant gets the combination it needs, set in YAML or in Elixir:
+
+- **[Verify](docs/configuration.md#sources)** the way each provider signs:
+  HMAC presets for Stripe, GitHub, Shopify, Slack, and Standard Webhooks, any
+  other HMAC scheme described in config, Ed25519 or RSA signatures, bearer
+  tokens, or mTLS client certificates. A failed check is rejected, quarantined
+  for later release, or accepted with a flag.
+- **[Throttle](docs/configuration.md#rate-limits)** per tenant, per client IP,
+  per source, and per node, in hooks or bytes per second, with a tenant's quota
+  shared across the whole fleet when you want it. Delivery is shared fairly
+  between tenants too.
+- **[Dedupe](docs/configuration.md#sources)** provider retries on the
+  provider's own event id, on one node or across the fleet.
+- **[Route](docs/multi-tenancy.md)** one catch URL per customer, pin a route to
+  a provider's published IP ranges, and add sources through the admin API
+  without a redeploy.
+- **[Deliver](docs/delivery.md)** to signed HTTP, RabbitMQ, Kafka, NATS
+  JetStream, SQS, Google Pub/Sub, or Redis pub/sub, with a retry policy per
+  source; a body too large for a queue message travels by claim check.
+- **[Extend](docs/elixir.md)** past the YAML: verifiers, sinks, and route
+  resolvers are Elixir behaviours you implement in your own app.
+
+One container is a complete receiver. A fleet is more of the same container
+behind a load balancer, not a rewrite, and an Elixir app can embed the whole
+pipeline as a library.
+
+Whatever the combination, one promise holds: **a `2xx` means the hook is
+stored somewhere that survives the failure you are worried about.** Which
+"somewhere" is one config key, `wal.type`:
 
 | `wal.type` | `201 accepted` means | An acked hook survives | Needs |
 | --- | --- | --- | --- |
