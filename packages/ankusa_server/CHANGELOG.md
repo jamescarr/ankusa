@@ -8,6 +8,15 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **Readiness keys (OPS-5).** `node.min_free_bytes` (unset): `/ready` answers `503`
+  with `disk: failing` while `data_dir`'s file system has fewer bytes free.
+  `health.sink_error_window_ms` (5000): under `wal.type: none`, a sink whose last
+  publish failed within this long ago makes `/ready` `503` with `sinks: failing`.
+  `queue.max_oldest_due_ms` (unset): past it `/ready` carries `backlog: failing`,
+  a label that never makes the node unready. See `config-examples/reference.yml`.
+  `/ready`'s body now lists every check with `ok`/`failing`/`draining` and
+  `reasons` (see the `ankusa` changelog for the wire change).
+
 - **`egress.pools` section (DEL-3).** `pool_size` (32), `pool_count` (1),
   `pool_timeout` (5000), `pool_max_idle_ms` (60000), `conn_max_idle_ms` (30000),
   `max_pools` (1024), `max_pools_per_tenant` (256) and `protocols` (`[http1,

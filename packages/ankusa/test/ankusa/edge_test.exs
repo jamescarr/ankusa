@@ -935,8 +935,8 @@ defmodule Ankusa.EdgeTest do
       assert JSON.decode!(down.resp_body) == %{
                "status" => "unavailable",
                "instance" => name,
-               "store" => "store_unavailable",
-               "reason" => "not_running"
+               "store" => "failing",
+               "reasons" => %{"store" => "not_running"}
              }
 
       # Liveness is unaffected.

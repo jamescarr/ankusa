@@ -574,7 +574,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/application.ex`, `packages/ankusa_server/lib/ankusa_server/application.ex:27-50`, `instance.ex:180-214`, `health.ex:3-50`, `edge/batcher.ex:76-83`.
   *Evidence:* —
 
-- [ ] **OPS-5 — Readiness that reflects every dependency** · P1 · Deps: —
+- [x] **OPS-5 — Readiness that reflects every dependency** · P1 · Deps: —
   *Why:* `/ready` consults only the local store; a `wal: none` node is ready with every broker down; no disk floor or backlog signal despite the gauges existing (`health.ex:38-50`).
   *Change:* `Ankusa.Health.Check` registry: `store`, `intake` (DUR-1 when present), `sinks` (last publish error per sink within `health.sink_error_window_ms` under `wal: none`), `disk` (`node.min_free_bytes`), `backlog` (`queue.max_oldest_due_ms`, label only, never unready by default), `backup` (DUR-6); `/ready` body lists each with `ok | failing | draining`; unready for `store`, `intake`, `disk`, `sinks` (direct mode).
   *Done when:* a direct-mode instance with a failing sink is 503; a tmpfs below the floor is 503; a backlog over threshold shows `backlog: failing` with 200.
