@@ -324,6 +324,7 @@ defmodule Ankusa.SourceStore.Redis.State do
   @spec put(atom(), String.t(), String.t(), map(), :create | :update) ::
           {:ok, Ankusa.SourceStore.stored()}
           | {:error, :invalid, String.t()}
+          | {:error, :retry_exceeds_claim_expiry, String.t()}
           | {:error, :exists}
           | {:error, :not_found}
           | {:error, :store_unavailable}
@@ -416,7 +417,11 @@ defmodule Ankusa.SourceStore.Redis.State do
                  {:ok, state} <- load(state) do
               # Once per boot, not on every reload: a resumed store and every
               # later sync load the same entries again.
-              Ankusa.Verifier.warn_stored_shared(config, Table.stored_sources(table))
+              stored = Table.stored_sources(table)
+              Ankusa.Verifier.warn_stored_shared(config, stored)
+              # A stored source whose retry horizon outlasts the bucket lifecycle
+              # rule would lose its packs mid-retry: refuse to boot with it.
+              Ankusa.ClaimCheck.validate_stored_horizons!(config, stored)
               Process.send_after(self(), :tick, state.tick_ms)
               {:ok, state}
             else
@@ -462,7 +467,11 @@ defmodule Ankusa.SourceStore.Redis.State do
                  :ok <- Table.check_write(state.instance, source) do
               write(state, stored, source, mode)
             else
-              {:error, :invalid, message} -> {:reply, {:error, :invalid, message}, state}
+              {:error, :invalid, message} ->
+                {:reply, {:error, :invalid, message}, state}
+
+              {:error, :retry_exceeds_claim_expiry, message} ->
+                {:reply, {:error, :retry_exceeds_claim_expiry, message}, state}
             end
 
           {:error, reason} ->

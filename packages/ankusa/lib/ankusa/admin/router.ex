@@ -632,12 +632,28 @@ defmodule Ankusa.Admin.Router do
 
   defp put_source(conn, ok_status, result) do
     case result do
-      {:ok, stored} -> send_json(conn, ok_status, Redact.source_entry(stored))
-      {:error, :invalid, message} -> invalid_source(conn, message)
-      {:error, :exists} -> send_json(conn, 409, %{error: "source_exists"})
-      {:error, :not_found} -> send_json(conn, 404, %{error: "source_not_found"})
-      {:error, :store_unavailable} -> source_store_unavailable(conn)
-      {:error, :read_only} -> send_json(conn, 409, %{error: "source_store_read_only"})
+      {:ok, stored} ->
+        send_json(conn, ok_status, Redact.source_entry(stored))
+
+      {:error, :invalid, message} ->
+        invalid_source(conn, message)
+
+      # The source would outlive the claim bucket's lifecycle rule: a `422` (the
+      # spec is well-formed, the instance's claim-check config refuses it).
+      {:error, :retry_exceeds_claim_expiry, message} ->
+        send_json(conn, 422, %{error: "retry_exceeds_claim_expiry", message: message})
+
+      {:error, :exists} ->
+        send_json(conn, 409, %{error: "source_exists"})
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{error: "source_not_found"})
+
+      {:error, :store_unavailable} ->
+        source_store_unavailable(conn)
+
+      {:error, :read_only} ->
+        send_json(conn, 409, %{error: "source_store_read_only"})
     end
   end
 

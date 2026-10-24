@@ -248,13 +248,37 @@ defmodule Ankusa.Sink.HttpTest do
       end)
     end
 
-    test "a status no retry can fix is permanent" do
-      for status <- [400, 401, 403, 404, 410, 413, 422] do
+    test "a status no retry can fix is permanent, 451 among them" do
+      for status <- [400, 401, 403, 404, 410, 413, 422, 451] do
         respond(status)
 
         assert Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/h")) ==
                  {:error, {:permanent, {:status, status}}}
       end
+    end
+
+    test "409 Conflict is transient: the receiver's state moves, and the retry horizon bounds it" do
+      respond(409)
+      assert Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/h")) == {:error, {:status, 409}}
+      assert {:transient, {:status, 409}} = Sink.classify({:status, 409})
+
+      # even with a Retry-After: only 408, 425, 429 and 5xx are paced by it
+      respond(409, [{"retry-after", "30"}])
+      assert Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/h")) == {:error, {:status, 409}}
+    end
+
+    test "425 Too Early is a pause: its Retry-After, else a full-jitter one" do
+      respond(425, [{"retry-after", "3"}])
+
+      assert Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/h")) ==
+               {:error, {:retry_after, 3_000, {:status, 425}}}
+
+      respond(425)
+
+      assert {:error, {:retry_after, ms, {:status, 425}}} =
+               Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/h"))
+
+      assert ms in 1..500
     end
 
     test "Retry-After on 408, 429 and 5xx becomes a minimum delay" do

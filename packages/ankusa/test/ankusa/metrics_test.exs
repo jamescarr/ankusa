@@ -347,6 +347,27 @@ defmodule Ankusa.MetricsTest do
       assert gauge(scrape, "ankusa_http_pools", inst) == 0.0
     end
 
+    test "config errors are counted per sink, and carry no tenant or source label" do
+      config = start_instance()
+      inst = config.instance
+
+      for _ <- 1..2 do
+        :telemetry.execute([:ankusa, :dispatch, :config_error], %{}, %{
+          instance: inst,
+          sink: Ankusa.Sink.SQS,
+          source_id: "acme.billing",
+          tenant_id: "acme"
+        })
+      end
+
+      scrape = Ankusa.Metrics.scrape(inst)
+
+      assert scrape =~
+               ~r/^ankusa_dispatch_config_errors_total\{[^}]*sink="Ankusa.Sink.SQS"[^}]*\} 2(\.0)?$/m
+
+      refute scrape =~ ~r/ankusa_dispatch_config_errors_total\{[^}]*(tenant_id|source_id)/
+    end
+
     test "the dedupe and audit-retention series follow their events" do
       config = start_instance()
       inst = config.instance

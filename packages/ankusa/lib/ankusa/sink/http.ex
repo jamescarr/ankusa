@@ -60,9 +60,15 @@ defmodule Ankusa.Sink.Http do
   | Status | Result | What dispatch does |
   | --- | --- | --- |
   | `2xx` | `:ok` | delivered |
-  | `400`, `401`, `403`, `404`, `410`, `413`, `422` | `{:error, {:permanent, {:status, s}}}` | dead-letter now |
+  | `400`, `401`, `403`, `404`, `410`, `413`, `422`, `451` | `{:error, {:permanent, {:status, s}}}` | dead-letter now |
   | `408`, `429`, `5xx` with a `Retry-After` | `{:error, {:retry_after, ms, {:status, s}}}` | retry no sooner than that |
+  | `425` | `{:error, {:retry_after, ms, {:status, 425}}}`, `ms` the `Retry-After` or else a full-jitter pause | retry no sooner than that |
+  | `409` | `{:error, {:status, 409}}` | the retry policy: the receiver's state usually moves; bounded by `retry.max_elapsed_ms` |
   | anything else | `{:error, {:status, s}}` | the retry policy |
+
+  `451 Unavailable For Legal Reasons` is permanent with the other refusals in
+  the first row: the receiver will not take the hook from this sender, and no
+  amount of retrying changes that.
 
   `401` and `403` are permanent because a credential (or `:secret`) fix is
   followed by a DLQ replay, not by hours of retries against a receiver that
@@ -141,7 +147,7 @@ defmodule Ankusa.Sink.Http do
   alias Ankusa.Sink.Http.Signer
   alias Ankusa.Sink.Message
 
-  @permanent [400, 401, 403, 404, 410, 413, 422]
+  @permanent [400, 401, 403, 404, 410, 413, 422, 451]
   @default_max_response_bytes 65_536
   @computed_keys [:url, :headers, :secret]
 
@@ -449,6 +455,19 @@ defmodule Ankusa.Sink.Http do
 
       {:ok, status, _headers, _body} when status in @permanent ->
         {:error, {:permanent, {:status, status}}}
+
+      # 425 Too Early: the receiver refused to process the request yet (replay
+      # protection while a handshake completes); it will take it shortly, so it is
+      # a pause (its `Retry-After`, else a jittered one), not a failure to back off.
+      {:ok, 425, headers, _body} ->
+        ms = retry_after_ms(headers) || Ankusa.Sink.throttle_after_ms(Map.get(ctx, :attempt, 1))
+        {:error, {:retry_after, ms, {:status, 425}}}
+
+      # 409 Conflict is transient on purpose: the receiver's state (a lock, a
+      # not-yet-created parent resource) usually moves, and a conflict that does
+      # not is bounded by the retry horizon like any other failure.
+      {:ok, 409, _headers, _body} ->
+        {:error, {:status, 409}}
 
       {:ok, status, headers, _body} when status in [408, 429] or status in 500..599 ->
         case retry_after_ms(headers) do

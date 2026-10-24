@@ -1538,6 +1538,69 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message =~ "a list of header names"
   end
 
+  test "DEL-2: dispatch.retry.max_elapsed_ms and dispatch.max_retry_after_ms load, with core's ranges" do
+    default = Config.load!(path: tmp_config("{}\n"), env: %{}).config.dispatch
+    assert default.max_retry_after_ms == 3_600_000
+    assert default.retry == {Ankusa.RetryPolicy.Exponential, []}
+
+    path =
+      tmp_config("""
+      dispatch:
+        max_retry_after_ms: 5000
+        retry: {max_elapsed_ms: 7200000, max_attempts: 10, jitter: false}
+      """)
+
+    dispatch = Config.load!(path: path, env: %{}).config.dispatch
+    assert dispatch.max_retry_after_ms == 5_000
+    assert {Ankusa.RetryPolicy.Exponential, opts} = dispatch.retry
+    assert Enum.sort(opts) == [jitter: false, max_attempts: 10, max_elapsed_ms: 7_200_000]
+
+    for {yaml, message} <- [
+          {"dispatch: {retry: {max_elapsed_ms: 10}}",
+           "dispatch.retry.max_elapsed_ms must be an integer from 1000 to 2592000000, got 10"},
+          {"dispatch: {max_retry_after_ms: 5}",
+           "dispatch.max_retry_after_ms must be an integer from 1000 to 86400000, got 5"},
+          {"dispatch: {retry: {max_elapsed_ms: soon}}",
+           ~s(dispatch.retry.max_elapsed_ms: expected an integer, got "soon")}
+        ] do
+      error =
+        assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml <> "\n"), env: %{}) end
+
+      assert error.message == message
+    end
+  end
+
+  test "DEL-2: sources.<id>.retry loads onto the source and fails naming the key" do
+    path =
+      tmp_config("""
+      sources:
+        a: {verify: {type: none}, retry: {max_elapsed_ms: 60000, jitter: false}, sinks: [{type: log}]}
+        b: {verify: {type: none}, sinks: [{type: log}]}
+      """)
+
+    {Ankusa.SourceStore.Static, opts} = Config.load!(path: path, env: %{}).config.source_store
+    sources = opts[:sources]
+    assert Enum.sort(sources["a"][:retry]) == [jitter: false, max_elapsed_ms: 60_000]
+    assert sources["b"][:retry] == nil
+    assert Ankusa.Source.new("a", sources["a"]).retry == sources["a"][:retry]
+
+    for {retry, message} <- [
+          {"{max_elapsed_ms: 10}", "sources.demo.retry.max_elapsed_ms must be an integer from"},
+          {"{max_attempts: 0}", "sources.demo.retry.max_attempts must be an integer from"},
+          {"{attempts: 3}", ~s(unknown key "attempts")},
+          {"{jitter: 1}", "sources.demo.retry.jitter"}
+        ] do
+      bad =
+        tmp_config("""
+        sources:
+          demo: {verify: {type: none}, retry: #{retry}, sinks: [{type: log}]}
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: bad, env: %{}) end
+      assert error.message =~ message
+    end
+  end
+
   test "store_headers: the http lists and a source override parse, lowercase, and reject other shapes" do
     default = Ankusa.Edge.StoredHeaders.default()
     assert Config.load!(path: tmp_config("{}\n"), env: %{}).config.store_headers == default

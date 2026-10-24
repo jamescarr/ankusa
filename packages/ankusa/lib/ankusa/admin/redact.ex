@@ -139,6 +139,13 @@ defmodule Ankusa.Admin.Redact do
       "sinks" => closed("sinks", Map.get(spec, "sinks", []))
     }
 
+    # The per-source retry options: numbers and a boolean, no secret in them.
+    entry =
+      case Map.get(spec, "retry") do
+        %{} = retry -> Map.put(entry, "retry", retry)
+        _ -> entry
+      end
+
     # The source's change counter, for a store that keeps one.
     case Map.get(stored, :revision) do
       revision when is_integer(revision) -> Map.put(entry, "revision", revision)

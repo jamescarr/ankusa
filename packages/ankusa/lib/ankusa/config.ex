@@ -115,7 +115,14 @@ defmodule Ankusa.Config do
               breaker_failures: 5,
               breaker_open_ms: 30_000,
               breaker_max_open_ms: 300_000,
+              # `{module, opts}` implementing `Ankusa.RetryPolicy`. Whatever the
+              # policy, `max_elapsed_ms` (default 24 h) is the wall-clock horizon:
+              # a delivery still failing that long after its first attempt is
+              # dead-lettered. A source's own `retry:` overrides these opts.
               retry: {Ankusa.RetryPolicy.Exponential, []},
+              # the longest pause a sink's `Retry-After` / throttle answer can
+              # impose on one retry (the retry horizon still ends it)
+              max_retry_after_ms: 3_600_000,
               # Per-tenant shares of the three global limits above, so one tenant
               # cannot exhaust what everyone else needs: `default` applies to every
               # tenant, `tenants["acme"]` (a tenant id string) overrides any of its

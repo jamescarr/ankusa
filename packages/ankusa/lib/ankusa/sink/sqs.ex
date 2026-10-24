@@ -17,8 +17,9 @@ defmodule Ankusa.Sink.SQS do
   This sink **never creates a queue**. A queue's type, retention, visibility
   timeout, redrive policy and encryption are an operator's contract, not
   something the first hook to arrive should decide. A queue that does not
-  exist is `{:error, {:sqs, 400, "QueueDoesNotExist", message}}`, which flows
-  into the source's `Ankusa.RetryPolicy`, then the DLQ. (Compare
+  exist is `{:error, {:permanent, {:config, {:sqs, 400, "QueueDoesNotExist",
+  message}}}}`: dead-lettered at once, since only an operator creating the queue
+  fixes it, and a DLQ replay then re-sends the hooks. (Compare
   `Ankusa.Sink.Kafka` and `Ankusa.Sink.NATS`, which likewise never create
   their topic or stream.)
 
@@ -35,11 +36,21 @@ defmodule Ankusa.Sink.SQS do
     * `{:permanent, {:sqs, status, code, message}}` — SQS refused the message
       itself: `InvalidMessageContents` (characters outside SQS's allowed set)
       or `InvalidParameterValue`. Dead-lettered at once.
-    * `{:sqs, status, code, message}` — any other SQS error
-      (`QueueDoesNotExist`, `AccessDenied`, throttling, a 5xx): an operator
-      can fix these, so they get the retry policy, then the DLQ.
+    * `{:permanent, {:config, {:sqs, status, code, message}}}` — SQS refused
+      this sink's configuration or credentials: `AccessDenied`,
+      `QueueDoesNotExist`, `InvalidClientTokenId`, `UnrecognizedClientException`,
+      `SignatureDoesNotMatch`, `InvalidAccessKeyId`, `MissingAuthenticationToken`.
+      Dead-lettered at once and counted in
+      `ankusa_dispatch_config_errors_total{sink}`.
+    * `{:retry_after, ms, {:sqs, status, code, message}}` — SQS throttled the
+      send (`Throttling`, `ThrottlingException`, `RequestThrottled`,
+      `TooManyRequestsException`, `ServiceUnavailable`, or any HTTP `429` or
+      `503`). `ms` is a full-jitter draw (`Ankusa.Sink.throttle_after_ms/1`).
+    * `{:sqs, status, code, message}` — any other SQS error (a 5xx, an expired
+      token): transient, the retry policy.
     * `{:status, status, body}` — a non-2xx response that is not an SQS error
-      document (a proxy, a load balancer).
+      document (a proxy, a load balancer); a `429` or `503` is a
+      `{:retry_after, ms, {:status, status, body}}`.
     * `{:md5_mismatch, expected, got}`, `{:unexpected_reply, body}`,
       `:no_credentials` and transport errors — retried.
 
@@ -111,6 +122,17 @@ defmodule Ankusa.Sink.SQS do
   # pinned down.
   @permanent_codes ~w(InvalidMessageContents InvalidParameterValue InvalidParameterValueException)
 
+  # What only the operator can fix: a credential SQS refuses, a queue that is not
+  # there. Dead-lettered at once, and counted as a config error.
+  @config_codes ~w(AccessDenied AccessDeniedException QueueDoesNotExist
+                   AWS.SimpleQueueService.NonExistentQueue InvalidClientTokenId
+                   UnrecognizedClientException SignatureDoesNotMatch InvalidAccessKeyId
+                   MissingAuthenticationToken)
+
+  # SQS asking the sender to slow down.
+  @throttle_codes ~w(Throttling ThrottlingException RequestThrottled RequestThrottledException
+                     TooManyRequestsException ServiceUnavailable)
+
   @impl true
   def publish(payload, %Envelope{} = env, ctx, opts) do
     max = Keyword.get(opts, :max_message_bytes, @default_max_message_bytes)
@@ -120,7 +142,7 @@ defmodule Ankusa.Sink.SQS do
          {:ok, creds} <- Ankusa.AWS.Credentials.get(opts) do
       opts
       |> send_message(creds, request_body(env, ctx, opts, payload, attributes))
-      |> reply(payload)
+      |> reply(payload, ctx)
     end
   end
 
@@ -230,7 +252,7 @@ defmodule Ankusa.Sink.SQS do
     )
   end
 
-  defp reply({:ok, 200, body}, payload) do
+  defp reply({:ok, 200, body}, payload, _ctx) do
     expected = Base.encode16(:crypto.hash(:md5, payload), case: :lower)
 
     case decode(body) do
@@ -247,23 +269,34 @@ defmodule Ankusa.Sink.SQS do
   end
 
   # `{"__type": "com.amazonaws.sqs#QueueDoesNotExist", "message": "..."}` is an
-  # SQS error; any other body came from something in front of it.
-  defp reply({:ok, status, body}, _payload) do
+  # SQS error; any other body came from something in front of it. A refused
+  # message or credential dead-letters; a throttle (a code, or any 429/503) asks
+  # for a jittered pause.
+  defp reply({:ok, status, body}, _payload, ctx) do
     case decode(body) do
       {:ok, %{"__type" => type} = error} when is_binary(type) ->
         code = type |> String.split("#") |> List.last()
         reason = {:sqs, status, code, error["message"] || error["Message"]}
 
-        if code in @permanent_codes,
-          do: {:error, {:permanent, reason}},
-          else: {:error, reason}
+        cond do
+          code in @permanent_codes -> {:error, {:permanent, reason}}
+          code in @config_codes -> {:error, {:permanent, {:config, reason}}}
+          code in @throttle_codes or status in [429, 503] -> throttled(reason, ctx)
+          true -> {:error, reason}
+        end
+
+      _ when status in [429, 503] ->
+        throttled({:status, status, body}, ctx)
 
       _ ->
         {:error, {:status, status, body}}
     end
   end
 
-  defp reply({:error, reason}, _payload), do: {:error, reason}
+  defp reply({:error, reason}, _payload, _ctx), do: {:error, reason}
+
+  defp throttled(reason, ctx),
+    do: {:error, {:retry_after, Ankusa.Sink.throttle_after_ms(ctx.attempt), reason}}
 
   defp decode(body) when is_binary(body), do: JSON.decode(body)
   defp decode(_body), do: :error

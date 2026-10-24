@@ -30,6 +30,24 @@ defmodule Ankusa.Sink.GooglePubSubTest do
         String.contains?(conn.request_path, "/topics/bad:") ->
           error(conn, 400, "INVALID_ARGUMENT", "Invalid message.")
 
+        String.contains?(conn.request_path, "/topics/denied:") ->
+          error(conn, 403, "PERMISSION_DENIED", "The caller does not have permission.")
+
+        String.contains?(conn.request_path, "/topics/unauth:") ->
+          error(conn, 401, "UNAUTHENTICATED", "Request had invalid credentials.")
+
+        String.contains?(conn.request_path, "/topics/exhausted:") ->
+          error(conn, 429, "RESOURCE_EXHAUSTED", "Quota exceeded.")
+
+        String.contains?(conn.request_path, "/topics/unavailable:") ->
+          error(conn, 503, "UNAVAILABLE", "The service is unavailable.")
+
+        String.contains?(conn.request_path, "/topics/overloaded:") ->
+          Plug.Conn.send_resp(conn, 503, "slow down")
+
+        String.contains?(conn.request_path, "/topics/internal:") ->
+          error(conn, 500, "INTERNAL", "Internal error.")
+
         String.contains?(conn.request_path, "/topics/boom:") ->
           Plug.Conn.send_resp(conn, 500, "kaboom")
 
@@ -171,17 +189,57 @@ defmodule Ankusa.Sink.GooglePubSubTest do
     assert path == "/v1/projects/p%2F..%2Fx/topics/a%20b:publish"
   end
 
-  test "Pub/Sub errors keep their status; only INVALID_ARGUMENT is permanent" do
-    assert {:error, {:pubsub, 404, "NOT_FOUND", "Resource not found (resource=missing)."} = r} =
+  test "Pub/Sub errors keep their status; a refused message is permanent, a refused credential or topic a config error" do
+    assert {:error,
+            {:permanent,
+             {:config, {:pubsub, 404, "NOT_FOUND", "Resource not found (resource=missing)."}}} =
+              r} =
              GooglePubSub.deliver(envelope(), %{attempt: 1}, opts(topic: "missing"))
 
-    assert {:transient, _} = Sink.classify(r)
+    assert {:permanent, {:config, _}} = Sink.classify(r)
+
+    assert {:error, {:permanent, {:config, {:pubsub, 403, "PERMISSION_DENIED", _}}}} =
+             GooglePubSub.deliver(envelope(), %{attempt: 1}, opts(topic: "denied"))
+
+    assert {:error, {:permanent, {:config, {:pubsub, 401, "UNAUTHENTICATED", _}}}} =
+             GooglePubSub.deliver(envelope(), %{attempt: 1}, opts(topic: "unauth"))
 
     assert {:error, {:permanent, {:pubsub, 400, "INVALID_ARGUMENT", _}}} =
              GooglePubSub.deliver(envelope(), %{attempt: 1}, opts(topic: "bad"))
 
+    # a 5xx that is not a throttle (a 500 `INTERNAL`, or a proxy's) is transient
     assert {:error, {:status, 500, "kaboom"}} =
              GooglePubSub.deliver(envelope(), %{attempt: 1}, opts(topic: "boom"))
+
+    assert {:error, {:pubsub, 500, "INTERNAL", _}} =
+             GooglePubSub.deliver(envelope(), %{attempt: 1}, opts(topic: "internal"))
+  end
+
+  test "RESOURCE_EXHAUSTED and 429/503 are a jittered retry-after, never a permanent error" do
+    assert {:error, {:retry_after, ms, {:pubsub, 429, "RESOURCE_EXHAUSTED", _}} = failure} =
+             GooglePubSub.deliver(envelope(), %{attempt: 1}, opts(topic: "exhausted"))
+
+    # full jitter: 1..500 ms on the first attempt
+    assert ms in 1..500
+    assert {:retry_after, ^ms, _} = Sink.classify(failure)
+
+    assert {:error, {:retry_after, _, {:pubsub, 503, "UNAVAILABLE", _}}} =
+             GooglePubSub.deliver(envelope(), %{attempt: 1}, opts(topic: "unavailable"))
+
+    assert {:error, {:retry_after, _, {:status, 503, "slow down"}}} =
+             GooglePubSub.deliver(envelope(), %{attempt: 1}, opts(topic: "overloaded"))
+
+    draws =
+      for _ <- 1..200 do
+        {:error, {:retry_after, ms, _}} =
+          GooglePubSub.deliver(envelope(), %{attempt: 7}, opts(topic: "exhausted"))
+
+        ms
+      end
+
+    assert Enum.all?(draws, &(&1 in 1..30_000))
+    assert Enum.max(draws) > 500
+    assert length(Enum.uniq(draws)) > 20
   end
 
   test "a 200 that does not name exactly one message id is an error" do

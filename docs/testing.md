@@ -339,6 +339,26 @@ The always-on tests cover:
   current secret in the pen, releases it once the secret is rotated (past the
   timestamp tolerance: the window is judged at receive time) with its original
   id and the job's `replay_id`, and finds nothing left on a second run.
+- **Dispatch, retry horizon and error classes (DEL-2)** (`dispatch_test.exs`,
+  `retry_policy_exponential_test.exs`, `retry_policy_test.exs`,
+  `sink/{sqs,google_pubsub,http}_test.exs`): a row 7 h in with 200 attempts
+  keeps retrying while one past `max_elapsed_ms` is dead-lettered by its next
+  failure; no retry is scheduled past the horizon (a property test over
+  generated policies and failure sequences); a real outage with
+  `max_elapsed_ms: 1500` and no attempt limit dead-letters at the horizon, not
+  at an attempt count; a `Retry-After` is capped by `dispatch.max_retry_after_ms`
+  and the horizon; a per-source `retry:` is honoured across a restart of a
+  persistent source store, and the row's `first_attempt_at` survives one; a row
+  parked behind an open breaker is due by its horizon and dead-lettered past it;
+  a `{:permanent, {:config, _}}` failure emits
+  `[:ankusa, :dispatch, :config_error]` (and `metrics_test.exs` counts it); SQS
+  and Pub/Sub auth/queue/topic errors are config errors, throttles a jittered
+  `{:retry_after, ms, _}`; HTTP `409` is transient, `425` a pause, `451`
+  permanent. `claim_check_test.exs`, `admin/router_test.exs` and
+  `source_store_persistent_test.exs` hold the horizon against
+  `claim_check.bucket_expiry_days`: boot refuses a configured or stored source
+  that outlasts it, and an admin write of one is `422
+  retry_exceeds_claim_expiry`.
 - **Dispatch, per tenant** (`dispatch/isolation_test.exs`, `describe "per-tenant
   scheduling"`): `tenant fairness` runs a tenant at 99 times another's load
   behind a slow sink and asserts the light tenant's p99 delivery lag is within

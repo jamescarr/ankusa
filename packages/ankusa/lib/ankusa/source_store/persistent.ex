@@ -130,7 +130,11 @@ defmodule Ankusa.SourceStore.Persistent do
 
     case load_persisted(instance, table, decoder, keyring) do
       :ok ->
-        Ankusa.Verifier.warn_stored_shared(config, Table.stored_sources(table))
+        stored = Table.stored_sources(table)
+        Ankusa.Verifier.warn_stored_shared(config, stored)
+        # A stored source whose retry horizon outlasts the bucket lifecycle rule
+        # would lose its packs mid-retry: refuse to boot with it.
+        Ankusa.ClaimCheck.validate_stored_horizons!(config, stored)
         {:ok, %{instance: instance, table: table, decoder: decoder, keyring: keyring}}
 
       # Booting without the persisted sources would 404 every hook for them.

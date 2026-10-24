@@ -15,6 +15,16 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   delivery goes through; core range-checks them when the config loads. See the
   `ankusa` changelog, [`configuration.md`](../../docs/configuration.md#outbound-connection-pools)
   and the `egress.pools` block of `config-examples/reference.yml`.
+- **`dispatch.retry.max_elapsed_ms`, `dispatch.max_retry_after_ms` and a per-source
+  `retry` block (DEL-2).** `max_elapsed_ms` (default `86400000`, 24 h) is the
+  horizon after which a delivery still failing is dead-lettered, so
+  `dispatch.retry.max_attempts` now defaults to `null` (no attempt limit; was 84,
+  about 6 hours). `sources.<id>.retry` (and the admin API's source spec) takes
+  `base_ms`, `max_ms`, `max_attempts`, `jitter`, `max_elapsed_ms` over the
+  instance's. A source whose `retry.max_elapsed_ms` outlasts
+  `claim_check.bucket_expiry_days` (S3/GCS claims) is refused: boot, or `422
+  retry_exceeds_claim_expiry`. See `config-examples/reference.yml` and the `ankusa`
+  changelog.
 
 - **`claim_check.integrity_check` (`off` or `manifest`, default `manifest`).** The
   claim gateway checks every whole-claim `GET` against the sha256 its pack's
