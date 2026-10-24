@@ -16,9 +16,10 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 - **Owned, bounded HTTP connection pools (DEL-3).** Every `Ankusa.HttpClient`
   request that does not name its own transport (`Sink.Http`, SQS, Pub/Sub, JWKS and
   secret-provider fetches) goes through `Ankusa.HttpClient.Pools`, one Finch for the
-  node (`Ankusa.HttpClient.Finch`, started by `Ankusa.Application`) with a pool per
+  node (`Ankusa.HttpClient.Finch`, started with the application) with a pool per
   receiver address and connection profile per instance, instead of Req's default of
-  one 50-connection pool per origin that is never closed. New `http_pools` config:
+  one 50-connection pool per origin that is never closed. New `egress.pools` config
+  (inside the `egress` section, so `Ankusa.Config` keeps its 31 struct fields):
   `pool_size` (32), `pool_count` (1), `pool_timeout` (5000), `pool_max_idle_ms`
   (60000), `conn_max_idle_ms` (30000), `max_pools` (1024), `max_pools_per_tenant`
   (256) and `protocols` (`[:http1, :http2]`, so HTTP/2 negotiates by ALPN), all

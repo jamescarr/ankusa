@@ -58,12 +58,12 @@ defmodule Ankusa.HttpClient do
 
   A request with no `:finch` and no `:plug` in its options is sent through
   `Ankusa.HttpClient.Pools`: a pool per origin and connection profile, sized and
-  idle-swept from the instance's `http_pools` config, never Req's default of an
+  idle-swept from the instance's `egress.pools` config, never Req's default of an
   unbounded number of pools that are never closed. The connection options the
   request would carry (connect timeout, TLS, the `:connect_options` in
   `req_options`) become the pool's, so every connection it opens uses them.
   `opts` takes the pool's context (taken out before the request is built):
-  `:instance` (whose `http_pools` apply; none uses the defaults), `:tenant`
+  `:instance` (whose `egress.pools` apply; none uses the defaults), `:tenant`
   (whose ceiling the pool counts against), `:source` (what `close_source/3`
   closes pools for) and `:pool` (a per-sink override, see
   `Ankusa.HttpClient.Pools.validate_override!/1`). A pool ceiling that cannot be

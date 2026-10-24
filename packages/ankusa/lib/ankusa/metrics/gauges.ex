@@ -28,7 +28,7 @@ defmodule Ankusa.Metrics.Gauges do
       does not start `:os_mon`; `ankusa_server` does.
     * `[:ankusa, :http, :state]` — `pools`, how many outbound HTTP connection
       pools the instance has open in `Ankusa.HttpClient.Pools`; a read of the
-      pool rows, bounded by `http_pools.max_pools`.
+      pool rows, bounded by `egress.pools.max_pools`.
 
   Each probe runs on its own: one that fails (the store is reopening) emits
   nothing, so its gauges keep their last value, and logs at `:debug`; the

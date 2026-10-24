@@ -31,7 +31,7 @@ defmodule Ankusa.Sink.Http do
                        proxy, or `plug:` for `Req.Test` in tests). See
                        `Ankusa.HttpClient` for the accepted keys
     * `:pool`       — this sink's connection pool, over the instance's
-                       `http_pools`: `:pool_size`, `:pool_count`,
+                       `egress.pools`: `:pool_size`, `:pool_count`,
                        `:pool_timeout` (ms to wait for a free connection) and
                        `:protocols`. See "Connection pools"
     * `:cacertfile` — a PEM CA bundle to verify the receiver's certificate
@@ -116,7 +116,7 @@ defmodule Ankusa.Sink.Http do
   Every delivery goes through the node's owned pools
   (`Ankusa.HttpClient.Pools`), never Req's default of one pool per origin kept
   for the life of the VM: one pool per receiver address and TLS profile, sized
-  by the instance's `http_pools` (`pool_size` connections, 32 by default, so
+  by the instance's `egress.pools` (`pool_size` connections, 32 by default, so
   several sinks posting to one receiver are not capped below
   `dispatch.concurrency`) or this sink's `:pool`, closed after `pool_max_idle_ms`
   idle and when the source is deleted, at most `max_pools` live per instance and
@@ -349,7 +349,7 @@ defmodule Ankusa.Sink.Http do
     end
   end
 
-  # Whose pool a delivery is: the instance's `http_pools` apply, the tenant's
+  # Whose pool a delivery is: the instance's `egress.pools` apply, the tenant's
   # ceiling counts it and the source's deletion closes it. `:pool` is the sink's
   # own override of the instance's sizes.
   defp pool_context(env, ctx, opts) do

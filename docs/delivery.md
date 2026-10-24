@@ -343,7 +343,7 @@ through `Ankusa.HttpClient.Pools`, the node's owned Finch, not Req's default of
 one 50-connection pool per origin that is never closed (one per tenant receiver,
 so file descriptors and processes would grow with the tenant count until the node
 ran out). There is one pool per receiver *address* and TLS profile, per instance,
-started on delivery. Its bounds (`http_pools` in the
+started on delivery. Its bounds (`egress.pools` in the
 [configuration](configuration.md#outbound-connection-pools)):
 
 | | |

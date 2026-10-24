@@ -553,6 +553,7 @@ defmodule Ankusa.Config do
             # `allow_hosts` exempts it; `deny_hosts` names are refused before any
             # lookup. `allow_cidrs` is how a deployment opts in to the private
             # network its sinks live on; `deny_cidrs` replaces the default list.
+            # `pools` bounds the connections that outbound HTTP uses (below).
             egress: %{
               allow_insecure_http: false,
               deny_cidrs: [
@@ -570,31 +571,31 @@ defmodule Ankusa.Config do
               ],
               allow_cidrs: [],
               allow_hosts: [],
-              deny_hosts: ["metadata.google.internal"]
-            },
-            # The node's outbound HTTP connection pools (`Ankusa.HttpClient.Pools`):
-            # one Finch pool per origin (per connection profile), owned by the
-            # instance, bounded in connections, count and idle time, and closed when
-            # idle. `pool_size` connections (HTTP/1) per pool and `pool_count`
-            # shards: keep `pool_size * pool_count` at or above `dispatch.concurrency`
-            # when several sinks post to one receiver (boot warns when it is not).
-            # `pool_timeout` is how long a request waits for a free connection. A
-            # pool idle for `pool_max_idle_ms` is closed; a connection idle for
-            # `conn_max_idle_ms` is not reused. `max_pools` caps the live pools of
-            # the instance and `max_pools_per_tenant` those one tenant's deliveries
-            # opened: past either, the least recently used idle pool (of that
-            # tenant, for its own cap) is closed, and when none is idle a request is
-            # refused as `{:error, {:unavailable, :pool_limit}}` (retried).
-            # `protocols` is the HTTP versions a connection may negotiate (ALPN).
-            http_pools: %{
-              pool_size: 32,
-              pool_count: 1,
-              pool_timeout: 5_000,
-              pool_max_idle_ms: 60_000,
-              conn_max_idle_ms: 30_000,
-              max_pools: 1_024,
-              max_pools_per_tenant: 256,
-              protocols: [:http1, :http2]
+              deny_hosts: ["metadata.google.internal"],
+              # The node's outbound HTTP connection pools (`Ankusa.HttpClient.Pools`):
+              # one Finch pool per origin (per connection profile), owned by the
+              # instance, bounded in connections, count and idle time, and closed when
+              # idle. `pool_size` connections (HTTP/1) per pool and `pool_count`
+              # shards: keep `pool_size * pool_count` at or above `dispatch.concurrency`
+              # when several sinks post to one receiver (boot warns when it is not).
+              # `pool_timeout` is how long a request waits for a free connection. A
+              # pool idle for `pool_max_idle_ms` is closed; a connection idle for
+              # `conn_max_idle_ms` is not reused. `max_pools` caps the live pools of
+              # the instance and `max_pools_per_tenant` those one tenant's deliveries
+              # opened: past either, the least recently used idle pool (of that
+              # tenant, for its own cap) is closed, and when none is idle a request is
+              # refused as `{:error, {:unavailable, :pool_limit}}` (retried).
+              # `protocols` is the HTTP versions a connection may negotiate (ALPN).
+              pools: %{
+                pool_size: 32,
+                pool_count: 1,
+                pool_timeout: 5_000,
+                pool_max_idle_ms: 60_000,
+                conn_max_idle_ms: 30_000,
+                max_pools: 1_024,
+                max_pools_per_tenant: 256,
+                protocols: [:http1, :http2]
+              }
             },
             # secrets at rest (`Ankusa.Crypto.Envelope`): the key-encryption key
             # that source specs' secrets (verify secrets, sink credentials) are
@@ -647,7 +648,7 @@ defmodule Ankusa.Config do
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
   sections (`:listener`, `:batcher`, `:dispatch`, `:storage`, `:claim_check`,
   `:backup`, `:admin`, `:metrics`, `:routes`, `:rate_limits`, `:dedupe`, `:fleet`,
-  `:quarantine`, `:tenants`, `:lifecycle`, `:egress`, `:http_pools`, `:secrets`) over the defaults. Every `tls` block (`listener.tls`,
+  `:quarantine`, `:tenants`, `:lifecycle`, `:egress`, `:secrets`) over the defaults (`egress.pools` is merged one level down). Every `tls` block (`listener.tls`,
   `admin.tls`, `routes.admin.tls`, `claim_check.tls`, `metrics.tls`) is
   validated and normalised by `Ankusa.Listener.normalize_tls!/2`, and
   `listener.num_acceptors: nil` becomes two per scheduler.
@@ -697,7 +698,6 @@ defmodule Ankusa.Config do
           :audit,
           :tenants,
           :egress,
-          :http_pools,
           :secrets,
           :intake
         ] ->
@@ -868,8 +868,8 @@ defmodule Ankusa.Config do
     {[:backup, :final_timeout_ms], "backup.final_timeout_ms"},
     {[:admin, :gauge_interval_ms], "admin.gauge_interval_ms"},
     {[:metrics, :max_series_per_metric], "metrics.max_series_per_metric"},
-    {[:http_pools, :pool_max_idle_ms], "http_pools.pool_max_idle_ms"},
-    {[:http_pools, :conn_max_idle_ms], "http_pools.conn_max_idle_ms"},
+    {[:egress, :pools, :pool_max_idle_ms], "egress.pools.pool_max_idle_ms"},
+    {[:egress, :pools, :conn_max_idle_ms], "egress.pools.conn_max_idle_ms"},
     {[:routes, :max_routes], "routes.max_routes"},
     {[:fleet, :pending_ttl_ms], "fleet.pending_ttl_ms"},
     {[:fleet, :breaker_window_ms], "fleet.breaker_window_ms"},
@@ -1053,7 +1053,7 @@ defmodule Ankusa.Config do
       &(&1 == "" or (is_binary(&1) and Regex.match?(@key_prefix, &1)))
     )
 
-    validate_http_pools!(config)
+    validate_pools!(config)
     validate_fleet!(config)
     validate_backup!(config)
 
@@ -1245,7 +1245,7 @@ defmodule Ankusa.Config do
 
   # The outbound pools' bounds (`Ankusa.HttpClient.Pools`). The positive-integer
   # check above runs first; these are the upper bounds and the protocol list.
-  defp validate_http_pools!(config) do
+  defp validate_pools!(config) do
     for {key, max} <- [
           pool_size: 1_024,
           pool_count: 64,
@@ -1255,8 +1255,8 @@ defmodule Ankusa.Config do
         ] do
       check!(
         config,
-        [:http_pools, key],
-        "http_pools.#{key}",
+        [:egress, :pools, key],
+        "egress.pools.#{key}",
         "an integer from 1 to #{max}",
         &(is_integer(&1) and &1 in 1..max)
       )
@@ -1264,8 +1264,8 @@ defmodule Ankusa.Config do
 
     check!(
       config,
-      [:http_pools, :protocols],
-      "http_pools.protocols",
+      [:egress, :pools, :protocols],
+      "egress.pools.protocols",
       "a non-empty list of :http1 and :http2",
       &(is_list(&1) and &1 != [] and Enum.all?(&1, fn p -> p in [:http1, :http2] end))
     )
@@ -1385,6 +1385,13 @@ defmodule Ankusa.Config do
             rocksdb: %{rocksdb | write_buffer_bytes: buffers}
         }
     }
+  end
+
+  # `egress.pools` is one level down: a partial `pools` keeps the other defaults.
+  defp put_section(acc, :egress, v) do
+    merged = merge_known!(acc.egress, v, "egress")
+    pools = merge_known!(acc.egress.pools, merged.pools, "egress.pools")
+    %{acc | egress: %{merged | pools: pools}}
   end
 
   defp put_section(acc, k, v) do

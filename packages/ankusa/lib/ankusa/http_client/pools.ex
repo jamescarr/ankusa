@@ -1,7 +1,7 @@
 defmodule Ankusa.HttpClient.Pools do
   @moduledoc """
   The outbound HTTP connection pools: one [`Finch`](https://hex.pm/packages/finch)
-  for the node (`Ankusa.HttpClient.Finch`, started by `Ankusa.Application`) that
+  for the node (`Ankusa.HttpClient.Finch`, started with the application) that
   every `Ankusa.HttpClient` request without a transport of its own goes through,
   and the bookkeeping that keeps its pools bounded.
 
@@ -14,7 +14,7 @@ defmodule Ankusa.HttpClient.Pools do
     * **Pool**: one per *origin and connection profile* (the connection options
       a request needs: connect timeout, TLS, the `hostname` a pinned address is
       verified against) and per instance. `pool_size` HTTP/1 connections
-      (`pool_count` shards) each, from the instance's `http_pools` config or a
+      (`pool_count` shards) each, from the instance's `egress.pools` config or a
       sink's `pool:` override; a request that cannot check one out within
       `pool_timeout` fails that attempt as a transport error.
     * **Sweep**: every 30 s a pool with no request in flight and none for
@@ -59,7 +59,7 @@ defmodule Ankusa.HttpClient.Pools do
   @table __MODULE__
   @tick_ms 30_000
   @call_timeout_ms 10_000
-  @defaults %Config{}.http_pools
+  @defaults %Config{}.egress.pools
 
   # Row: {key, instance, tenant, source, last_used_ms, in_flight}.
   @last 5
@@ -91,7 +91,7 @@ defmodule Ankusa.HttpClient.Pools do
   connections, idle pool 60 s, idle connection 30 s, HTTP/1 and HTTP/2), and TLS
   verification on, so a stray pool fails closed.
   """
-  @spec finch_child_spec() :: Supervisor.child_spec()
+  @spec finch_child_spec() :: {module(), keyword()}
   def finch_child_spec do
     default = [
       size: 8,
@@ -106,7 +106,7 @@ defmodule Ankusa.HttpClient.Pools do
   end
 
   @doc """
-  Create the row table. `Ankusa.Application` calls it, so the rows outlive a restart
+  Create the row table. The application calls it, so the rows outlive a restart
   of this process: the pools it opened are still running.
   """
   @spec create_table() :: :ok
@@ -194,14 +194,14 @@ defmodule Ankusa.HttpClient.Pools do
     ArgumentError -> :ok
   end
 
-  # The instance's `http_pools`, with a sink's `pool:` override on top.
+  # The instance's `egress.pools`, with a sink's `pool:` override on top.
   defp settings(limits, override) do
     Map.merge(limits, Map.new(override))
   end
 
   defp limits(instance) when is_atom(instance) and instance != nil do
     case Ankusa.fetch_config(instance) do
-      {:ok, %Config{http_pools: http_pools}} -> http_pools
+      {:ok, %Config{egress: %{pools: pools}}} -> pools
       _no_config -> @defaults
     end
   end
@@ -299,15 +299,15 @@ defmodule Ankusa.HttpClient.Pools do
   the ranges themselves are `Ankusa.Config`'s.
   """
   @spec validate_config!(Config.t()) :: :ok
-  def validate_config!(%Config{http_pools: pools, dispatch: dispatch} = config) do
+  def validate_config!(%Config{egress: %{pools: pools}, dispatch: dispatch} = config) do
     per_origin = pools.pool_size * pools.pool_count
 
     if Config.role?(config, :dispatch) and per_origin < dispatch.concurrency do
       Logger.warning(
-        "[ankusa] http_pools.pool_size * pool_count (#{per_origin}) is below " <>
+        "[ankusa] egress.pools.pool_size * pool_count (#{per_origin}) is below " <>
           "dispatch.concurrency (#{dispatch.concurrency}): deliveries to one origin " <>
           "will queue on a free connection, which caps their throughput. Raise " <>
-          "http_pools.pool_size, or set pool: on the sink."
+          "egress.pools.pool_size, or set pool: on the sink."
       )
     end
 
@@ -316,9 +316,9 @@ defmodule Ankusa.HttpClient.Pools do
     case fd_limit() do
       limit when is_integer(limit) and worst > limit ->
         Logger.warning(
-          "[ankusa] http_pools.max_pools (#{pools.max_pools}) * pool_size * pool_count " <>
+          "[ankusa] egress.pools.max_pools (#{pools.max_pools}) * pool_size * pool_count " <>
             "(#{per_origin}) can open #{worst} connections, above this process's " <>
-            "file descriptor limit (#{limit}). Raise `ulimit -n` or lower http_pools.max_pools."
+            "file descriptor limit (#{limit}). Raise `ulimit -n` or lower egress.pools.max_pools."
         )
 
       _within_limit_or_unknown ->
@@ -409,20 +409,18 @@ defmodule Ankusa.HttpClient.Pools do
     instance = Map.get(request, :instance)
     tenant = Map.get(request, :tenant)
 
-    cond do
-      check_in(key) ->
+    if check_in(key) do
+      :ok
+    else
+      with :ok <- make_room(instance, tenant, limits),
+           :ok <- start_pool(pool, request.connect_options, settings) do
+        :ets.insert(
+          @table,
+          {key, instance, tenant, Map.get(request, :source), now_ms(), 1}
+        )
+
         :ok
-
-      true ->
-        with :ok <- make_room(instance, tenant, limits),
-             :ok <- start_pool(pool, request.connect_options, settings) do
-          :ets.insert(
-            @table,
-            {key, instance, tenant, Map.get(request, :source), now_ms(), 1}
-          )
-
-          :ok
-        end
+      end
     end
   end
 

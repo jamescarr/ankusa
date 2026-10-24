@@ -34,7 +34,7 @@ defmodule Ankusa.ConfigTest do
     assert config.batcher.max_queue == 5
   end
 
-  describe "the http_pools section" do
+  describe "the egress.pools section" do
     test "defaults to bounded, idle-swept pools" do
       assert %{
                pool_size: 32,
@@ -45,11 +45,16 @@ defmodule Ankusa.ConfigTest do
                max_pools: 1_024,
                max_pools_per_tenant: 256,
                protocols: [:http1, :http2]
-             } = Config.new().http_pools
+             } = Config.new().egress.pools
     end
 
     test "merges over the defaults, and every number is range checked" do
-      assert %{pool_size: 4, max_pools: 1_024} = Config.new(http_pools: [pool_size: 4]).http_pools
+      config = Config.new(egress: [pools: [pool_size: 4]])
+
+      assert %{pool_size: 4, max_pools: 1_024} = config.egress.pools
+      # The policy beside it keeps its defaults, and a policy key keeps the pools'.
+      assert config.egress.deny_hosts == ["metadata.google.internal"]
+      assert %{pool_size: 32} = Config.new(egress: [allow_hosts: ["hooks.example"]]).egress.pools
 
       for {key, bad, message} <- [
             {:pool_size, 0, "an integer from 1 to 1024"},
@@ -63,13 +68,13 @@ defmodule Ankusa.ConfigTest do
             {:protocols, [], "a non-empty list of :http1 and :http2"},
             {:protocols, [:http3], "a non-empty list of :http1 and :http2"}
           ] do
-        assert_raise ArgumentError, ~r/http_pools\.#{key} must be #{message}/, fn ->
-          Config.new(http_pools: [{key, bad}])
+        assert_raise ArgumentError, ~r/egress\.pools\.#{key} must be #{message}/, fn ->
+          Config.new(egress: [pools: [{key, bad}]])
         end
       end
 
-      assert_raise ArgumentError, ~r/http_pools\.pool_sizes/, fn ->
-        Config.new(http_pools: [pool_sizes: 1])
+      assert_raise ArgumentError, ~r/egress\.pools\.pool_sizes/, fn ->
+        Config.new(egress: [pools: [pool_sizes: 1]])
       end
     end
   end

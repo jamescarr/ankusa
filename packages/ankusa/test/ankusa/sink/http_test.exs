@@ -962,7 +962,7 @@ defmodule Ankusa.Sink.HttpTest do
     # A real https listener whose certificate (SAN `san`) chains to a private CA,
     # and an instance of its own (the node's pool rows are keyed by instance, so a
     # test never counts another's pools) whose egress policy lets `localhost` and
-    # loopback addresses through, with the given `http_pools`.
+    # loopback addresses through, with the given `egress.pools`.
     defp pool_fixture(san, pools) do
       %{cert: cert, key: key, ca: ca} = Ankusa.TestHelpers.tls_fixture(san)
       port = Ankusa.TestHelpers.free_port()
@@ -983,8 +983,11 @@ defmodule Ankusa.Sink.HttpTest do
       Ankusa.put_config(
         Ankusa.Config.new(
           instance: instance,
-          egress: %{allow_hosts: ["localhost"], allow_cidrs: ["127.0.0.0/8"]},
-          http_pools: pools
+          egress: %{
+            allow_hosts: ["localhost"],
+            allow_cidrs: ["127.0.0.0/8"],
+            pools: pools
+          }
         )
       )
 

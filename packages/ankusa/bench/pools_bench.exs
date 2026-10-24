@@ -101,7 +101,7 @@ defmodule Bench.Pools do
 
   def instance(pools) do
     instance = Ankusa.TestHelpers.unique_instance()
-    Ankusa.put_config(Ankusa.Config.new(instance: instance, http_pools: pools))
+    Ankusa.put_config(Ankusa.Config.new(instance: instance, egress: %{pools: pools}))
     instance
   end
 

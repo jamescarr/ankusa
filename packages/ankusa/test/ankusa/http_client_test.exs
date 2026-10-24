@@ -214,11 +214,11 @@ defmodule Ankusa.HttpClientTest do
     def forward(_event, measurements, metadata, pid),
       do: send(pid, {:pool, measurements, metadata})
 
-    # An instance whose `http_pools` is `pools`, so its pools are its own: the
+    # An instance whose `egress.pools` is `pools`, so its pools are its own: the
     # node's rows are keyed by instance.
     defp instance(pools \\ %{}) do
       inst = Ankusa.TestHelpers.unique_instance()
-      Ankusa.put_config(Config.new(instance: inst, http_pools: pools))
+      Ankusa.put_config(Config.new(instance: inst, egress: %{pools: pools}))
       on_exit(fn -> :persistent_term.erase({Ankusa, :config, inst}) end)
       inst
     end
@@ -416,17 +416,22 @@ defmodule Ankusa.HttpClientTest do
 
       assert :ok = Pools.validate_override!(pool_size: 4, protocols: [:http2])
 
-      assert_raise ArgumentError, ~r/http_pools.max_pools must be/, fn ->
+      assert_raise ArgumentError, ~r/egress.pools.max_pools must be/, fn ->
         instance(%{max_pools: 0})
       end
     end
 
     test "boot warns when a pool is smaller than the dispatch concurrency, or can outrun ulimit" do
-      small = Config.new(instance: :pools_warn, http_pools: %{pool_size: 2})
-      huge = Config.new(instance: :pools_warn, http_pools: %{pool_size: 1_024, max_pools: 65_536})
+      small = Config.new(instance: :pools_warn, egress: %{pools: %{pool_size: 2}})
+
+      huge =
+        Config.new(
+          instance: :pools_warn,
+          egress: %{pools: %{pool_size: 1_024, max_pools: 65_536}}
+        )
 
       assert capture_log(fn -> Pools.validate_config!(small) end) =~
-               "http_pools.pool_size * pool_count (2) is below dispatch.concurrency (32)"
+               "egress.pools.pool_size * pool_count (2) is below dispatch.concurrency (32)"
 
       assert capture_log(fn -> Pools.validate_config!(huge) end) =~ "file descriptor limit"
     end
