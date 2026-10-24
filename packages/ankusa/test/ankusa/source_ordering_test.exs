@@ -176,17 +176,25 @@ defmodule Ankusa.SourceOrderingTest do
 
       # A source's own policy, per key.
       assert {:error, _} =
-               Ordering.check(config(), ordered.("x-entity", store_headers: %{drop: ["x-entity"]}))
+               Ordering.check(
+                 config(),
+                 ordered.("x-entity", store_headers: %{drop: ["x-entity"]})
+               )
 
       assert {:error, _} =
-               Ordering.check(config(), ordered.("x-entity", store_headers: %{hash: ["X-Entity"]}))
+               Ordering.check(
+                 config(),
+                 ordered.("x-entity", store_headers: %{hash: ["X-Entity"]})
+               )
 
       # Dropping something else is fine.
       assert Ordering.check(config(), ordered.("x-entity", store_headers: %{drop: ["x-other"]})) ==
                :ok
 
       # JSON and MFA keys read the body, which no policy touches.
-      json = new([{Log, ordered: true, ordering_key: {:json, "id"}}], store_headers: %{drop: ["id"]})
+      json =
+        new([{Log, ordered: true, ordering_key: {:json, "id"}}], store_headers: %{drop: ["id"]})
+
       assert Ordering.check(config(), json) == :ok
     end
   end
@@ -203,7 +211,8 @@ defmodule Ankusa.SourceOrderingTest do
                Ordering.lane_id(0, "t", "k"),
                Ordering.lane_id(0, "s", "j"),
                Ordering.lane_id(0, "s", nil)
-             ]) |> length() == 5
+             ])
+             |> length() == 5
 
       # The keyless lane is its own: an empty key is not the same lane.
       assert Ordering.lane_id(0, "s", nil) != Ordering.lane_id(0, "s", "")
@@ -261,7 +270,12 @@ defmodule Ankusa.SourceOrderingTest do
 
       keyless = Ordering.lane_id(0, "s", nil)
 
-      for body <- [~s({"data":{}}), ~s({"data":{"customer":{"a":1}}}), "not json", ~s({"data":{"customer":""}})] do
+      for body <- [
+            ~s({"data":{}}),
+            ~s({"data":{"customer":{"a":1}}}),
+            "not json",
+            ~s({"data":{"customer":""}})
+          ] do
         assert {nil, [{^keyless, ""}]} = Ordering.resolve(:none, source, env([], body)), body
       end
     end

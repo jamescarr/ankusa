@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Sink.Kafka`: with `ordered: true` (core, ADR 0004) the record key is the
+  lane's key and the record carries an `ankusa_ordering_key` header.
+
 - **`Ankusa.Intake.Kafka`: the intake log of `wal.type: dual` (DUR-1.b.b,
   [ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)).** Every acked hook is also a record in a replicated Kafka
   topic before the `201`. A brod client of its own

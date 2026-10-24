@@ -198,7 +198,10 @@ defmodule Ankusa.Dispatch.OrderingTest do
       assert :atomics.get(concurrent, 2) == 1
 
       wait_until(fn -> counters(inst).lanes == 0 end)
-      assert %{lanes: 0, lanes_blocked: 0, lane_members: 0, pending: 0, inflight: 0} = counters(inst)
+
+      assert %{lanes: 0, lanes_blocked: 0, lane_members: 0, pending: 0, inflight: 0} =
+               counters(inst)
+
       assert stored_counters(inst) == folded_counters(inst)
     end
 
@@ -315,6 +318,7 @@ defmodule Ankusa.Dispatch.OrderingTest do
       assert oks(3) == ["after-1", "after-2", "after-3"]
 
       wait_until(fn -> counters(inst).lanes == 0 end)
+
       assert {:ok, %{total: 1, entries: [%{envelope: %{body: "poison"}}]}} =
                Queue.dead(inst, limit: 10)
 
@@ -615,7 +619,8 @@ defmodule Ankusa.Dispatch.OrderingTest do
       held = MapSet.new(heads, fn {lane, _value} -> lane end)
       marked = MapSet.new(markers)
 
-      for {ord, lane, seq, sink} <- fold(inst, :lane_members, fn key, _v -> Keys.decode_lane_member(key) end) do
+      for {ord, lane, seq, sink} <-
+            fold(inst, :lane_members, fn key, _v -> Keys.decode_lane_member(key) end) do
         assert MapSet.member?(held, {ord, lane}) or MapSet.member?(marked, {ord, lane}),
                "member #{seq}/#{sink} of a lane with neither a head nor a marker"
       end
@@ -637,7 +642,10 @@ defmodule Ankusa.Dispatch.OrderingTest do
         Enum.count(claimed, &match?(%{lane: _}, row!(inst, &1.seq, &1.sink)))
 
       assert length(heads) == laned_due + laned_claimed
-      assert Enum.all?(due, fn d -> (d.kind in [2, 3]) == Map.has_key?(row!(inst, d.seq, d.sink), :lane) end)
+
+      assert Enum.all?(due, fn d ->
+               d.kind in [2, 3] == Map.has_key?(row!(inst, d.seq, d.sink), :lane)
+             end)
 
       assert stored_counters(inst) == folded_counters(inst)
     end
@@ -689,7 +697,9 @@ defmodule Ankusa.Dispatch.OrderingTest do
       :ok = Store.write(inst, Deliveries.coalesce(expanded), sync: true)
 
       # The release took the head away; the writer's marker survived it.
-      assert [{^ord, ^lane}] = fold(inst, :lane_markers, fn k, _v -> Keys.decode_lane_marker(k) end)
+      assert [{^ord, ^lane}] =
+               fold(inst, :lane_markers, fn k, _v -> Keys.decode_lane_marker(k) end)
+
       assert due_rows(inst) == []
       assert_lane_invariants(inst)
 

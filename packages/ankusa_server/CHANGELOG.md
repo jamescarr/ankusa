@@ -8,6 +8,9 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- `ordered` and `ordering_key` (`{header: name}` / `{json: path}`) on every sink
+  but `log` (ordering lanes, ADR 0004).
+
 - **`dispatch.retry.max_elapsed_ms`, `dispatch.max_retry_after_ms` and a per-source
   `retry` block (DEL-2).** `max_elapsed_ms` (default `86400000`, 24 h) is the
   horizon after which a delivery still failing is dead-lettered, so

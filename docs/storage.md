@@ -267,12 +267,22 @@ one tenant's rows are one contiguous range:
 
 | Key (`index` family) | Value | What |
 | --- | --- | --- |
-| `<<?D, ord::32, at::64, seq::64, sink::16>>` | `<<size::32, kind::8>>` | due: `kind` 0 a first attempt, 1 a retry |
+| `<<?D, ord::32, at::64, seq::64, sink::16>>` | `<<size::32, kind::8>>` | due: `kind` 0 a first attempt, 1 a retry, 2 the first attempt of a lane head, 3 a retry of one |
 | `<<?F, ord::32, seq::64, sink::16>>` | `<<size::32>>` | claimed by dispatch |
 | `<<?x, at::64, seq::64, sink::16>>` | `{source_id, id, ord}` | dead, in the node-wide time order `GET /v1/dlq` lists |
 | `<<?X, ord::32, at::64, seq::64, sink::16>>` | empty | dead, by tenant |
 | `<<?A, second::64, ord::32>>` | empty | active: the tenant has a due row in that second |
 | `<<?a, seq::64>>` | `<<size::32, ord::32>>` | archive obligation |
+| `<<?O, ord::32, lane::128, seq::64, sink::16>>` | `<<size::32>>` | ordering lane member: a pending row waiting its turn, in `seq` order, with no due row (ADR [0004](adr/0004-ordering-lanes.md)) |
+| `<<?H, ord::32, lane::128>>` | `<<seq::64, sink::16>>` | lane head: the one row of the lane that is in `?D` or `?F`; exists exactly while the lane is busy |
+| `<<?P, ord::32, lane::128>>` | empty | lane marker: this lane may have a member and no head (promotion work) |
+
+Store format 8 stamps these (no rewrite: a store that never enables `ordered` is
+bit-identical to format 7 apart from the stamp), so a format 7 image refuses it.
+Rollback boundary: the first start of a format 8 image. The counters `lanes`
+(heads), `lanes_blocked` (heads waiting out a retry or park) and `lane_members`
+are kept like the others.
+
 
 `pending`, `scheduled`, `inflight`, `dead`, `bytes` (the stored size of every
 delivery row the tenant holds), `archive_pending` and `dedupe` (live ingest-dedupe

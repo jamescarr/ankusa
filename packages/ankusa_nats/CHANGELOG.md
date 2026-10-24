@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Sink.NATS`: a hook of an `ordered: true` sink carries the lane's key as the
+  `ankusa_ordering_key` header (consumer-side ordering, ADR 0004).
+
 ### Changed
 
 - Requires `gnat ~> 1.18`. The sink hands `:password`, `:token` and

@@ -1017,9 +1017,14 @@ defmodule Ankusa.Queue.DeliveriesTest do
 
     defp lane_of(key), do: Ankusa.Ordering.lane_id(0, "load", key)
 
-    defp members(inst), do: fold(inst, :lane_members, fn key, _v -> Keys.decode_lane_member(key) end)
-    defp heads(inst), do: fold(inst, :lane_heads, fn key, v -> {Keys.decode_lane_head(key), v} end)
-    defp markers(inst), do: fold(inst, :lane_markers, fn key, _v -> Keys.decode_lane_marker(key) end)
+    defp members(inst),
+      do: fold(inst, :lane_members, fn key, _v -> Keys.decode_lane_member(key) end)
+
+    defp heads(inst),
+      do: fold(inst, :lane_heads, fn key, v -> {Keys.decode_lane_head(key), v} end)
+
+    defp markers(inst),
+      do: fold(inst, :lane_markers, fn key, _v -> Keys.decode_lane_marker(key) end)
 
     # What the Pipeline does for one visit of a tenant.
     defp sweep!(inst, tenant) do

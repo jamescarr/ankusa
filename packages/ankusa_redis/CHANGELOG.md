@@ -8,6 +8,9 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Sink.Redis`: a hook of an `ordered: true` sink carries the lane's key as
+  `ordering_key` in the message JSON (consumer-side ordering, ADR 0004).
+
 - **Streaming loads and incremental writes for 10⁶ entries (TEN-9).** The route
   store and the source store read their hash a page at a time (`HSCAN … COUNT
   1000`, `Ankusa.Redis.Scan`) instead of one `HGETALL`, with `timeout_ms`

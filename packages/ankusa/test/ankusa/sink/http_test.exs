@@ -251,7 +251,9 @@ defmodule Ankusa.Sink.HttpTest do
              )
 
     assert [{"POST", "/hooks", headers, _body}] = Agent.get(capture, & &1)
-    assert [{"x-ankusa-ordering-key", "cus_1"}] = Enum.filter(headers, &(elem(&1, 0) == "x-ankusa-ordering-key"))
+
+    assert [{"x-ankusa-ordering-key", "cus_1"}] =
+             Enum.filter(headers, &(elem(&1, 0) == "x-ankusa-ordering-key"))
 
     Agent.update(capture, fn _ -> [] end)
     assert :ok = Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/hooks"))

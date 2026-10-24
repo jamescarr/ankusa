@@ -13,6 +13,19 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Opt-in ordering lanes (DEL-1.b, ADR 0004).** A sink entry with
+  `ordered: true` and an `ordering_key` (`{:header, name}`, `{:json, "a.b"}`,
+  `{mod, fun, args}`) delivers the hooks of one lane (`{tenant, source, sink,
+  key}`) one at a time in `seq` order; a retry blocks its lane only, a dead head
+  releases it, and lane state is in the store (store format 8: index families
+  `?O`/`?H`/`?P`, due kinds 2/3, counters `lanes`, `lanes_blocked`,
+  `lane_members`). `ctx.ordering_key` and `ctx.lane` reach the sink; SQS sends
+  the key as `MessageGroupId`, Pub/Sub as `orderingKey`, `Sink.Http` as
+  `x-ankusa-ordering-key`; queue sinks carry `ankusa_ordering_key`. New gauges
+  `ankusa_dispatch_lanes` and `ankusa_dispatch_lanes_blocked`, counter
+  `ankusa_dispatch_lane_key_missing_total{sink}`. Format 8 is a one-way door at
+  its first start.
+
 - **`Ankusa.Sink.Messaging` and `Ankusa.Sink.Connections`: the shared shape of
   a queue-style sink.** `use Ankusa.Sink.Messaging` and implement `publish/4`:
   the injected `deliver/3` encodes the hook as `Ankusa.Sink.Message` (inline,

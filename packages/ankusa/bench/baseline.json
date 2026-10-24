@@ -1,9 +1,9 @@
 {
   "512B": {
-    "ingest_per_s": 23356.930,
+    "ingest_per_s": 23356.93,
     "p50_ms": 4.145,
     "p99_ms": 20.192,
-    "end_to_end_per_s": 2889.910
+    "end_to_end_per_s": 2889.91
   },
   "10240B": {
     "ingest_per_s": 9938.035,
@@ -12,10 +12,16 @@
     "end_to_end_per_s": 2650.085
   },
   "512B-c32": {
-    "ingest_per_s": 11748.240,
+    "ingest_per_s": 11748.24,
     "p50_ms": 1.949,
     "p99_ms": 5.935,
-    "end_to_end_per_s": 2678.460
+    "end_to_end_per_s": 2678.46
+  },
+  "512B-ordered": {
+    "ingest_per_s": 22772.0,
+    "p50_ms": 4.145,
+    "p99_ms": 20.192,
+    "end_to_end_per_s": 2889.91
   },
   "runner": "github-linux-x64"
 }

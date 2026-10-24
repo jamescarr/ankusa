@@ -52,8 +52,14 @@
 defmodule Bench.Gate do
   @n 20_000
   @sink_latency_ms 5
-  # {cell, BODY_BYTES, CONCURRENCY}
-  @matrix [{"512B", 512, 256}, {"10240B", 10_240, 256}, {"512B-c32", 512, 32}]
+  # {cell, BODY_BYTES, CONCURRENCY}; `512B-ordered` is `512B` with the source's sink
+  # `ordered: true` over 64 keys (`ORDERED=1`, ADR 0004).
+  @matrix [
+    {"512B", 512, 256},
+    {"10240B", 10_240, 256},
+    {"512B-c32", 512, 32},
+    {"512B-ordered", 512, 256}
+  ]
   @metrics ~w(ingest_per_s p50_ms p99_ms end_to_end_per_s)
 
   # {metric, :min | :max, factor}: `:max` fails above factor x baseline, `:min`
@@ -113,7 +119,7 @@ defmodule Bench.Gate do
     for run <- 1..runs, {cell, bytes, concurrency} <- matrix, reduce: samples do
       acc ->
         IO.puts("==> bench #{cell} run #{run}/#{runs}")
-        sample = run_bench(bytes, concurrency)
+        sample = run_bench(bytes, concurrency, String.ends_with?(cell, "-ordered"))
         Map.update(acc, cell, [sample], &(&1 ++ [sample]))
     end
   end
@@ -135,13 +141,14 @@ defmodule Bench.Gate do
 
   defp baseline_path, do: System.get_env("BENCH_BASELINE", @default_baseline)
 
-  defp run_bench(body_bytes, concurrency) do
+  defp run_bench(body_bytes, concurrency, ordered?) do
     env = [
       {"MIX_ENV", "test"},
       {"N", Integer.to_string(@n)},
       {"CONCURRENCY", Integer.to_string(concurrency)},
       {"SINK_LATENCY_MS", Integer.to_string(@sink_latency_ms)},
-      {"BODY_BYTES", Integer.to_string(body_bytes)}
+      {"BODY_BYTES", Integer.to_string(body_bytes)},
+      {"ORDERED", if(ordered?, do: "1", else: "0")}
     ]
 
     {out, status} =

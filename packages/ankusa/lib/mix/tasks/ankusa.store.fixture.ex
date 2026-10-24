@@ -47,6 +47,16 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
     def deliver(_env, _ctx, _opts), do: {:error, {:permanent, :fixture}}
   end
 
+  defmodule OrderedSink do
+    @moduledoc false
+    @behaviour Ankusa.Sink
+
+    # A head waits an hour out a retry, like `RetrySink`, so a lane's rows are
+    # still in the store whenever the fixture is booted.
+    @impl true
+    def deliver(_env, _ctx, _opts), do: {:error, {:retry_after, 3_600_000, :fixture}}
+  end
+
   @instance :fixture
 
   # Twenty years: a fixture is booted long after it was written, and its dedupe
@@ -90,6 +100,10 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
         dedupe: %{header: "x-event-id", ttl_ms: @dedupe_ttl_ms}
       ],
       "doomed" => [verifier: none, sinks: [{DeadSink, []}]],
+      "ordered" => [
+        verifier: none,
+        sinks: [{OrderedSink, ordered: true, ordering_key: {:header, "x-entity"}}]
+      ],
       "archived" => [verifier: none, sinks: [{Ankusa.Sink.Log, []}]]
     }
   end
@@ -169,6 +183,11 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
     archived = for n <- 1..4, do: ingest!(inst, "archived", "archived-#{n}", [])
     acme_archived = [ingest!(inst, "archived", "acme-archived", [], "acme")]
 
+    # Ordering lanes (format 8): the head of `k1` and of the keyless lane wait
+    # out a retry (due kind 3) with members behind them.
+    k1 = for n <- 1..3, do: ingest!(inst, "ordered", "k1-#{n}", [{"x-entity", "k1"}])
+    keyless = for n <- 1..2, do: ingest!(inst, "ordered", "keyless-#{n}", [])
+
     {:ok, _settled} = Pipeline.tick(inst)
     {:ok, segments} = Compactor.tick(inst)
     segments >= 1 or Mix.raise("nothing was archived")
@@ -192,7 +211,9 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
       reclaimed: archived ++ acme_archived,
       quarantined: quarantined,
       trail: trail,
-      segments: segments
+      segments: segments,
+      k1: k1,
+      keyless: keyless
     }
   end
 
@@ -215,6 +236,27 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
 
     :ok = Ankusa.Queue.Deliveries.claim(inst, [due])
 
+    # A busy lane: `k2`'s first hook is its head, promoted and claimed (as a crash
+    # leaves it), the second a member behind it.
+    k2 = for n <- 1..2, do: ingest!(inst, "ordered", "k2-#{n}", [{"x-entity", "k2"}])
+    {:ok, default_ord} = Ankusa.Queue.Tenants.ord(inst, "default")
+
+    {:ok, ops, _more} =
+      Ankusa.Queue.Deliveries.Lanes.sweep(
+        inst,
+        default_ord,
+        System.system_time(:millisecond) + 1,
+        100
+      )
+
+    :ok = Store.write(inst, Ankusa.Queue.Deliveries.coalesce(ops), sync: true)
+
+    {:ok, dues} =
+      Ankusa.Queue.Deliveries.due_for_tenant(inst, default_ord, now + 60_000, 0, 100, 1_000_000)
+
+    head = Enum.find(dues, &(&1.kind == 2)) || Mix.raise("no lane head was promoted")
+    :ok = Ankusa.Queue.Deliveries.claim(inst, [head])
+
     {:ok, version} = Store.get(inst, :default, Keys.format_version())
     {:ok, hooks} = Queue.hooks(inst, 0, 100_000)
     stored = Enum.map(hooks, & &1.id)
@@ -236,7 +278,8 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
       "dedupe" =>
         for({id, n} <- Enum.with_index(delivered.demo, 1), do: ["demo", "evt-#{n}", id]),
       "segments" => delivered.segments,
-      "tenants" => ["default", "acme", "globex", "deadonly"]
+      "tenants" => ["default", "acme", "globex", "deadonly"],
+      "lanes" => %{"k1" => delivered.k1, "keyless" => delivered.keyless, "k2" => k2}
     }
   end
 
