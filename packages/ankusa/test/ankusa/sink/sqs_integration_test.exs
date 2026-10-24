@@ -111,12 +111,12 @@ defmodule Ankusa.Sink.SQSIntegrationTest do
     assert replay["MessageAttributes"]["ankusa_replay_id"]["StringValue"] == "r1"
   end
 
-  test "a queue that was never created is an SQS error, retried rather than dropped", %{
+  test "a queue that was never created is a permanent config error, dead-lettered at once", %{
     fifo: fifo
   } do
     missing = String.replace(fifo, "ankusa-it-", "ankusa-it-never-")
 
-    assert {:error, {:sqs, 400, code, _message}} =
+    assert {:error, {:permanent, {:config, {:sqs, 400, code, _message}}}} =
              SQS.deliver(envelope(), %{attempt: 1}, opts(missing))
 
     assert is_binary(code)

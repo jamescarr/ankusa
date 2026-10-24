@@ -34,7 +34,13 @@ defmodule Ankusa.Source do
     # nil (the instance's `store_headers` policy), or %{drop: [..] | nil, hash:
     # [..] | nil}: which request headers the stored hook keeps, per key over the
     # instance's policy (see `Ankusa.Edge.StoredHeaders`)
-    store_headers: nil
+    store_headers: nil,
+    # nil (the instance's `dispatch.retry` as is), or a keyword list of
+    # `Ankusa.RetryPolicy` options laid over it: `base_ms`, `max_ms`,
+    # `max_attempts`, `jitter` and `max_elapsed_ms` (the horizon: how long after
+    # its first attempt a failing delivery is dead-lettered; claim-checked
+    # sources are bounded by `claim_check.bucket_expiry_days`)
+    retry: nil
   ]
 
   @type policy :: :reject | :quarantine | :accept_flag
@@ -49,7 +55,8 @@ defmodule Ankusa.Source do
           forward_headers: :default | [String.t()],
           max_headers: pos_integer(),
           forward_headers_max_bytes: pos_integer(),
-          store_headers: Ankusa.Edge.StoredHeaders.override() | nil
+          store_headers: Ankusa.Edge.StoredHeaders.override() | nil,
+          retry: keyword() | nil
         }
 
   @doc """
@@ -102,7 +109,8 @@ defmodule Ankusa.Source do
         Ankusa.Edge.StoredHeaders.normalize_override!(
           Map.get(opts, :store_headers),
           "source #{inspect(id)}: store_headers"
-        )
+        ),
+      retry: Ankusa.RetryPolicy.normalize_opts!(Map.get(opts, :retry), "source #{inspect(id)}")
     }
   end
 

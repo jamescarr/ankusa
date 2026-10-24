@@ -16,8 +16,9 @@ defmodule Ankusa.Sink.GooglePubSub do
   This sink **never creates a topic or a subscription**. Retention, schema,
   encryption and who may subscribe are an operator's contract, not something
   the first hook to arrive should decide. A topic that does not exist is
-  `{:pubsub, 404, "NOT_FOUND", message}`, which is transient: it flows into the
-  source's `Ankusa.RetryPolicy`, then the DLQ. (Compare `Ankusa.Sink.SQS`,
+  `{:error, {:permanent, {:config, {:pubsub, 404, "NOT_FOUND", message}}}}`:
+  dead-lettered at once, since only an operator creating the topic fixes it, and
+  a DLQ replay then re-publishes the hooks. (Compare `Ankusa.Sink.SQS`,
   `Ankusa.Sink.Kafka` and `Ankusa.Sink.NATS`, which likewise never create their
   queue, topic or stream.)
 
@@ -32,12 +33,19 @@ defmodule Ankusa.Sink.GooglePubSub do
       plus ordering key over `:max_message_bytes`, refused before any request.
     * `{:permanent, {:pubsub, status, "INVALID_ARGUMENT", message}}` — Pub/Sub
       refused the message itself. Dead-lettered at once.
+    * `{:permanent, {:config, {:pubsub, status, google_status, message}}}` —
+      Pub/Sub refused this sink's configuration or credentials: `NOT_FOUND`
+      (topic), `PERMISSION_DENIED`, `UNAUTHENTICATED`. Dead-lettered at once and
+      counted in `ankusa_dispatch_config_errors_total{sink}`; fix the source,
+      then replay the dead letters.
+    * `{:retry_after, ms, {:pubsub, status, google_status, message}}` — Pub/Sub
+      throttled the publish (`RESOURCE_EXHAUSTED`, or any HTTP `429` or `503`).
+      `ms` is a full-jitter draw (`Ankusa.Sink.throttle_after_ms/1`).
     * `{:pubsub, status, google_status, message}` — any other Pub/Sub error
-      (`NOT_FOUND` topic, `PERMISSION_DENIED`, `UNAUTHENTICATED`,
-      `RESOURCE_EXHAUSTED`, `UNAVAILABLE`, ...): an operator can fix these, so
-      they get the retry policy, then the DLQ.
+      (`UNAVAILABLE`, `INTERNAL`, ...): transient, the retry policy.
     * `{:status, status, body}` — a non-200 response that is not a Google error
-      document (a proxy, a load balancer).
+      document (a proxy, a load balancer); a `429` or `503` is a
+      `{:retry_after, ms, {:status, status, body}}`.
     * `{:unexpected_reply, body}`, `:no_credentials` (the `:token_provider`
       answered `:error`; no request is sent) and transport errors — retried.
 
@@ -107,6 +115,13 @@ defmodule Ankusa.Sink.GooglePubSub do
   def max_message_bytes(opts),
     do: Keyword.get(opts, :max_message_bytes, @default_max_message_bytes)
 
+  # What only the operator can fix: a credential or a role Pub/Sub refuses, a
+  # topic that is not there. Dead-lettered at once, and counted as a config error.
+  @config_statuses ~w(PERMISSION_DENIED NOT_FOUND UNAUTHENTICATED)
+
+  # Pub/Sub asking the sender to slow down.
+  @throttle_statuses ~w(RESOURCE_EXHAUSTED)
+
   @impl true
   def publish(payload, %Envelope{} = env, ctx, opts) do
     max = max_message_bytes(opts)
@@ -123,7 +138,7 @@ defmodule Ankusa.Sink.GooglePubSub do
         Keyword.get(opts, :timeout_ms, @default_timeout_ms),
         Keyword.get(opts, :req_options, [])
       )
-      |> reply()
+      |> reply(ctx)
     end
   end
 
@@ -199,7 +214,7 @@ defmodule Ankusa.Sink.GooglePubSub do
 
   defp encode(segment), do: URI.encode(segment, &URI.char_unreserved?/1)
 
-  defp reply({:ok, 200, body}) do
+  defp reply({:ok, 200, body}, _ctx) do
     case decode(body) do
       {:ok, %{"messageIds" => [id]}} when is_binary(id) -> :ok
       _ -> {:error, {:unexpected_reply, body}}
@@ -208,21 +223,30 @@ defmodule Ankusa.Sink.GooglePubSub do
 
   # `{"error": {"code": 404, "message": "...", "status": "NOT_FOUND"}}` is a
   # Pub/Sub error; any other body came from something in front of it.
-  defp reply({:ok, http_status, body}) do
+  defp reply({:ok, http_status, body}, ctx) do
     case decode(body) do
       {:ok, %{"error" => %{"status" => status} = error}} when is_binary(status) ->
         reason = {:pubsub, http_status, status, error["message"]}
 
-        if status in @permanent_statuses,
-          do: {:error, {:permanent, reason}},
-          else: {:error, reason}
+        cond do
+          status in @permanent_statuses -> {:error, {:permanent, reason}}
+          status in @config_statuses -> {:error, {:permanent, {:config, reason}}}
+          status in @throttle_statuses or http_status in [429, 503] -> throttled(reason, ctx)
+          true -> {:error, reason}
+        end
+
+      _ when http_status in [429, 503] ->
+        throttled({:status, http_status, body}, ctx)
 
       _ ->
         {:error, {:status, http_status, body}}
     end
   end
 
-  defp reply({:error, reason}), do: {:error, reason}
+  defp reply({:error, reason}, _ctx), do: {:error, reason}
+
+  defp throttled(reason, ctx),
+    do: {:error, {:retry_after, Ankusa.Sink.throttle_after_ms(ctx.attempt), reason}}
 
   defp decode(body) when is_binary(body), do: JSON.decode(body)
   defp decode(_body), do: :error
