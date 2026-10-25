@@ -28,6 +28,14 @@
 # machine; a runner-class mismatch is printed as a warning and the comparison
 # still runs.
 #
+# The checked-in baseline also carries an `f1_code` block (`{"commit",
+# "<cell>": {...}}`): the F1 baseline's code (before DUR-4), measured with this
+# bench harness on the machine, and in the session, that recorded the cells
+# around it. The gate ignores it; it is the like-with-like reference of
+# DUR-4.b.b.b's "at least 2x the F1 baseline". A rebaseline run carries the
+# block over from the file it overwrites; re-measure it (docs/testing.md
+# "Perf gate") when the harness, `bench/core_bench.exs`, changes.
+#
 # A p99 over 20k samples is noisy on a shared machine, and noise only ever
 # adds latency and takes throughput away. So a cell over a limit after its
 # `BENCH_RUNS` runs is run `BENCH_RUNS` more times and judged on its best run
@@ -107,7 +115,7 @@ defmodule Bench.Gate do
     IO.puts("wrote #{Path.relative_to_cwd(@last)}")
 
     if rebaseline? do
-      write_json(baseline_path(), cells, medians, runner, [])
+      write_json(baseline_path(), cells, medians, runner, [], carried_f1_code(baseline_path()))
       IO.puts("rebaselined #{baseline_path()} (runner #{runner})")
     else
       report(cells, medians, baseline, rows)
@@ -298,8 +306,9 @@ defmodule Bench.Gate do
   end
 
   # Two-level JSON written by hand so the checked-in baseline is stable and
-  # reviewable: cells in matrix order, metrics in `@metrics` order, runner last.
-  defp write_json(path, cells, medians, runner, extra) do
+  # reviewable: cells in matrix order, metrics in `@metrics` order, then the
+  # `f1_code` block (when there is one), runner last.
+  defp write_json(path, cells, medians, runner, extra, f1_code \\ nil) do
     cell_lines =
       for cell <- cells do
         fields =
@@ -310,10 +319,37 @@ defmodule Bench.Gate do
         ~s(  "#{cell}": {\n#{fields}\n  })
       end
 
+    f1_lines = if f1_code, do: [f1_code_block(cells, f1_code)], else: []
+
     tail =
       Enum.map([{"runner", runner} | extra], fn {k, v} -> ~s(  "#{k}": #{JSON.encode!(v)}) end)
 
-    File.write!(path, "{\n" <> Enum.join(cell_lines ++ tail, ",\n") <> "\n}\n")
+    File.write!(path, "{\n" <> Enum.join(cell_lines ++ f1_lines ++ tail, ",\n") <> "\n}\n")
+  end
+
+  defp f1_code_block(cells, f1_code) do
+    cell_lines =
+      for cell <- cells, f1_code[cell] do
+        fields =
+          Enum.map_join(@metrics, ", ", fn m ->
+            ~s("#{m}": #{:erlang.float_to_binary(f1_code[cell][m] * 1.0, decimals: 3)})
+          end)
+
+        ~s(    "#{cell}": {#{fields}})
+      end
+
+    lines = [~s(    "commit": #{JSON.encode!(f1_code["commit"])}) | cell_lines]
+    ~s(  "f1_code": {\n#{Enum.join(lines, ",\n")}\n  })
+  end
+
+  # The `f1_code` block of the file a rebaseline is about to overwrite, if any.
+  defp carried_f1_code(path) do
+    with {:ok, body} <- File.read(path),
+         {:ok, %{"f1_code" => f1_code}} <- JSON.decode(body) do
+      f1_code
+    else
+      _ -> nil
+    end
   end
 
   # The class of machine the numbers belong to. CI sets RUNNER_OS/RUNNER_ARCH

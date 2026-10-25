@@ -1168,9 +1168,18 @@ no Kubernetes.
 N=20000 CONCURRENCY=256 SINK_LATENCY_MS=5 mise run bench
 ```
 
-It ingests `N` hooks through `Ankusa.Edge.Ingest` at `CONCURRENCY` workers, then
-waits for a sink that sleeps `SINK_LATENCY_MS` per delivery to receive every
-acked envelope. One JSON line plus a table; exit code is non-zero if anything
+It builds every request, body included, once before the clock starts, then
+ingests `N` hooks through `Ankusa.Edge.Ingest` from `CONCURRENCY` long-lived
+client processes that claim the next request off a shared counter (a closed
+loop, as before), then waits for a sink that sleeps `SINK_LATENCY_MS` per
+delivery to receive every acked envelope. The timed section holds the
+`ingest/2` call and nothing the bench itself would have to pay for per hook: an
+earlier harness that built each body and started a `Task` per item spent about
+60 µs of CPU per hook on it, which at 10 KB capped the cell at roughly 1.6× the
+F1 code's rate however cheap ingest got. `STUB_INGEST=1` answers each request
+at once instead of calling ingest (and skips the drain): the rate the harness
+itself can drive, which has to stay far above any ingest rate the cell is
+asked to show. One JSON line plus a table; exit code is non-zero if anything
 acked never arrived. It runs under `MIX_ENV=test` because core's
 `config/config.exs` autostarts the default instance on :4000 outside `:test`.
 
@@ -1319,11 +1328,10 @@ FAIL p99_ms 512B-c32: 45.10 > 1.2×21.60 (limit 25.92)
 The `-ordered` cell is the `512B` cell with the source's sink `ordered: true`
 (`ORDERED=1`: 64 keys, so 64 lanes run at once; ADR 0004): the cost of the lane
 key at ingest (`ankusa_dispatch_lane*`), the member put and the sweep. Measured on
-one machine (`BENCH_REBASELINE=1`) it runs within 3 % of `512B` on `ingest_per_s`
-(27 596 vs 28 313) and no slower on `p99_ms` (15.4 vs 17.2 ms); its checked-in
-entry is the `github-linux-x64` `512B` entry with `ingest_per_s` scaled by that
-ratio (22 772), p99 unchanged. An unordered source pays one counter read per scan
-(`lane_members == 0` gates the sweep): the three older cells did not move.
+one machine (`BENCH_REBASELINE=1`) it ran within 3 % of `512B` on `ingest_per_s`
+(27 596 vs 28 313) and no slower on `p99_ms` (15.4 vs 17.2 ms); its baseline
+entry is measured like the others. An unordered source pays one counter read per
+scan (`lane_members == 0` gates the sweep): the three older cells did not move.
 
 The `-c32` cell exists because of Little's law. At 256 workers the pipeline is
 throughput-bound and latency is simply 256 ÷ throughput, so a fixed delay in
@@ -1351,10 +1359,30 @@ scripts), then gates the change against that. When the pull request changes
 measurement (the branch's are restored afterwards), so a dependency change is
 also measured base-against-branch on one runner rather than against a baseline
 recorded on another one. It falls back to the checked-in `baseline.json` only
-when there is no base commit to measure. `baseline.json` (`runner:
-github-linux-x64`) is the reference for local runs on a comparable machine; a
-run on another runner class prints a `WARN` (a laptop is usually faster than
-the CI runner, so it passes; a slower one can fail without a regression).
+when there is no base commit to measure. `baseline.json` is the reference for
+local runs on a comparable machine; a run on another runner class prints a
+`WARN`. The checked-in one was recorded (DUR-4.b.b.a, `runner:
+local-darwin-aarch64`) on an Apple-silicon laptop with the bench's data
+directory on a RAM disk (`TMPDIR=/Volumes/<ram disk>`: `hdiutil attach
+-nomount ram://8388608`, then `diskutil erasevolume HFS+ <name> <device>`): an
+fsync that costs nothing is the regime of a CI runner, whereas on this laptop's
+disk (4.3 ms fsync) the `512B-c32` cell is fsync-bound and misses 0.8× the
+baseline however the code is.
+
+`baseline.json` also holds an `f1_code` block: the F1 baseline's code
+(`b25506f6`, before DUR-4) measured with this harness, interleaved with
+current `main`, in the session that recorded the cells around it; the gate
+ignores it, a rebaseline run carries it over. It is the like-with-like
+reference for the plan's "at least 2× the F1 baseline" at 10 KB. Judge a
+change against it by measuring `f1_code`'s commit again on the machine in
+question, with this tree's `bench/core_bench.exs` (`git worktree add --detach
+<dir> <commit>`, copy the script over the old one, `MIX_ENV=test N=20000
+CONCURRENCY=256 BODY_BYTES=10240 mix run bench/core_bench.exs`, median of
+three), rather than against the recorded numbers: they are one machine's, and
+two runs of one tree there differ by 20 %. `STUB_INGEST=1` (above) is the
+check that the harness itself is not what a cell measures: at 10 KB it drives
+more than 100× the rate of the F1 code. Change the harness and the `f1_code`
+block has to be measured again, in the same PR.
 `BENCH_RUNS`, `BENCH_CONFIRM`, `BENCH_RUNNER`, `BENCH_BASELINE` and
 `BENCH_REBASELINE` are documented in the script's header.
 
@@ -1424,7 +1452,7 @@ A hot-path PR states before/after numbers in its description. The checked-in
 baseline changes only in a pull request titled `perf: rebaseline <reason>`
 that carries the before/after table: copy the `bench-last` artifact's cells
 and `runner` into `baseline.json`, or run `BENCH_REBASELINE=1 mise run
-bench:gate` on a `github-linux-x64` machine.
+bench:gate` on the machine the baseline is for (the `f1_code` block stays).
 
 ### Soak: `mise run bench:soak`
 

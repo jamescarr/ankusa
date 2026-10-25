@@ -337,8 +337,9 @@ jobs:
   # class differ by a factor of two in speed from job to job, so the gate
   # compares against the base commit measured on this very runner (see the
   # "measure the base commit" step); the checked-in
-  # packages/ankusa/bench/baseline.json (github-linux-x64) is the fallback when
-  # there is no base commit to measure.
+  # packages/ankusa/bench/baseline.json (recorded on a laptop with the bench's
+  # data directory on a RAM disk, see docs/testing.md "Perf gate") is the
+  # fallback when there is no base commit to measure.
   bench:
     name: perf gate
     runs-on: ubuntu-latest

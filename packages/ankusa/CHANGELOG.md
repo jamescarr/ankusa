@@ -187,6 +187,19 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- **`bench/core_bench.exs` no longer caps the 10 KB cell (DUR-4.b.b.a).** Every
+  request, body included, is built once before the clock starts and
+  `CONCURRENCY` long-lived client processes claim the next one off a shared
+  counter, where each item used to build its body and start a `Task` inside the
+  timed section (about 60 µs of CPU per hook, enough to hold the cell to ~1.6×
+  the F1 code's rate however cheap ingest got). The cell matrix, `N`,
+  `CONCURRENCY` and the JSON line are unchanged; `STUB_INGEST=1` answers each
+  request at once and reports what the harness itself can drive (11.3 M/s at
+  10 KB on the laptop that measured it, against 78.9 k/s for the F1 code).
+  `bench/baseline.json` is re-recorded under the new harness (a
+  `perf: rebaseline` change) with an `f1_code` block that holds the F1
+  baseline's code measured in the same session; `bench/gate.exs` ignores the
+  block and carries it over when it rewrites the file.
 - **`/ready` lists every readiness check (OPS-5).** `Ankusa.Health.ready/1` runs
   each `Ankusa.Health.Check` that applies to the node (`store`, `intake` under
   `wal: :dual`, `sinks` under `wal: :none`, `disk`, `backlog`, `backup`) and the
