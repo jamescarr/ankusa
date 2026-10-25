@@ -11,14 +11,20 @@
 
 _**Don't fight the traffic. Steer it.**_
 
-Ankusa is a framework for ingesting webhooks from any provider, durably, at
-any scale. Point Stripe, GitHub, Shopify, or your own services at it: each hook
-is verified, written to durable storage, and only then answered `2xx`.
-Delivery to your workers comes after, over HTTP or the queue you already run,
-with retries, a dead-letter queue, and replay.
+Ankusa is webhook ingestion infrastructure. Deploy it as a container in front
+of your workers, point Stripe, GitHub, Shopify, or your own services at it, and
+every webhook becomes a message on the broker you already run: Kafka,
+RabbitMQ, NATS JetStream, SQS, Google Pub/Sub, or Redis pub/sub. Prefer HTTP?
+It POSTs signed deliveries to your service instead. Each hook is verified and
+written to durable storage before the provider gets its `2xx`; publishing comes
+after, with retries, a dead-letter queue, and replay.
 
-Each source and tenant gets the combination it needs, set in YAML or in Elixir:
+Each source and tenant gets the combination it needs, set in YAML:
 
+- **[Deliver](docs/delivery.md)** each source to one sink or several, every
+  delivery retried on its own, with a retry policy per source and a dead-letter
+  queue you can replay. A body too large for a queue message travels by claim
+  check.
 - **[Verify](docs/configuration.md#sources)** the way each provider signs:
   HMAC presets for Stripe, GitHub, Shopify, Slack, and Standard Webhooks, any
   other HMAC scheme described in config, Ed25519 or RSA signatures, bearer
@@ -33,15 +39,11 @@ Each source and tenant gets the combination it needs, set in YAML or in Elixir:
 - **[Route](docs/multi-tenancy.md)** one catch URL per customer, pin a route to
   a provider's published IP ranges, and add sources through the admin API
   without a redeploy.
-- **[Deliver](docs/delivery.md)** to signed HTTP, RabbitMQ, Kafka, NATS
-  JetStream, SQS, Google Pub/Sub, or Redis pub/sub, with a retry policy per
-  source; a body too large for a queue message travels by claim check.
-- **[Extend](docs/elixir.md)** past the YAML: verifiers, sinks, and route
-  resolvers are Elixir behaviours you implement in your own app.
 
-One container is a complete receiver. A fleet is more of the same container
-behind a load balancer, not a rewrite, and an Elixir app can embed the whole
-pipeline as a library.
+One container is a complete receiver: the image ships a health check, serves
+Prometheus `/metrics`, and keeps its working state in one data volume. A fleet
+is more of the same container behind a load balancer, not a rewrite. Your
+workers can be written in any language.
 
 Whatever the combination, one promise holds: **a `2xx` means the hook is
 stored somewhere that survives the failure you are worried about.** Which
@@ -84,7 +86,9 @@ works before you have any provider credentials. Done? `docker rm -f ankusa`.
 Ankusa POSTs each hook to your endpoint with the raw body intact, and delivery
 is signed by default: the receiver verifies the Standard Webhooks signature
 against the sink's `secret`. Short outages are retried; long ones land in a
-dead-letter queue you can replay with one call.
+dead-letter queue you can replay with one call. To publish to a broker instead,
+give the source a `rabbitmq`, `kafka`, or `nats` sink; the
+[examples](#examples) below run each end to end.
 
 ```sh
 git clone https://github.com/jamescarr/ankusa
@@ -179,11 +183,10 @@ limits and dispatch fairness are per tenant, routes and source definitions can
 be shared through Redis, and a tenant can be erased. [`docs/multi-tenancy.md`](docs/multi-tenancy.md)
 has the URL schemes and the isolation rules.
 
-Observability is `/metrics` (Prometheus) plus `:telemetry` events under
-`[:ankusa, ...]` for every stage. Gauges cover the store, queue depth, oldest
-due age, quarantine bytes, disk free, and open dispatch breakers — enough to
-alert on a backlog before a provider sees a `503`. There is no OpenTelemetry
-tracing or structured-JSON logging yet.
+Observability is `/metrics` (Prometheus). Gauges cover the store, queue depth,
+oldest due age, quarantine bytes, disk free, and open dispatch breakers —
+enough to alert on a backlog before a provider sees a `503`. There is no
+OpenTelemetry tracing or structured-JSON logging yet.
 
 ## Run a fleet
 
@@ -191,7 +194,7 @@ When one box is not enough, run N independent all-role nodes behind a load
 balancer. Each node has its own data volume, its own store, and its own
 admin/replay API; they share nothing but the provider's traffic, and optionally
 Redis for routes, sources, and fleet-scoped rate limits and dedupe. `edge`,
-`dispatch`, and `storage` must stay in one BEAM node because they share the one
+`dispatch`, and `storage` must stay in one node because they share the one
 local store — a node is the unit of scale. The one role you may split out is
 `:claim_check`, the large-payload gateway, which never opens the store.
 
@@ -256,9 +259,10 @@ How to pick one, and what each proves:
 - [Integrations: Oban, Celery, queues](docs/integrations.md)
 
 Everything else, including the contributing docs:
-[`docs/README.md`](docs/README.md). Ankusa is also an Elixir library you can
-embed in your own app: [`docs/elixir.md`](docs/elixir.md) ·
-[HexDocs](https://hexdocs.pm/ankusa).
+[`docs/README.md`](docs/README.md). Past what the YAML covers, Ankusa is also
+an Elixir library: embed it in your own app and implement custom verifiers,
+sinks, and route resolvers as behaviours ([`docs/elixir.md`](docs/elixir.md) ·
+[HexDocs](https://hexdocs.pm/ankusa)).
 
 ## The name
 

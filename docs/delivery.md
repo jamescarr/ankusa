@@ -25,6 +25,17 @@ name inherits them. A hook accepted while the delete runs can still be queued
 after it; dispatch dead-letters it the same way when it claims it, unless the
 name was re-created first.
 
+**A sink that batches** (`Sink.SQS`, `Sink.GooglePubSub`) is the exception to the
+limit on attempts running at once: its attempts wait in the destination's
+batcher for their batch's response, so counting them against
+`dispatch.concurrency`, a tenant's `concurrency` or `dispatch.sink_concurrency`
+would cap every batch at that many messages. They are not counted;
+`sink_concurrency` counts the sink's *requests* in flight instead, and the
+claimed-row windows below (`dispatch.max_inflight`, `dispatch.tenants`) bound
+how many attempts wait. Each attempt still settles its own row, times out on its
+own, and moves its own tenant's breaker. See
+[`Sink.SQS`](#sinksqs-queue-delivery).
+
 **Deliveries are not ordered.** Two hooks for one sink may run in either
 order, and a retry runs after whatever is due before it. A Kafka partition key
 or an AMQP routing key only keeps the order hooks were published in, so it does
@@ -803,10 +814,11 @@ crash-loops against a server that is gone.
 The same `Ankusa.Sink.Message`, sent to an Amazon SQS queue, standard or FIFO.
 Consumers on SQS (Lambda, Celery's SQS transport, a worker polling
 `ReceiveMessage`) read it directly, with no Kafka-to-SQS bridge in between. The
-sink lives in `ankusa` core: it is one SigV4-signed HTTPS `POST` per delivery
-through `Ankusa.HttpClient`, with the signer `BlobStore.S3` already uses and
-the same credential chain (`Ankusa.AWS.Credentials`), so it adds no
-dependency and starts no process.
+sink lives in `ankusa` core: dispatch's deliveries go out in a SigV4-signed
+`SendMessageBatch` of up to 10 ([Batching](#sinksqs-queue-delivery), below);
+anything else is one `SendMessage`. Both go through `Ankusa.HttpClient`, with the
+signer `BlobStore.S3` already uses and the same credential chain
+(`Ankusa.AWS.Credentials`), so it adds no dependency.
 
 ```elixir
 sinks: [
@@ -816,7 +828,15 @@ sinks: [
    message_group_id: "stripe",                  # FIFO default: "tenant/source"; or a 1-arity fun
    inline_max_bytes: 65_536,                    # above this the message carries a claim reference
    max_message_bytes: 1_048_576,                # body + attributes; larger is dead-lettered at once
-   timeout_ms: 5_000}
+   timeout_ms: 5_000,
+   batch: true,                                 # false: one SendMessage per delivery
+   batch_linger_ms: 20,                         # how long a batch waits to fill
+   batch_max_entries: 10,                       # ≤ 10
+   batch_max_bytes: 262_144,                    # ≤ 1_048_576, SQS's batch limit
+   batch_queue_max: 4_096,                      # queue ceilings: entries, bytes, entries per tenant
+   batch_queue_max_bytes: 134_217_728,
+   batch_queue_tenant_max: 1_024,
+   batch_max_inflight: 8}                       # requests in flight; default dispatch.sink_concurrency
    # endpoint: "http://localhost:4566"          # default: the queue URL's origin
    # access_key_id:/secret_access_key:/session_token: — else AWS_* env, IRSA, IMDSv2
 ]
@@ -829,16 +849,17 @@ message}}}}`: dead-lettered at once, since only an operator creating the queue
 fixes it, and a DLQ replay then re-sends the hooks, the way `Sink.NATS` treats a missing stream.
 
 **`deliver/3` returns `:ok` only once SQS has the message.** That is a `200`
-from `SendMessage` whose `MD5OfMessageBody` matches the MD5 of the body sent;
+from `SendMessage`, or an entry under `Successful` in a `SendMessageBatch`
+reply, whose `MD5OfMessageBody` matches the MD5 of the body sent;
 SQS answers `200` after storing the message redundantly, so the sink is
 durable for [direct mode](#direct-mode). The other outcomes:
 
 | Outcome | Result |
 | --- | --- |
 | body + attributes over `max_message_bytes` (1 MiB, SQS's limit) | permanent `{:message_too_large, size, max}`, before any request |
-| SQS refuses the message itself: `InvalidMessageContents`, `InvalidParameterValue` | permanent `{:sqs, status, code, message}`: dead-lettered at once |
+| SQS refuses the message itself: `InvalidMessageContents`, `InvalidParameterValue`, `MissingParameter`, `InvalidAttributeName`, `InvalidAttributeValue` | permanent `{:sqs, status, code, message}`: dead-lettered at once |
 | SQS refuses this sink's credentials or queue: `AccessDenied`, `QueueDoesNotExist`, `InvalidClientTokenId`, `UnrecognizedClientException`, `SignatureDoesNotMatch`, `InvalidAccessKeyId`, `MissingAuthenticationToken` | `{:permanent, {:config, {:sqs, status, code, message}}}`: dead-lettered at once, counted in `ankusa_dispatch_config_errors_total{sink}`; fix the source, then replay |
-| throttling: `Throttling`, `ThrottlingException`, `RequestThrottled`, `TooManyRequestsException`, `ServiceUnavailable`, or any `429`/`503` | `{:retry_after, ms, {:sqs, status, code, message}}`, `ms` a full-jitter draw (1 to `min(30 s, 500 ms · 2^(attempt-1))`) |
+| throttling: `Throttling`, `ThrottlingException`, `RequestThrottled`, `TooManyRequestsException`, `ServiceUnavailable`, `KmsThrottled`, or any `429`/`503` | `{:retry_after, ms, {:sqs, status, code, message}}`, `ms` a full-jitter draw (1 to `min(30 s, 500 ms · 2^(attempt-1))`) |
 | any other SQS error: a 5xx, an expired token | transient `{:sqs, status, code, message}`: the retry policy |
 | a non-2xx that is not an SQS error document (a proxy) | transient `{:status, status, body}`; a `429`/`503` is a `{:retry_after, ms, _}` |
 | a `200` with a mismatched MD5, no credentials, a transport failure | transient |
@@ -858,6 +879,47 @@ still dedupe on the `idempotency_key`. On a standard queue the sink sends no
 deduplication id, and a `MessageGroupId` only when `message_group_id` is set
 (fair queues).
 
+**Batching.** A delivery from dispatch waits in its queue's batcher
+(`Ankusa.Sink.Batcher`: one per queue and set of credentials, started by the
+instance) and goes out in a `SendMessageBatch` with up to nine others, 20 ms
+after the first arrived or at once when the batch is full (10 entries,
+256 KiB). The hook's row stays claimed until its own entry is answered, so a
+batcher that dies or an attempt that times out loses nothing; the retry carries
+the same deduplication id. The reply is read per entry:
+
+| Entry | Result |
+| --- | --- |
+| `Successful`, MD5 of the body sent | `:ok` |
+| `Successful`, another MD5; absent from the reply | transient `{:md5_mismatch, …}` / `{:unexpected_reply, …}` |
+| `Failed` with `InvalidMessageContents`, `InvalidParameterValue`, `MissingParameter`, `InvalidAttributeName`, `InvalidAttributeValue` | permanent `{:sqs, status, code, message}`: that entry alone is dead-lettered |
+| `Failed` with `ThrottlingException`, `RequestThrottled`, `ServiceUnavailable`, `KmsThrottled` | `{:retry_after, ms, {:sqs, …}}`, `ms` full jitter |
+| any other `Failed` (`InternalError`, …) | transient `{:sqs, status, code, message}`: the retry policy |
+| the request fails as a whole (a `5xx`, a timeout, `QueueDoesNotExist`, `AccessDenied`) | every entry gets that failure, classified as a single `SendMessage` would (a refused queue or credential is a permanent `{:config, _}` for each; a `5xx` is retried on each entry's own schedule; a `429`/`503` is a `retry_after`) |
+
+An entry's `Id` is its position in the request (`"0"`…`"9"`), because a hook
+id has `:` in it and can appear twice in a batch (an original and its replay);
+`MessageDeduplicationId` is unchanged. A batch may hold hooks of many tenants
+and sources: entries are taken round-robin across tenants, each entry is
+settled, retried and breaker-counted as its own tenant's (an open breaker keeps
+that tenant's hooks out of the batch, it does not fail the others'), and
+`dispatch.sink_concurrency` counts **requests in flight per queue** for a
+batching sink, not messages (see [Batching sinks](#the-dispatch-pipeline)).
+On a FIFO queue a `MessageGroupId` has one request in flight at a time and
+its entries are sent in the order they were admitted (SQS enqueues a batch's
+messages in the order sent); a message that fails and is retried is a later
+send, as it always was. The batcher's queue is bounded (rule 3 of the hardening
+rules): `batch_queue_max` 4 096 entries, `batch_queue_max_bytes` 128 MiB and
+`batch_queue_tenant_max` 1 024 entries per tenant; a delivery past one is
+refused with `{:retry_after, ms, {:batch_queue_full, :entries | :bytes |
+:tenant}}` and counted in `ankusa_sink_batch_refused_total{sink,reason}`. The
+other series are `ankusa_sink_batch_requests_total`,
+`ankusa_sink_batch_entries_total`, `ankusa_sink_batch_bisections_total` (Pub/Sub
+only) and the gauges `ankusa_sink_batch_batchers`, `ankusa_sink_batch_queued`
+and `ankusa_sink_batch_queued_bytes`. Direct mode and lifecycle events publish
+with one `SendMessage` each; `batch: false` does the same for dispatch. `mix run
+bench/sqs_batch_bench.exs` prints requests and messages per second against a
+stub that answers in 20 ms.
+
 **The queue is the address, message attributes are the metadata.** Each
 message carries `String` attributes `ankusa_id`, `ankusa_source_id`,
 `ankusa_tenant_id`, `ankusa_message_version`, `ankusa_idempotency_key` and
@@ -871,9 +933,11 @@ checks body plus attributes.
 
 The same `Ankusa.Sink.Message`, published to a Google Cloud Pub/Sub topic.
 Consumers on Pub/Sub (Cloud Run, Dataflow, a worker pulling a subscription)
-read it directly. Like `Sink.SQS`, the sink lives in `ankusa` core: one
-`topics.publish` REST `POST` per delivery through `Ankusa.HttpClient`, so it
-adds no dependency and starts no process. Auth is a `:token_provider` MFA, as
+read it directly. Like `Sink.SQS`, the sink lives in `ankusa` core: dispatch's
+deliveries go out in one `topics.publish` REST `POST` of up to 1 000
+([Batching](#sinkgooglepubsub-google-cloud-pubsub-delivery), below), anything
+else in one of its own, through `Ankusa.HttpClient`, so it adds no dependency.
+Auth is a `:token_provider` MFA, as
 for `BlobStore.GCS`; Ankusa bundles no OAuth client. (The `ankusa_server`
 image ships one for the metadata server, `auth: metadata`.)
 
@@ -886,7 +950,15 @@ sinks: [
    ordering_key: "stripe",                      # default none; a string, or a 1-arity fun
    inline_max_bytes: 65_536,                    # above this the message carries a claim reference
    max_message_bytes: 10_000_000,               # data + attributes + key; larger is dead-lettered at once
-   timeout_ms: 5_000}
+   timeout_ms: 5_000,
+   batch: true,                                 # false: one publish per delivery
+   batch_linger_ms: 20,                         # how long a batch waits to fill
+   batch_max_entries: 1_000,                    # ≤ 1_000
+   batch_max_bytes: 7_500_000,                  # data before base64; ≤ 7_500_000
+   batch_queue_max: 4_096,                      # queue ceilings: messages, bytes, messages per tenant
+   batch_queue_max_bytes: 134_217_728,
+   batch_queue_tenant_max: 1_024,
+   batch_max_inflight: 8}                       # requests in flight; default dispatch.sink_concurrency
    # endpoint: "https://us-east1-pubsub.googleapis.com"  # default: https://pubsub.googleapis.com
 ]
 ```
@@ -900,24 +972,65 @@ message retention) answers `200` and discards the message: the sink cannot
 detect it.
 
 **`deliver/3` returns `:ok` only once Pub/Sub has the message.** That is a
-`200` whose reply names the one message id; Pub/Sub answers `200` after
-persisting the message, so the sink is durable for [direct mode](#direct-mode).
+`200` whose reply names one message id per message sent; Pub/Sub answers `200`
+after persisting the messages, so the sink is durable for [direct mode](#direct-mode).
 The other outcomes:
 
 | Outcome | Result |
 | --- | --- |
-| data + attributes + ordering key over `max_message_bytes` (10 MB, Pub/Sub's limit) | permanent `{:message_too_large, size, max}`, before any request |
-| Pub/Sub refuses the message itself: `INVALID_ARGUMENT` | permanent `{:pubsub, status, "INVALID_ARGUMENT", message}`: dead-lettered at once |
+| data + attributes + ordering key over `max_message_bytes` (10 MB, Pub/Sub's limit) | permanent `{:message_too_large, size, max}`, before any request (and never in a batch) |
+| Pub/Sub refuses the message itself: `INVALID_ARGUMENT` | permanent `{:pubsub, status, "INVALID_ARGUMENT", message}`: dead-lettered at once (a batch is bisected to find it) |
 | Pub/Sub refuses this sink's credentials or destination: `PERMISSION_DENIED`, `UNAUTHENTICATED`, `NOT_FOUND` (topic) | `{:permanent, {:config, {:pubsub, status, google_status, message}}}`: dead-lettered at once, counted in `ankusa_dispatch_config_errors_total{sink}`; fix the source, then replay |
 | `RESOURCE_EXHAUSTED`, or any `429`/`503` | `{:retry_after, ms, {:pubsub, status, google_status, message}}`, `ms` a full-jitter draw (1 to `min(30 s, 500 ms · 2^(attempt-1))`) |
 | any other Pub/Sub error: `UNAVAILABLE`, `INTERNAL`, … | transient `{:pubsub, status, google_status, message}`: the retry policy |
 | a non-200 that is not a Google error document (a proxy) | transient `{:status, status, body}`; a `429`/`503` is a `{:retry_after, ms, _}` |
-| a `200` that does not name one message id, a transport failure | transient |
+| a `200` that does not name one message id per message, a transport failure | transient |
 | the `:token_provider` answers `:error` | transient `:no_credentials`, no request sent |
 
 **There is no publish-side deduplication.** Delivery is at-least-once, so
 consumers dedupe on the `idempotency_key` (the `ankusa_idempotency_key`
 attribute).
+
+**Batching.** A delivery from dispatch waits in its topic's batcher
+(`Ankusa.Sink.Batcher`: one per topic and set of credentials) and is published in
+one `topics.publish` with up to 999 others, 20 ms after the first arrived or at
+once when the batch is full (1 000 messages, 7.5 MB of data: the REST body is
+the data in base64, and Pub/Sub's request limit is 10 MB). The hook's row stays
+claimed until its batch is answered, so a batcher that dies or an attempt that
+times out loses nothing.
+
+`publish` has **no per-message results**: the topic accepts the request or
+refuses it as a whole. So:
+
+| Reply | Every message of the batch |
+| --- | --- |
+| `200` with one id per message | `:ok` |
+| `RESOURCE_EXHAUSTED`, a `429`/`503` | `{:retry_after, ms, reason}`, each with its own jitter |
+| `UNAVAILABLE`, a `5xx`, a timeout, no credentials | transient, each retrying on its own schedule |
+| `NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED` | permanent `{:config, {:pubsub, …}}` for each (no message caused it, so the batch is not split) |
+| `INVALID_ARGUMENT` | **bisected**, below |
+
+`INVALID_ARGUMENT` says one message is invalid; failing the request would
+dead-letter up to 999 good ones (and retrying it would loop on the one bad
+one). The size and attribute checks run before a message joins a batch, so the
+usual causes never reach one; for the rest the request is split in two, left half
+then right (the messages keep their order), and a half that is refused again is
+split again, until the refused message stands alone: it is `{:permanent,
+{:pubsub, 400, "INVALID_ARGUMENT", message}}` and goes to the DLQ, and every other
+message of the batch is delivered. One bad message among 999 good ones costs
+about `2 · log₂ 1000 = 20` extra requests, counted in
+`ankusa_sink_batch_bisections_total`. The work is bounded at `2 · (⌈log₂ n⌉ + 1)`
+splits per batch; messages still unresolved after that are transient
+`{:batch_rejected, reason}` and retry in other batches.
+
+The rest is as for `Sink.SQS` (see [Batching](#sinksqs-queue-delivery) there):
+a batch may hold many tenants' hooks, taken round-robin, each settled and
+breaker-counted on its own; `dispatch.sink_concurrency` counts requests in
+flight per topic; the queue is bounded at 4 096 messages, 128 MiB and 1 024 per
+tenant, and a delivery past a ceiling is refused with `{:retry_after, ms,
+{:batch_queue_full, reason}}`; an `ordering_key` has one request in flight at a
+time, its messages in the order they were admitted. `batch: false` (or direct
+mode) publishes one message per request.
 
 **The topic is the address, message attributes are the metadata.** Each message
 carries attributes `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
