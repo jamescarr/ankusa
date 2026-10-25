@@ -222,6 +222,20 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   @doc """
+  Take `dispatch.concurrency`, `dispatch.sink_concurrency` and `dispatch.tenants`
+  from the instance's current config (`Ankusa.Reload`), without a restart: the
+  tenants' limits are rebuilt, and rows already claimed or running are never
+  dropped (a lowered limit only stops the next start until the count falls below
+  it). `:ok` also when the pipeline is down: it reads the config when it starts.
+  """
+  @spec reconfigure(atom()) :: :ok
+  def reconfigure(instance) do
+    GenServer.call(Ankusa.via(instance, :dispatch), :reconfigure, 30_000)
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
   Check the `config.dispatch` keys this module reads; raises `ArgumentError`
   naming the key.
   """
@@ -479,6 +493,39 @@ defmodule Ankusa.Dispatch.Pipeline do
   # Runs `fun` here, between two of this process's own steps: the one process
   # that claims rows, so `fun` cannot race a claim (`Deliveries.purge_tenant/3`).
   def handle_call({:exclusive, fun}, _from, state), do: {:reply, fun.(), state}
+
+  def handle_call(:reconfigure, _from, state) do
+    config = Ankusa.config(state.instance)
+    {default_limits, overrides} = tenant_limits(config)
+
+    state = %{
+      state
+      | config: config,
+        default_limits: default_limits,
+        tenant_overrides: overrides,
+        tenant_limits: %{},
+        tenant_full: MapSet.new()
+    }
+
+    # What `tenant_add/2` keeps for a tenant that holds claimed rows: its limits
+    # (only when some tenant has an override) and whether it is at its window.
+    state =
+      Enum.reduce(state.tenant_claimed, state, fn {ord, {_rows, _bytes, tenant} = entry}, acc ->
+        acc =
+          if map_size(overrides) > 0,
+            do: %{
+              acc
+              | tenant_limits:
+                  Map.put(acc.tenant_limits, ord, Map.get(overrides, tenant, default_limits))
+            },
+            else: acc
+
+        mark_full(acc, ord, entry)
+      end)
+
+    send(self(), :wake)
+    {:reply, :ok, state}
+  end
 
   def handle_call({:dead_letter_source, source_id}, _from, state) do
     # A buffered retry outcome is a row about to be pending again: write it

@@ -25,6 +25,7 @@ defmodule Ankusa.Audit do
   | `tenant.delete` | a tenant erase (`Ankusa.Tenant`): one row, with what each stage removed as its `detail`; the erase's own source, route and rate-limit deletions are rows of their own |
   | `ip_rules.put` | the global IP rules |
   | `log_level.put` | the node's log level (`PUT /v1/log-level`): `detail` has the new `level` and the `previous` one |
+  | `config.reload` | a config reload (`POST /v1/config/reload`, `SIGHUP`; `Ankusa.Reload`): `detail.keys` lists the dotted keys that changed, `result` is `ok` or `failed`; a refused reload writes none |
 
   A request that changes nothing (a validation error, a missing subject) writes
   no row; one that is refused by the store writes none either.

@@ -52,8 +52,13 @@ defmodule AnkusaServer.Application do
     config = loaded.config
     start_logging(loaded.log, config.instance)
 
-    # What the references resolved to, for `AnkusaServer.Secrets.reload/2`.
-    AnkusaServer.Secrets.remember(config.instance, loaded.secrets)
+    # What the file said, for `AnkusaServer.Reload` (`SIGHUP`, `POST /v1/config/reload`).
+    AnkusaServer.Reload.remember(config.instance, loaded)
+
+    Ankusa.Reload.register(
+      config.instance,
+      &AnkusaServer.Reload.reload(config.instance, audit: &1)
+    )
 
     # Under `log.format: json` stdout is lines of JSON and nothing else.
     if loaded.banner and loaded.log.format == :text, do: AnkusaServer.Banner.print()
@@ -67,8 +72,14 @@ defmodule AnkusaServer.Application do
     start_tracing(loaded.tracing)
 
     # The GCP token cache first: the blob store and Pub/Sub sinks ask it for tokens.
+    # `SIGHUP` last: a reload needs the instance it reloads.
     with {:ok, pid} <-
-           Supervisor.start_link([AnkusaServer.GcpToken, {Ankusa.Instance, config}],
+           Supervisor.start_link(
+             [
+               AnkusaServer.GcpToken,
+               {Ankusa.Instance, config},
+               {AnkusaServer.Reload.Signal, instance: config.instance}
+             ],
              strategy: :one_for_one,
              name: AnkusaServer.Supervisor
            ),

@@ -8,6 +8,20 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **Config reload and `config_version` (OPS-6).** `SIGHUP` and
+  `POST /v1/config/reload` (scope `config:write` + `tenant:*`) re-read the file,
+  resolve its `${file:}` / `${sm:}` references again and apply the keys that may
+  change while the node runs: `log` (level and format, when the file changed
+  them), `rate_limits` (not `scope`), static `sources`, the `routes` seed,
+  `dispatch.concurrency`, `dispatch.sink_concurrency`, `dispatch.tenants`,
+  `metrics.detail` and `admin.gauge_interval_ms`. A change to any other key is
+  refused with `409` naming it and nothing is applied; each reload writes one
+  `config.reload` audit row. The root key `config_version` (`1`, the default
+  when absent) versions the file format: an older file is migrated on load by the
+  loader's migration map, a newer one is refused. `AnkusaServer.Reload`
+  replaces `AnkusaServer.Secrets.reload/2` (`remember/2` and `recall/1` go with it);
+  `AnkusaServer.Config.load!/1` also answers the substituted document as `doc`.
+  `log.format` changes back to `text` at a reload now restore the text formatter.
 - **Helm chart (OPS-8).** `deploy/helm/ankusa` runs the image on Kubernetes in all
   three durability modes: a StatefulSet with a PVC per pod for `wal.type: disk` and
   `dual` (`intake.node_id` = the pod name), a Deployment behind an HPA for `none`.
