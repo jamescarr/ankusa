@@ -2685,7 +2685,8 @@ defmodule AnkusaServer.Config do
           |> put_opt(:tls, bool_opt(sink, "tls", path))
           |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))
 
-        {Ankusa.Sink.NATS, connection ++ nats_auth(sink["auth"], path ++ ["auth"]) |> ordering(sink, path)}
+        {Ankusa.Sink.NATS,
+         (connection ++ nats_auth(sink["auth"], path ++ ["auth"])) |> ordering(sink, path)}
 
       "redis" ->
         check_keys!(sink, @redis_sink_keys, path)

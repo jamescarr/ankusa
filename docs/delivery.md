@@ -939,7 +939,7 @@ No key is sent by default.
 ## Ordering lanes
 
 Opt-in, per sink entry of a source (ADR
-[0004](adr/0004-ordering-lanes.md)):
+[0004](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0004-ordering-lanes.md)):
 
 ```elixir
 sinks: [{Ankusa.Sink.Http, url: "...", ordered: true, ordering_key: {:header, "x-entity-id"}}]

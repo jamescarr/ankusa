@@ -273,7 +273,7 @@ one tenant's rows are one contiguous range:
 | `<<?X, ord::32, at::64, seq::64, sink::16>>` | empty | dead, by tenant |
 | `<<?A, second::64, ord::32>>` | empty | active: the tenant has a due row in that second |
 | `<<?a, seq::64>>` | `<<size::32, ord::32>>` | archive obligation |
-| `<<?O, ord::32, lane::128, seq::64, sink::16>>` | `<<size::32>>` | ordering lane member: a pending row waiting its turn, in `seq` order, with no due row (ADR [0004](adr/0004-ordering-lanes.md)) |
+| `<<?O, ord::32, lane::128, seq::64, sink::16>>` | `<<size::32>>` | ordering lane member: a pending row waiting its turn, in `seq` order, with no due row (ADR [0004](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0004-ordering-lanes.md)) |
 | `<<?H, ord::32, lane::128>>` | `<<seq::64, sink::16>>` | lane head: the one row of the lane that is in `?D` or `?F`; exists exactly while the lane is busy |
 | `<<?P, ord::32, lane::128>>` | empty | lane marker: this lane may have a member and no head (promotion work) |
 
