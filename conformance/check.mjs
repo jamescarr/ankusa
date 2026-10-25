@@ -1,9 +1,11 @@
 // Validate conformance/ and run every registered packages/sdk-* against its
 // vectors. Node 22 ESM, stdlib only. `mise run check:conformance` calls this.
-import { spawn } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
-import { availableParallelism } from "node:os";
-import { fileURLToPath } from "node:url";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { availableParallelism, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 const ROOT = new URL("..", import.meta.url);
 const CONFORMANCE = new URL("conformance/", ROOT);
@@ -88,6 +90,94 @@ console.log(`${features.length} features, ${caseCount} cases`);
 for (const feature of features) {
   console.log(`  ${feature.id}  ${caseCounts.get(feature.id) ?? 0}`);
 }
+
+// The producer vectors (cases/producer.json) are not hand-written: core's
+// `mix ankusa.conformance.gen` encodes a fixed set of hooks with
+// `Ankusa.Sink.Message.encode/3`. Regenerate them into a temporary file and
+// require the checked-in one to be identical, so a field added to (or removed
+// from, or changed in) the encoder without a vector update fails here, before
+// any SDK is asked to decode a message the vectors do not know about.
+function mix(args, env = {}) {
+  return spawnSync("mix", args, {
+    cwd: fileURLToPath(new URL("ankusa", PACKAGES)),
+    env: { ...process.env, ...env },
+    stdio: ["ignore", "inherit", "inherit"],
+  });
+}
+
+function describeDifference(generated, checkedIn) {
+  let now;
+  let before;
+  try {
+    now = JSON.parse(generated.input.message);
+    before = JSON.parse(checkedIn.input.message);
+  } catch {
+    return "its message is not JSON";
+  }
+  const added = Object.keys(now).filter((key) => !(key in before));
+  const removed = Object.keys(before).filter((key) => !(key in now));
+  const changed = Object.keys(now).filter((key) => key in before && !isDeepStrictEqual(now[key], before[key]));
+  const parts = [];
+  if (added.length > 0) parts.push(`message keys added: ${added.join(", ")}`);
+  if (removed.length > 0) parts.push(`message keys removed: ${removed.join(", ")}`);
+  if (changed.length > 0) parts.push(`message keys changed: ${changed.join(", ")}`);
+  if (parts.length === 0) parts.push("the expected decode result differs");
+  return parts.join("; ");
+}
+
+function producerVectorProblems() {
+  const generatedFile = join(mkdtempSync(join(tmpdir(), "ankusa-producer-")), "producer.json");
+  try {
+    // Both envs share one compiled-deps cache (`.mise/lib/mix_cache.sh`); test
+    // is the env `check:package ankusa` warms.
+    const env = { MIX_ENV: "test" };
+    for (const args of [
+      ["local.hex", "--force", "--if-missing"],
+      ["local.rebar", "--force", "--if-missing"],
+      ["deps.get", "--check-locked"],
+      ["ankusa.conformance.gen", "--out", generatedFile],
+    ]) {
+      const result = mix(args, env);
+      if (result.error || result.status !== 0) {
+        return [`\`mix ${args[0]}\` in packages/ankusa failed (${result.error?.message ?? `exit ${result.status}`})`];
+      }
+    }
+
+    const generated = new Map(readJson(pathToFileURL(generatedFile)).cases.map((c) => [c.id, c]));
+    const checkedIn = new Map(readJson(new URL("cases/producer.json", CONFORMANCE)).cases.map((c) => [c.id, c]));
+    const problems = [];
+    for (const id of generated.keys()) {
+      if (!checkedIn.has(id)) problems.push(`producer vector "${id}" is generated but missing from cases/producer.json`);
+    }
+    for (const id of checkedIn.keys()) {
+      if (!generated.has(id)) problems.push(`producer vector "${id}" is in cases/producer.json but no longer generated`);
+    }
+    for (const [id, vector] of generated) {
+      const old = checkedIn.get(id);
+      if (old && !isDeepStrictEqual(vector, old)) {
+        problems.push(`producer vector "${id}" is stale: ${describeDifference(vector, old)}`);
+      }
+    }
+    if (problems.length === 0 && readFileSync(generatedFile, "utf8") !== readFileSync(new URL("cases/producer.json", CONFORMANCE), "utf8")) {
+      problems.push("cases/producer.json is not byte-identical to the generated file");
+    }
+    return problems;
+  } finally {
+    rmSync(dirname(generatedFile), { recursive: true, force: true });
+  }
+}
+
+const producerProblems = producerVectorProblems();
+if (producerProblems.length > 0) {
+  const prefix = process.env.GITHUB_ACTIONS === "true" ? "::error::" : "";
+  for (const problem of producerProblems) console.log(`${prefix}${problem}`);
+  console.log(
+    `${prefix}Ankusa.Sink.Message.encode/3 no longer matches conformance/cases/producer.json: ` +
+      "run `mix ankusa.conformance.gen` in packages/ankusa, commit the result, and make every SDK decode it.",
+  );
+  process.exit(1);
+}
+console.log("producer vectors  match Sink.Message.encode/3");
 
 // The SDKs are independent: each builds and tests in its own directory with its
 // own toolchain, so they run concurrently instead of one after another. A cold

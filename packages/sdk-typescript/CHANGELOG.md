@@ -8,6 +8,16 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Wire-format evolution path (CON-2).** `decodeMessage` accepts every `v`
+  from `MIN_SUPPORTED_VERSION` to `MAX_SUPPORTED_VERSION` (1 and 2, both
+  exported) into the one `Message`, with `v` as the wire said it (now `number`,
+  not the literal `1`): a `v: 2` message is a `v: 1` message plus additive
+  fields, so the keys it does not know are ignored. `Message.instance` and
+  `Message.region`: the name of the Ankusa instance that published the message
+  and the region it is configured with (`null` when null or absent).
+  `decodeLifecycle(data)` and the `LifecycleEvent` type decode the CloudEvents
+  lifecycle events of the instance's lifecycle sinks.
+
 - `isTrusted(hook)`: `true` only when the node verified the hook at ingest
   (`status === "ok"`) and did not flag it (`flagged` false); works on a decoded
   `Message` or the `HookHeaders` of a delivery. A flagged, `failed` or

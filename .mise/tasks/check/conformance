@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
-#MISE description="SDK feature parity: validate conformance/ and run every packages/sdk-* against its vectors"
+#MISE description="SDK feature parity: validate conformance/, check core's encoder against the producer vectors, and run every packages/sdk-* against its vectors"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+source "$MISE_PROJECT_ROOT/.mise/lib/mix_cache.sh"
+cd "$ROOT"
+# check.mjs regenerates conformance/cases/producer.json with core's own encoder
+# (`mix ankusa.conformance.gen`), so core's compiled deps (RocksDB's NIF is the
+# slow one) come from the shared cache instead of being built here. The
+# subshell keeps MIX_ENV local; check.mjs sets it for its own `mix` calls.
+(MIX_ENV=test mix_cache_warm packages/ankusa ankusa test --check-locked)
 cd "$ROOT"
 node conformance/check.mjs

@@ -47,12 +47,24 @@ module Ankusa
   end
   private_constant :IdempotencyKey
 
-  # One decoded v1 queue message. `body` holds the inline bytes (or nil for the
+  # The message versions `Ankusa.decode_message` understands, both ends
+  # inclusive. `v` is the wire format's major version: a `v: 2` message is a
+  # `v: 1` message plus additive fields, decoded exactly like it (the keys this
+  # decoder does not know are ignored) into the one `Message` type, with `v` as
+  # the wire said it. Raising `MAX_SUPPORTED_VERSION` is the whole change an
+  # SDK needs for a producer that starts writing the next additive version.
+  MIN_SUPPORTED_VERSION = 1
+  MAX_SUPPORTED_VERSION = 2
+
+  # One decoded queue message; `v` is the wire's. `body` holds the inline bytes (or nil for the
   # claim form, where the bytes are fetched with `Ankusa::ClaimCheckClient`);
   # `claim` holds the ref string in that case. `headers` is the forwarded
   # provider request headers, `{}` when the message carried none. `traceparent`
   # and `tracestate` are the hook's W3C trace context, verbatim (nil when the
-  # message carries none): continue the trace from them.
+  # message carries none): continue the trace from them. `instance` and `region`
+  # are the name of the Ankusa instance that published the message and the
+  # region it is configured with (nil when the message says null or predates
+  # the fields).
   #
   # `idempotency_key` is the one value a consumer should dedupe on, as
   # `Message#idempotency_key` (the field is nil only for a message from a node
@@ -60,7 +72,7 @@ module Ankusa
   Message = Data.define(
     :v, :id, :source_id, :tenant_id, :received_at, :content_type, :size,
     :body, :claim, :sha256, :dedupe_key, :replay_id, :idempotency_key, :headers, :verification,
-    :traceparent, :tracestate
+    :traceparent, :tracestate, :instance, :region
   ) do
     # `Data.define` made `idempotency_key` the reader of the decoded field; keep
     # that value reachable here and let the helper below take over the name.
@@ -94,10 +106,13 @@ module Ankusa
 
   # The optional string-keyed fields that may be a string, null, or absent.
   # Checked in this order, so the first offending key is the one reported.
-  MESSAGE_STRING_FIELDS = %w[tenant_id content_type dedupe_key replay_id idempotency_key traceparent tracestate].freeze
+  MESSAGE_STRING_FIELDS = %w[
+    tenant_id content_type dedupe_key replay_id idempotency_key traceparent tracestate instance region
+  ].freeze
   private_constant :MESSAGE_STRING_FIELDS
 
-  # Decodes one v1 queue message (the JSON body a sink or broker delivers) into
+  # Decodes one queue message of any supported `v` (`MIN_SUPPORTED_VERSION` to
+  # `MAX_SUPPORTED_VERSION`; the JSON body a sink or broker delivers) into
   # a `Message`, applying every rule in "Consuming queue messages" of the SDK
   # README in order; the first failure wins.
   #
@@ -117,7 +132,7 @@ module Ankusa
     end
 
     version = parsed["v"]
-    unless version.is_a?(Integer) && version == 1
+    unless version.is_a?(Integer) && version.between?(MIN_SUPPORTED_VERSION, MAX_SUPPORTED_VERSION)
       raise InvalidMessageError.new("unsupported message version: #{version.inspect}", code: "unsupported_version")
     end
 
@@ -184,7 +199,7 @@ module Ankusa
     end
 
     Message.new(
-      v: 1,
+      v: version,
       id: id,
       source_id: source_id,
       tenant_id: tenant_id,
@@ -200,7 +215,9 @@ module Ankusa
       headers: headers,
       verification: verification,
       traceparent: parsed["traceparent"],
-      tracestate: parsed["tracestate"]
+      tracestate: parsed["tracestate"],
+      instance: parsed["instance"],
+      region: parsed["region"]
     )
   end
 

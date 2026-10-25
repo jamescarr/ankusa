@@ -163,7 +163,9 @@ class ConformanceTest < Minitest::Test
         "headers" => message.headers,
         "verification" => verification_hash(message.verification),
         "traceparent" => message.traceparent,
-        "tracestate" => message.tracestate
+        "tracestate" => message.tracestate,
+        "instance" => message.instance,
+        "region" => message.region
       }
     when "idempotency_key"
       include_replay = input.fetch("include_replay", false)
@@ -182,6 +184,10 @@ class ConformanceTest < Minitest::Test
           Ankusa.parse_headers(input.fetch("headers"))
         end
       {"trusted" => hook.trusted?}
+    when "supported_versions"
+      {"min" => Ankusa::MIN_SUPPORTED_VERSION, "max" => Ankusa::MAX_SUPPORTED_VERSION}
+    when "decode_lifecycle"
+      Ankusa.decode_lifecycle(input.fetch("event")).to_h.transform_keys(&:to_s)
     when "redeem"
       with_client(Ankusa::ClaimCheckClient, input, requests) do |client|
         body = client.redeem(input.fetch("ref"), input.fetch("sha256"))

@@ -10,7 +10,7 @@ use Ankusa\Internal\IdempotencyKey;
 use Ankusa\Webhook\Verification;
 
 /**
- * One decoded v1 queue message — what an Ankusa consumer reads off Redis, a
+ * One decoded queue message — what an Ankusa consumer reads off Redis, a
  * broker, or the HTTP sink.
  *
  * {@see self::decode()} is the inverse of `Ankusa.Sink.Message.encode/3`. It
@@ -31,11 +31,13 @@ use Ankusa\Webhook\Verification;
  * The rules, in order, first failure wins:
  *
  * 1. not JSON -> `invalid_json`; JSON that isn't an object -> `not_an_object`.
- * 2. `v` missing or not the integer 1 -> `unsupported_version`.
+ * 2. `v` missing or not an integer from {@see self::MIN_SUPPORTED_VERSION} to
+ *    {@see self::MAX_SUPPORTED_VERSION} (1 and 2) -> `unsupported_version`.
  * 3. field types -> `invalid_field` with `field` set to the key: `id` a
  *    non-empty string; `source_id` a string; `received_at` an integer; `size`
  *    an integer >= 0; `tenant_id`/`content_type`/`dedupe_key`/`replay_id`/
- *    `idempotency_key` a string, null, or absent; `headers` absent or an object
+ *    `idempotency_key`/`traceparent`/`tracestate`/`instance`/`region` a string,
+ *    null, or absent, in that order; `headers` absent or an object
  *    of strings; `sha256` absent or 64 lowercase hex characters.
  * 4. body form: both `body_base64` and `claim` -> `ambiguous_body`; neither ->
  *    `missing_body`; invalid base64 -> `invalid_body_base64`; an unparsable
@@ -51,6 +53,21 @@ use Ankusa\Webhook\Verification;
  */
 final readonly class Message
 {
+    /**
+     * The lowest message `v` {@see self::decode()} accepts.
+     *
+     * `v` is the wire format's major version: a `v: 2` message is a `v: 1`
+     * message plus additive fields, decoded exactly like it (the keys this
+     * decoder does not know are ignored) into the one `Message` type, with
+     * `$v` as the wire said it. Raising {@see self::MAX_SUPPORTED_VERSION} is
+     * the whole change an SDK needs for a producer that starts writing the
+     * next additive version.
+     */
+    public const int MIN_SUPPORTED_VERSION = 1;
+
+    /** The highest message `v` {@see self::decode()} accepts. */
+    public const int MAX_SUPPORTED_VERSION = 2;
+
     /**
      * @param array<string, string> $headers forwarded provider headers, lowercased
      */
@@ -81,6 +98,10 @@ final readonly class Message
         public ?string $traceparent = null,
         /** The W3C `tracestate` that goes with `traceparent`, verbatim; `null` when none. */
         public ?string $tracestate = null,
+        /** The name of the Ankusa instance that published the message; `null` when it says so or predates the field. */
+        public ?string $instance = null,
+        /** The region that instance is configured with; `null` when it has none or predates the field. */
+        public ?string $region = null,
     ) {}
 
     /**
@@ -99,7 +120,7 @@ final readonly class Message
         }
 
         $v = self::field($raw, 'v');
-        if (!\is_int($v) || $v !== 1) {
+        if (!\is_int($v) || $v < self::MIN_SUPPORTED_VERSION || $v > self::MAX_SUPPORTED_VERSION) {
             throw new InvalidMessageError('unsupported message version', 'unsupported_version');
         }
 
@@ -130,6 +151,8 @@ final readonly class Message
         $idempotencyKey = self::optionalString($raw, 'idempotency_key');
         $traceparent = self::optionalString($raw, 'traceparent');
         $tracestate = self::optionalString($raw, 'tracestate');
+        $instance = self::optionalString($raw, 'instance');
+        $region = self::optionalString($raw, 'region');
 
         $headers = self::headers($raw);
 
@@ -180,6 +203,8 @@ final readonly class Message
                 verification: $verification,
                 traceparent: $traceparent,
                 tracestate: $tracestate,
+                instance: $instance,
+                region: $region,
             );
         }
 
@@ -216,6 +241,8 @@ final readonly class Message
             verification: $verification,
             traceparent: $traceparent,
             tracestate: $tracestate,
+            instance: $instance,
+            region: $region,
         );
     }
 

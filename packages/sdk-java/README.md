@@ -231,6 +231,16 @@ is untrusted.
 
 ## Consuming queue messages
 
+The message's `v` is the wire format's major version: `Message.decode` accepts
+every `v` from `Message.MIN_SUPPORTED_VERSION` to `Message.MAX_SUPPORTED_VERSION`
+(1 and 2) into the one `Message`, with `v()` as the wire said it. A `v: 2`
+message is a `v: 1` message plus additive fields, so a consumer reads it the
+same way; any other `v` is `unsupported_version` (permanent: dead-letter it).
+`message.instance()` and `message.region()` are the Ankusa instance that
+published the message and the region it is configured with (`null` for none). A
+message from the instance's lifecycle sinks carries a CloudEvents event as its
+body: `LifecycleEvent.decode(body)`.
+
 Ankusa publishes each delivery as a JSON v1 message over the configured
 messaging sink (RabbitMQ, Kafka, NATS, Redis); the HTTP sink sends the
 original body plus `x-ankusa-*` headers instead.

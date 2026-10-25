@@ -11,6 +11,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - **`dedupe.max_json_bytes` (PERF-1).** The biggest body a `json` dedupe source
   decodes (default 1048576, an integer >= 1); a larger body is stored with no
   dedupe key and never decoded. See the `ankusa` changelog.
+- **`node.region` (`ANKUSA_REGION`) (CON-2).** The region the node runs in: a
+  non-empty string of at most 64 bytes. Every queue message carries it as
+  `region` (beside `instance`, the instance's name) and `GET /asyncapi.json`
+  carries it as the document's `x-ankusa-region` extension. Unset, `region` is
+  `null` and the extension is absent. Core keeps it in `dispatch.region`.
+
 - **Config reload and `config_version` (OPS-6).** `SIGHUP` and
   `POST /v1/config/reload` (scope `config:write` + `tenant:*`) re-read the file,
   resolve its `${file:}` / `${sm:}` references again and apply the keys that may

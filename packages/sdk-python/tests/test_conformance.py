@@ -257,6 +257,14 @@ def _run_trusted(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
     return {"trusted": ankusa.is_trusted(hook)}
 
 
+def _run_supported_versions(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    return {"min": ankusa.MIN_SUPPORTED_VERSION, "max": ankusa.MAX_SUPPORTED_VERSION}
+
+
+def _run_decode_lifecycle(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    return dataclasses.asdict(ankusa.decode_lifecycle(case["input"]["event"]))
+
+
 def _run_redeem(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
     inp = case["input"]
     with _connected_with(ankusa.ClaimCheckClient, inp["gateway"], inp.get("client") or {}, requests) as claim_check:
@@ -399,6 +407,8 @@ RUNNERS: dict[str, Runner] = {
     "decode_message": _run_decode_message,
     "idempotency_key": _run_idempotency_key,
     "trusted": _run_trusted,
+    "supported_versions": _run_supported_versions,
+    "decode_lifecycle": _run_decode_lifecycle,
     "redeem": _run_redeem,
     "health": _run_health,
     "routes_health": _run_routes_health,

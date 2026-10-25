@@ -105,11 +105,50 @@ defmodule Ankusa.SDK.MessageTest do
     end
 
     test "rejects a version it does not speak" do
-      assert {:error, %InvalidMessageError{reason: {:unsupported_version, 2}}} =
-               decode(inline_message(%{"v" => 2}))
+      assert {:error, %InvalidMessageError{reason: {:unsupported_version, 3}}} =
+               decode(inline_message(%{"v" => 3}))
+
+      assert {:error, %InvalidMessageError{reason: {:unsupported_version, 0}}} =
+               decode(inline_message(%{"v" => 0}))
+
+      assert {:error, %InvalidMessageError{reason: {:unsupported_version, "1"}}} =
+               decode(inline_message(%{"v" => "1"}))
 
       assert {:error, %InvalidMessageError{reason: {:unsupported_version, nil}}} =
                decode(Map.delete(inline_message(), "v"))
+    end
+
+    test "accepts every version from min_supported_version to max_supported_version" do
+      assert Message.min_supported_version() == 1
+      assert Message.max_supported_version() == 2
+
+      for v <- Message.min_supported_version()..Message.max_supported_version() do
+        assert {:ok, %Message{v: ^v, id: "01a0"}} = decode(inline_message(%{"v" => v}))
+      end
+    end
+
+    test "a v 2 message is a v 1 message plus additive fields: the extra keys are ignored" do
+      extra = %{"v" => 2, "priority" => "high", "labels" => %{"team" => "payments"}}
+
+      assert {:ok, v2} = decode(inline_message(extra))
+      assert {:ok, v1} = decode(inline_message())
+      assert v2 == %{v1 | v: 2}
+    end
+
+    test "instance and region are optional strings: nil when absent or null" do
+      assert {:ok, %Message{instance: nil, region: nil}} = decode(inline_message())
+
+      assert {:ok, %Message{instance: nil, region: nil}} =
+               decode(inline_message(%{"instance" => nil, "region" => nil}))
+
+      assert {:ok, %Message{instance: "ankusa-eu-1", region: "eu-west-1"}} =
+               decode(inline_message(%{"instance" => "ankusa-eu-1", "region" => "eu-west-1"}))
+
+      assert {:error, %InvalidMessageError{code: "invalid_field", field: "instance"}} =
+               decode(inline_message(%{"instance" => 7, "region" => 1}))
+
+      assert {:error, %InvalidMessageError{code: "invalid_field", field: "region"}} =
+               decode(inline_message(%{"region" => ["eu"]}))
     end
 
     test "rejects a malformed field, naming it" do

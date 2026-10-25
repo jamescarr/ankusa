@@ -31,9 +31,15 @@ defmodule Ankusa.SDK.Message do
   `Ankusa.SDK.Idempotency.key/2`); `headers` are the
   provider request headers the sink forwarded (lowercased, `""` joined).
 
-  `v` changes only when an existing field changes meaning or disappears, and
-  consumers must ignore keys they don't know — so `decode/1` accepts a message
-  with extra keys and rejects one whose `v` it does not speak.
+  `v` is the wire format's major version: every `v` from
+  `min_supported_version/0` to `max_supported_version/0` (1 and 2) decodes
+  into this one struct, with `v` as the wire said it. A `v: 2` message is a
+  `v: 1` message plus additive fields, so consumers must ignore keys they
+  don't know — `decode/1` accepts a message with extra keys and rejects one
+  whose `v` it does not speak (`unsupported_version`, permanent: dead-letter
+  it, never retry). `instance` and `region` name the Ankusa instance that
+  published the message and the region it is configured with (`nil` when the
+  message says `null` or predates the fields).
 
   ## Integrity
 
@@ -68,6 +74,8 @@ defmodule Ankusa.SDK.Message do
           verification: %{status: String.t(), flagged: boolean()} | nil,
           traceparent: String.t() | nil,
           tracestate: String.t() | nil,
+          instance: String.t() | nil,
+          region: String.t() | nil,
           headers: %{String.t() => String.t()}
         }
 
@@ -88,10 +96,27 @@ defmodule Ankusa.SDK.Message do
     :verification,
     :traceparent,
     :tracestate,
+    :instance,
+    :region,
     headers: %{}
   ]
 
   @sha256_pattern ~r/\A[0-9a-f]{64}\z/
+
+  # The message versions this SDK decodes. A version is a major number: `v: 2`
+  # is `v: 1` plus additive fields, decoded exactly like `v: 1` (the keys this
+  # SDK does not know are ignored), so raising `@max_supported_version` is the
+  # whole change an SDK needs for a producer that starts writing a new version.
+  @min_supported_version 1
+  @max_supported_version 2
+
+  @doc "The lowest message `v` `decode/1` accepts."
+  @spec min_supported_version() :: pos_integer()
+  def min_supported_version, do: @min_supported_version
+
+  @doc "The highest message `v` `decode/1` accepts."
+  @spec max_supported_version() :: pos_integer()
+  def max_supported_version, do: @max_supported_version
 
   @doc """
   Decode one message body.
@@ -162,7 +187,10 @@ defmodule Ankusa.SDK.Message do
   defp object(value) when is_map(value), do: {:ok, value}
   defp object(value), do: {:error, invalid(value, :not_an_object)}
 
-  defp version(%{"v" => 1}), do: :ok
+  defp version(%{"v" => v})
+       when is_integer(v) and v >= @min_supported_version and v <= @max_supported_version,
+       do: :ok
+
   defp version(%{"v" => other}), do: {:error, invalid(other, {:unsupported_version, other})}
   defp version(_raw), do: {:error, invalid(nil, {:unsupported_version, nil})}
 
@@ -180,12 +208,14 @@ defmodule Ankusa.SDK.Message do
          {:ok, idempotency_key} <- optional_string(raw, "idempotency_key"),
          {:ok, traceparent} <- optional_string(raw, "traceparent"),
          {:ok, tracestate} <- optional_string(raw, "tracestate"),
+         {:ok, instance} <- optional_string(raw, "instance"),
+         {:ok, region} <- optional_string(raw, "region"),
          {:ok, headers} <- headers(raw),
          {:ok, sha256} <- sha256(raw),
          {:ok, verification} <- verification(raw) do
       {:ok,
        %__MODULE__{
-         v: 1,
+         v: raw["v"],
          id: id,
          source_id: source_id,
          tenant_id: tenant_id,
@@ -199,7 +229,9 @@ defmodule Ankusa.SDK.Message do
          sha256: sha256,
          verification: verification,
          traceparent: traceparent,
-         tracestate: tracestate
+         tracestate: tracestate,
+         instance: instance,
+         region: region
        }}
     end
   end
