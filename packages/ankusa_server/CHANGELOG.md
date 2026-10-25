@@ -8,6 +8,18 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`sqs` and `google_pubsub` sinks batch (DEL-4).** Up to 10 (SQS
+  `SendMessageBatch`) or 1 000 (Pub/Sub `publish`) deliveries to one queue or topic
+  are one request. New sink keys, all optional: `batch` (`false` sends one request
+  per delivery), `batch_linger_ms` (20), `batch_max_entries`, `batch_max_bytes`,
+  `batch_queue_max` (4096), `batch_queue_max_bytes` (134217728),
+  `batch_queue_tenant_max` (1024) and `batch_max_inflight` (default
+  `dispatch.sink_concurrency`). New on `/metrics`:
+  `ankusa_sink_batch_{requests,entries,bisections,refused}_total` and
+  `ankusa_sink_batch_{batchers,queued,queued_bytes}`. A batching sink's attempts are
+  no longer counted against `dispatch.sink_concurrency`, a tenant's `concurrency` or
+  `dispatch.concurrency`. See the `ankusa` changelog and
+  [`delivery.md`](../../docs/delivery.md#sinksqs-queue-delivery).
 - **OpenTelemetry tracing (OPS-1).** `tracing: {enabled, otlp_endpoint,
   sample_ratio}` (off by default; `http://localhost:4318`; `1.0`) starts the
   OpenTelemetry SDK and the OTLP/HTTP exporter before the instance, with a
