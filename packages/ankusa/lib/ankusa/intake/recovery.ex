@@ -524,22 +524,16 @@ defmodule Ankusa.Intake.Recovery do
         _unknown -> {nil, [], :unroutable}
       end
 
+    lanes = if source, do: Ankusa.Ordering.lanes(ctx.instance, source, env)
+
     rows =
       sinks
       |> Enum.with_index()
       |> Enum.flat_map(fn {mod, i} ->
-        row =
-          Deliveries.encode_row(%{
-            module: mod,
-            state: :pending,
-            attempts: 0,
-            at: now,
-            error: nil,
-            size: size,
-            source_id: env.source_id
-          })
+        lane = lanes && Enum.at(lanes, i)
+        row = Deliveries.encode_row(Deliveries.new_row(mod, now, size, env.source_id, lane: lane))
 
-        Deliveries.new_ops(ord, now, seq, i, size, row)
+        Deliveries.new_ops(ord, now, seq, i, size, row, lane && elem(lane, 0))
       end)
 
     archive = if ctx.archive?, do: Deliveries.archive_ops(ord, seq, size), else: []

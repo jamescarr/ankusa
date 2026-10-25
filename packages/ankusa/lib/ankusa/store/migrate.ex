@@ -70,7 +70,8 @@ defmodule Ankusa.Store.Migrate do
     {3, 4, Ankusa.Store.Migrations.DedupeCounters},
     {4, 5, Ankusa.Store.Migrations.DlqBytes},
     {5, 6, Ankusa.Store.Migrations.ClaimLeases},
-    {6, 7, Ankusa.Store.Migrations.SegmentRows}
+    {6, 7, Ankusa.Store.Migrations.SegmentRows},
+    {7, 8, Ankusa.Store.Migrations.OrderingLanes}
   ]
 
   @type migration :: {pos_integer(), pos_integer(), module()}

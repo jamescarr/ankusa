@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Sink.Kafka`: with `ordered: true` (core, ADR 0004) the record key is the
+  lane's key and the record carries an `ankusa_ordering_key` header.
+
 ## [0.7.0] - 2026-10-24
 
 ### Added

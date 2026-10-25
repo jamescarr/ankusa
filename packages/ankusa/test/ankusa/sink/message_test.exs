@@ -239,6 +239,23 @@ defmodule Ankusa.Sink.MessageTest do
            ]
   end
 
+  test "a hook of an ordered sink carries its lane's key in the message, headers and attributes",
+       %{ctx: ctx} do
+    env = envelope("x", %{dedupe_key: "evt_1"})
+    ordered = Map.merge(ctx, %{ordering_key: "cus_1", lane: "abc"})
+
+    assert {:ok, json} = Message.encode(env, ordered, 100)
+    assert JSON.decode!(json)["ordering_key"] == "cus_1"
+
+    assert {:ok, plain} = Message.encode(env, ctx, 100)
+    refute Map.has_key?(JSON.decode!(plain), "ordering_key")
+
+    assert List.last(Message.headers(env, ordered)) == {"ankusa_ordering_key", "cus_1"}
+    assert {"ankusa_ordering_key", "cus_1"} in Message.attributes(env, ordered)
+    refute List.keymember?(Message.headers(env, ctx), "ankusa_ordering_key", 0)
+    refute List.keymember?(Message.attributes(env, ctx), "ankusa_ordering_key", 0)
+  end
+
   describe "trace context" do
     @traceparent "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 

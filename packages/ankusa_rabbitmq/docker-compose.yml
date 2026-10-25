@@ -13,7 +13,23 @@ services:
       - "5673:5672"    # AMQP
       - "15673:15672"  # management UI, http://localhost:15673 (guest/guest)
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      # `ping` is green before the AMQP listener is up; the port check is what
+      # says a client can connect (the fault suite restarts the broker).
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping && rabbitmq-diagnostics -q check_port_connectivity"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # Toxiproxy between the sink and the broker: `test/ankusa/sink/rabbitmq_faults_test.exs`
+  # (DEL-7) points the sink at :5674 instead of at the broker, and adds latency,
+  # drops and cut connections through the API on :8475. No other suite uses it.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    ports:
+      - "8475:8474"    # toxiproxy API
+      - "5674:5674"  # proxy to rabbitmq:5672 (AMQP)
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
       interval: 2s
       timeout: 5s
       retries: 30

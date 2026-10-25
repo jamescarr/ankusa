@@ -384,6 +384,16 @@ and `public_key`.
 | `sqs` | `queue_url`, `region`, `endpoint` (default: the queue URL's origin; set it for a VPC endpoint or an emulator), `message_group_id` (a static string), `inline_max_bytes` (65536), `max_message_bytes` (1048576, SQS's limit; body plus message attributes, a larger message is dead-lettered at once), `timeout_ms` (5000), `access_key_id` / `secret_access_key` / `session_token` (omit for the `AWS_*` env, IRSA, or the EC2 instance role). FIFO when `queue_url` ends `.fifo`: the group defaults to `tenant/source` and the deduplication id is the hook id (SQS dedupes for 5 minutes). The queue must already exist. See [`delivery.md`](delivery.md#sinksqs-queue-delivery). |
 | `google_pubsub` | `project`, `topic` (the id, not `projects/…/topics/…`), `endpoint` (default `https://pubsub.googleapis.com`; set it for a regional endpoint or an emulator), `ordering_key` (a static string; default none), `inline_max_bytes` (65536), `max_message_bytes` (10000000, Pub/Sub's limit; data plus attributes plus ordering key, a larger message is dead-lettered at once), `timeout_ms` (5000), `auth` = `metadata` \| `token` \| `none` (default `metadata`: the GCE/GKE metadata server; `token` is required when `auth: token`; `none` sends no credential, for an emulator). The topic must already exist, and a topic with no subscription drops the message. See [`delivery.md`](delivery.md#sinkgooglepubsub-google-cloud-pubsub-delivery). |
 
+Every sink except `log` also takes `ordered` (default `false`) and `ordering_key`
+(`{header: x-entity-id}` or `{json: data.object.customer}`), read by core, not by
+the sink: with `ordered: true` the hooks of one lane (`tenant`, source, sink,
+key) are delivered one at a time, in order. `ordering_key` without
+`ordered: true` is an error, except on `google_pubsub`, where a plain string
+keeps its meaning. `ordered: true` needs `wal.type` `disk` or `dual` and, on `sqs`,
+a `.fifo` queue; a `header` key must survive `store_headers` (the key is shown in
+`/v1/config`, it is not a secret). No instance key is added. See
+[Ordering lanes](delivery.md#ordering-lanes).
+
 The `sqs` and `google_pubsub` sinks batch what dispatch hands them: up to 10
 (SQS) or 1 000 (Pub/Sub) deliveries to one queue or topic go out as one request.
 Each takes these keys, all optional and range-checked when the first delivery

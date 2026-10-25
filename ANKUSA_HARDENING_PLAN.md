@@ -517,12 +517,12 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/sink.ex:24-31`, `dispatch/pipeline.ex:1094-1140`, `sink/sqs.ex:195-211`, `sink/google_pubsub.ex:118-120,159-165`.
   *Evidence:* 2026-10-24 · PR #170 · `mise run check:links` (under the shared lock), CI on the PR · `no relative links escaping README.md/docs/`, exit 0; `docs/adr/0004-ordering-lanes.md` (Context, Decision 1-8, Consequences, Proof) and its `docs/adr/README.md` row added; no product code changed. The ADR registers store format 7 → 8 (`OrderingLanes`, stamp only, fixture `store-v8`), the `?O`/`?H`/`?P` index families, due kinds 2/3 and counters 10-12 for DEL-1.b.
 
-- [ ] **DEL-1.b — Implement ordering lanes** · P1 · Deps: DEL-1.a (after: 51, 47)
+- [x] **DEL-1.b — Implement ordering lanes** · P1 · Deps: DEL-1.a (after: 51, 47)
   *Change:* as decided in the ADR; `docs/delivery.md` ordering section rewritten.
   *Done when:* 100 hooks for one key delivered with a mid-stream retry arrive in order at the receiver; other keys stay concurrent; lanes survive a restart.
   *Proof:* `mix test test/ankusa/dispatch/ordering_test.exs` (new) → `ordered lane`, `other keys concurrent`, `survives restart`; `mise run bench:gate` → PASS.
   *Anchors:* ADR 0004.
-  *Evidence:* —
+  *Evidence:* 2026-10-24 · PR #174 · `mix test test/ankusa/dispatch/ordering_test.exs test/ankusa/sink/message_test.exs` (37 passed, incl. `ordered lane`, `other keys concurrent`, `survives restart`), `mise run check` (repo-wide; every package green except `ankusa_server`'s stale `ordered`-rejected config test, fixed and re-run with `mise run check:package ankusa_server`), `mise run test:crash`, `mise run bench:gate`, `mise run check:links`, the PR's CI (`perf gate`) · core `Result: 1829 passed (50 properties, 1779 tests)`; `ankusa_server` `Result: 196 passed`; `ankusa_kafka` 36, `ankusa_nats` 17, `ankusa_rabbitmq` 33, `ankusa_redis` 79 passed; `test:crash` `acked=14835 recovered=14835 missing=0 enospc_503=1 resumed=true`; `bench:gate` locally: cells `512B`, `10240B` and the new `512B-ordered` (64 lanes) pass (`512B-ordered` ingest 26k/s, p99 18 ms vs the unordered `512B` 26.5k/s, 16.9 ms), `512B-c32` fails on this macOS host (3.67k/s against the github-linux baseline's 11.7k) exactly as `origin/main` does here (A/B of `core_bench` at `CONCURRENCY=32`: main 3.54-3.59k/s, p99 15.8-16.0 ms; this branch 3.42-3.56k/s, p99 15.8-16.7 ms), so the CI `perf gate` on the baseline's runner is the arbiter; the store-v8 fixture boots with its two retrying heads pinned 20 years out (`mix ankusa.store.fixture`), format 7 → 8 stamps only.
 
 - [ ] **DEL-6 — Fleet replay with tenant/sink/error filters and bounded DLQ listing** · P1 · Deps: TEN-1.b
   *Why:* replay filters are `source_id`/`id`/time only (`replay.ex:47-48,140-169`); `GET /v1/dlq` folds the whole dead family (`queue/deliveries.ex:509-575`); jobs are node-local (`dispatch/replayer.ex:34-39`).
@@ -532,13 +532,13 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/replay.ex:40-49,129-170`, `dispatch/replayer.ex:34-39,318-400`, `queue/deliveries.ex:509-575`, `packages/ankusa_server/lib/ankusa_server/cli.ex`.
   *Evidence:* —
 
-- [ ] **DEL-7 — Broker fault injection for every adapter** · P1 · Deps: —
+- [x] **DEL-7 — Broker fault injection for every adapter** · P1 · Deps: —
   *Why:* adapter suites test "unreachable" and one RabbitMQ channel close only (`rabbitmq_test.exs:202,244,335`, `kafka_test.exs:146`, `nats_test.exs:239`); no broker restart mid-publish, no latency or partition injection.
   *Change:* toxiproxy in each adapter's `docker-compose.yml`; tests: broker killed between publish and confirm with `max_inflight` outstanding (RabbitMQ), `produce_timeout_ms` expiry mid-flight (Kafka), JetStream ack loss (NATS), latency above the attempt deadline (all); assert `deliver/3` never returns `:ok` for a message the broker did not retain and the row stays retryable.
   *Done when:* each suite has the four scenarios green and the F5 chaos phase includes a broker restart with `missing: 0`.
   *Proof:* `mise run check:package ankusa_rabbitmq ankusa_kafka ankusa_nats ankusa_redis` → new cases pass.
   *Anchors:* `packages/ankusa_rabbitmq/test`, `packages/ankusa_kafka/test`, `packages/ankusa_nats/test`, each package's `docker-compose.yml`.
-  *Evidence:* —
+  *Evidence:* 2026-10-24 · PR #181 · `mise run check:package` for `ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats`, `ankusa_redis` and `ankusa` (each exit 0, under the shared lock), `mise run check:links`, `mise run check:examples`, `examples/fleet-e2e/run.sh` · `ankusa_rabbitmq` `Result: 36 passed`, `ankusa_kafka` `Result: 39 passed`, `ankusa_nats` `Result: 20 passed`, `ankusa_redis` `Result: 82 passed`, core `Result: 1761 passed`; each adapter's new `*_faults_test.exs` has the four scenarios (broker killed with a publish in flight, the per-publish timeout expiring mid-flight, an acknowledgement lost with its connection, latency above `dispatch.attempt_timeout_ms` through a real dispatch pipeline), asserting `:ok` only for what the broker retained, every other answer transient, the row not dead-lettered and delivered once the fault clears · fleet e2e chaos phase with `RabbitMQ` restarted at +36 s: `verify: wal=disk missing=0 sha_mismatches=0 extra_deliveries=20 claim_redeemed_cross_node=true duplicate_hooks=0`. Toxiproxy (`ghcr.io/shopify/toxiproxy:2.12.0`) added to each adapter's compose file; Redpanda gained a `proxied` listener advertising the proxy; the RabbitMQ healthcheck now also waits for the AMQP port. The RabbitMQ kill scenario kills the broker with 4 confirms held in the proxy: an answer is `:ok` only for a message the broker kept across the kill (checked against the durable queue), otherwise a retryable error; a proxy holding data also holds the connection close, so the test removes the toxic after the kill.
 
 ### Phase 5 — Observability and operations
 

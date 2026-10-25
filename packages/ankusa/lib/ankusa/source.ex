@@ -21,8 +21,12 @@ defmodule Ankusa.Source do
     # with no verifier must set this: it accepts that the request names the
     # tenant, unverified (see `Ankusa.Verifier.validate_shared!/1`)
     trust_url_tenant: false,
-    # [{module, opts}] implementing Ankusa.Sink
+    # [{module, opts}] implementing Ankusa.Sink. `ordered` and `ordering_key` are
+    # read off each entry by `Ankusa.Ordering` and are not in the opts a sink sees
     sinks: [{Ankusa.Sink.Log, []}],
+    # nil (no sink is ordered), or one `Ankusa.Ordering.sink_ordering()` per sink
+    # (ADR 0004): `nil` for an unordered sink, `{:ordered, key spec | nil}` else
+    ordering: nil,
     # %Ankusa.Dedupe{} or nil; the provider event key collapsed at ingest
     dedupe: nil,
     # :default | [header names]; provider request headers forwarded to sinks
@@ -51,6 +55,7 @@ defmodule Ankusa.Source do
           on_verify_failure: policy(),
           trust_url_tenant: boolean(),
           sinks: [{module(), keyword()}],
+          ordering: [Ankusa.Ordering.sink_ordering()] | nil,
           dedupe: Ankusa.Dedupe.t() | nil,
           forward_headers: :default | [String.t()],
           max_headers: pos_integer(),
@@ -70,6 +75,9 @@ defmodule Ankusa.Source do
     tenant_id = Map.get(opts, :tenant_id, "default")
     trust = Map.get(opts, :trust_url_tenant, false)
 
+    {sinks, ordering} =
+      Ankusa.Ordering.normalize_sinks!(id, Map.get(opts, :sinks, [{Ankusa.Sink.Log, []}]))
+
     unless Ankusa.ClaimCheck.Ref.valid_tenant?(tenant_id) do
       raise ArgumentError,
             "source #{inspect(id)}: tenant_id #{inspect(tenant_id)} must match [A-Za-z0-9_-]{1,64}"
@@ -86,7 +94,8 @@ defmodule Ankusa.Source do
       verifier: Map.get(opts, :verifier, {Ankusa.Verifier.None, []}),
       on_verify_failure: Map.get(opts, :on_verify_failure, :reject),
       trust_url_tenant: trust,
-      sinks: Map.get(opts, :sinks, [{Ankusa.Sink.Log, []}]),
+      sinks: sinks,
+      ordering: ordering,
       dedupe: Ankusa.Dedupe.new!(Map.get(opts, :dedupe)),
       forward_headers: forward_headers(id, Map.get(opts, :forward_headers, :default)),
       max_headers:

@@ -361,11 +361,25 @@ The always-on tests cover:
   restart while a delivered row is not (D7); a row that became visible below
   the scan floor (a stalled commit) is delivered when its wake arrives; and a
   window that drained is refilled even when housekeeping flushes the outcomes
-  first. Ordering is not asserted: lanes are gone. `replay_test.exs` covers
+  first. Ordering is asserted only for `ordered: true` sinks (below). `replay_test.exs` covers
   the replay jobs, including a `quarantine` job that leaves a hook failing the
   current secret in the pen, releases it once the secret is rotated (past the
   timestamp tolerance: the window is judged at receive time) with its original
   id and the job's `replay_id`, and finds nothing left on a second run.
+- **Ordering lanes (DEL-1.b, ADR 0004)** (`dispatch/ordering_test.exs`,
+  `source_ordering_test.exs`, `queue/deliveries_test.exs`,
+  `store_upgrade_test.exs`): `ordered lane` (100 hooks for one key with a
+  mid-stream retry arrive in order, one attempt of the lane in flight at a
+  time), `other keys concurrent` (a slow lane holds no slot, window room or
+  process), `survives restart` (a busy lane, a retrying head and their members),
+  `dead head releases lane`, `replay respects lanes`, `keyless lane`, `key
+  missing counter`, `racing writer` (a member committed between a release's
+  read and its write is promoted by the sweep) and the `lane invariant`
+  property (random ingest, claim, retry, delivered, dead, revive and purge:
+  every `?O` has an `?H` or `?P`, every `?H` names one row of `?D`/`?F`,
+  counters equal a fold). `source_ordering_test.exs` is the option grammar and
+  lane resolution; the 7 → 8 migration and the `store-v8` fixture (a busy lane,
+  a lane whose head waits out a retry, a keyless lane) are in the upgrade test.
 - **Dispatch, retry horizon and error classes (DEL-2)** (`dispatch_test.exs`,
   `retry_policy_exponential_test.exs`, `retry_policy_test.exs`,
   `sink/{sqs,google_pubsub,http}_test.exs`): a row 7 h in with 200 attempts
@@ -857,6 +871,67 @@ failing fast (`:econnrefused`, not a hang). Every publish in the suite goes to
 a per-test unique channel and instance, so tests never see each other's
 messages.
 
+## Broker fault injection: toxiproxy (`*_faults_test.exs`)
+
+Each broker adapter's suite has a fault suite beside its happy-path one
+(`ankusa_rabbitmq/test/ankusa/sink/rabbitmq_faults_test.exs`,
+`ankusa_kafka/…/kafka_faults_test.exs`, `ankusa_nats/…/nats_faults_test.exs`,
+`ankusa_redis/…/redis_faults_test.exs`). The adapter's `docker-compose.yml` runs
+a [toxiproxy](https://github.com/Shopify/toxiproxy) service beside the broker,
+the sink under test is pointed at the proxy instead of the broker, and the test
+adds latency, drops or a cut connection to the proxy through its HTTP API, or
+`docker compose kill`s the broker itself and starts it again. The test's own
+reads (what did the broker retain?) go straight to the broker.
+
+| Package | Proxy listens on | Toxiproxy API | Broker killed (`docker compose kill`) |
+| --- | --- | --- | --- |
+| `ankusa_rabbitmq` | `:5674` → `rabbitmq:5672` | `:8475` | `rabbitmq` |
+| `ankusa_kafka` | `:19093` → `redpanda:9093` (a `proxied` listener that advertises the proxy, so a client bootstrapped through it stays on it) | `:8476` | `redpanda` |
+| `ankusa_nats` | `:4224` → `nats:4222` | `:8477` | `nats` (streams in the suite use file storage so they outlive it) |
+| `ankusa_redis` | `:6400` → `redis:6379` | `:8478` | `redis` |
+
+`TOXIPROXY_URL` and the adapter's `*_PROXY_*` variable (named in each suite's
+`@moduledoc`) point a suite at another toxiproxy. The shared harness
+(`Ankusa.Toxiproxy`, `Ankusa.BrokerFaults`) is
+`packages/ankusa/test/support/broker_faults.exs`; each adapter's
+`test_helper.exs` loads it and core's suite never does.
+
+The contract every suite asserts: **`deliver/3` answers `:ok` only for a message
+the broker retained, every other answer is a transient error (never
+`{:permanent, _}`), and a row dispatch retries lands once the broker is back.**
+An error does not mean "not stored" (a confirm that was lost, or arrived after
+the caller's deadline, is a stored message: delivery is at-least-once), so each
+suite also reads the broker to show that the message of a failed attempt is
+there, and what the retry added. Four scenarios, each in every suite:
+
+- **the broker killed with a publish in flight.** RabbitMQ: `max_inflight`
+  publishes (4) wait on their confirms, a fifth is `{:error, :busy}`, the broker
+  is killed; every answer is `:ok` (only for what the broker had kept across the
+  kill) or a retryable error, and the retries arrive. Kafka and NATS: the
+  acknowledgement is held in the proxy while the broker is killed; the delivery
+  fails retryably, the retry lands (NATS: the stream holds the message once,
+  `Nats-Msg-Id`). Redis: the `PUBLISH` is held in the proxy when the server
+  dies, so no subscriber ever receives it; the delivery fails retryably and the
+  retry reaches a fresh subscriber.
+- **the per-publish timeout expiring mid-flight** (`confirm_timeout_ms`,
+  `produce_timeout_ms`, `publish_timeout_ms`): the reply is delayed past the
+  timeout, the answer is that timeout's error, and the broker holds the message
+  anyway.
+- **an acknowledgement lost with its connection** (RabbitMQ's confirm, Kafka's
+  produce ack, JetStream's publish ack, Redis's `PUBLISH` reply): the broker
+  stores the message, the proxy drops the reply and cuts the connection; the
+  answer is a retryable error, the broker holds the message, and the retry is
+  answered `:ok`.
+- **latency above the attempt deadline.** The sink runs inside a real dispatch
+  pipeline (`dispatch.attempt_timeout_ms` 1 s) against a reply delayed to 3 s:
+  the attempt is killed and counted as failed, the row is **not** dead-lettered
+  and stays due, and once the latency is gone dispatch delivers it (NATS: the
+  stream holds it once).
+
+`examples/fleet-e2e/run.sh`'s chaos phase adds the whole-fleet version: RabbitMQ
+restarts at +36 s under the paced load, and the run still ends `missing=0`
+(below).
+
 ## SDK conformance: one harness across the SDKs
 
 `packages/sdk-python`, `packages/sdk-typescript`, `packages/sdk-rust`,
@@ -1175,17 +1250,27 @@ A hot-path change must not make ingest slower unnoticed, so
 [`bench/gate.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/gate.exs)
 runs the bench for `BODY_BYTES` 512 and 10240 (`N=20000`, `CONCURRENCY=256`,
 `SINK_LATENCY_MS=5`) and for 512 bytes at `CONCURRENCY=32`, three runs each,
-takes the median of every metric per cell (`512B`, `10240B`, `512B-c32`),
+takes the median of every metric per cell (`512B`, `10240B`, `512B-c32`,
+`512B-ordered`),
 writes `packages/ankusa/bench/last.json`, and compares it with the checked-in
 [`bench/baseline.json`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/baseline.json)
 (`{"512B": {"ingest_per_s", "p50_ms", "p99_ms", "end_to_end_per_s"}, "10240B":
-{...}, "512B-c32": {...}, "runner": "<class>"}`). It prints a table with the
+{...}, "512B-c32": {...}, "512B-ordered": {...}, "runner": "<class>"}`). It prints a table with the
 delta per metric and fails when a cell's `p99_ms` is above 1.2× the baseline or
 its `ingest_per_s` below 0.8× it:
 
 ```text
 FAIL p99_ms 512B-c32: 45.10 > 1.2×21.60 (limit 25.92)
 ```
+
+The `-ordered` cell is the `512B` cell with the source's sink `ordered: true`
+(`ORDERED=1`: 64 keys, so 64 lanes run at once; ADR 0004): the cost of the lane
+key at ingest (`ankusa_dispatch_lane*`), the member put and the sweep. Measured on
+one machine (`BENCH_REBASELINE=1`) it runs within 3 % of `512B` on `ingest_per_s`
+(27 596 vs 28 313) and no slower on `p99_ms` (15.4 vs 17.2 ms); its checked-in
+entry is the `github-linux-x64` `512B` entry with `ingest_per_s` scaled by that
+ratio (22 772), p99 unchanged. An unordered source pays one counter read per scan
+(`lane_members == 0` gates the sweep): the three older cells did not move.
 
 The `-c32` cell exists because of Little's law. At 256 workers the pipeline is
 throughput-bound and latency is simply 256 ÷ throughput, so a fixed delay in
@@ -1353,7 +1438,10 @@ Phases: **steady** (paced, through the load balancer); **fat hooks** (a 20 KB
 body POSTed to each node directly must reach the consumer through a claim, with
 its sha256 intact: `claim_redeemed_cross_node`); **chaos** (the same load, with
 `ankusa-a` killed at +10 s and started at +20 s, one event delivered to node b
-and then *retried on node a*, and the consumer killed at +30 s); **burst**
+and then *retried on node a*, the consumer killed at +30 s, and RabbitMQ
+restarted at +36 s with the load still being acked, DEL-7: the nodes' publishes
+in flight fail and are retried, and the consumer starts afresh once the broker
+accepts connections); **burst**
 (closed loop). Each phase is verified; the run fails on any `missing`,
 `sha_mismatches` or `duplicate_hooks`.
 
