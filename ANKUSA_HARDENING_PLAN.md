@@ -532,13 +532,13 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/replay.ex:40-49,129-170`, `dispatch/replayer.ex:34-39,318-400`, `queue/deliveries.ex:509-575`, `packages/ankusa_server/lib/ankusa_server/cli.ex`.
   *Evidence:* —
 
-- [ ] **DEL-7 — Broker fault injection for every adapter** · P1 · Deps: —
+- [x] **DEL-7 — Broker fault injection for every adapter** · P1 · Deps: —
   *Why:* adapter suites test "unreachable" and one RabbitMQ channel close only (`rabbitmq_test.exs:202,244,335`, `kafka_test.exs:146`, `nats_test.exs:239`); no broker restart mid-publish, no latency or partition injection.
   *Change:* toxiproxy in each adapter's `docker-compose.yml`; tests: broker killed between publish and confirm with `max_inflight` outstanding (RabbitMQ), `produce_timeout_ms` expiry mid-flight (Kafka), JetStream ack loss (NATS), latency above the attempt deadline (all); assert `deliver/3` never returns `:ok` for a message the broker did not retain and the row stays retryable.
   *Done when:* each suite has the four scenarios green and the F5 chaos phase includes a broker restart with `missing: 0`.
   *Proof:* `mise run check:package ankusa_rabbitmq ankusa_kafka ankusa_nats ankusa_redis` → new cases pass.
   *Anchors:* `packages/ankusa_rabbitmq/test`, `packages/ankusa_kafka/test`, `packages/ankusa_nats/test`, each package's `docker-compose.yml`.
-  *Evidence:* —
+  *Evidence:* 2026-10-24 · PR #181 · `mise run check:package` for `ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats`, `ankusa_redis` and `ankusa` (each exit 0, under the shared lock), `mise run check:links`, `mise run check:examples`, `examples/fleet-e2e/run.sh` · `ankusa_rabbitmq` `Result: 36 passed`, `ankusa_kafka` `Result: 39 passed`, `ankusa_nats` `Result: 20 passed`, `ankusa_redis` `Result: 82 passed`, core `Result: 1761 passed`; each adapter's new `*_faults_test.exs` has the four scenarios (broker killed with a publish in flight, the per-publish timeout expiring mid-flight, an acknowledgement lost with its connection, latency above `dispatch.attempt_timeout_ms` through a real dispatch pipeline), asserting `:ok` only for what the broker retained, every other answer transient, the row not dead-lettered and delivered once the fault clears · fleet e2e chaos phase with `RabbitMQ` restarted at +36 s: `verify: wal=disk missing=0 sha_mismatches=0 extra_deliveries=20 claim_redeemed_cross_node=true duplicate_hooks=0`. Toxiproxy (`ghcr.io/shopify/toxiproxy:2.12.0`) added to each adapter's compose file; Redpanda gained a `proxied` listener advertising the proxy; the RabbitMQ healthcheck now also waits for the AMQP port. The RabbitMQ kill scenario kills the broker with 4 confirms held in the proxy: an answer is `:ok` only for a message the broker kept across the kill (checked against the durable queue), otherwise a retryable error; a proxy holding data also holds the connection close, so the test removes the toxic after the kill.
 
 ### Phase 5 — Observability and operations
 
