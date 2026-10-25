@@ -1,7 +1,7 @@
 defmodule AnkusaServer.SecretsTest do
   @moduledoc """
   Secret sources (`${file:}`, `secret_file:`, `${sm:}`) and rotation without a
-  redeploy (`AnkusaServer.Secrets.reload/2`), from the operator's side: a file
+  redeploy (`AnkusaServer.Reload`), from the operator's side: a file
   on disk, a secret manager that answers (or does not), and a running instance
   that verifies signed POSTs before and after.
 
@@ -13,7 +13,7 @@ defmodule AnkusaServer.SecretsTest do
 
   import ExUnit.CaptureLog
 
-  alias AnkusaServer.{Config, ConfigError, Secrets}
+  alias AnkusaServer.{Config, ConfigError, Reload}
 
   @moduletag capture_log: true
 
@@ -530,12 +530,12 @@ defmodule AnkusaServer.SecretsTest do
         id: instance
       )
 
-      Secrets.remember(instance, loaded.secrets)
+      Reload.remember(instance, loaded)
       %{instance: instance, path: path, env: env}
     end
 
     defp reload(node, opts \\ []),
-      do: Secrets.reload(node.instance, [path: node.path, env: node.env] ++ opts)
+      do: Reload.reload(node.instance, [path: node.path, env: node.env] ++ opts)
 
     test "a secret file swap and a reload verifies with the new secret; the old stays valid until removed",
          %{dir: dir} do
@@ -554,14 +554,14 @@ defmodule AnkusaServer.SecretsTest do
       # nothing changes until the reload
       assert post(node.instance, "s2") == 401
 
-      assert {:ok, %{changed: ["gh"], kept: []}} = reload(node)
+      assert {:ok, %{sources: ["gh"], kept: []}} = reload(node)
       assert post(node.instance, "s2") == 201
       assert post(node.instance, "s1") == 201
       assert post(node.instance, "s0") == 401
 
       # the window closes: the file list drops the old secret
       File.write!(node.path, String.replace(File.read!(node.path), ", #{previous}", ""))
-      assert {:ok, %{changed: ["gh"]}} = reload(node)
+      assert {:ok, %{sources: ["gh"]}} = reload(node)
       assert post(node.instance, "s2") == 201
       assert post(node.instance, "s1") == 401
     end
@@ -570,7 +570,7 @@ defmodule AnkusaServer.SecretsTest do
       file = write_secret(dir, "s", "same")
       node = boot(github("secret_file: #{file}"))
 
-      assert {:ok, %{changed: [], kept: []}} = reload(node)
+      assert {:ok, %{keys: [], sources: [], kept: []}} = reload(node)
       assert post(node.instance, "same") == 201
     end
 
@@ -582,13 +582,9 @@ defmodule AnkusaServer.SecretsTest do
       stub_set(stub, &%{&1 | down?: true, vault: %{"ankusa/gh" => %{"whsec" => "v2"}}})
 
       log = capture_log(fn -> send(self(), reload(node)) end)
-      assert_received {:ok, %{changed: [], kept: [kept]}}
+      assert_received {:ok, %{sources: [], kept: [kept]}}
 
-      assert kept == %{
-               ref: "${sm:vault:ankusa/gh#whsec}",
-               path: "sources.gh.verify.secret",
-               reason: :unavailable
-             }
+      assert kept == %{path: "sources.gh.verify.secret", reason: "unavailable"}
 
       assert log =~ "warning"
       assert log =~ "secret reload: ${sm:vault:ankusa/gh#whsec} (sources.gh.verify.secret)"
@@ -598,7 +594,7 @@ defmodule AnkusaServer.SecretsTest do
       assert post(node.instance, "v2") == 401
 
       stub_set(stub, &%{&1 | down?: false})
-      assert {:ok, %{changed: ["gh"], kept: []}} = reload(node)
+      assert {:ok, %{sources: ["gh"], kept: []}} = reload(node)
       assert post(node.instance, "v2") == 201
       assert post(node.instance, "v1") == 401
     end
@@ -608,7 +604,7 @@ defmodule AnkusaServer.SecretsTest do
       node = boot(github("secret_file: #{file}"))
 
       File.rm!(file)
-      assert {:ok, %{changed: [], kept: [%{reason: :enoent}]}} = reload(node)
+      assert {:ok, %{sources: [], kept: [%{reason: "enoent"}]}} = reload(node)
       assert post(node.instance, "kept-secret") == 201
     end
 
@@ -617,10 +613,10 @@ defmodule AnkusaServer.SecretsTest do
       node = boot(providers(stub, "cache_ttl_ms: 60000") <> github(~s(secret: "${sm:vault:p#v}")))
       stub_set(stub, &%{&1 | vault: %{"p" => %{"v" => "c2"}}})
 
-      assert {:ok, %{changed: []}} = reload(node)
+      assert {:ok, %{sources: []}} = reload(node)
       assert post(node.instance, "c1") == 201
 
-      assert {:ok, %{changed: ["gh"]}} = reload(node, refresh: true)
+      assert {:ok, %{sources: ["gh"]}} = reload(node, refresh: true)
       assert post(node.instance, "c2") == 201
       assert post(node.instance, "c1") == 401
     end
@@ -632,7 +628,7 @@ defmodule AnkusaServer.SecretsTest do
 
       # a new reference with no previous value cannot be kept
       File.write!(node.path, String.replace(original, file, Path.join(dir, "new-and-missing")))
-      assert {:error, %ConfigError{message: message}} = reload(node)
+      assert {:error, {:invalid_config, message}} = reload(node)
 
       assert message =~
                "sources.gh.verify.secret_file: ${file:#{Path.join(dir, "new-and-missing")}}: file not found"
@@ -641,7 +637,7 @@ defmodule AnkusaServer.SecretsTest do
 
       # a file that no longer parses
       File.write!(node.path, "sources: [unclosed")
-      assert {:error, %ConfigError{}} = reload(node)
+      assert {:error, {:invalid_config, _message}} = reload(node)
       assert post(node.instance, "stays") == 201
 
       # a source the instance would refuse to boot with
@@ -651,14 +647,14 @@ defmodule AnkusaServer.SecretsTest do
         |> String.replace("type: github", "type: standard_webhooks")
       )
 
-      assert {:error, %ConfigError{} = error} = reload(node)
-      assert error.message == "source gh: verifier secret is missing or undecodable"
+      assert {:error, {:invalid_config, message}} = reload(node)
+      assert message == "source gh: verifier secret is missing or undecodable"
       assert post(node.instance, "stays") == 201
     end
 
     test "an instance that is not running is an error" do
-      assert {:error, %ConfigError{message: "instance :nobody is not running"}} =
-               Secrets.reload(:nobody, path: config_file(github("secret: x")), env: %{})
+      assert {:error, {:invalid_config, "instance :nobody is not running"}} =
+               Reload.reload(:nobody, path: config_file(github("secret: x")), env: %{})
     end
 
     test "a store that keeps its sources elsewhere is told, not silently skipped" do
@@ -673,9 +669,12 @@ defmodule AnkusaServer.SecretsTest do
       path = config_file(yaml)
       loaded = Config.load!(path: path, env: %{})
       start_supervised!({Ankusa.Instance, %{loaded.config | instance: instance, port: 0}})
+      Reload.remember(instance, loaded)
 
-      log = capture_log(fn -> send(self(), Secrets.reload(instance, path: path, env: %{})) end)
-      assert_received {:ok, %{changed: [], kept: []}}
+      # the file's sources are seeds for this store: a changed one is reported, and not applied
+      File.write!(path, String.replace(yaml, "secret: x", "secret: y"))
+      log = capture_log(fn -> send(self(), Reload.reload(instance, path: path, env: %{})) end)
+      assert_received {:ok, %{keys: ["sources.gh.verify.secret"], sources: [], kept: []}}
       assert log =~ "does not run source_store.type: static"
     end
   end

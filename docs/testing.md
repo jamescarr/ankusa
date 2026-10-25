@@ -357,10 +357,28 @@ The always-on tests cover:
   resolves through a loopback stub of Vault KV v2 and AWS `GetSecretValue`
   (SigV4 header, token header, a JSON field, a binary secret) and a missing or
   unreachable secret fails the boot naming the reference; a signed POST
-  verifies with the new secret after a file swap and a reload while the old one
-  stays valid until it leaves the list; a manager outage or a deleted file at
-  reload keeps the last value and logs a warning; a reload that cannot be
-  applied changes nothing; an API-submitted spec cannot name a file.
+  verifies with the new secret after a file swap and a reload (`AnkusaServer.Reload`)
+  while the old one stays valid until it leaves the list; a manager outage or a
+  deleted file at reload keeps the last value and logs a warning; a reload that
+  cannot be applied changes nothing; an API-submitted spec cannot name a file.
+- **Config reload and `config_version`** (`ankusa/test/ankusa/reload_test.exs`;
+  `ankusa_server/test/ankusa_server/reload_test.exs`, `config_test.exs`): core's
+  `apply_config/3` applies the reloadable set to a running instance and keeps
+  every other field (a rate limit read on the next request, the dispatch
+  pipeline's limits, the gauge poller and metric definitions rebuilt, the seed's
+  difference through the routes API with API routes left alone, static sources),
+  refuses a config that would not boot with nothing applied and no audit row, and
+  records a seed route that collides with an API route as a `failed` row;
+  `POST /v1/config/reload` is `401` / `403` and maps each answer of the loader to
+  its status. The server suite boots an instance from a YAML file, edits the
+  file and reloads over the admin router: `applies reloadable` (`log.level`, a
+  tenant rate limit, a source secret, the seed and `dispatch.concurrency` all
+  change with no restart, one audit row names the keys), `refuses non-reloadable`
+  (a changed `http.port` is `409` naming it and nothing else in the file is
+  applied), a level set at runtime survives a reload that leaves `log` alone, a
+  file that no longer loads is `422`, and a real `SIGHUP` reloads as the system.
+  `config_test.exs` covers `config_version`: absent is 1, a newer version or a
+  non-integer is refused naming the key, `migrate!/3` runs each step.
 - **Dispatch** (`dispatch_test.exs`): a hook reaches every sink of its source
   exactly once; a failing sink is retried until it succeeds; a failing sink's
   retries do not hold the slots a healthy source needs (D1); one dead row per

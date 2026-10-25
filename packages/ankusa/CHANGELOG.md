@@ -23,6 +23,20 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `deploy/monitoring/` and `docs/runbooks/`, checked by
   `mise run check:monitoring`; see
   [`architecture.md`](../../docs/architecture.md#alerts-dashboard-and-runbooks).
+- **Config reload (OPS-6).** `Ankusa.Reload`: the seam a loader reloads an
+  instance through. `register/2` / `run/2` hold the instance's reload function;
+  `apply_config/3` takes the reloadable fields of a validated `%Ankusa.Config{}`
+  (`rate_limits` but `scope`, `dispatch.concurrency`, `dispatch.sink_concurrency`,
+  `dispatch.tenants`, `metrics.detail`, `admin.gauge_interval_ms`, `routes.seed`,
+  static sources) and applies them to the running instance atomically, after the
+  checks the instance boots under, with one `config.reload` audit row
+  (`result: ok | failed`). `POST /v1/config/reload` (scope `config:write` +
+  `tenant:*`) runs it: `200` with the keys and source ids that changed, `409
+  not_reloadable` naming the keys that need a restart, `409 reload_unavailable`
+  for an instance with no reload registered, `422 invalid_config`, `503
+  audit_backlog` / `store_unavailable`. `Ankusa.Dispatch.Pipeline.reconfigure/1`
+  takes new dispatch limits without dropping a claimed or running delivery;
+  `Ankusa.SourceStore.Static.with_sources/2` is what `publish/2` now builds on.
 - **A Salesforce dedupe preset and a boot warning for a source with no dedupe
   (CON-3).** `dedupe: :salesforce` is `{:json, ["id"]}`: Salesforce stamps no
   delivery-id header and documents no JSON delivery id on any outbound mechanism

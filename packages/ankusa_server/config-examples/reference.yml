@@ -15,6 +15,16 @@
 # Anything you can also set with an ANKUSA_* env var is marked [env]; env wins
 # over this file, which is how a container gets reconfigured without a rebuild.
 
+# The version of this file's format (default 1 when absent). An image reads every
+# version up to its own, migrating an older file as it loads, and refuses a newer
+# one. A running node re-reads the file on SIGHUP or `POST /v1/config/reload`
+# (scope config:write + tenant:*, audited) and applies `log`, `rate_limits` (not
+# `scope`), static `sources`, `routes.seed`, `dispatch.concurrency`,
+# `dispatch.sink_concurrency`, `dispatch.tenants`, `metrics.detail` and
+# `admin.gauge_interval_ms`; a change to any other key is refused with `409`
+# naming it, and needs a restart. See docs/configuration.md#reloading-the-config.
+config_version: 1
+
 node:
   # [env ANKUSA_ROLES] which OTP roles run here. One all-roles process is fine
   # to start with; split for scale (edge in front, dispatch+storage behind).
@@ -960,10 +970,10 @@ source_store:
 # `providers`; `#<field>` picks one field of a JSON secret). A source's
 # `secret_file: /abs/path` (or a list) is `secret:` read from a file. A
 # provider's own credentials come from ${VAR} or ${file:}, never another ${sm:}.
-# Unresolvable at boot is a load error naming the key; on a reload
-# (`AnkusaServer.Secrets.reload(:default)` from a `remote` shell) a reference
-# that fails keeps its last value and logs a warning, so a rotated secret
-# takes effect without a restart. See docs/configuration.md#secret-sources.
+# Unresolvable at boot is a load error naming the key; on a reload (SIGHUP, or
+# `POST /v1/config/reload`) a reference that fails keeps its last value and logs
+# a warning, so a rotated secret takes effect without a restart. See
+# docs/configuration.md#secret-sources.
 #   cache_ttl_ms: 0         # reuse a ${sm:} value fetched within this many ms (0..86400000)
 #   providers:
 #     prod-vault:
