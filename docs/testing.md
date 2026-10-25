@@ -103,7 +103,7 @@ The always-on tests cover:
   (`reopen backoff`), and starts the backoff over once it opens
   (`metrics_test.exs` scrapes `ankusa_store_write_failures_total`,
   `ankusa_store_reopen_total`, `ankusa_store_unavailable_seconds` and
-  `ankusa_store_wal_replay_seconds`, and `health_test.exs` the `reason`); the database opens with the recovery, blob and buffer
+  `ankusa_store_wal_replay_seconds`, and `health_test.exs` the `reasons.store`); the database opens with the recovery, blob and buffer
   settings asked for (read back from the `OPTIONS` file RocksDB writes, since
   RocksDB keeps its default for a value it cannot parse). The queue writer
   assigns dense, strictly
@@ -973,7 +973,7 @@ mise run test:crash
   missing start of fragmented record`), and the node never resumed; with it,
   eight consecutive runs passed.
 - **What the drills assert about the store's failure reporting.** While the
-  fault is on, `/ready` answers `503` with a `reason` (`no_space` for the
+  fault is on, `/ready` answers `503` with a `reasons.store` (`no_space` for the
   tmpfs, `io_error`/`read_only` for the device), and after the node resumed the
   metrics listener (`METRICS_PORT`, 4001 in the drill) must show
   `ankusa_store_write_failures_total{class}` and `ankusa_store_reopen_total{result}`;
@@ -1031,7 +1031,17 @@ sink's deliveries, the log's records):
   runs) twice and with `--dry-run`, a clean stop leaving the offset at the log
   head, and the offset staying below a record only the log holds.
 - `config_test.exs` (every `intake.*` range and the cross-key rules, the
-  `/v1/config` redaction), `health_test.exs` (`intake` up, down, recovering).
+  `/v1/config` redaction), `health_test.exs` (`intake` ok, failing as `down`, failing as `recovering`).
+- `health_test.exs` (OPS-5): the readiness checks and their gating. A
+  direct-mode (`wal: :none`) instance whose sink fails is `503` with `sinks:
+  failing` and ready again once the sink publishes (or after
+  `listener.ready_sink_error_window_ms`); a data dir under `listener.ready_min_free_bytes` is
+  `503` with `disk: failing` (`unmeasured` without `:os_mon`); a backlog over
+  `queue.max_oldest_due_ms` is `backlog: failing` with a `200`; a check that
+  reports `draining` gates, and one that raises is `failing` (reason `error`)
+  without crashing the probe. `backup_test.exs` covers `backup` ok/failing and
+  `require_fresh`; `edge_test.exs` the `/ready` body over HTTP;
+  `admin/router_test.exs` that `/v1/config` shows the new keys.
 
 `bench/intake_bench.exs` (`MIX_ENV=test mix run bench/intake_bench.exs`, also run
 by `mise run bench:gate`) compares `wal: :dual` with `wal: :disk` in one VM:

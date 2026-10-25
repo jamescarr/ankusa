@@ -13,8 +13,10 @@ defmodule Ankusa.Config do
             port: 4000,
             # limits for every HTTP listener this instance runs (the edge, the admin
             # and route-management APIs, the claim-check gateway, the metrics
-            # listener), and the TLS block of the ingest listener (see
-            # `Ankusa.Listener`).
+            # listener), the TLS block of the ingest listener (see
+            # `Ankusa.Listener`), and the two thresholds of the `/ready` every
+            # listener serves beyond the store (`Ankusa.Health`; YAML
+            # `health.sink_error_window_ms` and `node.min_free_bytes`).
             listener: %{
               # nil, or %{certfile, keyfile, cacertfile, verify, versions, ciphers}
               tls: nil,
@@ -33,7 +35,18 @@ defmodule Ankusa.Config do
               max_requests_per_connection: 1_000,
               max_header_count: 64,
               max_header_length: 16_384,
-              http2: false
+              http2: false,
+              # `wal: :none` only: a sink whose last publish failed within this
+              # long ago makes `/ready` answer 503 (`sinks: "failing"`). The
+              # provider's retry is the only retry in that mode, so a broker that
+              # refuses every publish should leave the load balancer. An integer
+              # >= 1.
+              ready_sink_error_window_ms: 5_000,
+              # nil | the free bytes `data_dir`'s file system must keep: below it
+              # `/ready` answers 503 (`disk: "failing"`). Needs `:os_mon` (the
+              # server image starts it); without it the free space cannot be
+              # measured and the check fails. nil = no disk check. An integer >= 1.
+              ready_min_free_bytes: nil
             },
             # {module, opts} implementing Ankusa.RouteResolver (URL scheme → identity)
             route_resolver: {Ankusa.RouteResolver.Path, []},
@@ -146,6 +159,11 @@ defmodule Ankusa.Config do
             # archived refuses new hooks with `503 dlq_full` instead of deleting
             # an acked one. Integers >= 1.
             #
+            # `max_oldest_due_ms` is the readiness threshold on the backlog: once
+            # the oldest due row has waited longer, `GET /ready` says
+            # `backlog: "failing"` (a label; the node stays ready). `nil` = no
+            # backlog check. An integer >= 1.
+            #
             # `rocksdb` is the RocksDB settings of the node's store
             # (`Ankusa.Store`), read when the database opens (a change needs a
             # restart) and again by every reopen. It lives here, not in a section
@@ -170,6 +188,7 @@ defmodule Ankusa.Config do
             # `/v1/config` shows the section as it is.
             queue: %{
               dlq: %{retention_days: 30, max_rows: 10_000_000, max_bytes: 53_687_091_200},
+              max_oldest_due_ms: nil,
               rocksdb: %{
                 block_cache_bytes: 64 * 1024 * 1024,
                 bloom_bits_per_key: 10,
@@ -871,6 +890,7 @@ defmodule Ankusa.Config do
     {[:claim_check, :read_cache_max_entry_bytes], "claim_check.read_cache_max_entry_bytes"},
     {[:backup, :interval_ms], "backup.interval_ms"},
     {[:backup, :keep], "backup.keep"},
+    {[:listener, :ready_sink_error_window_ms], "listener.ready_sink_error_window_ms"},
     {[:backup, :timeout_ms], "backup.timeout_ms"},
     {[:backup, :final_timeout_ms], "backup.final_timeout_ms"},
     {[:admin, :gauge_interval_ms], "admin.gauge_interval_ms"},
@@ -994,7 +1014,9 @@ defmodule Ankusa.Config do
 
     for {path, key} <- [
           {[:claim_check, :retention_days], "claim_check.retention_days"},
-          {[:claim_check, :bucket_expiry_days], "claim_check.bucket_expiry_days"}
+          {[:claim_check, :bucket_expiry_days], "claim_check.bucket_expiry_days"},
+          {[:listener, :ready_min_free_bytes], "listener.ready_min_free_bytes"},
+          {[:queue, :max_oldest_due_ms], "queue.max_oldest_due_ms"}
         ] do
       check!(config, path, key, "nil or an integer >= 1", &nil_or_positive?/1)
     end
