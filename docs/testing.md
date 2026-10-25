@@ -1150,15 +1150,19 @@ one class differ by a factor of two in speed from job to job (the same code
 ran at 23 000 and at 50 000 hooks/s on two `ubuntu-latest` runners), so the CI
 job does not compare with `baseline.json`: it measures the pull request's base
 commit on its own runner first (`BENCH_REBASELINE=1 BENCH_BASELINE=<temp
-file>` over the base's `lib/`, `priv/` and `config/` with this change's bench
-scripts), then gates the change against that. It falls back to the checked-in
-`baseline.json` only when there is no base commit to measure or `mix.exs` /
-`mix.lock` changed. `baseline.json` (`runner: github-linux-x64`) is the
-reference for local runs on a comparable machine; a run on another runner
-class prints a `WARN` (a laptop is usually faster than the CI runner, so it
-passes; a slower one can fail without a regression). `BENCH_RUNS`,
-`BENCH_CONFIRM`, `BENCH_RUNNER`, `BENCH_BASELINE` and `BENCH_REBASELINE` are
-documented in the script's header.
+file>` over the base's `lib/`, `priv/` and `config/`, with this change's bench
+scripts), then gates the change against that. When the pull request changes
+`mix.exs` or `mix.lock`, the base's copies are checked out with its sources and
+`mix deps.get` materialises the base's own dependency set before the
+measurement (the branch's are restored afterwards), so a dependency change is
+also measured base-against-branch on one runner rather than against a baseline
+recorded on another one. It falls back to the checked-in `baseline.json` only
+when there is no base commit to measure. `baseline.json` (`runner:
+github-linux-x64`) is the reference for local runs on a comparable machine; a
+run on another runner class prints a `WARN` (a laptop is usually faster than
+the CI runner, so it passes; a slower one can fail without a regression).
+`BENCH_RUNS`, `BENCH_CONFIRM`, `BENCH_RUNNER`, `BENCH_BASELINE` and
+`BENCH_REBASELINE` are documented in the script's header.
 
 [`bench/tenant_fairness_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/tenant_fairness_bench.exs)
 is the fairness bench of TEN-3, run by hand: it prints a light tenant's p99
