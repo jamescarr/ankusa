@@ -25,6 +25,17 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   (the Oban example and the jetstream-k8s chart's ankusa pods) are now 60, to cover the
   drain, and the Oban example's readiness probe is `/ready`.
 
+- **`dedupe: salesforce` (CON-3).** A source's `dedupe` accepts the preset
+  `salesforce` (`json: id`; see `configuration.md` for why it is a convention and
+  not a Salesforce-documented delivery id). A source with no `dedupe` logs one
+  boot warning and counts in `ankusa_sources_without_dedupe`. See the `ankusa`
+  changelog.
+- **SLI metrics (OPS-3).** `/metrics` gains `ankusa_delivery_latency_seconds{sink,result}`
+  (a delivery's age when it settled, buckets to 60 s), `ankusa_dispatch_attempt_duration_seconds{sink,result}`,
+  `ankusa_compact_failures_total{stage}`, `ankusa_claim_check_failures_total{op}` and
+  `ankusa_backup_failures_total`. No new config key; `metrics.detail: source` also puts
+  `tenant_id` and `source_id` on the delivery latency histogram. The SLO table is in
+  [`architecture.md`](../../docs/architecture.md#slis-and-slos).
 - `ordered` and `ordering_key` (`{header: name}` / `{json: path}`) on every sink
   but `log` (ordering lanes, ADR 0004).
 

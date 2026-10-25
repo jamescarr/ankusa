@@ -53,7 +53,12 @@ defmodule Ankusa.Edge.Publish do
       tasks =
         Enum.map(source.sinks, fn {mod, opts} ->
           Task.async(fn ->
-            Sink.attempt(mod, env, 1, nil, fn -> Sink.safe_deliver(mod, env, ctx, opts) end)
+            started = System.monotonic_time()
+
+            result =
+              Sink.attempt(mod, env, 1, nil, fn -> Sink.safe_deliver(mod, env, ctx, opts) end)
+
+            {result, Ankusa.Telemetry.elapsed_ms(started)}
           end)
         end)
 
@@ -64,16 +69,16 @@ defmodule Ankusa.Edge.Publish do
         |> Enum.zip(results)
         |> Enum.map(fn {{mod, _opts}, {_task, result}} ->
           case result do
-            {:ok, :ok} ->
-              {mod, :ok}
+            {:ok, {:ok, ms}} ->
+              {mod, :ok, ms}
 
-            {:ok, {:error, reason}} ->
+            {:ok, {{:error, reason}, ms}} ->
               Logger.warning(
                 "[ankusa] sink #{inspect(mod)} refused hook #{env.id}: #{inspect(reason)}",
                 sink: mod
               )
 
-              {mod, :error}
+              {mod, :error, ms}
 
             nil ->
               Logger.warning(
@@ -83,7 +88,7 @@ defmodule Ankusa.Edge.Publish do
                 sink: mod
               )
 
-              {mod, :error}
+              {mod, :timeout, timeout / 1}
 
             {:exit, reason} ->
               Logger.warning(
@@ -91,18 +96,20 @@ defmodule Ankusa.Edge.Publish do
                 sink: mod
               )
 
-              {mod, :error}
+              {mod, :error, nil}
           end
         end)
 
       # What `/ready` reports as `sinks` (`Ankusa.Health.SinkErrors`).
       source.sinks
       |> Enum.zip(outcomes)
-      |> Enum.each(fn {sink, {_mod, outcome}} -> SinkErrors.record(instance, sink, outcome) end)
+      |> Enum.each(fn {sink, {_mod, outcome, _ms}} ->
+        SinkErrors.record(instance, sink, if(outcome == :ok, do: :ok, else: :error))
+      end)
 
-      Enum.each(outcomes, fn {mod, outcome} -> emit(instance, env, mod, outcome) end)
+      Enum.each(outcomes, fn {mod, outcome, ms} -> emit(instance, env, mod, outcome, ms) end)
 
-      if Enum.all?(outcomes, &match?({_mod, :ok}, &1)) do
+      if Enum.all?(outcomes, &match?({_mod, :ok, _ms}, &1)) do
         {:ok, env}
       else
         {:error, :store_unavailable}
@@ -160,17 +167,40 @@ defmodule Ankusa.Edge.Publish do
     end)
   end
 
-  # Same event, and the same metadata, dispatch emits, so `/metrics` counts this
+  # Same events, and the same metadata, dispatch emits, so `/metrics` counts this
   # path with no change (a missing `sink` tag would drop the event): one
-  # attempt, no retry — the provider is the retry.
-  defp emit(instance, env, mod, result) do
-    Ankusa.Telemetry.emit([:dispatch, :stop], %{}, %{
+  # attempt, no retry — the provider is the retry. `attempt_ms` is nil for a sink
+  # task that crashed, whose time nobody measured.
+  defp emit(instance, env, mod, result, attempt_ms) do
+    tenant_id = Ankusa.Queue.Tenants.normalize(env.tenant_id)
+
+    if attempt_ms do
+      Ankusa.Telemetry.emit([:dispatch, :attempt], %{attempt_ms: attempt_ms}, %{
+        instance: instance,
+        result: result,
+        attempt: 1,
+        sink: mod,
+        source_id: env.source_id,
+        tenant_id: tenant_id
+      })
+    end
+
+    measurements =
+      case Ankusa.Telemetry.since_received_ms(env) do
+        nil -> %{}
+        ms -> %{since_received_ms: ms}
+      end
+
+    measurements =
+      if attempt_ms, do: Map.put(measurements, :attempt_ms, attempt_ms), else: measurements
+
+    Ankusa.Telemetry.emit([:dispatch, :stop], measurements, %{
       instance: instance,
-      result: result,
+      result: if(result == :ok, do: :ok, else: :error),
       attempts: 1,
       sink: mod,
       source_id: env.source_id,
-      tenant_id: Ankusa.Queue.Tenants.normalize(env.tenant_id)
+      tenant_id: tenant_id
     })
   end
 end

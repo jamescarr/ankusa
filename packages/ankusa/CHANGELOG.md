@@ -13,6 +13,31 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **A Salesforce dedupe preset and a boot warning for a source with no dedupe
+  (CON-3).** `dedupe: :salesforce` is `{:json, ["id"]}`: Salesforce stamps no
+  delivery-id header and documents no JSON delivery id on any outbound mechanism
+  (Outbound Messages are SOAP/XML; Flow/Apex callouts and Data 360 webhook
+  targets send a body the org builds), so the preset keys on the top-level `"id"`
+  the callout sets, and `configuration.md` says so. An `:edge` instance logs
+  `source <id> has no dedupe:` once per source it declares without `dedupe`
+  (`Ankusa.Dedupe.warn_undeduped/1`), and the gauge
+  `ankusa_sources_without_dedupe` (`[:ankusa, :sources, :state]`,
+  `:without_dedupe`) counts them. Tests: `salesforce preset`, `warns without
+  dedupe`.
+
+- **SLI metrics (OPS-3).** `[:ankusa, :dispatch, :stop]` now measures `attempt_ms`
+  (the final attempt) and `since_received_ms` (the hook's age when the delivery
+  settled; absent for a replayed delivery), and a new `[:ankusa, :dispatch,
+  :attempt]` event (`attempt_ms`; `result` `ok`, `error` or `timeout`) fires per
+  attempt, in direct mode too. New on `/metrics`:
+  `ankusa_delivery_latency_seconds{sink,result}` (buckets to 60 s; `tenant_id` and
+  `source_id` only at `metrics.detail: source`, like the ingest histogram),
+  `ankusa_dispatch_attempt_duration_seconds{sink,result}`,
+  `ankusa_compact_failures_total{stage}` (`segment`, `retention`, `reclaim`; from
+  the new `[:ankusa, :compact, :failure]`), `ankusa_claim_check_failures_total{op}`
+  (`check_in`, `redeem`; from `[:ankusa, :claim_check, :failure]`, only for a
+  claim store's fault) and `ankusa_backup_failures_total`. The SLO table is in
+  [`architecture.md`](../../docs/architecture.md#slis-and-slos).
 - **Opt-in ordering lanes (DEL-1.b, ADR 0004).** A sink entry with
   `ordered: true` and an `ordering_key` (`{:header, name}`, `{:json, "a.b"}`,
   `{mod, fun, args}`) delivers the hooks of one lane (`{tenant, source, sink,

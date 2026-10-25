@@ -99,6 +99,7 @@ defmodule Ankusa.Instance do
     Ankusa.HttpClient.Egress.validate_config!(config)
     Ankusa.HttpClient.Pools.validate_config!(config)
     Ankusa.Intake.validate_config!(config)
+    if Config.role?(config, :edge), do: Ankusa.Dedupe.warn_undeduped(config)
     if config.wal == :dual, do: Ankusa.Intake.Pending.create(instance)
     opts = [instance: config.instance]
 

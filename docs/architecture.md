@@ -15,7 +15,7 @@ framework is downstream of that one sentence.
   was lost because nothing was promised.
 - **Crash after the accept, before the HTTP response leaves:** the provider
   retries anyway (it never saw the `2xx`). Without a source
-  [`dedupe:`](configuration.md#sources) setting, that retry is a new hook: a fresh `id`, stored and delivered again. Delivery
+  [`dedupe:`](configuration.md#sources) setting (boot logs a warning per such source), that retry is a new hook: a fresh `id`, stored and delivered again. Delivery
   is at-least-once; consumers are idempotent receivers.
 - **Store slow or down:** `503` with `Retry-After`. Under `wal.type: disk` that
   is the store refusing a commit; under `dual` it is the store or the intake
@@ -551,7 +551,8 @@ carries `ankusa_store_hooks`, `ankusa_queue_pending` / `_scheduled` /
 most first attempts waiting), `ankusa_quarantine_bytes`, `ankusa_quarantine_pending`, `ankusa_disk_free_bytes`,
 `ankusa_dispatch_running` / `_claimed` / `_runnable` / `_active_tenants`,
 `ankusa_dispatch_tenant_inflight{tenant}` (the claimed rows of the 100 tenants
-holding the most, against their windows) and
+holding the most, against their windows), `ankusa_sources_without_dedupe` (the
+configured sources with no `dedupe:`, each also a boot warning) and
 `ankusa_dispatch_breakers_open` — enough to
 alert on a growing backlog, a filling disk or an open breaker before a
 provider sees a `503`. `pending` is first attempts waiting and `scheduled`
@@ -570,3 +571,49 @@ long the store has been closed; alert on it staying above 0) and
 `ankusa_store_wal_replay_seconds`, and `/ready` names the same class as
 `reasons.store` in its `503` body. A closed store retries its open after 5 s, then 10, 20, 40 and 60 s
 (jittered), until it works ([`storage.md`](storage.md#durability-corruption-full-disk)).
+
+### SLIs and SLOs
+
+Four series answer "is the tier healthy" without logs:
+
+- `ankusa_ingest_duration_seconds`: the ack latency, how long `Ankusa.Edge.Ingest`
+  took to answer one request (its `outcome` is on `ankusa_ingest_requests_total`).
+- `ankusa_delivery_latency_seconds{sink,result}`: how old a hook was when its
+  delivery settled (`result="ok"`: the sink confirmed; `"dlq"`: it was
+  dead-lettered; direct mode `"error"`: the sink refused), measured from the
+  hook's `received_at`, so queueing, retries and their backoff count. A replayed
+  delivery is not sampled: its age is the replay's. It carries `tenant_id` and
+  `source_id` only at [`metrics.detail: source`](configuration.md#metric-cardinality)
+  (a histogram is a dozen series per label set, so the default `tenant` detail
+  keeps them off every histogram).
+- `ankusa_dispatch_attempt_duration_seconds{sink,result}`: one sample per
+  attempt, retried or not (`result` is `ok`, `error` or `timeout`), so a sink
+  that fails or hangs shows here before its deliveries settle. A timed-out
+  attempt reports `dispatch.attempt_timeout_ms`.
+- `ankusa_queue_oldest_due_age_seconds`: the backlog's age, the alert for a
+  dispatcher that has stopped.
+
+Three counters say a background stage is failing even though ingest still
+answers: `ankusa_compact_failures_total{stage}` (`segment`: an archive segment
+was not written; `retention`: the catalogue sweep; `reclaim`: the hook reclaim
+sweep), `ankusa_claim_check_failures_total{op}` (`check_in` or `redeem` failed
+on a claim store: unavailable, refused this node's credential, or bytes that
+fail the claim's sha256) and `ankusa_backup_failures_total`. The events behind
+them are in `Ankusa.Telemetry`'s moduledoc.
+
+The objectives (ground rule 10 of the hardening plan, `ANKUSA_HARDENING_PLAN.md`),
+per node unless stated:
+
+| SLI | Target | Metric |
+| --- | --- | --- |
+| Ack latency (steady, 10 KB bodies, 1 k req/s/node) | p99 ≤ 50 ms | `ankusa_ingest_duration_seconds` |
+| Ack latency during chaos (pod kills) | p99 ≤ 250 ms, zero `missing` | loadgen chaos phase |
+| Ingest throughput (1 KB bodies, in-process bench) | ≥ 10 k/s/node | `bench/core_bench.exs` |
+| Delivery latency, healthy sinks (received → confirmed) | p99 ≤ 5 s | `ankusa_delivery_latency_seconds` |
+| Backlog age (oldest due row) | alert at 5 min | `ankusa_queue_oldest_due_age_seconds` |
+| Memory growth, 1 h soak at target rate | ≤ 5 % RSS | soak job |
+| `/metrics` size | ≤ 10 k series/node, independent of tenant count | metrics test |
+| Drain on SIGTERM | zero connection resets, every in-flight request answered | OPS-4 test |
+
+`metrics_test.exs` (`slo series present`) reads this table and fails if a metric
+it names is missing from a scrape.
