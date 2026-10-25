@@ -1,8 +1,11 @@
 import Config
 
 # The release logs to stdout in the container-friendly shape: no metadata, one
-# line per event. The level itself comes from the operator's config file
-# (`log.level`), applied by AnkusaServer.Application at boot.
+# line per event (`log.format: text`, the default). `log.format: json` replaces
+# this formatter at boot with AnkusaServer.LogFormatter, which prints the
+# correlation metadata core sets. The level itself comes from the operator's
+# config file (`log.level`), applied by AnkusaServer.Application at boot and
+# changeable at runtime (`PUT /v1/log-level`).
 config :logger, :console, format: "$time [$level] $message\n", metadata: []
 
 # Does starting this application bind ports and read the config file? Yes

@@ -72,11 +72,12 @@ is the [key reference](#ankusa-config) below.
 | Section | Keys (default) |
 | --- | --- |
 | `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`), `min_free_bytes` (unset = no check; the free bytes `data_dir`'s file system must keep, or `/ready` answers `503` with `disk: failing`; see [`/ready`](deployment.md#running-the-container)) |
-| `log` | `level` (`info`), `banner` (`true`; the ASCII-art banner on start) |
+| `log` | `level` (`info`), `format` (`text` \| `json`; `text`), `banner` (`true`; the ASCII-art banner on start, never printed with `format: json`). See [Logs](#logs) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`), `store_headers` (`drop`: `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`; `hash`: none). See [Stored headers](#stored-headers) |
 | `listener` | Limits for every HTTP listener, and the ingest port's TLS: `max_connections` (20000), `num_acceptors` (null = two per scheduler), `read_timeout_ms` (10000), `body_read_timeout_ms` (15000), `request_deadline_ms` (30000), `max_requests_per_connection` (1000), `max_header_count` (64), `max_header_length` (16384), `http2` (`false`), `drain_delay_ms` (5000) and `drain_timeout_ms` (30000: how a SIGTERM drains the node), `tls` (`certfile`, `keyfile`, `cacertfile`, `verify` = `verify_none` \| `verify_peer`, `versions`, `ciphers`). See [Listeners](#listeners-limits-tls-and-mtls) |
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it, and then needs `auth`), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled), `tls` (a TLS block, like `listener.tls`), `auth` (who may call it: `mode` = `none` \| `token` \| `jwt` \| `mtls`, `allow_insecure`, `tokens`, `jwt`, `mtls`; see [Control-plane authentication](#control-plane-authentication)) |
 | `metrics` | `enabled` (`false`), `port` (4004), `ip` (`127.0.0.1`), `tls`. A listener that serves only `/metrics`, `/health` and `/ready`. See [A separate metrics listener](#a-separate-metrics-listener) |
+| `tracing` | `enabled` (`false`), `otlp_endpoint` (`http://localhost:4318`), `sample_ratio` (`1.0`; 0 to 1). Image only. Starts the OpenTelemetry SDK and the OTLP exporter. See [Tracing](#tracing) |
 | `batcher` | `partitions` (4), `max_batch` (256), `max_commits` (64), `group_commit_max_bytes` (4194304), `group_commit_max_records` (1024), `group_commit_delay_ms` (1), `max_delay_ms` (0), `max_queue` (10000), `max_queue_bytes` (268435456) |
 | `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `sink_concurrency` (8; null = only `concurrency`), `breaker_failures` (5; 0 disables breakers), `breaker_open_ms` (30000), `breaker_max_open_ms` (300000), `tenants` (`default` and one entry per tenant id, each any of `max_inflight` (1024), `max_inflight_bytes` (33554432), `concurrency` (16)), `max_retry_after_ms` (3600000; 1000 to 86400000), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (null: no attempt limit), `retry.jitter` (`true`), `retry.max_elapsed_ms` (86400000, 24 h; 1000 to 2592000000: the wall-clock horizon, see [Retry horizon](delivery.md#retry-horizon)). See [`delivery.md`](delivery.md#a-slow-or-dead-sink) and [Dispatch fairness between tenants](delivery.md#fairness-between-tenants) |
 | `wal` | `type` (`disk` \| `dual` \| `none`; the queue's mode — the name is historical; `dual` also confirms every hook in the intake log, see `intake`), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
@@ -106,6 +107,85 @@ is the [key reference](#ankusa-config) below.
 `type` is set. See
 [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/reference.yml)
 for every key with its comment and the alternatives.
+
+### Tracing
+
+`tracing` (image only; not a key of `%Ankusa.Config{}`) turns on OpenTelemetry
+tracing of every hook, from the provider's request to the consumer:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Start the OpenTelemetry SDK and the OTLP/HTTP exporter before the instance. Off, the image runs only core's no-op `opentelemetry_api`. |
+| `otlp_endpoint` | `http://localhost:4318` | The collector; spans go to `<otlp_endpoint>/v1/traces`. `http://` or `https://` with a host and **no** `user:password`: the load fails, without echoing the value. |
+| `sample_ratio` | `1.0` | 0 to 1, else the load fails. The share of new traces kept; the sampler is parent-based, so a request that carries a sampled `traceparent` is always traced. |
+
+With tracing off, a `traceparent` (and `tracestate`) sent to the edge still
+reaches every consumer byte for byte: on `Sink.Http` as headers, in queue
+messages as the `traceparent`/`tracestate` fields and the broker-native
+`traceparent`/`tracestate` header or attribute, on lifecycle events as the
+CloudEvents extension. Nothing is recorded. With it on, the hook stores the
+`ankusa.ingest` span's context instead (same trace id, `tracestate` carried), and
+these spans make it one trace: `ankusa.ingest` (a child of the provider's),
+`ankusa.verify`, `ankusa.commit`, `ankusa.dispatch.attempt` (one per attempt,
+a child of the stored context and linked to it), `ankusa.claim_check`,
+`ankusa.replay`, `ankusa.lifecycle.event`.
+
+The SDK's own `OTEL_*` environment variables take precedence over this section.
+The collector's credentials are the standard `OTEL_EXPORTER_OTLP_HEADERS`: no
+secret lives in this file, so the section needs no redaction and is not in
+`GET /v1/config`.
+
+### Logs
+
+`log.format: text` (the default) writes `HH:MM:SS.mmm [level] message`, as before.
+`log.format: json` writes **one JSON object per line** to stdout, for a log
+pipeline that indexes fields instead of parsing text. A line has these keys, in
+this order, and omits the ones it has no value for:
+
+| Key | Value |
+| --- | --- |
+| `time` | RFC 3339, UTC, to the microsecond |
+| `level` | `debug`, `info`, `warning`, `error`, ... |
+| `msg` | the message, one string |
+| `instance` | the instance's name |
+| `hook_id`, `tenant_id`, `source_id` | the hook the line is about, and its tenant and source |
+| `sink` | the sink module a delivery attempt, or the refusal of one, is about |
+| `trace_id` | the 32-hex W3C trace id of the hook's `traceparent` (the same id `ankusa.ingest` and every later span carry, see [Tracing](#tracing)) |
+
+Any other `Logger` metadata the line has follows, sorted by key: `attempt` and
+`replay_id` on a delivery attempt of a replayed row. The correlation is set where
+the work happens: `Ankusa.Edge.Router` clears it per request and
+`Ankusa.Edge.Ingest` sets the hook's (so a sink that refuses a hook under
+`wal.type: none`, or any line logged while one is ingested, names its source,
+tenant and trace), `Ankusa.Sink.attempt/5` sets it for each delivery attempt
+(dispatch, lifecycle events, `wal.type: none` publishes), and a replay step sets
+`replay_id`. A line from a process that handles no hook (the store, a
+supervisor) has `time`, `level`, `msg` and `instance` only.
+
+The value of any key whose name contains `secret`, `token`, `password`,
+`authorization` or `cookie` (any case) is printed as `"[REDACTED]"`, in the
+metadata and inside a structured report's maps, keyword lists, `{key, value}`
+pairs and structs, however deep. The text of a message is not scanned: Ankusa
+never interpolates a secret into one.
+
+`log.level` is the level the node **starts** at. It changes while the node runs,
+without a restart, with the admin API:
+
+```sh
+curl -X PUT http://127.0.0.1:4002/v1/log-level \
+  -H "authorization: Bearer $ADMIN_TOKEN" -d '{"level": "debug"}'
+# {"level":"debug","previous":"info"}
+```
+
+The body is `{"level": ...}`, one of `debug`, `info`, `warning`, `error` (anything
+else is `400 invalid_log_level`). The caller needs `config:write` and `tenant:*`
+(the level is the node's, for every tenant): `401` without a credential, `403`
+without them. The change takes effect at once and is node-local (call each node);
+a restarted node logs at `log.level` again. It is audited like every
+control-plane change: `action: log_level.put`, with the new `level` and the
+`previous` one in `detail`. The row is committed first and the level changes once
+it is durable, so a node whose store cannot take the row answers
+`503 store_unavailable` (or `503 audit_backlog`) and keeps its level.
 
 ### Sources
 
@@ -304,6 +384,29 @@ and `public_key`.
 | `sqs` | `queue_url`, `region`, `endpoint` (default: the queue URL's origin; set it for a VPC endpoint or an emulator), `message_group_id` (a static string), `inline_max_bytes` (65536), `max_message_bytes` (1048576, SQS's limit; body plus message attributes, a larger message is dead-lettered at once), `timeout_ms` (5000), `access_key_id` / `secret_access_key` / `session_token` (omit for the `AWS_*` env, IRSA, or the EC2 instance role). FIFO when `queue_url` ends `.fifo`: the group defaults to `tenant/source` and the deduplication id is the hook id (SQS dedupes for 5 minutes). The queue must already exist. See [`delivery.md`](delivery.md#sinksqs-queue-delivery). |
 | `google_pubsub` | `project`, `topic` (the id, not `projects/…/topics/…`), `endpoint` (default `https://pubsub.googleapis.com`; set it for a regional endpoint or an emulator), `ordering_key` (a static string; default none), `inline_max_bytes` (65536), `max_message_bytes` (10000000, Pub/Sub's limit; data plus attributes plus ordering key, a larger message is dead-lettered at once), `timeout_ms` (5000), `auth` = `metadata` \| `token` \| `none` (default `metadata`: the GCE/GKE metadata server; `token` is required when `auth: token`; `none` sends no credential, for an emulator). The topic must already exist, and a topic with no subscription drops the message. See [`delivery.md`](delivery.md#sinkgooglepubsub-google-cloud-pubsub-delivery). |
 
+The `sqs` and `google_pubsub` sinks batch what dispatch hands them: up to 10
+(SQS) or 1 000 (Pub/Sub) deliveries to one queue or topic go out as one request.
+Each takes these keys, all optional and range-checked when the first delivery
+reaches the sink (a bad one fails that delivery with the key's name):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `batch` | `true` | `false` sends every delivery as its own request, counted against `dispatch.sink_concurrency` |
+| `batch_linger_ms` | `20` (1–60000) | how long a batch waits to fill |
+| `batch_max_entries` | `10` (SQS, 1–10) / `1000` (Pub/Sub, 1–1000) | entries per request |
+| `batch_max_bytes` | `262144` (SQS, ≤ 1048576) / `7500000` (Pub/Sub, data before base64) | bytes per request |
+| `batch_queue_max` | `4096` | entries the batcher holds; a delivery past it is refused with a jittered retry |
+| `batch_queue_max_bytes` | `134217728` | bytes the batcher holds |
+| `batch_queue_tenant_max` | `1024` | entries one tenant may hold, so it cannot fill the queue |
+| `batch_max_inflight` | `dispatch.sink_concurrency` (8) | requests in flight per queue or topic |
+
+They are plain numbers and a boolean, so `/v1/config` shows them. A refusal is
+`{:retry_after, ms, {:batch_queue_full, reason}}` and counted in
+`ankusa_sink_batch_refused_total{sink,reason}`; the batchers' depth is the gauges
+`ankusa_sink_batch_batchers`, `ankusa_sink_batch_queued` and
+`ankusa_sink_batch_queued_bytes`. See
+[`delivery.md`](delivery.md#sinksqs-queue-delivery).
+
 Bodies above a sink's `inline_max_bytes` are checked in to the object store and
 the message carries a claim reference. See [`claim-check.md`](claim-check.md).
 
@@ -332,6 +435,7 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`) |
 | `ANKUSA_DATA_DIR` | `node.data_dir` |
 | `ANKUSA_LOG_LEVEL` | `log.level` |
+| `ANKUSA_LOG_FORMAT` | `log.format` (`text` or `json`) |
 | `ANKUSA_BANNER` | `log.banner` |
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
@@ -984,9 +1088,10 @@ Scopes (`Ankusa.Principal`): `metrics:read` (`/metrics`, `/v1/wal`),
 `tenants:write` (`DELETE /v1/tenants/{tenant}` and `GET /v1/tenants/{tenant}/erase`,
 a [tenant erase](multi-tenancy.md#erasing-a-tenant); it also needs `tenant:*`), and
 `dlq:write`, which starting a `dlq` replay also needs (`quarantine:write` for a
-`quarantine` replay). `config:write` is reserved: no route uses it yet.
+`quarantine` replay). `config:write` (with `tenant:*`) changes the node's
+[log level](#logs): `PUT /v1/log-level`.
 `audit:read` reads `GET /v1/audit`: every change to a source, route, IP rule,
-rate-limit override, quarantine purge or replay job, newest first, with
+rate-limit override, quarantine purge, replay job or log-level change, newest first, with
 `since`, `until` (ms), `actor`, `action`, `tenant`, `limit` and `cursor`
 filters. The trail spans tenants, so a reader without `tenant:*` sees only its
 own tenants' rows (none of the rows that belong to no tenant), and naming
@@ -1510,7 +1615,7 @@ the map.
 | `Ankusa.Queue` | Durable ack and seq assignment over this node's store | `wal: :disk` (one synced commit per batch) | `wal: :dual` (the same commit plus a confirmed intake-log publish), `wal: :none` (no queue: ingest acks on the sinks' confirm, see [`delivery.md`](delivery.md#direct-mode)) |
 | `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `Verifier.Hmac` (configurable HMAC engine; named schemes Stripe, GitHub, Standard Webhooks, Shopify, Slack), `Verifier.Asymmetric` (Ed25519 or RSA over the same wire templates; named scheme `standard_webhooks_asym`), `Verifier.Token` (bearer, basic, header or query credential), `Verifier.ClientCert` (mTLS client certificate pin) |
 | `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | `SourceStore.Persistent` (API-managed sources in this node's store) |
-| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.SQS` (`SendMessage`, in core), `Sink.RabbitMQ` (exchange publish, `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce, `ankusa_kafka` package), `Sink.NATS` (JetStream subject publish, `ankusa_nats` package), `Sink.Redis` (pub/sub channel publish, `ankusa_redis` package) |
+| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.SQS` (`SendMessageBatch`, in core), `Sink.RabbitMQ` (exchange publish, `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce, `ankusa_kafka` package), `Sink.NATS` (JetStream subject publish, `ankusa_nats` package), `Sink.Redis` (pub/sub channel publish, `ankusa_redis` package) |
 | `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | none |
 | `Ankusa.BlobStore` | Segment PUT / range GET / delete | `BlobStore.LocalFS` | `BlobStore.S3` (+R2/MinIO), `BlobStore.GCS` |
 | `Ankusa.ClaimCheck` | Pack claims into the object store, redeem by reference | none (the instance's `BlobStore`) | none |

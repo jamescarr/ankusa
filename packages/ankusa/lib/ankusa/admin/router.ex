@@ -22,6 +22,7 @@ defmodule Ankusa.Admin.Router do
   | --- | --- |
   | `GET /metrics`, `GET /v1/wal` | `metrics:read` |
   | `GET /v1/config`, `GET /asyncapi.json` | `config:read` |
+  | `PUT /v1/log-level` | `config:write` + `tenant:*` |
   | `GET /v1/dlq`, `DELETE /v1/dlq` | `dlq:read` / `dlq:write` + a `tenant` (filtered) |
   | `POST /v1/replays` | `replays:write` + a `tenant` (filtered), and `dlq:write` / `quarantine:write` for those kinds |
   | `GET /v1/replays[/:id]` | `replays:read` + a `tenant` (filtered) |
@@ -72,6 +73,8 @@ defmodule Ankusa.Admin.Router do
   @max_replay_body 65_536
   @max_source_body 65_536
   @max_rate_limit_body 65_536
+  # `{"level": "..."}`
+  @max_log_level_body 1_024
   @default_limit 100
   @max_limit 1000
   # A purge is one synced store batch: big enough to clear a flood in a few
@@ -123,6 +126,12 @@ defmodule Ankusa.Admin.Router do
     Auth.authorize(conn, "config:read", fn conn ->
       AsyncApiSpex.Plug.RenderSpec.send_spec(conn, Ankusa.AsyncApi.document(instance(conn)))
     end)
+  end
+
+  # The VM's log level, for every tenant's lines: a node-wide change, so it
+  # needs `tenant:*` as well, like a tenant erase. Audited like every change.
+  put "/v1/log-level" do
+    Auth.authorize_global(conn, "config:write", &log_level_put/1)
   end
 
   get "/v1/dlq" do
@@ -312,6 +321,58 @@ defmodule Ankusa.Admin.Router do
     conn
     |> Plug.Conn.put_resp_header("retry-after", "60")
     |> send_json(503, %{error: "audit_backlog"})
+  end
+
+  # `{"level": "debug"}`: one key, one of `Ankusa.LogLevel.levels/0`. The audit
+  # row is committed first and the level changes only once it is durable: a
+  # change the trail cannot record is not made (`audit_backlog`, `store_unavailable`).
+  defp log_level_put(conn) do
+    case Ankusa.Http.read_body_limited(conn, @max_log_level_body, read_opts(conn)) do
+      {:ok, body, conn} ->
+        with {:ok, %{"level" => name} = map} when map_size(map) == 1 <- JSON.decode(body),
+             {:ok, level} <- Ankusa.LogLevel.parse(name) do
+          log_level_apply(conn, level)
+        else
+          _ -> invalid_log_level(conn)
+        end
+
+      {:too_large, conn} ->
+        invalid_log_level(conn)
+
+      {:error, _reason, conn} ->
+        invalid_log_level(conn)
+    end
+  end
+
+  defp log_level_apply(conn, level) do
+    previous = Ankusa.LogLevel.get()
+
+    attrs = %{
+      action: "log_level.put",
+      resource: "log_level",
+      detail: %{level: Atom.to_string(level), previous: Atom.to_string(previous)}
+    }
+
+    case Audit.commit(instance(conn), Context.from_conn(conn), attrs, []) do
+      :ok ->
+        {:ok, _previous} = Ankusa.LogLevel.set(level)
+        send_json(conn, 200, %{level: Atom.to_string(level), previous: Atom.to_string(previous)})
+
+      {:error, :audit_backlog} ->
+        audit_backlog(conn)
+
+      {:error, :store_unavailable} ->
+        send_json(conn, 503, %{error: "store_unavailable"})
+    end
+  end
+
+  defp invalid_log_level(conn) do
+    send_json(conn, 400, %{
+      error: "invalid_log_level",
+      message:
+        ~s(body must be a JSON object with one key, "level": one of ) <>
+          Enum.map_join(Ankusa.LogLevel.levels(), ", ", &Atom.to_string/1)
+    })
   end
 
   defp quarantine_index(conn, tenants) do

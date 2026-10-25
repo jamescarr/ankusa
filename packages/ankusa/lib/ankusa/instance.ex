@@ -111,6 +111,7 @@ defmodule Ankusa.Instance do
         store_children(config, opts) ++
         erase_children(config, opts) ++
         backup_children(config, opts) ++
+        [{Ankusa.Sink.Batcher.Workers, opts}] ++
         source_store_children(config, opts) ++
         lifecycle_children(config, opts) ++
         edge_children(config, opts) ++

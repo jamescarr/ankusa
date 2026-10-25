@@ -65,6 +65,21 @@ defmodule Ankusa.Dispatch.Pipeline do
   park. A parked row comes due no later than its horizon, and one that is parked
   again at or past it is dead-lettered as `{:retry_horizon, module}`.
 
+  ## Batching sinks
+
+  A sink that batches (`c:Ankusa.Sink.batched?/1`: `Sink.SQS`, `Sink.GooglePubSub`)
+  has its attempts wait in the destination's `Ankusa.Sink.Batcher` for the
+  batch's response, so counting them against `dispatch.sink_concurrency`, a
+  tenant's `concurrency` or the global `dispatch.concurrency` would cap a batch
+  at that many messages (8, not the 10 of an SQS batch, let alone Pub/Sub's
+  1 000). Their attempts are not counted: the claimed-row windows
+  (`dispatch.max_inflight`, `dispatch.tenants`) bound how many are waiting, the
+  batcher bounds its queue (per tenant too) and counts `sink_concurrency` in
+  in-flight *requests*. Each attempt is still its own: it settles its own row
+  on its own entry's result, is timed out by `dispatch.attempt_timeout_ms`, and
+  moves its own key's breaker, so a tenant whose breaker is open never has an
+  entry in another tenant's batch.
+
   ## Binding
 
   A row binds to `(sink index, module)` at ack time. Its opts always come from
@@ -369,6 +384,8 @@ defmodule Ankusa.Dispatch.Pipeline do
        ring: :queue.new(),
        queued: 0,
        running: %{},
+       # attempts counted against the concurrency limits (not a batching sink's)
+       running_counted: 0,
        running_by_key: %{},
        running_by_tenant: %{},
        # sink key => breaker; a key without an entry is closed with no failures
@@ -1084,6 +1101,7 @@ defmodule Ankusa.Dispatch.Pipeline do
                   row: item.row,
                   env: item.env,
                   spec: spec,
+                  batched?: Sink.batched?(elem(spec, 0), elem(spec, 1)),
                   policy: policy,
                   claim: item.claim,
                   forward_headers: source.forward_headers,
@@ -1548,7 +1566,10 @@ defmodule Ankusa.Dispatch.Pipeline do
 
     Logger.warning(
       "[ankusa] sink #{inspect(mod)} of source #{inspect(job.env.source_id)} failed " <>
-        "#{breaker.failures} time(s) in a row; its deliveries pause for #{period} ms"
+        "#{breaker.failures} time(s) in a row; its deliveries pause for #{period} ms",
+      source_id: job.env.source_id,
+      tenant_id: job.env.tenant_id,
+      sink: mod
     )
 
     state =
@@ -1616,7 +1637,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   defp start_jobs(state, 0), do: state
 
   defp start_jobs(state, budget) do
-    if map_size(state.running) >= state.config.dispatch.concurrency do
+    if state.running_counted >= state.config.dispatch.concurrency do
       state
     else
       case :queue.out(state.ring) do
@@ -1727,31 +1748,35 @@ defmodule Ankusa.Dispatch.Pipeline do
           {false, state}
       end
 
-    entry = %{job: job, task: task, timer: timer, probe?: probe?}
+    counted? = not job.batched?
+    entry = %{job: job, task: task, timer: timer, probe?: probe?, counted?: counted?}
 
     %{
       state
       | queues: queues,
         rings: rings,
         queued: state.queued - 1,
-        running: Map.put(state.running, task.ref, entry),
-        running_by_key: Map.update(state.running_by_key, key, 1, &(&1 + 1)),
-        running_by_tenant: Map.update(state.running_by_tenant, ord, 1, &(&1 + 1))
+        running: Map.put(state.running, task.ref, entry)
     }
+    |> count(job, counted?)
   end
 
   # Runs in the task. Returns `{result, fresh_claim}` and never raises or
   # touches the store — the pipeline process owns every row transition.
   defp run_job(%{env: env, spec: {mod, opts}} = job, instance) do
-    case ensure_claim(job, instance) do
-      {:ok, claim, fresh} ->
-        result = Sink.safe_deliver(mod, env, ctx(job, instance, claim), opts)
+    # One `ankusa.dispatch.attempt` span per attempt, a child of the hook's stored
+    # trace and linked to it; the claim-check write (`ensure_claim/2`) is inside.
+    Sink.attempt(mod, env, job.row.attempts + 1, Map.get(job.row, :replay), fn ->
+      case ensure_claim(job, instance) do
+        {:ok, claim, fresh} ->
+          result = Sink.safe_deliver(mod, env, ctx(job, instance, claim), opts)
 
-        {result, fresh}
+          {result, fresh}
 
-      {:error, reason} ->
-        {{:error, reason}, nil}
-    end
+        {:error, reason} ->
+          {{:error, reason}, nil}
+      end
+    end)
   end
 
   # A job that has no ref yet but needs one (its pack failed) checks its body in
@@ -1793,36 +1818,65 @@ defmodule Ankusa.Dispatch.Pipeline do
         _ -> ctx
       end
 
+    ctx = if job.batched?, do: Map.put(ctx, :batch, true), else: ctx
+
     if claim, do: Map.put(ctx, :claim, claim), else: ctx
+  end
+
+  # An attempt of a batching sink waits in its destination's batcher for the
+  # batch's response, so `sink_concurrency`, a tenant's `concurrency` and the
+  # global `concurrency` do not count it (see `c:Ankusa.Sink.batched?/1`): the
+  # claimed-row windows bound how many there are, the batcher bounds the requests.
+  defp count(state, %{key: key, ord: ord}, true) do
+    %{
+      state
+      | running_counted: state.running_counted + 1,
+        running_by_key: Map.update(state.running_by_key, key, 1, &(&1 + 1)),
+        running_by_tenant: Map.update(state.running_by_tenant, ord, 1, &(&1 + 1))
+    }
+  end
+
+  defp count(state, _job, false), do: state
+
+  defp uncount(state, _job, false), do: state
+
+  defp uncount(state, %{key: key, ord: ord}, true) do
+    running_by_key =
+      case Map.fetch!(state.running_by_key, key) do
+        1 -> Map.delete(state.running_by_key, key)
+        n -> Map.put(state.running_by_key, key, n - 1)
+      end
+
+    running_by_tenant =
+      case Map.fetch!(state.running_by_tenant, ord) do
+        1 -> Map.delete(state.running_by_tenant, ord)
+        n -> Map.put(state.running_by_tenant, ord, n - 1)
+      end
+
+    %{
+      state
+      | running_counted: state.running_counted - 1,
+        running_by_key: running_by_key,
+        running_by_tenant: running_by_tenant
+    }
   end
 
   # ── outcomes ──────────────────────────────────────────────────────────────
 
   defp outcome(state, ref, result, fresh_claim) do
-    {%{job: job, timer: timer, probe?: probe?}, running} = Map.pop!(state.running, ref)
+    {%{job: job, timer: timer, probe?: probe?, counted?: counted?}, running} =
+      Map.pop!(state.running, ref)
+
     Process.cancel_timer(timer)
-
-    running_by_key =
-      case Map.fetch!(state.running_by_key, job.key) do
-        1 -> Map.delete(state.running_by_key, job.key)
-        n -> Map.put(state.running_by_key, job.key, n - 1)
-      end
-
-    running_by_tenant =
-      case Map.fetch!(state.running_by_tenant, job.ord) do
-        1 -> Map.delete(state.running_by_tenant, job.ord)
-        n -> Map.put(state.running_by_tenant, job.ord, n - 1)
-      end
 
     state =
       %{
         state
         | running: running,
-          running_by_key: running_by_key,
-          running_by_tenant: running_by_tenant,
           claimed: state.claimed - 1,
           claimed_bytes: state.claimed_bytes - job.size
       }
+      |> uncount(job, counted?)
       |> tenant_sub(job.ord, job.size)
 
     attempts = job.row.attempts + 1

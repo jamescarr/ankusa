@@ -34,6 +34,28 @@ mise run check:package ankusa         # no external infra needed
 mise run test:integration             # +22 tests against the floci emulators (see below)
 ```
 
+`test/ankusa/tracing_test.exs` (OPS-1) is the proof that a hook is one trace: it
+starts the OpenTelemetry SDK with the in-memory `:otel_exporter_pid` and asserts
+`one trace across stages` (ingest, verify, commit and dispatch spans share the
+provider's trace id, the attempt links to the ingest span, the delivered
+`traceparent` is the ingest span's), and, with no SDK, that a `traceparent` reaches
+the queue message and `Sink.Http` unchanged. It tears the SDK down, and the
+tracers it parked in `:persistent_term`, so no other test sees it.
+
+`test/ankusa/admin/router_test.exs` (OPS-2) has `runtime level`: `PUT /v1/log-level`
+is `401` with no credential and `403` without `config:write` + `tenant:*`, `400`
+for a body that is not `{"level": <level>}`, changes `Logger.level()` at once and
+answers the old level, leaves an audit row (`log_level.put`, the caller as the
+actor), and changes nothing when the row cannot be written. The VM's log level is
+global, so the test restores it. `ankusa_server`'s `test/ankusa_server/log_test.exs`
+is the proof of the JSON log: `json line` boots a `wal.type: none` edge whose sink
+refuses every hook, sends a request with a `traceparent`, and parses the line the
+refusal wrote with `AnkusaServer.LogFormatter` (`source_id`, `tenant_id`, `hook_id`,
+`sink`, `trace_id`, `instance`, one line, a timestamp); it also covers the ids of
+one request not leaking onto the next on the same connection process, a delivery
+attempt's correlation, the fixed key order, and the redaction of
+`secret|token|password|authorization|cookie` keys in metadata and reports.
+
 The always-on tests cover:
 
 - **Stored-header policy** (`stored_headers_test.exs`, `edge_test.exs`,
@@ -635,11 +657,19 @@ a backup and a claim `PUT`, recorded on their way to the emulator, all carry
 delivers through `Sink.SQS` to floci's SQS and reads the queue back: the
 `Ankusa.Sink.Message` body, the message attributes and FIFO group, one stored
 message for a retried FIFO delivery and a second for a replay, a missing queue
-as an `{:sqs, 400, _, _}` error, and a standard queue.
+as an `{:sqs, 400, _, _}` error, and a standard queue. Through the batcher:
+`sqs batch partial failure` (ten FIFO deliveries in one `SendMessageBatch`, the
+emulator refuses the entry without a group, exactly that delivery is permanent
+and the other nine are stored), `sqs batch order` (one group's messages arrive
+in the order they were admitted) and a standard queue's batch.
 `sink/google_pubsub_integration_test.exs` publishes through
 `Sink.GooglePubSub` to floci-gcp's Pub/Sub and pulls the subscription back:
-the `Ankusa.Sink.Message` data and attributes, an ordering key, and a missing
-topic as a transient error. Excluded by default
+the `Ankusa.Sink.Message` data and attributes, an ordering key, a missing
+topic as a transient error, and `pubsub batch`: 50 deliveries are one `publish`
+(one `[:ankusa, :sink_batch, :flush]` event) and all 50 arrive. The unit tests
+(`sink/google_pubsub_test.exs`) hold the bisection: one invalid message among
+999 good ones is one dead entry and 999 delivered, within `1 + 2·⌈log₂ 1000⌉`
+requests. Excluded by default
 (`test_helper.exs`:`ExUnit.start(exclude: [:integration])`) because they
 need live infra:
 
@@ -1176,15 +1206,19 @@ one class differ by a factor of two in speed from job to job (the same code
 ran at 23 000 and at 50 000 hooks/s on two `ubuntu-latest` runners), so the CI
 job does not compare with `baseline.json`: it measures the pull request's base
 commit on its own runner first (`BENCH_REBASELINE=1 BENCH_BASELINE=<temp
-file>` over the base's `lib/`, `priv/` and `config/` with this change's bench
-scripts), then gates the change against that. It falls back to the checked-in
-`baseline.json` only when there is no base commit to measure or `mix.exs` /
-`mix.lock` changed. `baseline.json` (`runner: github-linux-x64`) is the
-reference for local runs on a comparable machine; a run on another runner
-class prints a `WARN` (a laptop is usually faster than the CI runner, so it
-passes; a slower one can fail without a regression). `BENCH_RUNS`,
-`BENCH_CONFIRM`, `BENCH_RUNNER`, `BENCH_BASELINE` and `BENCH_REBASELINE` are
-documented in the script's header.
+file>` over the base's `lib/`, `priv/` and `config/`, with this change's bench
+scripts), then gates the change against that. When the pull request changes
+`mix.exs` or `mix.lock`, the base's copies are checked out with its sources and
+`mix deps.get` materialises the base's own dependency set before the
+measurement (the branch's are restored afterwards), so a dependency change is
+also measured base-against-branch on one runner rather than against a baseline
+recorded on another one. It falls back to the checked-in `baseline.json` only
+when there is no base commit to measure. `baseline.json` (`runner:
+github-linux-x64`) is the reference for local runs on a comparable machine; a
+run on another runner class prints a `WARN` (a laptop is usually faster than
+the CI runner, so it passes; a slower one can fail without a regression).
+`BENCH_RUNS`, `BENCH_CONFIRM`, `BENCH_RUNNER`, `BENCH_BASELINE` and
+`BENCH_REBASELINE` are documented in the script's header.
 
 [`bench/tenant_fairness_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/tenant_fairness_bench.exs)
 is the fairness bench of TEN-3, run by hand: it prints a light tenant's p99

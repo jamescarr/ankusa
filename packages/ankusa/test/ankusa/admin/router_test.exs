@@ -2039,6 +2039,75 @@ defmodule Ankusa.Admin.RouterTest do
       assert tcall(inst, :put, "/v1/tenants/acme/rate-limit", "nobody", body).status == 403
     end
 
+    @tag :capture_log
+    test "runtime level: PUT /v1/log-level changes the VM's level at once, audited, and is 401/403 without config:write + tenant:*" do
+      config = start_tenant_instance(failing_sources())
+      inst = config.instance
+
+      original = Logger.level()
+      on_exit(fn -> Logger.configure(level: original) end)
+      Logger.configure(level: :info)
+      refute :logger.allow(:debug, __MODULE__)
+
+      put = fn token, body -> tcall(inst, :put, "/v1/log-level", token, body) end
+      audited = fn -> json(tcall(inst, :get, "/v1/audit?action=log_level.put", "operator")) end
+
+      # No credential is 401; without `config:write` (`nobody`), or for a caller
+      # limited to one tenant (`acme` holds every scope), it is 403: the level is
+      # the node's, for every tenant.
+      assert Plug.Test.conn(:put, "/v1/log-level", ~s({"level":"debug"}))
+             |> then(&Router.call(&1, Router.init(instance: inst)))
+             |> Map.fetch!(:status) == 401
+
+      assert put.("nobody", ~s({"level":"debug"})).status == 403
+      assert put.("acme", ~s({"level":"debug"})).status == 403
+      assert Logger.level() == :info
+
+      # A body that is not `{"level": <level>}` is refused, and nothing is recorded.
+      for body <- [
+            "",
+            "[]",
+            ~s({"level":"loud"}),
+            ~s({"level":7}),
+            ~s({"lvl":"debug"}),
+            ~s({"level":"debug","extra":1}),
+            ~s({"level":"#{String.duplicate("x", 2_048)}"})
+          ] do
+        conn = put.("operator", body)
+        assert conn.status == 400
+        assert %{"error" => "invalid_log_level"} = json(conn)
+      end
+
+      assert Logger.level() == :info
+      assert %{"entries" => []} = audited.()
+
+      # The change is made at once, with no restart, and answers the old level.
+      conn = put.("operator", ~s({"level":"debug"}))
+      assert conn.status == 200
+      assert json(conn) == %{"level" => "debug", "previous" => "info"}
+      assert Logger.level() == :debug
+      assert :logger.allow(:debug, __MODULE__)
+
+      assert json(put.("operator", ~s({"level":"error"}))) ==
+               %{"level" => "error", "previous" => "debug"}
+
+      assert Logger.level() == :error
+
+      # Both changes are in the trail, newest first, with the caller as the actor.
+      assert %{"entries" => [newest, oldest]} = audited.()
+      assert %{"action" => "log_level.put", "actor" => "operator", "tenant" => nil} = newest
+      assert %{"level" => "error", "previous" => "debug"} = newest["detail"]
+      assert %{"level" => "debug", "previous" => "info"} = oldest["detail"]
+
+      # A change the trail cannot record is not made.
+      :ok = Supervisor.terminate_child(Ankusa.via(inst, :instance), {Ankusa.Store, inst})
+
+      conn = put.("operator", ~s({"level":"info"}))
+      assert conn.status == 503
+      assert json(conn) == %{"error" => "store_unavailable"}
+      assert Logger.level() == :error
+    end
+
     defp wait_for_cursor(inst, left \\ 200) do
       case Ankusa.Store.get(inst, :default, Ankusa.Store.Keys.lifecycle_cursor()) do
         {:ok, _cursor} ->

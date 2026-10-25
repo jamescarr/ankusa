@@ -203,7 +203,7 @@ defmodule Ankusa.Lifecycle.Publisher do
 
   defp replay_jobs(state, replay_id, rows) do
     Enum.reduce_while(rows, {:ok, []}, fn {row, entity}, {:ok, jobs} ->
-      case Lifecycle.envelope(state.instance, row, entity, replay_id) do
+      case Lifecycle.traced_envelope(state.instance, row, entity, replay_id) do
         {:ok, env} ->
           new =
             for sink <- state.sinks do
@@ -382,7 +382,7 @@ defmodule Ankusa.Lifecycle.Publisher do
 
   defp deliver_row(state, seq, row) do
     with {:ok, entity} <- Audit.entity(state.instance, seq),
-         {:ok, env} <- Lifecycle.envelope(state.instance, row, entity) do
+         {:ok, env} <- Lifecycle.traced_envelope(state.instance, row, entity) do
       jobs =
         for sink <- state.sinks do
           %{
@@ -458,7 +458,9 @@ defmodule Ankusa.Lifecycle.Publisher do
 
         task =
           Task.Supervisor.async_nolink(state.sup, fn ->
-            Sink.safe_deliver(mod, job.env, ctx, opts)
+            Sink.attempt(mod, job.env, job.attempt, job.replay, fn ->
+              Sink.safe_deliver(mod, job.env, ctx, opts)
+            end)
           end)
 
         timer = Process.send_after(self(), {:attempt_timeout, task.ref}, state.attempt_timeout_ms)
@@ -522,7 +524,11 @@ defmodule Ankusa.Lifecycle.Publisher do
       :give_up ->
         Logger.error(
           "[ankusa] lifecycle event #{job.type} for #{job.subject} to #{inspect(mod)} " <>
-            "dropped after #{job.attempt} attempts: #{inspect(reason)}"
+            "dropped after #{job.attempt} attempts: #{inspect(reason)}",
+          source_id: job.env.source_id,
+          tenant_id: job.env.tenant_id,
+          sink: mod,
+          replay_id: job.replay
         )
 
         dropped(state.instance, job.type, inspect(mod), :gave_up)

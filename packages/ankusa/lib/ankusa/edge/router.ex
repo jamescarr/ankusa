@@ -21,6 +21,7 @@ defmodule Ankusa.Edge.Router do
   use Plug.Router, copy_opts_to_assign: :ankusa_opts
 
   alias Ankusa.Edge.{Ingest, RateLimiter, RouteGuard}
+  alias Ankusa.Trace
 
   plug(:match)
   plug(:dispatch)
@@ -60,6 +61,18 @@ defmodule Ankusa.Edge.Router do
   # ── capture ───────────────────────────────────────────────────────────────
 
   defp capture(conn, instance) do
+    # A connection's process serves many requests: what the last one put in the
+    # process's log metadata (`Ankusa.Edge.Ingest` sets the hook's) must not
+    # label this one's lines. `source_id`, `tenant_id`, `hook_id` and `trace_id`
+    # are set once the request is looked up and ingested.
+    Logger.metadata(
+      instance: instance,
+      source_id: nil,
+      tenant_id: nil,
+      hook_id: nil,
+      trace_id: nil
+    )
+
     config = Ankusa.config(instance)
     max = config.max_body_bytes
     declared = declared_length(conn)
@@ -95,10 +108,11 @@ defmodule Ankusa.Edge.Router do
   defp route_id(%Plug.Conn{assigns: %{ankusa_route: %{id: id}}}), do: id
   defp route_id(%Plug.Conn{}), do: nil
 
-  # The request the ingest path reads. `peer_cert` is a live call into the TLS
-  # socket, so it is made for a source verified by `Ankusa.Verifier.ClientCert`
-  # and nobody else; no certificate (plain HTTP, a transport that cannot answer)
-  # is `nil`, which that verifier fails closed on.
+  # The request the ingest path reads. `trace` is the provider's W3C trace
+  # context (`Ankusa.Trace`), `nil` without a valid `traceparent`. `peer_cert` is
+  # a live call into the TLS socket, so it is made for a source verified by
+  # `Ankusa.Verifier.ClientCert` and nobody else; no certificate (plain HTTP, a
+  # transport that cannot answer) is `nil`, which that verifier fails closed on.
   defp raw_request(conn, %Ankusa.Source{verifier: {verifier, _opts}}, body) do
     request = %{
       method: conn.method,
@@ -106,7 +120,8 @@ defmodule Ankusa.Edge.Router do
       headers: conn.req_headers,
       query: conn.query_string,
       body: body,
-      route_id: route_id(conn)
+      route_id: route_id(conn),
+      trace: Trace.from_headers(conn.req_headers)
     }
 
     if verifier == Ankusa.Verifier.ClientCert,

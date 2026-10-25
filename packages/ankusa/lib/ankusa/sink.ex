@@ -41,7 +41,7 @@ defmodule Ankusa.Sink do
   millisecond) and tolerate redelivery.
   """
 
-  alias Ankusa.Envelope
+  alias Ankusa.{Envelope, Trace}
 
   @type ctx :: %{
           required(:instance) => atom(),
@@ -56,6 +56,9 @@ defmodule Ankusa.Sink do
           # which provider request headers travel into the sink message
           # (`Ankusa.Sink.Message.forwarded_headers/2`); absent means `:default`
           optional(:forward_headers) => :default | [String.t()],
+          # set by dispatch for a sink whose `c:batched?/1` is true: this attempt
+          # may wait in the sink's batcher for its batch's response
+          optional(:batch) => boolean(),
           # the source's caps on those headers (count; name plus value bytes);
           # absent means 64 and 16 KiB
           optional(:max_headers) => pos_integer(),
@@ -138,7 +141,38 @@ defmodule Ankusa.Sink do
               opts :: keyword()
             ) :: Ankusa.Sink.Description.t()
 
-  @optional_callbacks inline_max_bytes: 1, durable?: 1, describe: 2
+  @doc """
+  Does this sink batch deliveries (`Ankusa.Sink.Batcher`)?
+
+  Dispatch runs a batching sink's attempts without counting them against
+  `dispatch.sink_concurrency`, a tenant's `concurrency` or the global
+  `dispatch.concurrency`: an attempt waits in the batcher for its batch's
+  response, so those limits cannot count messages and still let a batch fill.
+  The sink's batcher bounds what it holds (a queue cap, a per-tenant share) and
+  counts *requests* against `sink_concurrency`; the claimed-row windows
+  (`dispatch.max_inflight`, `dispatch.tenants`) bound the attempts.
+
+  Defaults to `false`. A sink that returns `true` must batch only for a delivery
+  whose ctx carries `batch: true`, which dispatch sets and `Ankusa.Edge.Publish`
+  and `Ankusa.Lifecycle.Publisher` do not.
+  """
+  @callback batched?(opts :: keyword()) :: boolean()
+
+  @optional_callbacks inline_max_bytes: 1, durable?: 1, describe: 2, batched?: 1
+
+  @doc """
+  Resolve `c:batched?/1` for `mod` with `opts`; `false` for a sink that doesn't
+  implement it, or whose callback raises or answers anything but `true`.
+  """
+  @spec batched?(module(), keyword()) :: boolean()
+  def batched?(mod, opts) do
+    Code.ensure_loaded?(mod) and function_exported?(mod, :batched?, 1) and
+      mod.batched?(opts) == true
+  rescue
+    _error -> false
+  catch
+    _kind, _reason -> false
+  end
 
   @doc """
   Resolve `c:describe/2` for `mod`; `nil` for a sink that doesn't implement it.
@@ -214,4 +248,67 @@ defmodule Ankusa.Sink do
     :exit, reason -> {:error, {:exit, reason}}
     :throw, value -> {:error, {:throw, value}}
   end
+
+  @doc """
+  Run one delivery attempt of `env` inside an `ankusa.dispatch.attempt` span
+  (`Ankusa.Trace`): a child of the hook's stored trace context and linked to it,
+  so every attempt of a hook, however late, is in its trace. `fun` is the whole
+  attempt, and may return `:ok`, `{:error, reason}`, or either of those paired
+  with anything (`Ankusa.Dispatch.Pipeline` also reports a claim it checked in).
+  A failure marks the span with its class (`permanent`, `retry_after`,
+  `transient`), never the reason. With no OpenTelemetry SDK running this is
+  `fun.()`.
+
+  The attempt's process gets the hook's correlation as `Logger` metadata
+  (`hook_id`, `source_id`, `tenant_id`, `sink`, `attempt`, `trace_id`, and
+  `replay_id` for a replayed row), so whatever the sink logs while it delivers
+  names the hook. Every caller runs it in a process of its own (a task per
+  attempt).
+  """
+  @spec attempt(module(), Envelope.t(), pos_integer(), String.t() | nil, (-> result)) :: result
+        when result: :ok | {:error, term()} | {:ok | {:error, term()}, term()}
+  def attempt(mod, %Envelope{} = env, number, replay_id, fun) when is_function(fun, 0) do
+    Logger.metadata(
+      hook_id: env.id,
+      source_id: env.source_id,
+      tenant_id: env.tenant_id,
+      sink: mod,
+      attempt: number,
+      trace_id: Trace.trace_id(env.trace),
+      replay_id: replay_id
+    )
+
+    Trace.span(
+      "ankusa.dispatch.attempt",
+      [
+        kind: :producer,
+        parent: env.trace,
+        link: env.trace,
+        attributes: fn ->
+          %{
+            "ankusa.sink" => inspect(mod),
+            "ankusa.attempt" => number,
+            "ankusa.hook.id" => env.id,
+            "ankusa.source_id" => env.source_id,
+            "ankusa.tenant_id" => env.tenant_id || "default"
+          }
+          |> put_replay(replay_id)
+        end
+      ],
+      fn ->
+        result = fun.()
+        mark_failed(result)
+        result
+      end
+    )
+  end
+
+  defp put_replay(attributes, replay_id) when is_binary(replay_id),
+    do: Map.put(attributes, "ankusa.replay_id", replay_id)
+
+  defp put_replay(attributes, _none), do: attributes
+
+  defp mark_failed(:ok), do: :ok
+  defp mark_failed({:error, reason}), do: Trace.error(reason |> classify() |> elem(0))
+  defp mark_failed({result, _extra}), do: mark_failed(result)
 end

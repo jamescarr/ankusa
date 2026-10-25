@@ -9,6 +9,10 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `decode` returns `:traceparent` and `:tracestate`: the hook's W3C trace
+  context from the message, verbatim (`nil` when none); a non-string value is
+  `invalid_field`.
+
 - `list-audit`: `GET /v1/audit`, the audit trail (newest first, paged by
   `cursor`/`limit`, filtered by `since`, `until`, `actor`, `action`,
   `tenant`).

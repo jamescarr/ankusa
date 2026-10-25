@@ -13,6 +13,71 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Log correlation and a runtime log level (OPS-2).** The process that handles a
+  hook carries its correlation as `Logger` metadata: `Ankusa.Edge.Router` clears
+  it per request and sets `instance`; `Ankusa.Edge.Ingest` sets `source_id`,
+  `tenant_id`, `trace_id` (`Ankusa.Trace.trace_id/1`) and `hook_id`;
+  `Ankusa.Sink.attempt/5` sets them, with `sink`, `attempt` and `replay_id`, for
+  every delivery attempt (dispatch, lifecycle events, `wal.type: none`
+  publishes); a replay step sets `replay_id`; the breaker, `wal.type: none` sink
+  refusal and lifecycle give-up lines name their source, tenant and sink. The
+  console format is unchanged; the server image's `log.format: json` prints them.
+  `Ankusa.LogLevel` (`levels/0`, `get/0`, `parse/1`, `set/1`) and
+  `PUT /v1/log-level` (`{"level": "debug"}`; scope `config:write` plus `tenant:*`)
+  change the VM's log level at once, without a restart, with an audit row
+  (`log_level.put`, written first: a node whose store cannot take the row keeps
+  its level). `config:write`, reserved until now, is the scope of that route.
+
+- **`Sink.SQS` and `Sink.GooglePubSub` batch (DEL-4).** Dispatch's deliveries to
+  one queue or topic wait in an `Ankusa.Sink.Batcher` (one per destination and set
+  of credentials, under `Ankusa.Instance`) and go out as one `SendMessageBatch`
+  (10 entries, 256 KiB) or `topics.publish` (1 000 messages, 7.5 MB of data), 20 ms
+  after the first arrived or when the batch is full: about 10× and 1 000× fewer
+  requests at 10 k messages a second (`mix run bench/sqs_batch_bench.exs`). A
+  delivery is answered when *its* entry is: an SQS `Failed` entry is classified
+  alone (`InvalidParameterValue`, `MissingParameter`, … permanent; throttling a
+  jittered `{:retry_after, ms, _}`; the rest transient), and the entry `Id` is the
+  position in the request, never the hook id, so a hook twice in a batch is fine.
+  Pub/Sub's `publish` has no per-message results, so `INVALID_ARGUMENT` bisects the
+  request (at most `2 · (⌈log₂ n⌉ + 1)` splits) until the one refused message is
+  `{:permanent, _}` and the rest are delivered. A FIFO `MessageGroupId` or Pub/Sub
+  `ordering_key` has one request in flight and keeps admission order. The queue
+  is bounded (`batch_queue_max` 4 096, `batch_queue_max_bytes` 128 MiB,
+  `batch_queue_tenant_max` 1 024; a delivery past one is
+  `{:retry_after, ms, {:batch_queue_full, reason}}`) and entries are taken
+  round-robin across tenants. New sink options `batch`, `batch_linger_ms`,
+  `batch_max_entries`, `batch_max_bytes`, `batch_queue_max`,
+  `batch_queue_max_bytes`, `batch_queue_tenant_max`, `batch_max_inflight`; new
+  optional callback `c:Ankusa.Sink.batched?/1` and `Sink.batched?/2`; new
+  `Ankusa.Sink.SQS.classify_error/4` and `Ankusa.Sink.GooglePubSub.classify_error/4`
+  (the DEL-2 classes, shared by a whole request and one entry of a batch), and
+  `validate_opts!/1` on both (range checks of the `batch_*` options; the server
+  image runs them at load, a delivery that meets a bad one is a permanent
+  `{:config, {:batch_options, _}}`). SQS's `MissingParameter`,
+  `InvalidAttributeName`, `InvalidAttributeValue` and `KmsThrottled` are now
+  classified (permanent and throttled). New series
+  `ankusa_sink_batch_{requests,entries,bisections,refused}_total` and
+  `ankusa_sink_batch_{batchers,queued,queued_bytes}`; events
+  `[:ankusa, :sink_batch, :flush | :refused | :state]`. **Behaviour change:** for a
+  batching sink dispatch no longer counts an attempt against
+  `dispatch.sink_concurrency`, a tenant's `concurrency` or `dispatch.concurrency`
+  (those would cap a batch at 8); the claimed-row windows bound the attempts and
+  `sink_concurrency` counts the batcher's requests. `batch: false` restores the
+  old one-request-per-message behaviour for a sink.
+- **OpenTelemetry tracing end to end (OPS-1).** `Ankusa.Trace` reads the
+  request's W3C `traceparent`/`tracestate` into the new `Envelope.trace` field
+  (additive: a node that predates it ignores it) and every sink carries it to
+  the consumer: the `traceparent` (and `tracestate`) header on `Sink.Http`, the
+  `traceparent`/`tracestate` fields of `Sink.Message` (`null` for a hook with no
+  trace) plus the same pair in `Message.headers/2` and `attributes/2`, and the
+  CloudEvents `traceparent` extension on lifecycle events. Core depends on
+  `opentelemetry_api` only: with no SDK started the request's context reaches
+  the consumer byte for byte and no span exists. With an SDK, spans
+  `ankusa.ingest` (a child of the provider's), `ankusa.verify`, `ankusa.commit`,
+  `ankusa.dispatch.attempt` (a child of, and linked to, the stored context),
+  `ankusa.claim_check`, `ankusa.replay` and `ankusa.lifecycle.event` make a
+  hook one trace. New `Ankusa.Sink.attempt/5` and `Ankusa.Lifecycle.traced_envelope/4`.
+
 - **Readiness thresholds (OPS-5).** `listener.ready_sink_error_window_ms` (5000):
   under `wal: :none`, a sink whose last publish failed within this long ago makes
   `/ready` `503` with `sinks: "failing"`; a sink that publishes again clears

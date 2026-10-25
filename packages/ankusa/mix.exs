@@ -152,6 +152,10 @@ defmodule Ankusa.MixProject do
       # (`Ankusa.Sink.Http.Pool`). Req already brings it; core now calls it
       # directly, so it is declared (the version Req is locked to everywhere).
       {:finch, "~> 0.24"},
+      # Tracing (`Ankusa.Trace`, ground rule 8): the API only. Without an SDK
+      # every call is a no-op, so a library user pays nothing; `ankusa_server`
+      # ships the SDK and the OTLP exporter behind `tracing.enabled`.
+      {:opentelemetry_api, "~> 1.4"},
       # AWS Signature V4 — the signing implementation behind the official
       # aws-elixir SDK. Replaces ~80 lines of hand-rolled canonical-request /
       # string-to-sign / HMAC-chain code; signs Ankusa.BlobStore.S3 and Ankusa.Sink.SQS.
@@ -187,6 +191,10 @@ defmodule Ankusa.MixProject do
       # Property tests (`test/ankusa/property/`): generators and `check all` for
       # the parsers and codecs that take attacker-reachable bytes.
       {:stream_data, "~> 1.1", only: :test},
+      # The SDK `test/ankusa/tracing_test.exs` starts by hand (with the in-memory
+      # `:otel_exporter_pid`); nothing else in the suite runs it, so every other
+      # test and the bench see the no-op API.
+      {:opentelemetry, "~> 1.5", only: :test, runtime: false},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       # Static analysis gates run by `mise run check:package` (dev only, so they
       # never reach a consumer's dependency tree).

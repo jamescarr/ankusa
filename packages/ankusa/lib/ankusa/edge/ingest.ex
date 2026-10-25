@@ -45,6 +45,20 @@ defmodule Ankusa.Edge.Ingest do
   (`Ankusa.Edge.Fleet`): an event key another node has claimed but not yet made
   durable is `{:error, {:dedupe_pending, ms}}` (`409`, retried by the sender), and
   one it has committed is a `{:duplicate, env}` carrying that node's hook id.
+
+  ## Tracing
+
+  The request's `traceparent`/`tracestate` become `Ankusa.Envelope.trace`
+  (`Ankusa.Trace`). With an OpenTelemetry SDK running, the whole ingest is an
+  `ankusa.ingest` span (a child of the provider's), with `ankusa.verify` and
+  `ankusa.commit` inside it, and the hook stores the ingest span's context
+  instead. Without one, the request's context is stored verbatim and no span
+  exists.
+
+  The request process's `Logger` metadata carries `source_id`, `tenant_id`,
+  `hook_id` and `trace_id` while a hook is ingested (and `Ankusa.Edge.Router`
+  clears them per request), so any line logged for it correlates; the server
+  image's JSON log formatter prints them.
   """
 
   alias Ankusa.Edge.{
@@ -56,7 +70,7 @@ defmodule Ankusa.Edge.Ingest do
     StoredHeaders
   }
 
-  alias Ankusa.{Envelope, Source, Verification}
+  alias Ankusa.{Envelope, Source, Trace, Verification}
 
   @type result ::
           {:ok, Envelope.t()}
@@ -101,7 +115,8 @@ defmodule Ankusa.Edge.Ingest do
   # map type here would make every `ingest/2` call "break the contract". The
   # edge adds `:query` (the raw query string), `:route_id` (the route the guard
   # matched, `nil` with routes off; reported as `:route_id` on the
-  # `[:ankusa, :ingest]` span) and, for a source verified by
+  # `[:ankusa, :ingest]` span), `:trace` (the request's `Ankusa.Trace`, read from
+  # `headers` here when absent) and, for a source verified by
   # `Ankusa.Verifier.ClientCert` only, `:peer_cert` (the DER client certificate
   # the TLS handshake accepted, or `nil`).
   @type raw_request :: %{
@@ -270,17 +285,44 @@ defmodule Ankusa.Edge.Ingest do
       route_id: Map.get(req, :route_id)
     }
 
-    Ankusa.Telemetry.span([:ingest], metadata, fn ->
-      {result, dropped} = accept(instance, source, tenant_id, req)
+    trace = Map.get_lazy(req, :trace, fn -> Trace.from_headers(req.headers) end)
 
-      {result, %{size: byte_size(req.body), outcome: tag(result), dropped_headers: dropped}}
-    end)
+    # Every log line from here to the answer (a sink that refused the hook, a
+    # store that would not take it) names the hook's source and tenant, and the
+    # trace it belongs to. `hook_id` follows once the envelope exists.
+    Logger.metadata(source_id: source.id, tenant_id: tenant_id, trace_id: Trace.trace_id(trace))
+
+    # `ankusa.ingest` is a child of the provider's span when the request carried
+    # a `traceparent`; with no SDK this is the telemetry span alone.
+    Trace.span(
+      "ankusa.ingest",
+      [
+        kind: :server,
+        parent: trace,
+        attributes: fn ->
+          %{
+            "ankusa.source_id" => source.id,
+            "ankusa.tenant_id" => tenant_id,
+            "ankusa.hook.size" => byte_size(req.body)
+          }
+        end
+      ],
+      fn ->
+        Ankusa.Telemetry.span([:ingest], metadata, fn ->
+          {result, dropped} = accept(instance, source, tenant_id, req, trace)
+          trace_result(result)
+
+          {result, %{size: byte_size(req.body), outcome: tag(result), dropped_headers: dropped}}
+        end)
+      end
+    )
   end
 
   # Returns the result and how many request headers the stored-header policy
   # removed from the hook (0 for a hook that was not stored).
-  defp accept(instance, source, tenant_id, req) do
-    env = build_envelope(source, tenant_id, req)
+  defp accept(instance, source, tenant_id, req, trace) do
+    env = build_envelope(source, tenant_id, req, trace)
+    Logger.metadata(hook_id: env.id)
 
     case verify(instance, source, env, req) do
       {:accept, env} ->
@@ -401,7 +443,16 @@ defmodule Ankusa.Edge.Ingest do
         [:verify],
         %{instance: instance, source_id: source.id, tenant_id: env.tenant_id},
         fn ->
-          result = mod.verify(env, opts)
+          result =
+            Trace.span(
+              "ankusa.verify",
+              [attributes: fn -> %{"ankusa.scheme" => to_string(scheme)} end],
+              fn ->
+                result = mod.verify(env, opts)
+                if result != :ok, do: Trace.error(:verification_failed)
+                result
+              end
+            )
 
           {result,
            %{provider: mod, scheme: scheme, status: verify_status(result), weak_hash: weak_hash}}
@@ -444,10 +495,18 @@ defmodule Ankusa.Edge.Ingest do
   # `Ankusa.config/1` is a `:persistent_term` read: this branch costs nothing
   # on the hot path.
   defp commit(instance, source, env) do
-    case Ankusa.config(instance).wal do
-      :none -> Publish.publish(instance, source, env)
-      _ -> buffered_or_full(instance, source, env)
-    end
+    wal = Ankusa.config(instance).wal
+
+    Trace.span("ankusa.commit", [attributes: fn -> %{"ankusa.wal" => to_string(wal)} end], fn ->
+      result =
+        case wal do
+          :none -> Publish.publish(instance, source, env)
+          _ -> buffered_or_full(instance, source, env)
+        end
+
+      trace_failure(result)
+      result
+    end)
   end
 
   # A DLQ over `queue.dlq.max_rows`/`max_bytes` with no archived row left to evict
@@ -512,7 +571,7 @@ defmodule Ankusa.Edge.Ingest do
 
   # ── envelope construction ─────────────────────────────────────────────────
 
-  defp build_envelope(%Source{} = source, tenant_id, req) do
+  defp build_envelope(%Source{} = source, tenant_id, req, trace) do
     env = %Envelope{
       id: Ankusa.UUIDv7.generate(),
       source_id: source.id,
@@ -525,7 +584,9 @@ defmodule Ankusa.Edge.Ingest do
       # keep raw bytes verbatim; a slice of a larger binary is copied so it
       # can't pin its parent (the socket buffer)
       body: standalone(req.body),
-      size: byte_size(req.body)
+      size: byte_size(req.body),
+      # The ingest span's context with an SDK, else the request's own, verbatim.
+      trace: Trace.current(trace)
     }
 
     # Read it back through the envelope so "the content-type header" is defined
@@ -549,4 +610,42 @@ defmodule Ankusa.Edge.Ingest do
   defp tag({:error, {:quarantine_rate_limited, _retry_after_ms}}), do: :quarantine_rate_limited
   defp tag({:error, {:dedupe_pending, _retry_after_ms}}), do: :dedupe_pending
   defp tag({:error, reason}), do: reason
+
+  # ── tracing ───────────────────────────────────────────────────────────────
+
+  # The ingest span's outcome. Rate limits and a retry the sender is meant to
+  # make are the caller's to answer, not a fault of ours: they stay unmarked.
+  defp trace_result(result) do
+    if Trace.active?() do
+      outcome = tag(result)
+      Trace.set_attributes(%{"ankusa.outcome" => outcome_label(outcome)})
+
+      if outcome not in [
+           :rate_limited,
+           :tenant_overload,
+           :quarantine_rate_limited,
+           :dedupe_pending
+         ] and match?({:error, _}, result),
+         do: Trace.error(outcome_label(outcome))
+    end
+
+    :ok
+  end
+
+  # A commit that did not make the hook durable.
+  defp trace_failure({:error, _reason} = error) do
+    if Trace.active?(), do: Trace.error(outcome_label(tag(error)))
+    :ok
+  end
+
+  defp trace_failure(_stored), do: :ok
+
+  # A bounded label for a span attribute or status: the reason's name, never
+  # the term (a reason may carry ids or destinations).
+  defp outcome_label(outcome) when is_atom(outcome), do: Atom.to_string(outcome)
+
+  defp outcome_label(outcome) when is_tuple(outcome) and is_atom(elem(outcome, 0)),
+    do: Atom.to_string(elem(outcome, 0))
+
+  defp outcome_label(_outcome), do: "error"
 end
