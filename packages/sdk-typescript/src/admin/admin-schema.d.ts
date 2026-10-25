@@ -35,12 +35,18 @@ export interface paths {
         };
         /**
          * Readiness probe
-         * @description `200` while this node can ack a hook: on a node that runs the local
-         *     store, a synced write to it succeeds (the answer is cached for 1 s).
-         *     `503` with `Retry-After: 1` while it cannot — a full disk, a store
-         *     that is closed or reopening — and `200` again on its own once it can.
-         *     A node without a store is always ready (`store: none`). `/health`
-         *     stays a liveness probe.
+         * @description `200` while this node can ack a hook. Every readiness check that applies
+         *     to the node's config lists its state in the body (`ok`, `failing` or
+         *     `draining`), with `reasons` naming why a check is not `ok`: `store` (a
+         *     synced write to the local store succeeds; the answer is cached for 1 s),
+         *     `intake` (`wal.type: dual`), `sinks` (`wal.type: none`: no sink failed its
+         *     last publish within `health.sink_error_window_ms`), `disk`
+         *     (`node.min_free_bytes`), `backlog` (`queue.max_oldest_due_ms`) and
+         *     `backup` (`backup.max_age_ms`). `503` with `Retry-After: 1` while a check
+         *     that gates is not `ok`: `store`, `intake`, `sinks` and `disk` always,
+         *     `backup` only with `backup.require_fresh`, `backlog` never (a label).
+         *     A node with none of these checks is always ready. `/health` stays a
+         *     liveness probe.
          */
         get: operations["getReady"];
         put?: never;
@@ -649,24 +655,50 @@ export interface components {
             /** @description The roles this node runs, sorted. */
             roles: ("claim_check" | "dispatch" | "edge" | "storage")[];
         };
+        /** @enum {string} */
+        CheckState: "ok" | "failing" | "draining";
+        /**
+         * @description One key per readiness check that applies to the node (see `GET /ready`);
+         *     a check that does not apply has no key.
+         */
         Readiness: {
             /** @enum {string} */
             status: "ready" | "unavailable";
             instance: string;
+            /** @description Present on a node that runs the local store. */
+            store?: components["schemas"]["CheckState"];
+            /** @description Present with `wal.type: dual`. */
+            intake?: components["schemas"]["CheckState"];
+            /** @description Present with `wal.type: none`. */
+            sinks?: components["schemas"]["CheckState"];
+            /** @description Present with `node.min_free_bytes`. */
+            disk?: components["schemas"]["CheckState"];
             /**
-             * @description `none` on a node without a local store; `store_unavailable` when
-             *     the store is closed or does not answer; `write_failed` when the
-             *     probe write failed.
-             * @enum {string}
+             * @description Present with `queue.max_oldest_due_ms`. A label: never makes the
+             *     node unready.
              */
-            store: "ok" | "none" | "store_unavailable" | "write_failed";
+            backlog?: components["schemas"]["CheckState"];
             /**
-             * @description Present only with `backup.enabled` and `backup.max_age_ms`: `stale`
+             * @description Present with `backup.enabled` and `backup.max_age_ms`: `failing`
              *     when the last successful backup is older than `max_age_ms` (or the
              *     uploader is not running). `503` only with `backup.require_fresh`.
-             * @enum {string}
              */
-            backup?: "fresh" | "stale";
+            backup?: components["schemas"]["CheckState"];
+            /** @description Present while a check is not `ok`, why, per check. */
+            reasons?: {
+                /** @enum {string} */
+                store?: "no_space" | "io_error" | "read_only" | "corruption" | "busy" | "timeout" | "not_running" | "other" | "error";
+                /** @enum {string} */
+                intake?: "down" | "recovering" | "error";
+                /** @enum {string} */
+                sinks?: "publish_failed" | "error";
+                /** @enum {string} */
+                disk?: "below_floor" | "unmeasured" | "error";
+                /** @enum {string} */
+                backlog?: "over_threshold" | "unavailable" | "error";
+                /** @enum {string} */
+                backup?: "stale" | "error";
+            };
         };
         Wal: {
             instance: string;
@@ -1417,7 +1449,11 @@ export interface operations {
                      * @example {
                      *       "status": "ready",
                      *       "instance": "default",
-                     *       "store": "ok"
+                     *       "store": "ok",
+                     *       "backlog": "failing",
+                     *       "reasons": {
+                     *         "backlog": "over_threshold"
+                     *       }
                      *     }
                      */
                     "application/json": components["schemas"]["Readiness"];
@@ -1435,7 +1471,10 @@ export interface operations {
                      * @example {
                      *       "status": "unavailable",
                      *       "instance": "default",
-                     *       "store": "write_failed"
+                     *       "store": "failing",
+                     *       "reasons": {
+                     *         "store": "no_space"
+                     *       }
                      *     }
                      */
                     "application/json": components["schemas"]["Readiness"];

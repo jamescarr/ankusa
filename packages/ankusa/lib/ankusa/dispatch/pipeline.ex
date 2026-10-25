@@ -1155,7 +1155,9 @@ defmodule Ankusa.Dispatch.Pipeline do
                   spec: spec,
                   policy: policy,
                   claim: item.claim,
-                  forward_headers: source.forward_headers
+                  forward_headers: source.forward_headers,
+                  max_headers: source.max_headers,
+                  forward_headers_max_bytes: source.forward_headers_max_bytes
                 }
 
                 {state, ops, pairs, [job | jobs], sources}
@@ -1854,7 +1856,9 @@ defmodule Ankusa.Dispatch.Pipeline do
       source_id: env.source_id,
       tenant_id: env.tenant_id,
       attempt: row.attempts + 1,
-      forward_headers: job.forward_headers
+      forward_headers: job.forward_headers,
+      max_headers: job.max_headers,
+      forward_headers_max_bytes: job.forward_headers_max_bytes
     }
 
     ctx =

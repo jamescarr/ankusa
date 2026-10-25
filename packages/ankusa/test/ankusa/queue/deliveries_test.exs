@@ -914,7 +914,7 @@ defmodule Ankusa.Queue.DeliveriesTest do
       report = Sweeper.report(inst, opts)
 
       if report.leases_pruned + report.packs > 0 or report.backlog > 0 or
-           report.partitions_left > 0,
+           report.partitions_left > 0 or report.tenants_left > 0,
          do: sweep_all(inst, opts),
          else: report
     end

@@ -26,7 +26,9 @@ defmodule Ankusa.Sink.Kafka do
   (`required_acks: -1`, not configurable). A record the broker will never take
   is `{:error, {:permanent, reason}}`, dead-lettered at once (see "Error
   classes" in `Ankusa.Sink`): a value plus key over `:max_record_bytes` is
-  refused before it is produced, and a produce the broker answers with
+  refused before it is produced (a body that cannot fit at all; a message whose
+  inline base64 would not fit is checked in instead, see
+  `Ankusa.Sink.Message`), and a produce the broker answers with
   `message_too_large`, `invalid_message` or `invalid_record` is permanent too.
   Anything else — unreachable broker, unknown topic, timeout, failed claim
   check — returns `{:error, reason}` into the source's `Ankusa.RetryPolicy`,
@@ -91,6 +93,11 @@ defmodule Ankusa.Sink.Kafka do
   # Produce error codes no retry can fix.
   @permanent_codes [:message_too_large, :invalid_message, :invalid_record]
 
+  # The message ceiling is the record's: `Message.encode/4` checks the value
+  # against it before `publish/4`, which then adds the key.
+  @impl Ankusa.Sink.Messaging
+  def max_message_bytes(opts), do: Keyword.get(opts, :max_record_bytes, @default_max_record_bytes)
+
   @impl true
   def publish(payload, %Envelope{} = env, ctx, opts) do
     topic = Keyword.fetch!(opts, :topic)
@@ -98,11 +105,7 @@ defmodule Ankusa.Sink.Kafka do
     client = client_id(ctx.instance, Keyword.get(opts, :client, :default))
     key = lane_or_configured_key(ctx, env, opts)
 
-    with :ok <-
-           Message.fits(
-             byte_size(payload) + byte_size(key || ""),
-             Keyword.get(opts, :max_record_bytes, @default_max_record_bytes)
-           ),
+    with :ok <- Message.fits(byte_size(payload) + byte_size(key || ""), max_message_bytes(opts)),
          {:ok, _pid} <- client(client, opts, timeout),
          {:ok, partition} <- partition(client, topic, key),
          {:ok, call_ref} <-

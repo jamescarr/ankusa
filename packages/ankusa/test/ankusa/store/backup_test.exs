@@ -774,13 +774,13 @@ defmodule Ankusa.Store.BackupTest do
     assert latest(secondary) == id
   end
 
-  test "readiness: backup is fresh within max_age_ms, stale past it (503 only with require_fresh), unlabelled without one" do
+  test "readiness: backup is ok within max_age_ms, failing past it (503 only with require_fresh), unlabelled without one" do
     plain = start(blob_root())
     assert {:ok, body} = Ankusa.Health.ready(plain.instance)
     refute Map.has_key?(body, :backup)
 
     fresh = start(blob_root(), backup: %{max_age_ms: 3_600_000})
-    assert {:ok, %{backup: "fresh", status: "ready"}} = Ankusa.Health.ready(fresh.instance)
+    assert {:ok, %{backup: "ok", status: "ready"}} = Ankusa.Health.ready(fresh.instance)
 
     # Puts that always fail: no backup ever succeeds, so the age only grows.
     {:ok, failures} = Agent.start_link(fn -> 1_000_000 end)
@@ -796,7 +796,7 @@ defmodule Ankusa.Store.BackupTest do
 
       assert wait_until(fn ->
                match?(
-                 {:ok, %{backup: "stale", status: "ready"}},
+                 {:ok, %{backup: "failing", status: "ready", reasons: %{backup: "stale"}}},
                  Ankusa.Health.ready(lax.instance)
                )
              end)
@@ -809,7 +809,13 @@ defmodule Ankusa.Store.BackupTest do
 
       assert wait_until(fn ->
                match?(
-                 {:error, %{backup: "stale", status: "unavailable", store: "ok"}},
+                 {:error,
+                  %{
+                    backup: "failing",
+                    status: "unavailable",
+                    store: "ok",
+                    reasons: %{backup: "stale"}
+                  }},
                  Ankusa.Health.ready(strict.instance)
                )
              end)
@@ -817,7 +823,7 @@ defmodule Ankusa.Store.BackupTest do
       # One good backup and it is fresh again.
       Agent.update(failures, fn _ -> 0 end)
       assert {:ok, _} = Backup.run(strict.instance)
-      assert {:ok, %{backup: "fresh"}} = Ankusa.Health.ready(strict.instance)
+      assert {:ok, %{backup: "ok"}} = Ankusa.Health.ready(strict.instance)
     end)
   end
 

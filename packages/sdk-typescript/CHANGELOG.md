@@ -6,6 +6,16 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The generated admin types (`src/admin/admin-schema.d.ts`) follow the server's new
+  `GET /ready` body (OPS-5): `Readiness` lists one `CheckState` (`ok`, `failing`
+  or `draining`) per readiness check (`store`, `intake`, `sinks`, `disk`,
+  `backlog`, `backup`) and `reasons`; `store` is no longer `none`,
+  `store_unavailable` or `write_failed`, and `backup` no longer `fresh`/`stale`.
+
+## [0.6.0] - 2026-10-24
+
 ### Added
 
 - The generated claim-check types (`src/claim-check/claim-check-schema.d.ts`)
@@ -192,7 +202,8 @@ this project follows [Semantic Versioning](https://semver.org/).
   `ClaimCheckUnavailableError`), each carrying a `retryable` boolean, so a
   consumer needs exactly one bit to route a failure to dead-letter or retry.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.5.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.6.0...HEAD
+[0.6.0]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.5.0...sdk-typescript-v0.6.0
 [0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.3.0...sdk-typescript-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.2.4...sdk-typescript-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.2.1...sdk-typescript-v0.2.4

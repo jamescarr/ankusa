@@ -11,6 +11,35 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - `ordered` and `ordering_key` (`{header: name}` / `{json: path}`) on every sink
   but `log` (ordering lanes, ADR 0004).
 
+- **Readiness keys (OPS-5).** `node.min_free_bytes` (unset): `/ready` answers `503`
+  with `disk: failing` while `data_dir`'s file system has fewer bytes free.
+  `health.sink_error_window_ms` (5000): under `wal.type: none`, a sink whose last
+  publish failed within this long ago makes `/ready` `503` with `sinks: failing`.
+  `queue.max_oldest_due_ms` (unset): past it `/ready` carries `backlog: failing`,
+  a label that never makes the node unready. See `config-examples/reference.yml`.
+  `/ready`'s body now lists every check with `ok`/`failing`/`draining` and
+  `reasons` (see the `ankusa` changelog for the wire change).
+
+## [0.7.0] - 2026-10-24
+
+### Added
+
+- **Forwarded-header caps and sink message limits (DEL-5).** A source takes
+  `max_headers` (default 64) and `forward_headers_max_bytes` (default 16384):
+  a forwarded header past either is dropped whole and counted in
+  `ankusa_sink_headers_dropped_total{reason}`. `rabbitmq`, `nats` and `redis`
+  sinks take `max_message_bytes` (defaults 134217728, 1048576, 536870912).
+  A message over a sink's limit is checked in as a claim, or, when the body is
+  over it by itself, dead-lettered at once as `message_too_large` with no
+  broker call. Both source keys are positive integers; `reference.yml` and
+  `configuration.md` document them.
+- **`egress.pools` section (DEL-3).** `pool_size` (32), `pool_count` (1),
+  `pool_timeout` (5000), `pool_max_idle_ms` (60000), `conn_max_idle_ms` (30000),
+  `max_pools` (1024), `max_pools_per_tenant` (256) and `protocols` (`[http1,
+  http2]`) size and bound the outbound HTTP connection pools every HTTP sink
+  delivery goes through; core range-checks them when the config loads. See the
+  `ankusa` changelog, [`configuration.md`](../../docs/configuration.md#outbound-connection-pools)
+  and the `egress.pools` block of `config-examples/reference.yml`.
 - **`dispatch.retry.max_elapsed_ms`, `dispatch.max_retry_after_ms` and a per-source
   `retry` block (DEL-2).** `max_elapsed_ms` (default `86400000`, 24 h) is the
   horizon after which a delivery still failing is dead-lettered, so
@@ -668,7 +697,8 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   fleet (Postgres + S3), Kafka/RabbitMQ fan-out, and multi-tenant examples.
 - Compose files for a single node and for a fleet behind nginx basic auth.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.6.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.7.0...HEAD
+[0.7.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.6.0...ankusa_server-v0.7.0
 [0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.4.0...ankusa_server-v0.6.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.3.0...ankusa_server-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.4...ankusa_server-v0.3.0

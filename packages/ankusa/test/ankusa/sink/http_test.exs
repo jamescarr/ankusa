@@ -713,7 +713,7 @@ defmodule Ankusa.Sink.HttpTest do
   end
 
   describe "computed destinations" do
-    alias Ankusa.Sink.Http.Pool
+    alias Ankusa.HttpClient.Pools
 
     @instance :sink_http_computed_test
     @key :crypto.strong_rand_bytes(32)
@@ -933,20 +933,32 @@ defmodule Ankusa.Sink.HttpTest do
         Sink.Http.validate_opts!(url: fn _env -> "https://a.example/" end)
       end
 
-      assert_raise ArgumentError, ~r/cannot combine a computed :url/, fn ->
+      # A computed URL may use a private CA or skip verification: the TLS options
+      # are part of its pool's connection options, not a shared pool's.
+      assert :ok =
+               Sink.Http.validate_opts!(
+                 url: fn _env -> "https://a.example/" end,
+                 allow_unsigned: true,
+                 allow_insecure_tls: true
+               )
+
+      assert_raise ArgumentError, ~r/pool_size must be an integer from 1 to 1024/, fn ->
         Sink.Http.validate_opts!(
-          url: fn _env -> "https://a.example/" end,
+          url: "https://a.example/",
           allow_unsigned: true,
-          allow_insecure_tls: true
+          pool: [pool_size: 0]
         )
       end
 
-      # and a sink that skipped validation is refused at delivery, nothing sent
-      assert {:error, {:permanent, {:computed, :url, :tls_override}}} =
-               Sink.Http.deliver(
-                 envelope(),
-                 %{attempt: 1},
-                 computed(url: fn _env -> "https://203.0.113.10/" end, allow_insecure_tls: true)
+      assert_raise ArgumentError, ~r/pool: unknown key :size/, fn ->
+        Sink.Http.validate_opts!(url: "https://a.example/", allow_unsigned: true, pool: [size: 4])
+      end
+
+      assert :ok =
+               Sink.Http.validate_opts!(
+                 url: "https://a.example/",
+                 allow_unsigned: true,
+                 pool: [pool_size: 4, protocols: [:http1]]
                )
     end
 
@@ -976,126 +988,179 @@ defmodule Ankusa.Sink.HttpTest do
                Sink.describe(Sink.Http, subject, url: "https://hooks.example:8443/")
     end
 
-    # A real https listener whose certificate chains to a private CA, an instance
-    # that lets `localhost` through the egress policy, and its computed-URL pool
-    # trusting that CA and reaping idle origins after `idle_ms`.
-    defp pool_fixture(idle_ms) do
-      %{client_config: client, server_config: server} =
-        :public_key.pkix_test_data(%{
-          server_chain: %{
-            root: [digest: :sha256, key: {:namedCurve, :secp256r1}],
-            peer: [
-              digest: :sha256,
-              key: {:namedCurve, :secp256r1},
-              extensions: [{:Extension, {2, 5, 29, 17}, false, [{:dNSName, ~c"localhost"}]}]
-            ]
-          },
-          client_chain: %{root: [], peer: []}
-        })
+    defmodule SlowEcho do
+      @moduledoc false
+      @behaviour Plug
+      import Plug.Conn
 
-      dir = Path.join(System.tmp_dir!(), "ankusa-pool-#{System.unique_integer([:positive])}")
-      File.mkdir_p!(dir)
-      on_exit(fn -> File.rm_rf!(dir) end)
+      @impl true
+      def init(opts), do: opts
 
-      {key_type, key_der} = server[:key]
-      cert = Path.join(dir, "cert.pem")
-      key = Path.join(dir, "key.pem")
-      ca = Path.join(dir, "ca.pem")
-      File.write!(cert, :public_key.pem_encode([{:Certificate, server[:cert], :not_encrypted}]))
-      File.write!(key, :public_key.pem_encode([{key_type, key_der, :not_encrypted}]))
+      @impl true
+      def call(conn, opts) do
+        Process.sleep(150)
+        send(opts[:test], {:request, conn.request_path})
+        send_resp(conn, 200, "ok")
+      end
+    end
 
-      File.write!(
-        ca,
-        :public_key.pem_encode(
-          for der <- client[:cacerts], do: {:Certificate, der, :not_encrypted}
-        )
-      )
-
+    # A real https listener whose certificate (SAN `san`) chains to a private CA,
+    # and an instance of its own (the node's pool rows are keyed by instance, so a
+    # test never counts another's pools) whose egress policy lets `localhost` and
+    # loopback addresses through, with the given `egress.pools`.
+    defp pool_fixture(san, pools) do
+      %{cert: cert, key: key, ca: ca} = Ankusa.TestHelpers.tls_fixture(san)
       port = Ankusa.TestHelpers.free_port()
 
       start_supervised!(
         {Bandit,
-         plug: {Echo, test: self()},
+         plug: {SlowEcho, test: self()},
          scheme: :https,
          ip: {127, 0, 0, 1},
          port: port,
          certfile: cert,
-         keyfile: key}
+         keyfile: key,
+         startup_log: false}
       )
+
+      instance = Ankusa.TestHelpers.unique_instance()
 
       Ankusa.put_config(
-        Ankusa.Config.new(instance: @instance, egress: %{allow_hosts: ["localhost"]})
+        Ankusa.Config.new(
+          instance: instance,
+          egress: %{
+            allow_hosts: ["localhost"],
+            allow_cidrs: ["127.0.0.0/8"],
+            pools: pools
+          }
+        )
       )
 
-      on_exit(fn -> :persistent_term.erase({Ankusa, :config, @instance}) end)
+      on_exit(fn -> :persistent_term.erase({Ankusa, :config, instance}) end)
 
-      start_supervised!(
-        {Pool, instance: @instance, pool_max_idle_ms: idle_ms, transport_opts: [cacertfile: ca]}
-      )
-
-      %{port: port, ca: ca, ctx: %{instance: @instance, attempt: 1}}
+      %{port: port, ca: ca, ctx: %{instance: instance, attempt: 1}}
     end
 
-    defp eventually(fun, tries \\ 60) do
-      cond do
-        fun.() -> :ok
-        tries == 0 -> flunk("condition never held")
-        true -> Process.sleep(100) && eventually(fun, tries - 1)
+    # `name` resolves to whatever `answers` holds, and nothing else resolves.
+    defp resolver(name, answers) do
+      fn host, family ->
+        case {List.to_string(host), family} do
+          {^name, :inet} -> {:ok, Agent.get(answers, & &1)}
+          _other -> {:error, :nxdomain}
+        end
       end
     end
 
-    test "computed urls share the instance's bounded pool; static ones do not" do
-      %{port: port, ca: ca, ctx: ctx} = pool_fixture(500)
-      url = "https://localhost:#{port}"
+    test "a computed url gets a pool per receiver, with a private CA, and the pool reaped when idle" do
+      %{port: port, ca: ca, ctx: ctx} = pool_fixture("localhost", %{pool_max_idle_ms: 50})
+      per_tenant = fn env -> "https://localhost:#{port}/t/" <> env.tenant_id end
 
       assert :ok =
                Sink.Http.deliver(envelope(), ctx,
-                 url: url <> "/static",
+                 url: "https://localhost:#{port}/static",
                  allow_unsigned: true,
                  cacertfile: ca
                )
 
       assert_received {:request, "/static"}
-      assert Pool.origins(@instance) == 0
-
-      per_tenant = fn env -> url <> "/t/" <> env.tenant_id end
+      assert Pools.count(ctx.instance) == 1
 
       for tenant <- ["acme", "globex"] do
         assert :ok =
-                 Sink.Http.deliver(
-                   envelope(%{tenant_id: tenant}),
-                   ctx,
+                 Sink.Http.deliver(envelope(%{tenant_id: tenant}), ctx,
                    url: per_tenant,
-                   allow_unsigned: true
+                   allow_unsigned: true,
+                   cacertfile: ca
                  )
 
         expected = "/t/" <> tenant
         assert_received {:request, ^expected}
       end
 
-      # Both tenants are one origin here (one host and port).
-      assert Pool.origins(@instance) == 1
-      assert {:ok, 1} = Finch.get_pool_count(Pool.name(@instance), url)
+      # One receiver, one TLS profile: the static sink and both tenants share a pool.
+      assert Pools.count(ctx.instance) == 1
 
-      # An origin nobody delivers to is reaped: the pool does not keep one per
-      # tenant receiver for the life of the node.
-      eventually(fn -> Pool.origins(@instance) == 0 end)
+      # An origin nobody delivers to is reaped: no pool per tenant receiver for the
+      # life of the node.
+      Process.sleep(80)
+      assert :ok = Pools.sweep_now()
+      assert Pools.count(ctx.instance) == 0
     end
 
-    test "a new origin is refused at the ceiling; an open one never is" do
-      %{port: port, ctx: ctx} = pool_fixture(60_000)
-      url = "https://localhost:#{port}/x"
+    test "every connection of a pool goes to the pinned address, verified against the name" do
+      %{port: port, ca: ca, ctx: ctx} = pool_fixture("pinned.test", %{pool_size: 2})
+      {:ok, answers} = Agent.start_link(fn -> [{127, 0, 0, 1}] end)
+      ctx = Map.put(ctx, :egress_resolver, resolver("pinned.test", answers))
+      opts = [url: "https://pinned.test:#{port}/x", allow_unsigned: true, cacertfile: ca]
 
-      assert :ok =
-               Sink.Http.deliver(envelope(), ctx, url: fn _env -> url end, allow_unsigned: true)
+      # `pinned.test` resolves nowhere but the stub: two simultaneous deliveries make
+      # the pool open two connections, and both reach the listener, so neither
+      # resolved the name on its own. The certificate is checked against the name.
+      results =
+        1..2
+        |> Task.async_stream(fn _ -> Sink.Http.deliver(envelope(), ctx, opts) end)
+        |> Enum.map(fn {:ok, result} -> result end)
 
-      assert Pool.origins(@instance) == 1
+      assert results == [:ok, :ok]
+      assert_received {:request, "/x"}
+      assert_received {:request, "/x"}
+      assert Pools.count(ctx.instance) == 1
 
-      assert :ok = Pool.admit(@instance, url, 1)
-      assert :ok = Pool.admit(@instance, "https://other.example/", 2)
+      # The pinned address is not the identity: a name the certificate does not
+      # cover is refused even though it reaches the same listener.
+      anywhere = fn _host, family ->
+        if family == :inet, do: {:ok, [{127, 0, 0, 1}]}, else: {:error, :nxdomain}
+      end
 
-      assert {:error, :pool_origins_exhausted} =
-               Pool.admit(@instance, "https://other.example/", 1)
+      assert {:error, _hostname_mismatch} =
+               Sink.Http.deliver(
+                 envelope(),
+                 Map.put(ctx, :egress_resolver, anywhere),
+                 url: "https://wrong.test:#{port}/x",
+                 allow_unsigned: true,
+                 cacertfile: ca
+               )
+
+      refute_received {:request, _}
+    end
+
+    test "a name that turns private between two deliveries through one pool is denied on the second" do
+      %{port: port, ca: ca, ctx: ctx} = pool_fixture("pinned.test", %{pool_size: 1})
+      {:ok, answers} = Agent.start_link(fn -> [{127, 0, 0, 1}] end)
+      ctx = Map.put(ctx, :egress_resolver, resolver("pinned.test", answers))
+      opts = [url: "https://pinned.test:#{port}/x", allow_unsigned: true, cacertfile: ca]
+      deliver = fn -> Sink.Http.deliver(envelope(), ctx, opts) end
+
+      assert :ok = deliver.()
+      assert_received {:request, "/x"}
+      assert Pools.count(ctx.instance) == 1
+
+      # The pool is open and its connection idle; the name now answers an address on
+      # the private network, then the metadata service. Each attempt is checked
+      # before it can touch the pool, and neither reaches the receiver.
+      for {rebound, shown} <- [
+            {{10, 0, 0, 5}, "10.0.0.5"},
+            {{169, 254, 169, 254}, "169.254.169.254"}
+          ] do
+        Agent.update(answers, fn _ -> [rebound] end)
+
+        assert {:error, {:permanent, {:egress_denied, {:address, "pinned.test", ^shown}}}} =
+                 deliver.()
+
+        refute_received {:request, _}
+      end
+
+      # A name with one public and one private record is refused as well.
+      Agent.update(answers, fn _ -> [{127, 0, 0, 1}, {10, 0, 0, 5}] end)
+
+      assert {:error, {:permanent, {:egress_denied, {:address, "pinned.test", "10.0.0.5"}}}} =
+               deliver.()
+
+      # Back to the good answer: the pool that is still open serves it.
+      Agent.update(answers, fn _ -> [{127, 0, 0, 1}] end)
+      assert :ok = deliver.()
+      assert_received {:request, "/x"}
+      assert Pools.count(ctx.instance) == 1
     end
   end
 end

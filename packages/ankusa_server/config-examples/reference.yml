@@ -21,6 +21,19 @@ node:
   roles: [edge, dispatch, storage]
   # [env ANKUSA_DATA_DIR] the RocksDB store (hooks, delivery rows and DLQ, quarantine pen, API-managed sources, rate-limit overrides) and local segments land here.
   data_dir: /var/lib/ankusa
+  # Readiness disk floor, in bytes (default: unset, no check). `GET /ready` answers
+  # 503 with `disk: failing` while the file system holding data_dir has fewer bytes
+  # free, so the load balancer drains the node before the store hits ENOSPC. The
+  # image starts os_mon, which measures it. An integer >= 1.
+  # min_free_bytes: 10737418240
+
+# What `GET /ready` checks beyond the store (see docs/deployment.md, "Running the container").
+health:
+  # wal.type none only: a sink whose last publish failed within this many ms makes
+  # `/ready` answer 503 with `sinks: failing` (the provider's retry is the only
+  # retry in that mode, so a broker that refuses every publish should leave the
+  # load balancer). A sink that publishes again clears itself at once. An integer >= 1.
+  sink_error_window_ms: 5000
 
 log:
   # [env ANKUSA_LOG_LEVEL] debug | info | warning | error
@@ -396,6 +409,10 @@ quarantine:
 # look: raise the cache on a node whose store holds tens of millions of dedupe keys
 # (the filters live in it).
 queue:
+  # Readiness backlog threshold, in ms (default: unset, no check). Once the oldest due
+  # delivery has waited longer, `GET /ready` says `backlog: failing`: a label, the
+  # node stays ready (200) and the alert is the signal. An integer >= 1.
+  # max_oldest_due_ms: 300000
   rocksdb:
     # LRU block cache shared by every column family, index and filter blocks included
     block_cache_bytes: 67108864
@@ -812,6 +829,36 @@ egress:
   allow_hosts: []
   # Names refused before any lookup; wins over allow_hosts.
   deny_hosts: [metadata.google.internal]
+  # The outbound HTTP connection pools: every HTTP sink delivery (and the SQS,
+  # Pub/Sub, JWKS and secret-provider calls) goes through one pool per receiver
+  # address, bounded in connections, count and idle time. The values shown are the
+  # defaults. Ranges are checked at startup.
+  pools:
+    # HTTP/1 connections per pool, and shards per pool. Several sinks posting to
+    # one receiver share a pool: keep pool_size * pool_count at or above
+    # dispatch.concurrency (startup warns when it is not), or deliveries to that
+    # receiver queue on a free connection. A sink can override the three of
+    # pool_size, pool_count and pool_timeout in Elixir config with `pool:`.
+    pool_size: 32
+    pool_count: 1
+    # How long a request waits for a free connection before that attempt fails
+    # as a transport error (retried), in ms.
+    pool_timeout: 5000
+    # A pool with no request in flight for this long is closed (swept every
+    # 30 s), and so is a source's idle pool when the source is deleted; a
+    # connection idle for conn_max_idle_ms is not reused.
+    pool_max_idle_ms: 60000
+    conn_max_idle_ms: 30000
+    # Ceilings on live pools: per node instance, and per tenant (the tenant
+    # whose delivery opened the pool). At a ceiling the least recently used idle
+    # pool is closed to make room; with none idle the request is refused as
+    # {unavailable, pool_limit} and retried. max_pools * pool_size * pool_count
+    # is the most connections this can open: startup warns when it passes
+    # `ulimit -n`.
+    max_pools: 1024
+    max_pools_per_tenant: 256
+    # HTTP versions a connection may negotiate (ALPN): http1, http2, or both.
+    protocols: [http1, http2]
 
 lifecycle:
   # Where a lifecycle event goes when a source or route is created, updated, or
@@ -924,6 +971,8 @@ sources:
       tolerance_seconds: 300
     # dedupe: stripe   # a preset (github | standard_webhooks | svix | shopify | stripe), or {header: X-Event-Id} / {json: data.id}, plus optional ttl_seconds (259200)
     # forward_headers: [stripe-signature]   # absent = every header except auth/framing/hop-by-hop and x-ankusa-*
+    # max_headers: 64   # at most this many forwarded headers per message; the rest are dropped (ankusa_sink_headers_dropped_total{reason="count"})
+    # forward_headers_max_bytes: 16384   # at most this many bytes of forwarded header names and values per message; a header that would pass it is dropped whole (reason="bytes")
     # store_headers: {drop: [x-internal-auth], hash: [x-tenant-token]}   # absent = the http.store_headers lists above
     # At least one. Every sink is tried on every delivered hook.
     sinks:
@@ -958,6 +1007,9 @@ sources:
         exchange_type: topic
         routing_key: "ankusa.stripe"
         inline_max_bytes: 8192
+        # The largest message published (default 128 MiB, RabbitMQ's default
+        # max_message_size).
+        max_message_bytes: 134217728
         # Publishes awaiting a broker confirm on this connection; past it a
         # publish fails fast as busy (retried) instead of queueing.
         max_inflight: 256
@@ -988,6 +1040,10 @@ sources:
         # covers this subject has to exist.
         subject: "${NATS_SUBJECT}"
         inline_max_bytes: 8192
+        # The largest message published (default 1 MiB, the server's max_payload).
+        # A bigger inline message is checked in instead; a body that is too big
+        # by itself is dead-lettered at once, with no server call.
+        max_message_bytes: 1048576
         # How long to wait for JetStream's publish ack.
         publish_timeout_ms: 5000
         tls: false
@@ -1007,6 +1063,8 @@ sources:
         # Static string only (a fun is an embedding API, not a config surface).
         channel: "ankusa.stripe"
         inline_max_bytes: 8192
+        # The largest message published (default 512 MiB, Redis's own limit).
+        max_message_bytes: 536870912
         # How long to wait for Redis to answer the PUBLISH.
         publish_timeout_ms: 5000
       - type: sqs

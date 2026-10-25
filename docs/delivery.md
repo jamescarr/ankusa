@@ -350,27 +350,42 @@ and the admin API build static sinks only. `Ankusa.Sink.describe/3` reports
 the options that are `computed`; the sink stays out of the AsyncAPI document,
 which describes the envelope and not the raw body this sink sends.
 
-Computed URLs connect through `Ankusa.Sink.Http.Pool`, one Finch per instance,
-not Req's default of one pool per origin that is never closed (one per tenant
-receiver, so file descriptors and processes would grow with the tenant count
-until the node ran out). Its bounds:
+### `Sink.Http`: connection pools
+
+Every `Sink.Http` delivery (a static URL as much as a computed one) goes
+through `Ankusa.HttpClient.Pools`, the node's owned Finch, not Req's default of
+one 50-connection pool per origin that is never closed (one per tenant receiver,
+so file descriptors and processes would grow with the tenant count until the node
+ran out). There is one pool per receiver *address* and TLS profile, per instance,
+started on delivery. Its bounds (`egress.pools` in the
+[configuration](configuration.md#outbound-connection-pools)):
 
 | | |
 | --- | --- |
-| Cap | 4 connections per origin (HTTP/1), so one tenant's slow receiver holds at most 4; 4,096 open origins per node |
-| Sweep | an origin with no delivery for 30 s has its pool closed; a connection idle 15 s is not reused |
-| Metric | `ankusa_sink_http_pool_origins` |
-| Refusal | a delivery that cannot get a connection within 5 s, or that would open origin 4,097, fails that attempt (`{:error, :pool_origins_exhausted}` for the latter) and is retried by the retry policy; deliveries to open origins are never refused for the ceiling |
+| Cap | `pool_size` (32) HTTP/1 connections per pool, so one receiver's slow endpoint holds at most that many; `max_pools` (1,024) live pools per instance and `max_pools_per_tenant` (256) per tenant, so one tenant with a thousand receivers only ever churns its own pools |
+| Sweep | every 30 s a pool with no request in flight for `pool_max_idle_ms` (60 s) is closed; a connection idle `conn_max_idle_ms` (30 s) is not reused; a deleted source's idle pools are closed at once |
+| Metric | gauge `ankusa_http_pools`; counters `ankusa_http_pool_closed_total{reason}` and `ankusa_http_pool_refused_total{scope}` |
+| Refusal | at a ceiling the least recently used idle pool is closed to make room; with every pool in scope serving a request the delivery fails that attempt as `{:error, {:unavailable, :pool_limit}}`; a request that cannot get a connection within `pool_timeout` (5 s) fails it as a transport error. Both are retried by the retry policy |
 
-The pool verifies peers against the system trust store with one 5 s connect
-timeout, so a computed `url` cannot also set `cacertfile` or
-`allow_insecure_tls` (refused at load): give such a sink a pool of its own with
-`req_options: [finch: [name: MyFinch]]`, which owns its TLS options. A plain
-`http` URL whose host has only IPv6 addresses cannot be pinned and is
-`{:permanent, {:computed, :url, :unpinnable}}`. This pool is interim: owned,
-bounded pools for every outbound client are the hardening plan's DEL-3, which
-replaces it. Tests: `sink/http_test.exs` ("computed destinations": `computed url
-per tenant`, `computed url denied`, the pool and its idle reap).
+A pool belongs to its receiver, not to a sink: several sinks (of any sources)
+posting to one endpoint share it, up to `dispatch.concurrency` attempts at once.
+Size `pool_size` for that, not for one sink: a pool of 8 against a 100 ms
+receiver tops out at 80 requests a second however many attempts wait, and boot
+warns when `pool_size * pool_count` is below `dispatch.concurrency`. A sink sets
+its own `pool: [pool_size:, pool_count:, pool_timeout:, protocols:]`.
+Connections negotiate HTTP/2 where the receiver offers it (`protocols`).
+
+The pool is keyed by the address the egress check validated: its connections go
+to that address and verify the peer against the name (SNI and certificate), so a
+name that later resolves somewhere denied is refused on its next attempt, before
+a pool is touched, and one that moves to another public address gets a pool of its
+own. `cacertfile` and `allow_insecure_tls` are part of the pool's connection
+options, so a computed `url` may use them. Tests: `http_client_test.exs`
+(`pool reaped`, `http2`, the ceilings and the refusal), `sink/http_test.exs`
+("computed destinations": `computed url per tenant`, `computed url denied`,
+`every connection of a pool goes to the pinned address`, `a name that turns
+private between two deliveries through one pool is denied on the second`),
+`bench/pools_bench.exs` (10⁵ origins, throughput at one origin).
 
 ### Idempotent receivers
 
@@ -431,6 +446,21 @@ and as `dedupe_key` when the source extracts it. `Sink.Http` adds its own
 and `x-ankusa-replay-id`; a message carries `id`, `source_id`, `tenant_id`,
 `received_at`, `content_type`, `size`, `sha256`, `dedupe_key`, `replay_id`,
 `idempotency_key`, `verification`, `headers` and the body (or claim).
+
+**Forwarded headers are capped** so a provider with large headers cannot push a
+small body over a transport limit: per source, `max_headers` (64) names and
+`forward_headers_max_bytes` (16 KiB) of names plus values
+([`configuration.md`](configuration.md#sources)). Names are considered in order
+of arrival; a header past either cap is dropped whole (never truncated), and
+each drop is counted as `ankusa_sink_headers_dropped_total{reason="count" |
+"bytes"}` (`[:ankusa, :sink, :headers_dropped]`). The budget for one queue
+message is therefore `inline_max_bytes × 4/3` (base64) plus about 1 KiB of
+envelope plus at most `forward_headers_max_bytes`; the default 64 KiB is about
+106 KiB. Before publishing, every queue sink checks the message against its
+limit (`max_message_bytes`; `max_record_bytes` for Kafka): an inline message
+over it is checked in and sent as a claim instead, and a body that is over it
+by itself (`inline_max_bytes` at least its size) is dead-lettered at once as
+`{:permanent, {:message_too_large, size, max}}`, with no broker call.
 
 **Verification.** Every delivery says how the hook was verified at ingest:
 `x-ankusa-verification` on `Sink.Http` and the message's `verification` object
@@ -611,7 +641,9 @@ it. Delivery is at-least-once anyway, and consumers dedupe on the
 `message.max.bytes`; raise it with the topic's `max.message.bytes`) is refused
 before it is produced, and a broker `message_too_large`, `invalid_message` or
 `invalid_record` is permanent too. Retrying any of them for days would only
-fill the log.
+fill the log. A raised `:inline_max_bytes` does not make that a trap: an inline
+message whose base64 would pass `:max_record_bytes` is checked in and sent as a
+claim, and only a body that is over the limit by itself is refused.
 
 **Client lifecycle**: one brod client per `(instance, :client)`, started on
 demand by the first `deliver/3` call under `ankusa_kafka`'s own
@@ -660,11 +692,15 @@ acknowledgement, `{"stream":"ANKUSA","seq":42}`, awaited up to
 a permission violation, or no answering stream all come back as
 `{:error, reason}`. Note that an error ack carries `"seq": 0` *and* an
 `"error"` in the same body, so a sink that only checks for a stream name and a
-sequence would report a refused hook as delivered. The one permanent error is
-`{:permanent, :max_payload_exceeded}`: a message over the server's
-`max_payload` (1 MiB by default) is refused by gnat before it is sent, and is
-dead-lettered at once rather than retried. It takes an `:inline_max_bytes`
-raised past that limit; at the default (64 KiB) a larger body is claim-checked.
+sequence would report a refused hook as delivered. Two errors are permanent:
+`{:permanent, :max_payload_exceeded}`, a message over the server's
+`max_payload` (1 MiB by default) that gnat refuses before sending it, and
+`{:permanent, {:message_too_large, size, max}}`, below.
+Both are dead-lettered at once rather than retried. The sink checks the
+size limit itself first, as `:max_message_bytes` (default 1,048,576): an
+inline message over it is claim-checked instead, and a body that is over it by
+itself (an `:inline_max_bytes` raised past it) is refused with no server call.
+Raise `:max_message_bytes` together with the server's `max_payload`.
 
 **The subject is the address, the headers are the metadata.** Each message
 carries the same headers the Kafka sink sets — always `ankusa_id`,

@@ -48,6 +48,48 @@ defmodule Ankusa.TestHelpers do
   end
 
   @doc """
+  A private CA and a server certificate it signed for the DNS name `san`, as PEM
+  files in a temp dir (removed on exit): `%{cert: path, key: path, ca: path}`.
+  `ca` is the bundle a client verifies the server against (`cacertfile`).
+  """
+  def tls_fixture(san \\ "localhost") do
+    %{client_config: client, server_config: server} =
+      :public_key.pkix_test_data(%{
+        # sha256 + P-256: what a TLS 1.3 handshake accepts (the test data's
+        # default digest, sha1, gets `no_suitable_signature_algorithm`).
+        server_chain: %{
+          root: [digest: :sha256, key: {:namedCurve, :secp256r1}],
+          peer: [
+            digest: :sha256,
+            key: {:namedCurve, :secp256r1},
+            extensions: [
+              {:Extension, {2, 5, 29, 17}, false, [{:dNSName, String.to_charlist(san)}]}
+            ]
+          ]
+        },
+        client_chain: %{root: [], peer: []}
+      })
+
+    dir = Path.join(System.tmp_dir!(), "ankusa-tls-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    ExUnit.Callbacks.on_exit(fn -> File.rm_rf!(dir) end)
+
+    {key_type, key_der} = server[:key]
+    cert = Path.join(dir, "cert.pem")
+    key = Path.join(dir, "key.pem")
+    ca = Path.join(dir, "ca.pem")
+    File.write!(cert, :public_key.pem_encode([{:Certificate, server[:cert], :not_encrypted}]))
+    File.write!(key, :public_key.pem_encode([{key_type, key_der, :not_encrypted}]))
+
+    File.write!(
+      ca,
+      :public_key.pem_encode(for der <- client[:cacerts], do: {:Certificate, der, :not_encrypted})
+    )
+
+    %{cert: cert, key: key, ca: ca}
+  end
+
+  @doc """
   Boot a routes-enabled `:edge` instance and return its config.
 
   `routes_opts` is the keyword under `config.routes` (minus a nested `:admin`

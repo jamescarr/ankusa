@@ -238,19 +238,39 @@ defmodule Ankusa.Sink.KafkaTest do
     hw
   end
 
-  test "a record over max_record_bytes is permanent and never produced", %{
+  test "a body over max_record_bytes by itself is permanent and never produced", %{
     instance: inst,
     topic: topic
   } do
-    # Inline, base64 in the message: about 1.2 MB of value.
+    # The body alone is over the record limit, so no claim and no produce.
+    body = :crypto.strong_rand_bytes(1_100_000)
+    env = envelope(%{body: body, size: byte_size(body)})
+
+    assert {:error, {:permanent, {:message_too_large, 1_100_000, 1_000_000}}} =
+             Kafka.deliver(env, ctx(inst), opts(topic, inline_max_bytes: 4_000_000))
+
+    assert high_watermark(topic) == 0
+  end
+
+  test "an inline record whose base64 would pass max_record_bytes is produced as a claim", %{
+    instance: inst,
+    topic: topic
+  } do
+    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}_#{System.os_time(:microsecond)}")
+    on_exit(fn -> File.rm_rf(dir) end)
+    Ankusa.put_config(Ankusa.Config.new(instance: inst, data_dir: dir))
+
+    # 900 KB fits the limit, its base64 (about 1.2 MB) does not.
     body = :crypto.strong_rand_bytes(900_000)
     env = envelope(%{body: body, size: byte_size(body)})
 
-    assert {:error, {:permanent, {:message_too_large, size, 1_000_000}}} =
-             Kafka.deliver(env, ctx(inst), opts(topic, inline_max_bytes: 4_000_000))
+    assert :ok = Kafka.deliver(env, ctx(inst), opts(topic, inline_max_bytes: 4_000_000))
 
-    assert size > 1_000_000
-    assert high_watermark(topic) == 0
+    assert high_watermark(topic) == 1
+    assert [msg] = fetch_all(topic)
+    decoded = JSON.decode!(msg.value)
+    refute Map.has_key?(decoded, "body_base64")
+    assert {:ok, ^body} = ClaimCheck.redeem(inst, decoded["claim"], decoded["sha256"])
   end
 
   test "raising max_record_bytes (with the topic's limit) produces it", %{instance: inst} do

@@ -38,6 +38,9 @@ defmodule Ankusa.Sink.RabbitMQ do
     * `:routing_key`       — a static string, or a 1-arity fun `(Envelope.t() -> String.t())`;
                               default `"ankusa.\#{source_id}"`
     * `:inline_max_bytes`  — default 64 KiB (65,536), configurable
+    * `:max_message_bytes` — the largest message published; default
+                             `134_217_728`, RabbitMQ's default `max_message_size`
+                             (128 MiB). Lower it to the broker's own setting
     * `:retry_ms`          — reconnect backoff in milliseconds, default `5_000`
     * `:confirm_timeout_ms` — publisher-confirm wait in milliseconds, default `5_000`
     * `:idle_timeout_ms`   — close the connection after this long without a
@@ -52,6 +55,12 @@ defmodule Ankusa.Sink.RabbitMQ do
   alias Ankusa.Sink.{Connections, Description, Messaging}
   alias Ankusa.Sink.RabbitMQ.Connection
   alias Ankusa.Sink.Reaper
+
+  @default_max_message_bytes 134_217_728
+
+  @impl Ankusa.Sink.Messaging
+  def max_message_bytes(opts),
+    do: Keyword.get(opts, :max_message_bytes, @default_max_message_bytes)
 
   @impl true
   def publish(payload, %Envelope{} = env, ctx, opts) do

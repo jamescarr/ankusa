@@ -271,17 +271,23 @@ defmodule Ankusa.SourceStore do
       %Config{source_store: {mod, _}} = Ankusa.config(instance)
       context = Context.from_opts(opts)
 
-      cond do
-        exports?(mod, :delete, 4) ->
-          mod.delete(instance, tenant, name, audit: context)
+      result =
+        cond do
+          exports?(mod, :delete, 4) ->
+            mod.delete(instance, tenant, name, audit: context)
 
-        exports?(mod, :delete, 3) ->
-          prior = prior(mod, instance, tenant, name)
-          audited_delete(mod, instance, context, tenant, name, prior)
+          exports?(mod, :delete, 3) ->
+            prior = prior(mod, instance, tenant, name)
+            audited_delete(mod, instance, context, tenant, name, prior)
 
-        true ->
-          {:error, :read_only}
-      end
+          true ->
+            {:error, :read_only}
+        end
+
+      # The source's deliveries are over: close the idle connection pools they
+      # opened, rather than leave them to the idle sweep.
+      if result == :ok, do: Ankusa.HttpClient.Pools.close_source(instance, tenant, name)
+      result
     end
   end
 

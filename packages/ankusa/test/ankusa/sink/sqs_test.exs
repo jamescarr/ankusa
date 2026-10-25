@@ -296,6 +296,40 @@ defmodule Ankusa.Sink.SQSTest do
     assert Agent.get(capture, & &1) == []
   end
 
+  test "a 1 MiB forwarded header is dropped and counted: the message stays under SQS's limit",
+       %{capture: capture} do
+    handler = "sqs-headers-dropped-#{System.unique_integer([:positive])}"
+    test = self()
+
+    :telemetry.attach(
+      handler,
+      [:ankusa, :sink, :headers_dropped],
+      &__MODULE__.report/4,
+      test
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    env =
+      envelope(%{
+        headers: [{"x-ok", "yes"}, {"x-huge", String.duplicate("h", 1_048_576)}]
+      })
+
+    ctx = %{attempt: 1, instance: :sqs_header_cap}
+    assert :ok = SQS.deliver(env, ctx, opts())
+
+    {_method, _host, _path, _h, body, request} = sent(capture)
+    message = JSON.decode!(request["MessageBody"])
+
+    assert message["headers"] == %{"x-ok" => "yes"}
+    assert byte_size(body) < 1_048_576
+
+    assert_receive {:dropped, %{count: 1}, %{instance: :sqs_header_cap, reason: :bytes}}
+  end
+
+  @doc false
+  def report(_event, measurements, meta, pid), do: send(pid, {:dropped, measurements, meta})
+
   test "describe/2: the queue as the channel, with the sqs binding" do
     assert %Sink.Description{
              protocol: "sqs",

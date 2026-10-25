@@ -322,11 +322,35 @@ defmodule Ankusa.Metrics do
           tags: [:instance] ++ ids ++ [:result, :sink]
         )
       ),
+      sum(
+        "ankusa.sink.headers_dropped.total",
+        scoped(own,
+          event_name: [:ankusa, :sink, :headers_dropped],
+          measurement: :count,
+          tags: [:instance] ++ ids ++ [:reason]
+        )
+      ),
       counter(
         "ankusa.dispatch.breaker.transitions.total",
         scoped(own,
           event_name: [:ankusa, :dispatch, :breaker],
           tags: [:instance, :sink, :state]
+        )
+      ),
+      sum(
+        "ankusa.http_pool.closed.total",
+        scoped(own,
+          event_name: [:ankusa, :http_pool, :closed],
+          measurement: :count,
+          tags: [:instance, :reason]
+        )
+      ),
+      sum(
+        "ankusa.http_pool.refused.total",
+        scoped(own,
+          event_name: [:ankusa, :http_pool, :refused],
+          measurement: :count,
+          tags: [:instance, :scope]
         )
       ),
       counter(
@@ -611,6 +635,8 @@ defmodule Ankusa.Metrics do
           {"ankusa.claim_check.sweep.backlog", [:ankusa, :claim_check, :sweep], :backlog, :unit},
           {"ankusa.claim_check.sweep.partitions_left", [:ankusa, :claim_check, :sweep],
            :partitions_left, :unit},
+          {"ankusa.claim_check.sweep.tenants_left", [:ankusa, :claim_check, :sweep],
+           :tenants_left, :unit},
           {"ankusa.audit.rows", [:ankusa, :audit, :state], :rows, :unit},
           {"ankusa.audit.bytes", [:ankusa, :audit, :state], :bytes, :byte},
           {"ankusa.audit.outbox_backlog", [:ankusa, :audit, :state], :outbox_backlog, :unit},
@@ -629,7 +655,7 @@ defmodule Ankusa.Metrics do
           {"ankusa.dispatch.claimed.bytes", [:ankusa, :dispatch, :state], :claimed_bytes, :byte},
           {"ankusa.dispatch.runnable", [:ankusa, :dispatch, :state], :runnable, :unit},
           {"ankusa.dispatch.breakers_open", [:ankusa, :dispatch, :state], :breakers_open, :unit},
-          {"ankusa.sink_http.pool.origins", [:ankusa, :sink_http, :state], :origins, :unit},
+          {"ankusa.http.pools", [:ankusa, :http, :state], :pools, :unit},
           {"ankusa.dispatch.active_tenants", [:ankusa, :dispatch, :state], :active_tenants,
            :unit},
           {"ankusa.backup.age.seconds", [:ankusa, :backup, :state], :age_seconds, :second}

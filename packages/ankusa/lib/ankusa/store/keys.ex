@@ -42,6 +42,12 @@ defmodule Ankusa.Store.Keys do
   # `audit.max_bytes` are checked in O(1) (`Ankusa.Audit`). A value that does not
   # match the newest row of the trail is recounted at boot.
   def meta("audit_usage"), do: "m:audit_usage"
+  # The tenant the claim sweeper last finished (`Ankusa.ClaimCheck.Sweeper`): the
+  # tenant's name, as the `tenant=<t>` directory carries it. The sweeper visits
+  # one tenant per tick in name order and resumes after this one when the node
+  # restarts; absent means a pass starts from the first tenant. Additive: a
+  # build that does not know the row ignores it.
+  def meta("claim_sweep_cursor"), do: "m:claim_sweep_cursor"
   def meta("imported:" <> artifact), do: "m:imported:" <> artifact
 
   # The store's layout version (an integer in decimal), and the resumable marker

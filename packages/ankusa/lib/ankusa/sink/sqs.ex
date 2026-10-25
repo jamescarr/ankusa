@@ -114,7 +114,6 @@ defmodule Ankusa.Sink.SQS do
   alias Ankusa.{Envelope, HttpClient}
   alias Ankusa.Sink.{Description, Message, Messaging}
 
-  @default_max_message_bytes 1_048_576
   @default_timeout_ms 5_000
 
   # SQS refusing the message itself: no retry changes the answer. Both spellings
@@ -135,7 +134,7 @@ defmodule Ankusa.Sink.SQS do
 
   @impl true
   def publish(payload, %Envelope{} = env, ctx, opts) do
-    max = Keyword.get(opts, :max_message_bytes, @default_max_message_bytes)
+    max = max_message_bytes(opts)
     attributes = attributes(env, ctx)
 
     with :ok <- Message.fits(size(payload, attributes), max),
