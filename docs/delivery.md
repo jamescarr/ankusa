@@ -1108,6 +1108,13 @@ record key, `Sink.Http` adds `x-ankusa-ordering-key`; `Sink.RabbitMQ`,
 `ankusa_ordering_key` (a header, or the `ordering_key` field of the Redis body):
 consumer-side, documented, not enforced.
 
+A batching sink (`Sink.SQS`, `Sink.GooglePubSub`) still batches an ordered sink: the
+head of each lane waits in the destination's batcher like any attempt, so one
+request can carry the heads of many lanes but never two hooks of one lane (a lane
+has one head at a time), and the batcher's own per-group rule (one request in
+flight per `MessageGroupId` / `orderingKey`) holds the key (unverified: no test
+drives an ordered lane through a batcher).
+
 A lane's throughput is one delivery round trip per hook; a lane is blocked for as
 long as its head keeps retrying (up to `retry.max_elapsed_ms`). Order is per node
 and by `seq`: two nodes accepting hooks of one key have no common order, so route
