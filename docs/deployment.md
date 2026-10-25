@@ -100,8 +100,35 @@ Alpine: `build-base cmake git linux-headers openssl-dev zstd-dev`). The
 `jamescarr/ankusa` image installs those and builds RocksDB in its own cached
 layer; you only meet this if you build your own image or run core from source.
 
-**Shutdown and backups.** Stop the node with SIGTERM (`docker stop` sends it):
-the supervisor lets `Ankusa.Store` close the database cleanly. SIGKILL is safe
+**Draining on SIGTERM.** `docker stop` and a Kubernetes pod deletion send
+SIGTERM, and the node answers it in order, so a deploy resets no connection:
+
+1. `/ready` answers `503` with `"status": "draining"` (and a `drain` key) at
+   once, and the load balancer takes the node out.
+2. It keeps serving for `listener.drain_delay_ms` (5 s): a balancer needs a
+   probe interval or two to notice, and a request it had already routed must
+   find the listener open.
+3. The ingest listener closes. It stops accepting and waits for every request
+   it is serving, up to the batcher's 15 s record deadline plus the store
+   commit and a 5 s margin (22 s; 13 s under `wal.type: none`, 24 s under
+   `dual`), so a commit that starts late is not killed mid-fsync. Each request
+   is answered `201` (stored) or `503` (refused, nothing stored).
+4. It waits until every batcher holds nothing, within `listener.drain_timeout_ms`
+   (30 s) from the end of the delay.
+5. The tree stops: dispatch writes the outcomes it holds, the backup takes its
+   final checkpoint (below), and the store closes.
+
+A drain that cannot finish says so in the log and lets the stop go on. Give the
+orchestrator time for all of it: `terminationGracePeriodSeconds` of at least
+`(drain_delay_ms + drain_timeout_ms) / 1000 + 10` (45 with the defaults), plus
+`backup.final_timeout_ms` when the node backs up, and `docker stop -t` the
+same (Docker's default of 10 s is shorter than the drain). Proof:
+`test/ankusa/drain_test.exs` (200 requests in flight, SIGTERM, zero resets,
+every `201` present after a restart) and the `docker stop` drill of
+`mise run docker:smoke`.
+
+**Shutdown and backups.** After the drain the supervisor lets `Ankusa.Store`
+close the database cleanly. SIGKILL is safe
 for data — the store recovers from its write-ahead log and loses no acked hook
 — but a VM killed under write load with the database open can segfault on the
 way out. For a host you can lose, turn on [`backup`](configuration.md#backup)
@@ -131,11 +158,12 @@ that applies to its config and listing each one's state:
 A state is `ok`, `failing` or `draining`; `reasons` appears only while a check
 is not `ok` and names why, from a fixed set. A check that does not apply (no
 store, no threshold set, another `wal` mode) has no key. The node answers `503`
-(`status: "unavailable"`, `Retry-After: 1`) when a check that **gates** is not
+(`status: "unavailable"`, `Retry-After: 1`; `"draining"` once a stop has begun) when a check that **gates** is not
 `ok`, `200` otherwise:
 
 | Check | Applies when | Failing means (`reasons.<check>`) | `503`? |
 | --- | --- | --- | --- |
+| `drain` | the node is being stopped (SIGTERM) | `draining` (reason `shutting_down`): the node is closing its listeners and will exit; `status` is `draining` | yes |
 | `store` | the node runs the local store (any `edge`, `dispatch` or `storage` role, the admin API, or a persistent source store: every node but a claim-check-only gateway, `wal.type: none` included) | the store did not take a synced write in the last second, or a write failed in the last 5 s: a full volume, a latched RocksDB error, a store that is reopening. Reason: `no_space`, `io_error`, `read_only`, `corruption`, `busy`, `timeout`, `not_running` or `other` | yes |
 | `intake` | `wal.type: dual` | `down` (the breaker is open and the log is not answering) or `recovering` (boot replay is running) | yes |
 | `sinks` | `wal.type: none` | `publish_failed`: a sink failed its last publish within `health.sink_error_window_ms` (the provider's retry is the only retry in this mode, so a broker that refuses everything leaves the load balancer). A sink that publishes again clears itself at once | yes |

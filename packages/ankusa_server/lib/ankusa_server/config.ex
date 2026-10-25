@@ -83,7 +83,7 @@ defmodule AnkusaServer.Config do
   @store_headers_keys ~w(drop hash)
   @store_headers_fields %{"drop" => :drop, "hash" => :hash}
   @admin_keys ~w(enabled port ip gauge_interval_ms tls auth)
-  @listener_keys ~w(tls max_connections num_acceptors read_timeout_ms body_read_timeout_ms request_deadline_ms max_requests_per_connection max_header_count max_header_length http2)
+  @listener_keys ~w(tls max_connections num_acceptors read_timeout_ms body_read_timeout_ms request_deadline_ms max_requests_per_connection max_header_count max_header_length http2 drain_delay_ms drain_timeout_ms)
   @metrics_keys ~w(enabled port ip tls detail max_series_per_metric)
   @metrics_details ~w(tenant source none)
   @tls_keys ~w(certfile keyfile cacertfile verify versions ciphers)
@@ -784,6 +784,8 @@ defmodule AnkusaServer.Config do
         |> put_opt(:max_header_count, int_opt(listener, "max_header_count", path))
         |> put_opt(:max_header_length, int_opt(listener, "max_header_length", path))
         |> put_opt(:http2, bool_opt(listener, "http2", path))
+        |> put_opt(:drain_delay_ms, int_opt(listener, "drain_delay_ms", path))
+        |> put_opt(:drain_timeout_ms, int_opt(listener, "drain_timeout_ms", path))
     ]
   end
 

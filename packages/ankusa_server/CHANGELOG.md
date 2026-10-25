@@ -51,6 +51,20 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `/ready`'s body now lists every check with `ok`/`failing`/`draining` and
   `reasons` (see the `ankusa` changelog for the wire change).
 
+- **Graceful drain on SIGTERM (OPS-4).** `docker stop` (and a pod deletion) now
+  drains the node before it stops: `/ready` answers `503` with `"status":
+  "draining"` at once, the ingest port keeps serving for `listener.drain_delay_ms`
+  (5000, an integer >= 0), then closes after the requests it is serving, then
+  every batcher is waited on, all within `listener.drain_timeout_ms` (30000, an
+  integer >= 1; on a node with the `edge` role at least the ingest listener's
+  wait, 22 s by default). The ingest listener waits 22 s (13 s under
+  `wal.type: none`, 24 s under `dual`) for requests in flight instead of Thousand
+  Island's 15 s, so a commit that starts late is no longer killed mid-fsync and
+  no provider sees a reset for a committed hook. Set `terminationGracePeriodSeconds`
+  (and `docker stop -t`) to at least `(drain_delay_ms + drain_timeout_ms) / 1000 +
+  10`, plus `backup.final_timeout_ms` when the node backs up. See
+  `config-examples/reference.yml` and `docs/deployment.md`.
+
 ## [0.7.0] - 2026-10-24
 
 ### Added

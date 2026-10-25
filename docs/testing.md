@@ -332,6 +332,11 @@ The always-on tests cover:
   and `/ready` and answers `404` to the operator API's routes. The image
   smoke drill (`mise run docker:smoke`) repeats the mutual-TLS check with
   `openssl s_client` and `curl` against the built image.
+  The same smoke drill also stops a container under 200 throttled uploads
+  (`docker stop`, `listener.drain_delay_ms: 2000`) and asserts `/ready` flips to
+  `503 draining`, no upload is reset (curl exits 0 for every one, each answered
+  `201` or `503`), the container exits `0`, and every `201`'s id is in the
+  store after `docker start`.
 - **Secret sources** (`source_store_static_test.exs` in core;
   `ankusa_server/test/ankusa_server/secrets_test.exs`): `SourceStore.Static.publish/2`
   swaps a running instance's sources, names the ids that changed, and applies
@@ -561,6 +566,19 @@ The always-on tests cover:
   due row under its tenant's ordinal, `pending_for_tenant/2` agrees, and the
   stored per-tenant counters equal a fold of the index (`counters equal the
   index after kill -9`).
+- **A drain checker** (`drain_test.exs`, OPS-4): like the loss checker, it runs a
+  separate OS process. A child BEAM (`test/support/drain_harness.exs`) runs
+  the real `:ankusa` application with one edge + dispatch instance and a slow
+  sink, and a `STALL` command suspends its queue writer so 200 POSTs sit in
+  the batchers. The test sends `SIGTERM` and asserts what the clients and the
+  store saw: `/ready` answers `503` with `"status":"draining"` within 100 ms of
+  the signal, every request is answered `201` or `503` with **zero connection
+  resets**, the child exits `0`, and every `201`'s hook id is in the store
+  after a restart (it prints `drain: ready flips in <n> ms; zero resets; …`).
+  The `in process` tests cover `Ankusa.Instance.Drain` (it closes the ingress
+  listener, waits while a batcher still holds a record, and is a no-op for an
+  instance that never started) and `Ankusa.Edge.Batcher.queued/2`; the same
+  drill runs against the built image in `mise run docker:smoke` (see Listeners).
 - **Lifecycle events** (`lifecycle_test.exs`, `replay_test.exs`): through a real
   instance, a source's create/update/delete and a route's
   create/replace/patch/delete each deliver one CloudEvent to the configured
@@ -1143,7 +1161,8 @@ sink's deliveries, the log's records):
   `listener.ready_sink_error_window_ms`); a data dir under `listener.ready_min_free_bytes` is
   `503` with `disk: failing` (`unmeasured` without `:os_mon`); a backlog over
   `queue.max_oldest_due_ms` is `backlog: failing` with a `200`; a check that
-  reports `draining` gates, and one that raises is `failing` (reason `error`)
+  reports `draining` gates and makes the body's `status` `draining` (and
+  `Health.drain/1` adds the `drain` check that does), and one that raises is `failing` (reason `error`)
   without crashing the probe. `backup_test.exs` covers `backup` ok/failing and
   `require_fresh`; `edge_test.exs` the `/ready` body over HTTP;
   `admin/router_test.exs` that `/v1/config` shows the new keys.

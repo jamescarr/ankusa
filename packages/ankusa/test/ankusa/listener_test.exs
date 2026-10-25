@@ -56,6 +56,25 @@ defmodule Ankusa.ListenerTest do
                [enabled: true]
     end
 
+    test "extra Thousand Island options are appended, TLS or not" do
+      plain = Config.new([])
+      secure = Config.new(listener: %{tls: tls([])})
+      extra = [shutdown_timeout: 22_000]
+
+      assert Listener.bandit_options(plain, nil, extra)[:thousand_island_options][
+               :shutdown_timeout
+             ] == 22_000
+
+      assert Listener.bandit_options(secure, secure.listener.tls, extra)[:thousand_island_options][
+               :shutdown_timeout
+             ] == 22_000
+
+      refute Keyword.has_key?(
+               Listener.bandit_options(plain, nil)[:thousand_island_options],
+               :shutdown_timeout
+             )
+    end
+
     test "a TLS block turns the listener into https and demands a client certificate under verify_peer" do
       ca = Path.join(@tls_dir, "ca.pem")
       config = Config.new(listener: %{tls: tls(verify: :verify_peer, cacertfile: ca)})
