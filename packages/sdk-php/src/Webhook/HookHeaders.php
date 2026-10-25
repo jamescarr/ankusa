@@ -102,6 +102,17 @@ final readonly class HookHeaders
     }
 
     /**
+     * Whether the node verified this delivery at ingest and nothing flags it
+     * (see {@see Verification::isTrusted()}). A delivery with no
+     * `x-ankusa-verification` header (a node older than the field) is
+     * untrusted.
+     */
+    public function isTrusted(): bool
+    {
+        return $this->verification?->isTrusted() === true;
+    }
+
+    /**
      * @param array<string, string|null> $lowered
      */
     private static function parseVerification(array $lowered): ?Verification

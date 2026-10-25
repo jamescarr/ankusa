@@ -252,6 +252,17 @@ public record Message(
   }
 
   /**
+   * Whether the node verified this message's hook at ingest and nothing flags it (see {@link
+   * Verification#trusted()}). A message with no {@code verification} (a node older than the field)
+   * is untrusted.
+   *
+   * @return true when the message may be treated as verified
+   */
+  public boolean trusted() {
+    return verification != null && verification.trusted();
+  }
+
+  /**
    * The inline body's bytes.
    *
    * @return the decoded body, or null when this is a claim message

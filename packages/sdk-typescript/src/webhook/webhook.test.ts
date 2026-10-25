@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
+import { isTrusted } from "../message/index.js";
 import { parseHeaders } from "./headers.js";
 
 // The webhook vectors cover the parsed output for plain string maps. These
@@ -34,5 +35,23 @@ describe("parseHeaders", () => {
     assert.equal(parsed.dedupeKey, "evt_9");
     assert.equal(parsed.replayId, null);
     assert.equal(parsed.idempotencyKey, "acme:stripe:evt_9");
+  });
+});
+
+describe("isTrusted", () => {
+  test("is true only for an unflagged ok", () => {
+    assert.equal(isTrusted(parseHeaders({ "x-ankusa-id": "01a0", "x-ankusa-verification": "ok" })), true);
+    assert.equal(
+      isTrusted(
+        parseHeaders({
+          "x-ankusa-id": "01a0",
+          "x-ankusa-verification": "failed",
+          "x-ankusa-verification-flagged": "true",
+        }),
+      ),
+      false,
+    );
+    assert.equal(isTrusted(parseHeaders({ "x-ankusa-id": "01a0", "x-ankusa-verification": "skipped" })), false);
+    assert.equal(isTrusted(parseHeaders({ "x-ankusa-id": "01a0" })), false);
   });
 });

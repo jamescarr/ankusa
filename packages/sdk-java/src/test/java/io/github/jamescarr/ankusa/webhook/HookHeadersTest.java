@@ -1,7 +1,9 @@
 package io.github.jamescarr.ankusa.webhook;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import java.util.Map;
@@ -30,5 +32,29 @@ class HookHeadersTest {
                 "x-ankusa-verification-flagged", List.of("true")));
 
     assertEquals(new Verification("failed", true), headers.verification());
+  }
+
+  @Test
+  void trusted_only_for_an_unflagged_ok() {
+    assertTrue(
+        HookHeaders.parse(
+                Map.of(
+                    "x-ankusa-id", List.of("01a0"),
+                    "x-ankusa-verification", List.of("ok")))
+            .trusted());
+    assertFalse(
+        HookHeaders.parse(
+                Map.of(
+                    "x-ankusa-id", List.of("01a0"),
+                    "x-ankusa-verification", List.of("failed"),
+                    "x-ankusa-verification-flagged", List.of("true")))
+            .trusted());
+    assertFalse(
+        HookHeaders.parse(
+                Map.of(
+                    "x-ankusa-id", List.of("01a0"),
+                    "x-ankusa-verification", List.of("skipped")))
+            .trusted());
+    assertFalse(HookHeaders.parse(Map.of("x-ankusa-id", List.of("01a0"))).trusted());
   }
 }

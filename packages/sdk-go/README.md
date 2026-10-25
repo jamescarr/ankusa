@@ -182,7 +182,10 @@ case errors.As(err, &noID):
 `*Verification` saying how the *node* verified the hook at ingest, `nil` from
 a node older than the field. `Verification.Flagged == true` means the node
 accepted a failed check (`on_verify_failure: accept_flag`) — treat it as
-unverified.
+unverified. `hook.Trusted()` (on `Message`, `HookHeaders` and `*Verification`)
+is that decision in one call: true only for status `"ok"` with `Flagged`
+false, so a flagged, `failed` or `skipped` hook, or one from a node older than
+the field, is untrusted.
 
 ## Consuming queue messages
 

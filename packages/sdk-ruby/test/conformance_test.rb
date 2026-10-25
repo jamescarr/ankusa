@@ -174,6 +174,14 @@ class ConformanceTest < Minitest::Test
           Ankusa.parse_headers(input.fetch("headers")).idempotency_key(include_replay: include_replay)
         end
       {"key" => key}
+    when "trusted"
+      hook =
+        if input.key?("message")
+          Ankusa.decode_message(input.fetch("message"))
+        else
+          Ankusa.parse_headers(input.fetch("headers"))
+        end
+      {"trusted" => hook.trusted?}
     when "redeem"
       with_client(Ankusa::ClaimCheckClient, input, requests) do |client|
         body = client.redeem(input.fetch("ref"), input.fetch("sha256"))

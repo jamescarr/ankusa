@@ -83,6 +83,13 @@ module Ankusa
         dedupe_key: dedupe_key, id: id, replay_id: replay_id, include_replay: include_replay
       )
     end
+
+    # Whether the node verified this message's hook at ingest and nothing flags
+    # it (see `Verification#trusted?`). A message with no `verification` (a node
+    # older than the field) is untrusted.
+    def trusted?
+      verification&.trusted? == true
+    end
   end
 
   # The optional string-keyed fields that may be a string, null, or absent.

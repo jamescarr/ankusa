@@ -39,6 +39,19 @@ pub struct Verification {
     pub flagged: bool,
 }
 
+impl Verification {
+    /// Whether the node verified the hook at ingest and nothing flags it:
+    /// `true` only for status `ok` with `flagged` false.
+    ///
+    /// A flagged hook (accepted despite a failed check,
+    /// `on_verify_failure: accept_flag`), a `failed` or `skipped` one, and any
+    /// other status are untrusted.
+    #[must_use]
+    pub fn is_trusted(&self) -> bool {
+        self.status == "ok" && !self.flagged
+    }
+}
+
 impl HookHeaders<'_> {
     /// The idempotency key for this delivery.
     ///
@@ -60,6 +73,17 @@ impl HookHeaders<'_> {
             replay_id: self.replay_id,
         }
         .key(include_replay)
+    }
+
+    /// Whether the node verified this delivery at ingest and nothing flags it
+    /// (see [`Verification::is_trusted`]). A delivery with no
+    /// `x-ankusa-verification` header (a node older than the field) is
+    /// untrusted.
+    #[must_use]
+    pub fn is_trusted(&self) -> bool {
+        self.verification
+            .as_ref()
+            .is_some_and(Verification::is_trusted)
     }
 }
 
@@ -226,5 +250,27 @@ mod tests {
         let parsed = parse_headers(&empty).expect("id present");
         assert_eq!(parsed.idempotency_key, None);
         assert_eq!(parsed.idempotency_key(false), "acme:stripe:evt_1");
+    }
+
+    #[test]
+    fn is_trusted_is_true_only_for_an_unflagged_ok() {
+        let trusted = |pairs: &[(&str, &str)]| {
+            let map = headers(pairs);
+            parse_headers(&map).expect("id present").is_trusted()
+        };
+        assert!(trusted(&[
+            ("x-ankusa-id", "01a0"),
+            ("x-ankusa-verification", "ok"),
+        ]));
+        assert!(!trusted(&[
+            ("x-ankusa-id", "01a0"),
+            ("x-ankusa-verification", "failed"),
+            ("x-ankusa-verification-flagged", "true"),
+        ]));
+        assert!(!trusted(&[
+            ("x-ankusa-id", "01a0"),
+            ("x-ankusa-verification", "skipped"),
+        ]));
+        assert!(!trusted(&[("x-ankusa-id", "01a0")]));
     }
 }

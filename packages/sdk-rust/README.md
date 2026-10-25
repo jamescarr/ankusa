@@ -159,7 +159,10 @@ assert!(matches!(err, ReceiveError::Signature(_)));
 an `Option<Verification>` saying how the *node* verified the hook at ingest,
 `None` from a node older than the field. `verification.flagged == true` means
 the node accepted a failed check (`on_verify_failure: accept_flag`) — treat it
-as unverified.
+as unverified. `hook.is_trusted()` (on `Message`, `HookHeaders` and
+`Verification`) is that decision in one call: `true` only for status `ok` with
+`flagged` false, so a flagged, `failed` or `skipped` hook, or one from a node
+older than the field, is untrusted.
 
 ## Consuming queue messages
 

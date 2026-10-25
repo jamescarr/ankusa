@@ -222,6 +222,7 @@ defmodule Ankusa.SDK.Receiver do
       dedupe_key: headers.dedupe_key,
       replay_id: headers.replay_id,
       idempotency_key: headers.idempotency_key,
+      verification: headers.verification,
       headers: headers.headers
     }
 

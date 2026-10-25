@@ -216,6 +216,7 @@ public final class ConformanceTest {
       case "receive_delivery" -> receiveDelivery(vector);
       case "decode_message" -> Message.decode(text(vector, "message"));
       case "idempotency_key" -> Map.of("key", idempotencyKey(vector));
+      case "trusted" -> Map.of("trusted", trusted(vector));
       case "redeem" ->
           withClient(
               vector,
@@ -452,6 +453,17 @@ public final class ConformanceTest {
       return HookHeaders.parse(headerMap(vector)).idempotencyKey(includeReplay);
     }
     return Message.decode(text(vector, "message")).idempotencyKey(includeReplay);
+  }
+
+  /**
+   * Runs the {@code trusted} operation: decode the message (or parse the headers), then ask whether
+   * it is trusted.
+   */
+  private static boolean trusted(CaseSpec vector) {
+    if (vector.input().containsKey("headers")) {
+      return HookHeaders.parse(headerMap(vector)).trusted();
+    }
+    return Message.decode(text(vector, "message")).trusted();
   }
 
   /** An optional boolean input, false when absent. */

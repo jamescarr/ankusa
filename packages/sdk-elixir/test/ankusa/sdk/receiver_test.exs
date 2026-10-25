@@ -91,6 +91,42 @@ defmodule Ankusa.SDK.ReceiverTest do
     assert hook.headers["x-github-event"] == "push"
   end
 
+  test "a delivery carries how the node verified it, and a flagged one is untrusted" do
+    verified =
+      post("/deliveries", @body,
+        "x-ankusa-id": "01a0",
+        "x-ankusa-source": "demo",
+        "x-ankusa-verification": "ok"
+      )
+      |> Receiver.call(receiver_opts())
+
+    assert verified.status == 202
+    assert_received {:hook, %Hook{verification: %{status: "ok", flagged: false}} = ok_hook}
+    assert Hook.trusted?(ok_hook)
+
+    flagged =
+      post("/deliveries", @body,
+        "x-ankusa-id": "01a1",
+        "x-ankusa-source": "demo",
+        "x-ankusa-verification": "failed",
+        "x-ankusa-verification-flagged": "true"
+      )
+      |> Receiver.call(receiver_opts())
+
+    assert flagged.status == 202
+    assert_received {:hook, %Hook{verification: %{status: "failed", flagged: true}} = bad_hook}
+    refute Hook.trusted?(bad_hook)
+
+    # a sink that predates the header
+    legacy =
+      post("/deliveries", @body, "x-ankusa-id": "01a2", "x-ankusa-source": "demo")
+      |> Receiver.call(receiver_opts())
+
+    assert legacy.status == 202
+    assert_received {:hook, %Hook{verification: nil} = legacy_hook}
+    refute Hook.trusted?(legacy_hook)
+  end
+
   test "a delivery without a tenant has a nil tenant_id" do
     conn =
       post("/deliveries", @body, "x-ankusa-id": "01a0", "x-ankusa-source": "demo")
