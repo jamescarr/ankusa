@@ -436,6 +436,140 @@ restores the node from the secondary backup alone with `recover`: `missing=0`,
 the log and must **lose** the hooks acked since the last backup, so the drill
 proves the difference. See [`examples/fleet-e2e`](https://github.com/jamescarr/ankusa/tree/main/examples/fleet-e2e/).
 
+## Kubernetes: the Helm chart
+
+[`deploy/helm/ankusa`](https://github.com/jamescarr/ankusa/tree/main/deploy/helm/ankusa)
+runs the image in its three durability modes. `wal.type` picks the workload:
+
+| `wal.type` | Workload | Scale |
+| --- | --- | --- |
+| `disk` (default), `dual` | a **StatefulSet**, one RocksDB store on one PVC per pod (`dual`: `intake.node_id` is the pod name, the identity a replacement keeps) | `replicas`, by hand: a pod holds hooks, so nothing scales it away |
+| `none` | a **Deployment** of interchangeable pods, an `emptyDir` for the data directory | an HPA on CPU (and, with a custom-metrics adapter, on `ankusa_queue_pending`) |
+
+```sh
+helm install ankusa deploy/helm/ankusa -f my-values.yaml
+```
+
+The server's YAML goes under `config:` in your values (merged over what the chart
+derives: `wal.type`, `listener.drain_*`, JSON logs, the admin and claim-check
+listeners); secrets stay out of it as `${VAR}` references filled from `extraEnv` /
+`extraEnvFrom`. `claimCheck.enabled` adds the gateway as a Deployment of its own
+(`ANKUSA_ROLES=claim_check`). `deploy/helm/ankusa/ci/{disk,dual,none}-values.yaml`
+are one worked example per mode.
+
+**The pod spec is the restricted Pod Security Standard.** The pod runs as uid 100 /
+gid 101 (`runAsNonRoot`), `readOnlyRootFilesystem: true` (the writable paths are the
+data volume and a 256 MiB `/tmp`, which is the release's `RELEASE_TMP`),
+`allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, the runtime's default
+seccomp profile, no service-account token, no service-link environment variables. The
+`kind` run of the fleet (below) installs the chart into a namespace that *enforces*
+`restricted`. Every one of these is a value (`podSecurityContext`, `securityContext`),
+so a cluster policy that needs another uid changes the chart's input, not its templates.
+
+**Probes.** `startupProbe` and `livenessProbe` are `GET /health` (the process answers;
+the startup probe allows 10 minutes, for a store's boot migrations), `readinessProbe`
+is `GET /ready` with `failureThreshold: 1`: a full disk, a reopening store, an intake
+log that is down, or a drain takes the pod out of the Service within one period
+([Liveness and readiness](#running-the-container)). A claim-check pod has no `/ready`,
+so all three probes are `GET /health` on 4001.
+
+**`terminationGracePeriodSeconds` is computed from the drain.** The chart writes
+`drain.delayMs` / `drain.timeoutMs` into `listener.drain_delay_ms` /
+`drain_timeout_ms` and sets the grace period to `(delay + timeout) / 1000 + 10`, plus
+`backup.final_timeout_ms` (20 s) when `config.backup.enabled`: 45 s with the defaults,
+65 s for a backing-up node. A `drain` set under `config.listener` is the one it follows.
+There is no `preStop` sleep: the node flips `/ready` itself on SIGTERM and keeps serving
+for `drain_delay_ms`, which is the endpoint-removal margin
+([Draining on SIGTERM](#running-the-container)).
+
+**Disruption and placement.** A PodDisruptionBudget (`maxUnavailable: 1`) per workload,
+and `topologySpreadConstraints` over zones (`ScheduleAnyway`) and nodes
+(`DoNotSchedule`), `maxSkew: 1`, selecting the workload's own pods. A rolling update
+of the StatefulSet replaces one pod at a time and waits for its `/ready`; the
+Deployment surges one pod and never goes below its replicas.
+
+**The network.** A NetworkPolicy selects every pod of the release: port 4000 is open to
+every client (providers), 4001-4004 (claim check, admin and `/metrics`, route
+management, the metrics listener) only to the namespaces in
+`networkPolicy.operatorNamespaces` (the release's own by default). The admin API and the
+gateway bind their pod address only when `admin.expose` / `claimCheck.enabled` ask, and
+the chart refuses to render one without a token Secret (`tokenSecret.name`, which becomes
+`ANKUSA_ADMIN_TOKEN` / `ANKUSA_CLAIM_CHECK_TOKEN`) or `allowInsecure: true`. Egress is
+open: sinks, the intake log and the object store are wherever your config says.
+
+**Sizing the PVC.** The volume holds everything the node has acked and not yet
+compacted and delivered, so size it for the backlog you promise to ride out
+(a sink outage, a paused broker):
+
+```
+PVC bytes = hooks/s × mean body bytes × backlog goal (s) × 2
+```
+
+The `× 2` is headroom for row overhead, the write-ahead log and compaction's working
+set. Keep `node.min_free_bytes` (the `disk` readiness check) at 10 % of the volume so a
+node leaves the load balancer before `ENOSPC`. Per node:
+
+| hooks/s | mean body | backlog goal | PVC bytes | `persistence.size` |
+| --- | --- | --- | --- | --- |
+| 100 | 10 KiB | 5 min | 0.6 GiB | `5Gi` (the practical floor: the RocksDB, the quarantine pen, the local archive) |
+| 1 000 | 10 KiB | 5 min | 5.7 GiB | `8Gi` |
+| 1 000 | 10 KiB | 1 h | 68.7 GiB | `80Gi` |
+| 10 000 | 1 KiB | 5 min | 5.7 GiB | `8Gi` |
+| 10 000 | 1 KiB | 1 h | 68.7 GiB | `80Gi` |
+| 1 000 | 100 KiB | 5 min | 57.2 GiB | `64Gi` |
+
+A body over `inline_max_bytes` of a claim-checking sink leaves the volume for the claim
+bucket, so it counts for its claim reference only. Segments belong in S3/GCS
+(`storage.type`), where they are not the volume's problem; with LocalFS they live on it
+too. A StatefulSet that is deleted or scaled down keeps its volumes
+(`persistence.retentionPolicy`).
+
+**Proof.** `mise run check:examples` renders the chart for every mode and validates the
+manifests with `kubeconform`. `mise run e2e` (or `mise run e2e fleet`) runs the fleet of
+[`examples/fleet-e2e`](https://github.com/jamescarr/ankusa/tree/main/examples/fleet-e2e/)
+from this chart on kind: two StatefulSet pods and a gateway in a namespace that enforces
+`restricted`, one pod deleted (a drain) and one `SIGKILL`ed under load, `missing=0`.
+
+## Multi-region
+
+A region is a failure domain, so the unit of deployment is a **regional fleet**: one
+release of the chart with everything it needs, in the region, and nothing shared with
+another region.
+
+- **Independent regional fleets.** Each region has its own Kubernetes cluster, StatefulSet,
+  Redis (the route, source and fleet stores), segment/claim bucket, consumers and
+  intake log. Nothing replicates between them, so a region that fails takes down only
+  its own tenants. `dedupe.scope: fleet` and `rate_limits.scope: fleet` are *per
+  region*: the same provider event delivered to two regions is two hooks, and a tenant's
+  quota is per region.
+- **Tenant → region pinning at the global load balancer.** Pin every tenant to one home
+  region and route on it before the request reaches a fleet: the tenant segment of the
+  catch URL (`/webhooks/<tenant>/<source>`, [`multi-tenancy.md`](multi-tenancy.md)) or a
+  per-tenant hostname, in the global LB (GeoDNS, an anycast L7 proxy, a mesh gateway).
+  Keep the pin in one table that also provisions the tenant's routes and sources in
+  its home region. A region outage is the provider's retry (they retry a `5xx`) against
+  a LB that keeps answering `503`, or a **deliberate** change of the pin; moving a tenant
+  re-points new hooks only, and what its old region had acked stays there until it returns
+  or is restored.
+- **One intake topic per region.** `wal.type: dual` confirms every hook in a Kafka
+  cluster inside the region, across its zones (replication factor 3,
+  `min.insync.replicas=2`, rack-aware): `intake.fleet` names the region
+  (`ankusa.intake.eu-west-1`), and no cluster stretches across regions, because a confirm
+  that waits for another region's replicas puts a WAN round trip into every ack and
+  makes the region's availability depend on its neighbour's.
+- **`backup.secondary` is the cross-region copy.** Set the primary bucket in the region
+  and `backup.secondary` in another one: every backup goes to both, and a restore falls
+  back to the secondary. That is the *only* state that leaves a region, and it is why a
+  region lost entirely (hosts, volumes, the intake log, the primary bucket) costs the
+  hooks acked since the last backup (`backup.interval_ms`, the recovery point); `dual`'s
+  zero-loss promise covers a lost host, not a lost region. Restoring into another
+  region means installing the chart there with the same node ids and `backup` pointed
+  at the surviving bucket: each pod restores its store from it before it takes a hook.
+- **No cross-region store.** No RocksDB, Redis, claim bucket or Kafka cluster spans
+  regions, and consumers redeem claims at their own region's gateway. Sinks may be
+  anywhere (TLS, the SSRF-safe egress rules apply), but the hook is durable in its home
+  region before any of it leaves.
+
 ## Upgrading between releases
 
 The store carries a **format version** (`m:format_version` in its `default`

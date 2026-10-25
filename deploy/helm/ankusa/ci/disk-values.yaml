@@ -1,0 +1,16 @@
+# wal.type: disk, the default: a StatefulSet, a PVC per pod. `check:examples`
+# renders and lints the chart with each *-values.yaml here.
+wal: {type: disk}
+replicas: 3
+persistence: {size: 20Gi, storageClassName: fast-ssd}
+admin:
+  expose: true
+  tokenSecret: {name: ankusa-admin, key: token}
+claimCheck:
+  enabled: true
+  tokenSecret: {name: ankusa-claim-check, key: token}
+config:
+  sources:
+    stripe:
+      verify: {type: none}
+      sinks: [{type: log}]
