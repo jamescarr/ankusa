@@ -8,6 +8,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **SLI metrics (OPS-3).** `/metrics` gains `ankusa_delivery_latency_seconds{sink,result}`
+  (a delivery's age when it settled, buckets to 60 s), `ankusa_dispatch_attempt_duration_seconds{sink,result}`,
+  `ankusa_compact_failures_total{stage}`, `ankusa_claim_check_failures_total{op}` and
+  `ankusa_backup_failures_total`. No new config key; `metrics.detail: source` also puts
+  `tenant_id` and `source_id` on the delivery latency histogram. The SLO table is in
+  [`architecture.md`](../../docs/architecture.md#slis-and-slos).
 - **`sqs` and `google_pubsub` sinks batch (DEL-4).** Up to 10 (SQS
   `SendMessageBatch`) or 1 000 (Pub/Sub `publish`) deliveries to one queue or topic
   are one request. New sink keys, all optional: `batch` (`false` sends one request

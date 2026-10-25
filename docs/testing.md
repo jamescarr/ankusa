@@ -66,6 +66,17 @@ The always-on tests cover:
   present and `source_id` absent by default, the gauges dropping what the
   ceiling refuses, and a concurrent test that admission never exceeds the
   ceiling or leaks a slot.
+  The SLI series (OPS-3) are in `metrics_test.exs` too: "delivery latency
+  histogram" holds a delivery behind a gate sink for 250 ms and checks it in the
+  latency and attempt `_sum`s and in the `[:ankusa, :dispatch, :stop]` and
+  `:attempt` measurements; "attempts are sampled by result" covers `error`,
+  `timeout` and a dead-lettered delivery; "direct mode samples the same …"
+  covers `wal: :none`; "delivery latency carries an identity only at detail:
+  :source" covers the cardinality; "compact, claim check and backup failures"
+  covers the three counters (the events themselves are asserted in
+  `storage_test.exs` and `claim_check_test.exs`); and "slo series present" reads
+  the SLO table in [`architecture.md`](architecture.md#slis-and-slos) and fails
+  if a metric it names is not on `/metrics`.
 - **Verifier hardening** (`verifier_test.exs` "tolerance range and weak hashes",
   `metrics_test.exs`, `ankusa_server` `config_test.exs` "tolerance range"):
   `tolerance` 0–3600 validates and 3601, a negative or a non-integer is

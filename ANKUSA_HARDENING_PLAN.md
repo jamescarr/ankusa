@@ -558,7 +558,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa_server/lib/ankusa_server/application.ex:27-50`, `packages/ankusa_server/config/config.exs`, `packages/ankusa/lib/ankusa/edge/router.ex:56-74`.
   *Evidence:* —
 
-- [ ] **OPS-3 — SLI metrics: delivery latency, attempt duration, failure counters** · P1 · Deps: — (after: 55)
+- [x] **OPS-3 — SLI metrics: delivery latency, attempt duration, failure counters** · P1 · Deps: — (after: 55)
   *Why:* `[:ankusa, :dispatch, :stop]` has no measurements (`telemetry.ex:24`, `pipeline.ex:1273-1278`); no end-to-end latency, no compactor/claim/backup failure counters, no SLO definitions.
   *Change:* measurements `attempt_ms` and `since_received_ms` on dispatch stop; histograms `ankusa_delivery_latency_seconds{tenant_id,sink,result}` (buckets to 60 s) and `ankusa_dispatch_attempt_duration_seconds{sink,result}`; `tenant_id` on `ankusa_ingest_duration_seconds`; counters `ankusa_compact_failures_total`, `ankusa_claim_check_failures_total{op}`, `ankusa_backup_failures_total`; the ground-rule SLO table referenced from `architecture.md#telemetry`.
   *Done when:* a `GateSink` delay shows up in the histogram `_sum`; every series in the SLO table exists on `/metrics`.

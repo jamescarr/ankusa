@@ -13,6 +13,19 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **SLI metrics (OPS-3).** `[:ankusa, :dispatch, :stop]` now measures `attempt_ms`
+  (the final attempt) and `since_received_ms` (the hook's age when the delivery
+  settled; absent for a replayed delivery), and a new `[:ankusa, :dispatch,
+  :attempt]` event (`attempt_ms`; `result` `ok`, `error` or `timeout`) fires per
+  attempt, in direct mode too. New on `/metrics`:
+  `ankusa_delivery_latency_seconds{sink,result}` (buckets to 60 s; `tenant_id` and
+  `source_id` only at `metrics.detail: source`, like the ingest histogram),
+  `ankusa_dispatch_attempt_duration_seconds{sink,result}`,
+  `ankusa_compact_failures_total{stage}` (`segment`, `retention`, `reclaim`; from
+  the new `[:ankusa, :compact, :failure]`), `ankusa_claim_check_failures_total{op}`
+  (`check_in`, `redeem`; from `[:ankusa, :claim_check, :failure]`, only for a
+  claim store's fault) and `ankusa_backup_failures_total`. The SLO table is in
+  [`architecture.md`](../../docs/architecture.md#slis-and-slos).
 - **`Sink.SQS` and `Sink.GooglePubSub` batch (DEL-4).** Dispatch's deliveries to
   one queue or topic wait in an `Ankusa.Sink.Batcher` (one per destination and set
   of credentials, under `Ankusa.Instance`) and go out as one `SendMessageBatch`
