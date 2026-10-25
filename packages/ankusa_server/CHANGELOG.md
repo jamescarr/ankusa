@@ -8,6 +8,9 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`dedupe.max_json_bytes` (PERF-1).** The biggest body a `json` dedupe source
+  decodes (default 1048576, an integer >= 1); a larger body is stored with no
+  dedupe key and never decoded. See the `ankusa` changelog.
 - **`dedupe: salesforce` (CON-3).** A source's `dedupe` accepts the preset
   `salesforce` (`json: id`; see `configuration.md` for why it is a convention and
   not a Salesforce-documented delivery id). A source with no `dedupe` logs one

@@ -2318,19 +2318,28 @@ defmodule AnkusaServer.ConfigTest do
     assert config.fleet == %Ankusa.Config{}.fleet
   end
 
-  test "dedupe.max_entries and max_entries_per_tenant map to core's config and are range checked" do
+  test "dedupe.max_entries, max_entries_per_tenant and max_json_bytes map to core's config and are range checked" do
     config =
       Config.load!(
-        path: tmp_config("dedupe: {max_entries: 500, max_entries_per_tenant: 50}\n"),
+        path:
+          tmp_config(
+            "dedupe: {max_entries: 500, max_entries_per_tenant: 50, max_json_bytes: 2048}\n"
+          ),
         env: %{}
       ).config
 
-    assert config.dedupe == %{scope: :node, max_entries: 500, max_entries_per_tenant: 50}
+    assert config.dedupe == %{
+             scope: :node,
+             max_entries: 500,
+             max_entries_per_tenant: 50,
+             max_json_bytes: 2048
+           }
 
     for {yaml, message} <- [
           {"dedupe: {max_entries: 0}", "dedupe.max_entries must be an integer >= 1, got 0"},
           {"dedupe: {max_entries_per_tenant: 0}",
            "dedupe.max_entries_per_tenant must be an integer >= 1, got 0"},
+          {"dedupe: {max_json_bytes: 0}", "dedupe.max_json_bytes must be an integer >= 1, got 0"},
           {"dedupe: {max_entries: lots}", ~s(dedupe.max_entries: expected an integer, got "lots")}
         ] do
       error =

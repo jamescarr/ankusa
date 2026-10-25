@@ -24,7 +24,8 @@ defmodule Ankusa.Dedupe do
     * `{:header, name}` — the value of a request header (case-insensitive).
     * `{:json, ["a", "b"]}` — walk `a` → `b` through the decoded JSON body;
       only map keys are followed. A string value is the key; an integer value
-      becomes its decimal string. Anything else yields `nil`.
+      becomes its decimal string. Anything else yields `nil`. A body past
+      `dedupe.max_json_bytes` (1 MiB by default) is not decoded: no key.
 
   ## Salesforce
 
@@ -61,6 +62,7 @@ defmodule Ankusa.Dedupe do
   }
 
   @max_key_bytes 200
+  @default_max_json_bytes 1_048_576
 
   @doc """
   Build a dedupe spec from config. Accepts:
@@ -129,24 +131,51 @@ defmodule Ankusa.Dedupe do
   `decoded` is the body's JSON when the caller has decoded it already
   (`{:ok, term}` or `{:error, reason}`: `Ankusa.Ordering` shares one decode between
   an ordering key and a `dedupe: json`); `:skip` decodes it here.
-  """
-  @spec key(t() | nil, Ankusa.Envelope.t(), {:ok, term()} | {:error, term()} | :skip) ::
-          String.t() | nil
-  def key(dedupe, env, decoded \\ :skip)
-  def key(nil, _env, _decoded), do: nil
 
-  def key(%__MODULE__{from: {:header, name}}, env, _decoded) do
-    case Ankusa.Envelope.header(env, name) do
+  A `json` source reads no body of more than `max_json_bytes` bytes
+  (`dedupe.max_json_bytes`, #{@default_max_json_bytes} by default; see
+  `max_json_bytes/1`): it answers `nil` before any decode, so a body of
+  megabytes is never decoded on the request process, and the hook is stored with
+  no key. A `header` source is not affected.
+  """
+  @spec key(
+          t() | nil,
+          Ankusa.Envelope.t(),
+          {:ok, term()} | {:error, term()} | :skip,
+          pos_integer()
+        ) :: String.t() | nil
+  def key(dedupe, env, decoded \\ :skip, max_json_bytes \\ @default_max_json_bytes)
+  def key(nil, _env, _decoded, _max_json_bytes), do: nil
+
+  def key(%__MODULE__{from: {:header, name}}, env, _decoded, _max_json_bytes) do
+    case Ankusa.Envelope.header_downcased(env, name) do
       nil -> nil
       "" -> nil
       value -> clamp(value)
     end
   end
 
-  def key(%__MODULE__{from: {:json, path}}, env, :skip),
+  def key(%__MODULE__{from: {:json, _path}}, %{body: body}, _decoded, max_json_bytes)
+      when byte_size(body) > max_json_bytes,
+      do: nil
+
+  def key(%__MODULE__{from: {:json, path}}, env, :skip, _max_json_bytes),
     do: key_from_json(path, JSON.decode(env.body))
 
-  def key(%__MODULE__{from: {:json, path}}, _env, decoded), do: key_from_json(path, decoded)
+  def key(%__MODULE__{from: {:json, path}}, _env, decoded, _max_json_bytes),
+    do: key_from_json(path, decoded)
+
+  @doc """
+  The `dedupe.max_json_bytes` of `instance`: what `key/4` is handed. The default
+  (#{@default_max_json_bytes}) where no instance runs.
+  """
+  @spec max_json_bytes(atom()) :: pos_integer()
+  def max_json_bytes(instance) do
+    case Ankusa.fetch_config(instance) do
+      {:ok, %{dedupe: %{max_json_bytes: max}}} -> max
+      _ -> @default_max_json_bytes
+    end
+  end
 
   defp key_from_json(path, {:ok, decoded}) do
     case walk(decoded, path) do

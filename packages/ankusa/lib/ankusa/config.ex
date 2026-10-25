@@ -496,7 +496,16 @@ defmodule Ankusa.Config do
             # A key costs about 200 B of disk, so the defaults bound the index at
             # about 20 GB; a tenant at 100 hooks/s with the 72 h default ttl holds
             # about 26 M keys, so raise both for a bigger tenant or a longer ttl.
-            dedupe: %{scope: :node, max_entries: 100_000_000, max_entries_per_tenant: 30_000_000},
+            #
+            # `max_json_bytes`: the biggest body a `json` dedupe source decodes
+            # on the request process (an integer >= 1). A larger body is stored
+            # with no dedupe key, as if the stamp were missing, and never decoded.
+            dedupe: %{
+              scope: :node,
+              max_entries: 100_000_000,
+              max_entries_per_tenant: 30_000_000,
+              max_json_bytes: 1_048_576
+            },
             # The shared store behind `rate_limits.scope: :fleet` and
             # `dedupe.scope: :fleet`, `{module, opts}` (a module implementing
             # `Ankusa.RateLimiter.Store` and `Ankusa.Dedupe.Store`, e.g.
@@ -1076,7 +1085,7 @@ defmodule Ankusa.Config do
     validate_retention!(config)
     validate_rocksdb!(config)
 
-    for key <- [:max_entries, :max_entries_per_tenant] do
+    for key <- [:max_entries, :max_entries_per_tenant, :max_json_bytes] do
       check!(
         config,
         [:dedupe, key],

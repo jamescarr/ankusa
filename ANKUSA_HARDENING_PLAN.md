@@ -642,7 +642,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
 
 ### Phase 7 — Hot-path polish
 
-- [ ] **PERF-1 — Allocation cuts on the request path** · P2 · Deps: F1 (after: 65)
+- [x] **PERF-1 — Allocation cuts on the request path** · P2 · Deps: F1 (after: 65)
   *Why:* `Hmac.signed_bytes` materialises a second body copy via `Regex.replace` (`verifier/hmac.ex:240-250`); `Envelope.header/2` re-downcases every lookup (`envelope.ex:51-57`); the `{:json, path}` dedupe preset decodes the whole body on the request process (`dedupe.ex:125-134`); the rate-limiter sweep is a full `select_delete` every 60 s (`rate_limiter.ex:105-114`).
   *Change:* build the signing template as an iolist once at `resolve_scheme` and pass iodata to `:crypto.mac/4`; `Envelope.header/2` compares against already-lowercased names; `dedupe.max_json_bytes` (default 1 MiB) → key `nil` above it; shard the rate-limiter table by `phash2(tenant, 16)` and sweep one shard per tick.
   *Done when:* allocations per verify of an 8 MB body halve; a 9 MB JSON body yields a nil key with unchanged p99; a 1 M-row sweep takes < 50 ms.

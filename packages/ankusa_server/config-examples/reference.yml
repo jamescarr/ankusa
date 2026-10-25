@@ -389,6 +389,10 @@ dedupe:
   # keys expire on their own. Integers >= 1.
   max_entries: 100000000
   max_entries_per_tenant: 30000000
+  # The biggest body a `json` dedupe source decodes on the request process. A
+  # larger body is stored with no dedupe key (as if the stamp were missing), and
+  # never decoded. An integer >= 1; 1 MiB by default.
+  max_json_bytes: 1048576
 
 fleet:
   # The shared store behind `rate_limits.scope: fleet` and `dedupe.scope: fleet`.
