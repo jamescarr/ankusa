@@ -24,7 +24,7 @@ defmodule Ankusa.Property.DedupeTest do
 
   defp specs do
     one_of([
-      member_of([:github, :standard_webhooks, :svix, :shopify, :stripe]),
+      member_of([:github, :standard_webhooks, :svix, :shopify, :stripe, :salesforce]),
       map(G.token(16), &%{header: &1}),
       map(
         list_of(string(:alphanumeric, min_length: 1, max_length: 6),

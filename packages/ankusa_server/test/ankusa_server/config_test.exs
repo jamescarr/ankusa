@@ -1537,6 +1537,7 @@ defmodule AnkusaServer.ConfigTest do
             a: {verify: {type: none}, dedupe: github, sinks: [{type: log}]}
             b: {verify: {type: none}, dedupe: {header: X-Custom-Id}, sinks: [{type: log}]}
             c: {verify: {type: none}, dedupe: {json: data.id, ttl_seconds: 60}, sinks: [{type: log}]}
+            d: {verify: {type: none}, dedupe: salesforce, sinks: [{type: log}]}
           """),
         env: %{}
       ).config
@@ -1546,6 +1547,8 @@ defmodule AnkusaServer.ConfigTest do
     assert sources["a"][:dedupe] == :github
     assert sources["b"][:dedupe] == %{header: "X-Custom-Id"}
     assert sources["c"][:dedupe] == %{json: "data.id", ttl_ms: 60_000}
+    assert sources["d"][:dedupe] == :salesforce
+    assert Ankusa.Source.new("d", sources["d"]).dedupe.from == {:json, ["id"]}
 
     # `Source.new/2` (what every fetch builds) folds the header name.
     assert Ankusa.Source.new("b", sources["b"]).dedupe.from == {:header, "x-custom-id"}
