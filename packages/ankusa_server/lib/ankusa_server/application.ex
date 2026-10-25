@@ -47,11 +47,30 @@ defmodule AnkusaServer.Application do
         "sources=#{sources(config)}"
     )
 
+    start_tracing(loaded.tracing)
+
     # The GCP token cache first: the blob store and Pub/Sub sinks ask it for tokens.
     Supervisor.start_link([AnkusaServer.GcpToken, {Ankusa.Instance, config}],
       strategy: :one_for_one,
       name: AnkusaServer.Supervisor
     )
+  end
+
+  # Before the instance, so the first request is already traced. A failure is
+  # logged and the node runs untraced: tracing never keeps the ingest tier down.
+  defp start_tracing(%{enabled: false}), do: :ok
+
+  defp start_tracing(tracing) do
+    case AnkusaServer.Tracing.start(tracing) do
+      :ok ->
+        Logger.info(
+          "[ankusa] tracing on: OTLP to #{tracing.otlp_endpoint}, " <>
+            "sample_ratio=#{tracing.sample_ratio}"
+        )
+
+      {:error, reason} ->
+        Logger.error("[ankusa] tracing did not start (#{inspect(reason)}); running untraced")
+    end
   end
 
   @doc "This image's version. Independently versioned from the Hex packages."

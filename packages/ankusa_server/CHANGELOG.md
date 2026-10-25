@@ -8,6 +8,14 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **OpenTelemetry tracing (OPS-1).** `tracing: {enabled, otlp_endpoint,
+  sample_ratio}` (off by default; `http://localhost:4318`; `1.0`) starts the
+  OpenTelemetry SDK and the OTLP/HTTP exporter before the instance, with a
+  parent-based sampler over `sample_ratio`. The endpoint may not carry
+  `user:password`; collector credentials are the standard
+  `OTEL_EXPORTER_OTLP_HEADERS`. With it off, only core's no-op API runs and a
+  hook's `traceparent` still reaches the consumer unchanged. Not part of
+  `/v1/config`: it configures the image, not an instance, and holds no secret.
 - **Readiness keys (OPS-5).** `node.min_free_bytes` (unset): `/ready` answers `503`
   with `disk: failing` while `data_dir`'s file system has fewer bytes free.
   `health.sink_error_window_ms` (5000): under `wal.type: none`, a sink whose last

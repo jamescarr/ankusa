@@ -140,6 +140,65 @@ defmodule AnkusaServer.ConfigTest do
            } = config.claim_check
   end
 
+  test "tracing is off by default, takes an endpoint and a ratio, and names a mistake" do
+    demo = "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+    tracing = fn yaml -> Config.load!(path: tmp_config(yaml <> demo), env: %{}).tracing end
+
+    assert tracing.("") ==
+             %{enabled: false, otlp_endpoint: "http://localhost:4318", sample_ratio: 1.0}
+
+    # the reference spells the defaults out
+    reference = Config.load!(path: "config-examples/reference.yml", env: @fixture_env).tracing
+
+    assert reference == %{
+             enabled: false,
+             otlp_endpoint: "http://localhost:4318",
+             sample_ratio: 1.0
+           }
+
+    assert tracing.("""
+           tracing:
+             enabled: true
+             otlp_endpoint: https://collector.example:4318/prefix
+             sample_ratio: 0.25
+           """) ==
+             %{
+               enabled: true,
+               otlp_endpoint: "https://collector.example:4318/prefix",
+               sample_ratio: 0.25
+             }
+
+    # an integer ratio is a float: 0 and 1 are the ends
+    assert tracing.("tracing: {sample_ratio: 1}\n").sample_ratio === 1.0
+    assert tracing.("tracing: {sample_ratio: 0}\n").sample_ratio === 0.0
+    assert tracing.("tracing: {sample_ratio: \"0.5\"}\n").sample_ratio === 0.5
+
+    failure = fn yaml ->
+      assert_raise(ConfigError, fn -> tracing.(yaml) end).message
+    end
+
+    assert failure.("tracing: {sample_ratio: 1.5}\n") ==
+             "tracing.sample_ratio: expected a number from 0 to 1, got 1.5"
+
+    assert failure.("tracing: {sample_ratio: -0.1}\n") ==
+             "tracing.sample_ratio: expected a number from 0 to 1, got -0.1"
+
+    assert failure.("tracing: {sample_ratio: high}\n") ==
+             ~s(tracing.sample_ratio: expected a number, got "high")
+
+    assert failure.("tracing: {enabled: maybe}\n") ==
+             ~s(tracing.enabled: expected a boolean, got "maybe")
+
+    assert failure.("tracing: {endpoint: x}\n") == ~s(tracing: unknown key "endpoint")
+
+    # an endpoint is refused without being echoed: it may carry a password
+    for bad <- ["collector:4318", "ftp://collector", "http://", "http://user:secret@collector"] do
+      message = failure.("tracing: {otlp_endpoint: \"#{bad}\"}\n")
+      assert message =~ "tracing.otlp_endpoint: expected an http:// or https:// URL"
+      refute message =~ "secret"
+    end
+  end
+
   test "the baked image config is the demo: admin on, one open source" do
     config = Config.load!(path: "rel/ankusa.yml", env: %{}).config
 

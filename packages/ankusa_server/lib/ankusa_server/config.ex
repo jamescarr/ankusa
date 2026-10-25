@@ -72,10 +72,12 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http listener admin metrics routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive health)
+  @root_keys ~w(node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive health)
   @node_keys ~w(roles data_dir min_free_bytes)
   @health_keys ~w(sink_error_window_ms)
   @log_keys ~w(level banner)
+  @tracing_keys ~w(enabled otlp_endpoint sample_ratio)
+  @default_otlp_endpoint "http://localhost:4318"
   @http_keys ~w(port max_body_bytes routing prefix store_headers)
   @store_headers_keys ~w(drop hash)
   @store_headers_fields %{"drop" => :drop, "hash" => :hash}
@@ -217,7 +219,19 @@ defmodule AnkusaServer.Config do
           config: Ankusa.Config.t(),
           log_level: Logger.level(),
           banner: boolean(),
+          tracing: tracing(),
           secrets: AnkusaServer.Secrets.t()
+        }
+
+  @typedoc """
+  The `tracing` section: whether the image runs an OpenTelemetry SDK
+  (`AnkusaServer.Tracing`), where it exports to, and the share of root traces
+  it keeps. Not part of `Ankusa.Config`: it configures the image, not an instance.
+  """
+  @type tracing :: %{
+          enabled: boolean(),
+          otlp_endpoint: String.t(),
+          sample_ratio: float()
         }
 
   # `${NAME}`, `${NAME:-default}`, `${file:/path}`, `${sm:provider:ref}`. A file
@@ -248,7 +262,13 @@ defmodule AnkusaServer.Config do
         Keyword.take(opts, [:refresh])
       )
 
-    %{config: config!(doc), log_level: log_level!(doc), banner: banner?(doc), secrets: secrets}
+    %{
+      config: config!(doc),
+      log_level: log_level!(doc),
+      banner: banner?(doc),
+      tracing: tracing!(doc),
+      secrets: secrets
+    }
   end
 
   @doc """
@@ -530,6 +550,55 @@ defmodule AnkusaServer.Config do
   defp banner?(doc) do
     log = section!(doc, "log", @log_keys, [])
     bool_opt(log, "banner", ["log"]) != false
+  end
+
+  # `tracing:` configures the image's OpenTelemetry SDK, not an instance, so it
+  # is read beside `log:` rather than into `Ankusa.Config`.
+  defp tracing!(doc) do
+    path = ["tracing"]
+    tracing = section!(doc, "tracing", @tracing_keys, [])
+
+    %{
+      enabled: bool_opt(tracing, "enabled", path) == true,
+      otlp_endpoint: otlp_endpoint!(tracing),
+      sample_ratio: sample_ratio!(tracing)
+    }
+  end
+
+  # The value is never echoed: an endpoint may be pasted with credentials in it,
+  # and the collector's own credentials belong in `OTEL_EXPORTER_OTLP_HEADERS`.
+  defp otlp_endpoint!(tracing) do
+    case string_opt(tracing, "otlp_endpoint", ["tracing"]) do
+      nil ->
+        @default_otlp_endpoint
+
+      endpoint ->
+        case URI.parse(endpoint) do
+          %URI{scheme: scheme, host: host, userinfo: nil}
+          when scheme in ["http", "https"] and is_binary(host) and host != "" ->
+            endpoint
+
+          _ ->
+            raise ConfigError,
+              message:
+                "tracing.otlp_endpoint: expected an http:// or https:// URL with a host and " <>
+                  "no user:password (the collector's credentials go in OTEL_EXPORTER_OTLP_HEADERS)"
+        end
+    end
+  end
+
+  defp sample_ratio!(tracing) do
+    case number_opt(tracing, "sample_ratio", ["tracing"]) do
+      nil ->
+        1.0
+
+      ratio when ratio >= 0 and ratio <= 1 ->
+        ratio / 1
+
+      other ->
+        raise ConfigError,
+          message: "tracing.sample_ratio: expected a number from 0 to 1, got #{inspect(other)}"
+    end
   end
 
   defp config!(doc) do

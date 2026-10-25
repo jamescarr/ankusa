@@ -79,6 +79,18 @@ defmodule Ankusa.AsyncApi.SinkMessage do
               "the hook, and the tenant it names, as unverified. `skipped` is a hook nothing " <>
               "checked: a source with no verifier, or a lifecycle event."
         },
+        "traceparent" => %{
+          "type" => ["string", "null"],
+          "pattern" => "^00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]$",
+          "description" =>
+            "The hook's W3C `traceparent`: the provider's own, or the id of Ankusa's ingest " <>
+              "span when tracing is enabled. Continue the trace from it. `null` when the hook " <>
+              "carries none."
+        },
+        "tracestate" => %{
+          "type" => ["string", "null"],
+          "description" => "The W3C `tracestate` that travels with `traceparent`, else `null`."
+        },
         "headers" => %{
           "type" => "object",
           "description" =>
@@ -148,6 +160,14 @@ defmodule Ankusa.AsyncApi.SinkMessageHeaders do
         "ankusa_replay_id" => %{
           "type" => "string",
           "description" => "The replay job id, when this delivery is a replay."
+        },
+        "traceparent" => %{
+          "type" => "string",
+          "description" => "Same value as the message's `traceparent`, when the hook has one."
+        },
+        "tracestate" => %{
+          "type" => "string",
+          "description" => "Same value as the message's `tracestate`, when the hook has one."
         },
         "Nats-Msg-Id" => %{
           "type" => "string",
@@ -234,6 +254,16 @@ defmodule Ankusa.AsyncApi.LifecycleEvent do
         "replayid" => %{
           "type" => "string",
           "description" => "Present only on an event a replay job re-sent: the job's id."
+        },
+        "traceparent" => %{
+          "type" => "string",
+          "description" =>
+            "CloudEvents distributed-tracing extension: the W3C `traceparent` of the span that " <>
+              "emitted the event. Present only when tracing is enabled."
+        },
+        "tracestate" => %{
+          "type" => "string",
+          "description" => "The W3C `tracestate` that goes with `traceparent`, when it has one."
         }
       }
     }
