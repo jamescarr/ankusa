@@ -45,12 +45,23 @@ What a consumer learns per transport:
 
 | Sink | Address | Bindings and headers |
 | --- | --- | --- |
-| `kafka` | the `topic` | record key (`<tenant>/<source_id>` unless `key:` is set), six always-present headers (`ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`, `ankusa_idempotency_key`, `content_type`) plus optional `ankusa_dedupe_key` and `ankusa_replay_id` |
-| `rabbitmq` | the routing key (`ankusa.<source_id>` unless `routing_key:` is set) | exchange name, type, vhost; the document advertises no headers, though the wire carries AMQP `message_id` and an `ankusa_idempotency_key` header (plus optional `ankusa_dedupe_key` and `ankusa_replay_id`), which it does not describe |
-| `nats` | the `subject` | the same six always-present headers and optional `ankusa_dedupe_key`/`ankusa_replay_id` as Kafka, plus `Nats-Msg-Id` |
+| `kafka` | the `topic` | record key (`<tenant>/<source_id>` unless `key:` is set), five always-present headers (`ankusa_id`, `ankusa_source_id`, `ankusa_message_version`, `ankusa_idempotency_key`, `content_type`), `ankusa_tenant_id` (`""` without a tenant), plus optional `ankusa_dedupe_key`, `ankusa_replay_id` and `ankusa_ordering_key` |
+| `rabbitmq` | the routing key (`ankusa.<source_id>` unless `routing_key:` is set) | exchange name, type, vhost; the document advertises no headers, though the wire carries AMQP `message_id` and an `ankusa_idempotency_key` header (plus optional `ankusa_dedupe_key`, `ankusa_replay_id` and `ankusa_ordering_key`), which it does not describe |
+| `nats` | the `subject` | the same headers as Kafka, plus `Nats-Msg-Id` |
 | `redis` | the `channel` | none: pub/sub has no headers |
-| `sqs` | the queue name (`hooks.fifo`) | the `sqs` channel binding (`queue.name`, `queue.fifoQueue`); the document advertises no headers, though each message carries the Kafka header set as SQS message attributes (`ankusa_tenant_id` only when the hook has a tenant), which it does not describe |
-| `google_pubsub` | `projects/<project>/topics/<topic>` | the `googlepubsub` channel binding, plus the `orderingKey` message binding when a static `ordering_key` is set; the document advertises no headers, though each message carries the Kafka header set as Pub/Sub message attributes (`ankusa_tenant_id` only when the hook has a tenant), which it does not describe |
+| `sqs` | the queue name (`hooks.fifo`) | the `sqs` channel binding (`queue.name`, `queue.fifoQueue`); the Kafka header set as SQS message attributes, except that `ankusa_tenant_id` is absent when the hook has no tenant (SQS refuses an empty value) |
+| `google_pubsub` | `projects/<project>/topics/<topic>` | the `googlepubsub` channel binding, plus the `orderingKey` message binding when a static `ordering_key` is set; the Kafka header set as Pub/Sub message attributes, `ankusa_tenant_id` absent without a tenant |
+
+Kafka, NATS, SQS and Pub/Sub messages reference one header schema,
+`SinkMessageHeadersV1`. It requires the names every one of them sends
+(`ankusa_id`, `ankusa_source_id`, `ankusa_message_version`,
+`ankusa_idempotency_key`, `content_type`) and lists `ankusa_tenant_id` as
+optional, because the transports differ on it; a consumer that needs the tenant
+reads `tenant_id` from the body. The `http` sink is not in the document: its
+`x-ankusa-*` request headers (`x-ankusa-id`, `x-ankusa-source`,
+`x-ankusa-idempotency-key`, `x-ankusa-verification`, `x-ankusa-received-at`,
+`x-ankusa-body-sha256`, and the optional tenant, dedupe, replay, ordering and
+trace headers) are described in [`integrations.md`](integrations.md#http-handoff-any-language).
 
 Kafka is one topic with the source in the record key, not a topic per source, so
 two Kafka sources on one topic are one channel with two messages. When a

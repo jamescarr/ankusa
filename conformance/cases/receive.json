@@ -34,6 +34,8 @@
           "dedupe_key": null,
           "replay_id": null,
           "idempotency_key": null,
+          "received_at": null,
+          "body_sha256": null,
           "verification": null
         }
       }
@@ -70,6 +72,8 @@
           "dedupe_key": null,
           "replay_id": null,
           "idempotency_key": null,
+          "received_at": null,
+          "body_sha256": null,
           "verification": null
         }
       }
@@ -106,6 +110,8 @@
           "dedupe_key": null,
           "replay_id": null,
           "idempotency_key": null,
+          "received_at": null,
+          "body_sha256": null,
           "verification": null
         }
       }
@@ -365,6 +371,8 @@
           "dedupe_key": null,
           "replay_id": null,
           "idempotency_key": "acme:demo:evt_1",
+          "received_at": null,
+          "body_sha256": null,
           "verification": null
         }
       }
@@ -396,6 +404,8 @@
           "dedupe_key": null,
           "replay_id": null,
           "idempotency_key": null,
+          "received_at": null,
+          "body_sha256": null,
           "verification": null
         }
       }

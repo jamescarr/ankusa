@@ -3,17 +3,24 @@ package ankusa
 import (
 	"net/http"
 	"net/textproto"
+	"strconv"
 	"strings"
 )
 
 // HookHeaders is a hook delivery's identity, read from the headers Ankusa's
 // HTTP sink attaches. Source is "" when absent; Tenant, ContentType,
-// DedupeKey, ReplayID, ShippedIdempotencyKey and Verification are nil when
-// absent.
+// DedupeKey, ReplayID, ShippedIdempotencyKey, ReceivedAt, BodySHA256 and
+// Verification are nil when absent.
 //
 // ShippedIdempotencyKey is x-ankusa-idempotency-key: the tenant-scoped key
 // Ankusa computed once for the hook, nil for a sender that predates the
 // header. Read the key through IdempotencyKey, which falls back to computing it.
+//
+// ReceivedAt (x-ankusa-received-at) is when the edge accepted the hook, in
+// unix milliseconds, and BodySHA256 (x-ankusa-body-sha256) the lowercase hex
+// SHA-256 of the body Ankusa sent. Both are advisory: nil when the header is
+// absent, empty or malformed (not 1 to 15 decimal digits; not exactly 64
+// lowercase hex characters), never an error.
 type HookHeaders struct {
 	ID                    string        `json:"id"`
 	Source                string        `json:"source"`
@@ -22,6 +29,8 @@ type HookHeaders struct {
 	DedupeKey             *string       `json:"dedupe_key"`
 	ReplayID              *string       `json:"replay_id"`
 	ShippedIdempotencyKey *string       `json:"idempotency_key"`
+	ReceivedAt            *int64        `json:"received_at"`
+	BodySHA256            *string       `json:"body_sha256"`
 	Verification          *Verification `json:"verification"`
 }
 
@@ -93,6 +102,16 @@ func ParseHeaders(h http.Header) (HookHeaders, error) {
 	if value, ok := headerValue(h, "x-ankusa-idempotency-key"); ok && value != "" {
 		shipped = &value
 	}
+	var receivedAt *int64
+	if value, ok := headerValue(h, "x-ankusa-received-at"); ok && isDigits(value, 1, 15) {
+		if ms, err := strconv.ParseInt(value, 10, 64); err == nil {
+			receivedAt = &ms
+		}
+	}
+	var bodySHA256 *string
+	if value, ok := headerValue(h, "x-ankusa-body-sha256"); ok && isLowerHex(value, 64) {
+		bodySHA256 = &value
+	}
 	var verification *Verification
 	if status, ok := headerValue(h, "x-ankusa-verification"); ok && status != "" {
 		flagged, _ := headerValue(h, "x-ankusa-verification-flagged")
@@ -107,8 +126,36 @@ func ParseHeaders(h http.Header) (HookHeaders, error) {
 		DedupeKey:             dedupeKey,
 		ReplayID:              replayID,
 		ShippedIdempotencyKey: shipped,
+		ReceivedAt:            receivedAt,
+		BodySHA256:            bodySHA256,
 		Verification:          verification,
 	}, nil
+}
+
+// isDigits reports whether s is lo to hi ASCII decimal digits and nothing else.
+func isDigits(s string, lo, hi int) bool {
+	if len(s) < lo || len(s) > hi {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isLowerHex reports whether s is exactly n lowercase hex characters.
+func isLowerHex(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for i := range len(s) {
+		if (s[i] < '0' || s[i] > '9') && (s[i] < 'a' || s[i] > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // ReceiveOptions configures ReceiveDelivery. The zero value refuses every

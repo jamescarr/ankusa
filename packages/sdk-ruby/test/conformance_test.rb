@@ -130,6 +130,8 @@ class ConformanceTest < Minitest::Test
         "dedupe_key" => headers.dedupe_key,
         "replay_id" => headers.replay_id,
         "idempotency_key" => headers.to_h[:idempotency_key],
+        "received_at" => headers.received_at,
+        "body_sha256" => headers.body_sha256,
         "verification" => verification_hash(headers.verification)
       }
     when "parse_headers"
@@ -142,6 +144,8 @@ class ConformanceTest < Minitest::Test
         "dedupe_key" => headers.dedupe_key,
         "replay_id" => headers.replay_id,
         "idempotency_key" => headers.to_h[:idempotency_key],
+        "received_at" => headers.received_at,
+        "body_sha256" => headers.body_sha256,
         "verification" => verification_hash(headers.verification)
       }
     when "decode_message"

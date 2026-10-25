@@ -14,8 +14,10 @@ defmodule Ankusa.Sink.Description do
       database as `"/2"`), or `nil`.
     * `:address` — the topic, routing key, subject, or channel; `nil` when a
       configured function computes it per hook.
-    * `:ankusa_headers` — true when each message also carries the five
-      `ankusa_*` / `content_type` application headers.
+    * `:ankusa_headers` — true when each message also carries the `ankusa_*` /
+      `content_type` application headers (Kafka and NATS headers, SQS and Pub/Sub
+      message attributes); the AsyncAPI document then references
+      `SinkMessageHeadersV1` for the message.
     * `:channel_bindings` / `:message_bindings` — AsyncAPI binding objects keyed
       by protocol (`%{"kafka" => %{...}}`), `%{}` when the protocol defines none.
     * `:payload` — what the sink sends: `:message` (the `Ankusa.Sink.Message`

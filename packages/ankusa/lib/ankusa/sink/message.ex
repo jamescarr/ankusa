@@ -244,9 +244,9 @@ defmodule Ankusa.Sink.Message do
   ("application/json"), then `ankusa_dedupe_key` and `ankusa_replay_id` when
   the hook carries them, then `traceparent` and `tracestate` when it carries a
   trace context (`Ankusa.Trace`). Unlike `attributes/2`, `ankusa_tenant_id` is
-  always present — `""` without a tenant — because such a sink's description
-  promises the header set (`ankusa_headers: true`) and the AsyncAPI header
-  schema requires it.
+  always present — `""` without a tenant — because a header can carry an empty
+  value where an SQS or Pub/Sub attribute cannot. The AsyncAPI header schema
+  (`SinkMessageHeadersV1`) therefore does not require it: it describes both sets.
   """
   @spec headers(Envelope.t(), Ankusa.Sink.ctx()) :: [{String.t(), String.t()}]
   def headers(%Envelope{} = env, ctx) do

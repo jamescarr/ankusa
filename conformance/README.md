@@ -40,6 +40,11 @@ then runs every registered SDK's native runner.
   TypeScript — no subclass matching). Only the other keys present in
   `expect.error` are compared, by deep equality against the error's attribute
   of the same name.
+- A case that expects `InvalidMessageError` or `InvalidSignatureError` must
+  say `"retryable": false`: input no retry can fix is permanent, and a consumer
+  sends it to its terminal queue (`consumer.failure_policy`;
+  [`docs/delivery.md`](../docs/delivery.md#consumer-failure-policy)).
+  `check.mjs` rejects the case otherwise.
 - `requests`, when present: the recorded requests must match in count and
   order; `method` and `path` must be equal (`path` includes the query string
   exactly as sent: parameter order is input order, booleans go out as
@@ -62,11 +67,18 @@ then runs every registered SDK's native runner.
 - `parse_headers`: `{"headers": {string: string}}` → `ok` is
   `{"id", "source", "tenant": string|null, "content_type": string|null,
   "dedupe_key": string|null, "replay_id": string|null,
-  "idempotency_key": string|null, "verification": {"status": string,
+  "idempotency_key": string|null, "received_at": int|null,
+  "body_sha256": string|null, "verification": {"status": string,
   "flagged": bool}|null}`. `dedupe_key` comes from
   `x-ankusa-dedupe-key`, `replay_id` from `x-ankusa-replay-id`,
   `idempotency_key` from `x-ankusa-idempotency-key`; each is `null` when the
-  header is absent or empty. `verification` comes from
+  header is absent or empty. `received_at` comes from `x-ankusa-received-at`
+  (when the edge accepted the hook, unix milliseconds): an integer when the
+  value is 1 to 15 decimal digits and nothing else, otherwise `null`.
+  `body_sha256` comes from `x-ankusa-body-sha256` (the SHA-256 of the body
+  sent): the value as is when it is exactly 64 lowercase hex characters,
+  otherwise `null` (`webhook.delivery_metadata`). Both are advisory: an
+  absent or malformed one is `null`, never an error. `verification` comes from
   `x-ankusa-verification`/`x-ankusa-verification-flagged` (`flagged` is
   `true` only when the latter header is exactly `"true"`); `null` when
   `x-ankusa-verification` is absent or empty.

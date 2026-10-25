@@ -1,0 +1,162 @@
+{
+  "cases": [
+    {
+      "id": "failure_policy.message.empty_input",
+      "feature": "consumer.failure_policy",
+      "operation": "decode_message",
+      "input": {
+        "message": ""
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_json",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "failure_policy.message.truncated_json",
+      "feature": "consumer.failure_policy",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVs"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_json",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "failure_policy.message.future_version",
+      "feature": "consumer.failure_policy",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":3,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "unsupported_version",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "failure_policy.message.not_an_object",
+      "feature": "consumer.failure_policy",
+      "operation": "decode_message",
+      "input": {
+        "message": "[1,2,3]"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "not_an_object",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "failure_policy.message.invalid_field",
+      "feature": "consumer.failure_policy",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "id"
+        }
+      }
+    },
+    {
+      "id": "failure_policy.lifecycle.empty_input",
+      "feature": "consumer.failure_policy",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": ""
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_json",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "failure_policy.lifecycle.future_specversion",
+      "feature": "consumer.failure_policy",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"2.0\",\"id\":\"e1\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00Z\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "unsupported_version",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "failure_policy.lifecycle.not_an_object",
+      "feature": "consumer.failure_policy",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "\"io.ankusa.source.created\""
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "not_an_object",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "failure_policy.delivery.bad_signature",
+      "feature": "consumer.failure_policy",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "receiver": {
+          "secrets": [
+            "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+          ]
+        },
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "no_matching_signature",
+          "field": "webhook-signature"
+        }
+      }
+    }
+  ]
+}

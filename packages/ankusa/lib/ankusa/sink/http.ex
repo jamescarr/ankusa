@@ -45,7 +45,10 @@ defmodule Ankusa.Sink.Http do
   (falling back to `application/octet-stream`). Identity headers `x-ankusa-id`,
   `x-ankusa-source`, `x-ankusa-idempotency-key` (the key a consumer dedupes on,
   see `Ankusa.Envelope.idempotency_key/1`), `x-ankusa-verification` (`ok`,
-  `failed` or `skipped`: how the hook was verified at ingest) and (when set)
+  `failed` or `skipped`: how the hook was verified at ingest), `x-ankusa-received-at`
+  (the unix time in milliseconds the edge accepted the hook, the message's
+  `received_at`), `x-ankusa-body-sha256` (the lowercase hex SHA-256 of the body
+  sent, the message's `sha256` for a claim) and (when set)
   `x-ankusa-tenant` are always added, plus `x-ankusa-verification-flagged: true`
   when a failed check was let through by `on_verify_failure: accept_flag` (treat
   that hook as unverified), `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when
@@ -419,6 +422,8 @@ defmodule Ankusa.Sink.Http do
         {"x-ankusa-id", env.id},
         {"x-ankusa-idempotency-key", Envelope.idempotency_key(env)},
         {"x-ankusa-source", env.source_id},
+        {"x-ankusa-received-at", Integer.to_string(env.received_at)},
+        {"x-ankusa-body-sha256", Base.encode16(:crypto.hash(:sha256, env.body), case: :lower)},
         {"content-type", env.content_type || "application/octet-stream"}
       ] ++
         verification_headers(env.verification) ++

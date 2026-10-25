@@ -69,3 +69,37 @@ func TestVerificationTrusted(t *testing.T) {
 		t.Errorf("Message without verification must be untrusted")
 	}
 }
+
+func TestParseHeadersDeliveryMetadata(t *testing.T) {
+	const sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+	h := http.Header{}
+	h.Set("x-ankusa-id", "01a0")
+	h.Set("x-ankusa-received-at", "1720000000000")
+	h.Set("x-ankusa-body-sha256", sha256)
+
+	hook, err := ankusa.ParseHeaders(h)
+	if err != nil {
+		t.Fatalf("ParseHeaders: %v", err)
+	}
+	if hook.ReceivedAt == nil || *hook.ReceivedAt != 1720000000000 {
+		t.Fatalf("ReceivedAt = %v, want 1720000000000", hook.ReceivedAt)
+	}
+	if hook.BodySHA256 == nil || *hook.BodySHA256 != sha256 {
+		t.Fatalf("BodySHA256 = %v, want %s", hook.BodySHA256, sha256)
+	}
+}
+
+func TestParseHeadersDeliveryMetadataMalformedIsNil(t *testing.T) {
+	h := http.Header{}
+	h.Set("x-ankusa-id", "01a0")
+	h.Set("x-ankusa-received-at", "-1")
+	h.Set("x-ankusa-body-sha256", "ABC")
+
+	hook, err := ankusa.ParseHeaders(h)
+	if err != nil {
+		t.Fatalf("ParseHeaders: %v", err)
+	}
+	if hook.ReceivedAt != nil || hook.BodySHA256 != nil {
+		t.Fatalf("expected nil ReceivedAt and BodySHA256, got %v and %v", hook.ReceivedAt, hook.BodySHA256)
+	}
+}

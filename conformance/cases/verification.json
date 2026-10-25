@@ -103,35 +103,35 @@
       "feature": "webhook.verification",
       "operation": "parse_headers",
       "input": {"headers": {"x-ankusa-id": "01a0", "x-ankusa-source": "demo", "X-Ankusa-Verification": "ok"}},
-      "expect": {"ok": {"id": "01a0", "source": "demo", "tenant": null, "content_type": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "verification": {"status": "ok", "flagged": false}}}
+      "expect": {"ok": {"id": "01a0", "source": "demo", "tenant": null, "content_type": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "received_at": null, "body_sha256": null, "verification": {"status": "ok", "flagged": false}}}
     },
     {
       "id": "verification.headers.flagged",
       "feature": "webhook.verification",
       "operation": "parse_headers",
       "input": {"headers": {"x-ankusa-id": "01a0", "x-ankusa-source": "demo", "x-ankusa-verification": "failed", "x-ankusa-verification-flagged": "true"}},
-      "expect": {"ok": {"id": "01a0", "source": "demo", "tenant": null, "content_type": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "verification": {"status": "failed", "flagged": true}}}
+      "expect": {"ok": {"id": "01a0", "source": "demo", "tenant": null, "content_type": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "received_at": null, "body_sha256": null, "verification": {"status": "failed", "flagged": true}}}
     },
     {
       "id": "verification.headers.flagged_other_value_is_false",
       "feature": "webhook.verification",
       "operation": "parse_headers",
       "input": {"headers": {"x-ankusa-id": "01a0", "x-ankusa-source": "demo", "x-ankusa-verification": "ok", "x-ankusa-verification-flagged": "yes"}},
-      "expect": {"ok": {"id": "01a0", "source": "demo", "tenant": null, "content_type": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "verification": {"status": "ok", "flagged": false}}}
+      "expect": {"ok": {"id": "01a0", "source": "demo", "tenant": null, "content_type": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "received_at": null, "body_sha256": null, "verification": {"status": "ok", "flagged": false}}}
     },
     {
       "id": "verification.headers.empty_is_null",
       "feature": "webhook.verification",
       "operation": "parse_headers",
       "input": {"headers": {"x-ankusa-id": "01a0", "x-ankusa-source": "demo", "x-ankusa-verification": "", "x-ankusa-verification-flagged": "true"}},
-      "expect": {"ok": {"id": "01a0", "source": "demo", "tenant": null, "content_type": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "verification": null}}
+      "expect": {"ok": {"id": "01a0", "source": "demo", "tenant": null, "content_type": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "received_at": null, "body_sha256": null, "verification": null}}
     },
     {
       "id": "verification.receive.unsigned_flagged",
       "feature": "webhook.verification",
       "operation": "receive_delivery",
       "input": {"headers": {"x-ankusa-id": "01a0", "x-ankusa-source": "demo", "x-ankusa-verification": "failed", "x-ankusa-verification-flagged": "true"}, "body": {"text": "{}"}, "receiver": {"allow_unsigned": true}, "now": 1720000000},
-      "expect": {"ok": {"verified": false, "id": "01a0", "source": "demo", "tenant": null, "content_type": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "verification": {"status": "failed", "flagged": true}}}
+      "expect": {"ok": {"verified": false, "id": "01a0", "source": "demo", "tenant": null, "content_type": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "received_at": null, "body_sha256": null, "verification": {"status": "failed", "flagged": true}}}
     },
     {
       "id": "verification.headers.trusted.ok",

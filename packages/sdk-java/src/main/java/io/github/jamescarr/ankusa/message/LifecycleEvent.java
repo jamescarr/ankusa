@@ -79,6 +79,11 @@ public record LifecycleEvent(
       throw new InvalidMessageError("invalid_json", null, "event is not valid JSON");
     }
 
+    // Jackson reads empty (or blank) input as a missing node instead of failing.
+    if (root.isMissingNode()) {
+      throw new InvalidMessageError("invalid_json", null, "event is not valid JSON");
+    }
+
     if (!root.isObject()) {
       throw new InvalidMessageError("not_an_object", null, "event is not a JSON object");
     }

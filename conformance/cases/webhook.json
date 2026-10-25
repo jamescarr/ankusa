@@ -21,6 +21,8 @@
           "dedupe_key": null,
           "replay_id": null,
           "idempotency_key": null,
+          "received_at": null,
+          "body_sha256": null,
           "verification": null
         }
       }
@@ -45,6 +47,8 @@
           "dedupe_key": null,
           "replay_id": null,
           "idempotency_key": null,
+          "received_at": null,
+          "body_sha256": null,
           "verification": null
         }
       }
@@ -67,6 +71,8 @@
           "dedupe_key": null,
           "replay_id": null,
           "idempotency_key": null,
+          "received_at": null,
+          "body_sha256": null,
           "verification": null
         }
       }
@@ -123,6 +129,8 @@
           "dedupe_key": "evt_9",
           "replay_id": "rid-1",
           "idempotency_key": "default:demo:evt_9",
+          "received_at": null,
+          "body_sha256": null,
           "verification": null
         }
       }
@@ -146,6 +154,308 @@
           "dedupe_key": null,
           "replay_id": null,
           "idempotency_key": null,
+          "received_at": null,
+          "body_sha256": null,
+          "verification": null
+        }
+      }
+    },
+    {
+      "id": "webhook.delivery_metadata.both",
+      "feature": "webhook.delivery_metadata",
+      "operation": "parse_headers",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo",
+          "x-ankusa-received-at": "1720000000000",
+          "x-ankusa-body-sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "01a0",
+          "source": "demo",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null,
+          "received_at": 1720000000000,
+          "body_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "verification": null
+        }
+      }
+    },
+    {
+      "id": "webhook.delivery_metadata.case_insensitive_names",
+      "feature": "webhook.delivery_metadata",
+      "operation": "parse_headers",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo",
+          "X-Ankusa-Received-At": "1720000000000",
+          "X-Ankusa-Body-Sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "01a0",
+          "source": "demo",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null,
+          "received_at": 1720000000000,
+          "body_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "verification": null
+        }
+      }
+    },
+    {
+      "id": "webhook.delivery_metadata.received_at_only",
+      "feature": "webhook.delivery_metadata",
+      "operation": "parse_headers",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo",
+          "x-ankusa-received-at": "0"
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "01a0",
+          "source": "demo",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null,
+          "received_at": 0,
+          "body_sha256": null,
+          "verification": null
+        }
+      }
+    },
+    {
+      "id": "webhook.delivery_metadata.empty_is_absent",
+      "feature": "webhook.delivery_metadata",
+      "operation": "parse_headers",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo",
+          "x-ankusa-received-at": "",
+          "x-ankusa-body-sha256": ""
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "01a0",
+          "source": "demo",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null,
+          "received_at": null,
+          "body_sha256": null,
+          "verification": null
+        }
+      }
+    },
+    {
+      "id": "webhook.delivery_metadata.received_at_not_digits",
+      "feature": "webhook.delivery_metadata",
+      "operation": "parse_headers",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo",
+          "x-ankusa-received-at": "17e11",
+          "x-ankusa-body-sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "01a0",
+          "source": "demo",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null,
+          "received_at": null,
+          "body_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "verification": null
+        }
+      }
+    },
+    {
+      "id": "webhook.delivery_metadata.received_at_negative",
+      "feature": "webhook.delivery_metadata",
+      "operation": "parse_headers",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo",
+          "x-ankusa-received-at": "-1"
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "01a0",
+          "source": "demo",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null,
+          "received_at": null,
+          "body_sha256": null,
+          "verification": null
+        }
+      }
+    },
+    {
+      "id": "webhook.delivery_metadata.received_at_too_long",
+      "feature": "webhook.delivery_metadata",
+      "operation": "parse_headers",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo",
+          "x-ankusa-received-at": "1720000000000000"
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "01a0",
+          "source": "demo",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null,
+          "received_at": null,
+          "body_sha256": null,
+          "verification": null
+        }
+      }
+    },
+    {
+      "id": "webhook.delivery_metadata.sha256_uppercase",
+      "feature": "webhook.delivery_metadata",
+      "operation": "parse_headers",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo",
+          "x-ankusa-received-at": "1720000000000",
+          "x-ankusa-body-sha256": "2CF24DBA5FB0A30E26E83B2AC5B9E29E1B161E5C1FA7425E73043362938B9824"
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "01a0",
+          "source": "demo",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null,
+          "received_at": 1720000000000,
+          "body_sha256": null,
+          "verification": null
+        }
+      }
+    },
+    {
+      "id": "webhook.delivery_metadata.sha256_short",
+      "feature": "webhook.delivery_metadata",
+      "operation": "parse_headers",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo",
+          "x-ankusa-body-sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b982"
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "01a0",
+          "source": "demo",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null,
+          "received_at": null,
+          "body_sha256": null,
+          "verification": null
+        }
+      }
+    },
+    {
+      "id": "webhook.delivery_metadata.sha256_not_hex",
+      "feature": "webhook.delivery_metadata",
+      "operation": "parse_headers",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo",
+          "x-ankusa-body-sha256": "gcf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "01a0",
+          "source": "demo",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null,
+          "received_at": null,
+          "body_sha256": null,
+          "verification": null
+        }
+      }
+    },
+    {
+      "id": "webhook.delivery_metadata.receive_unsigned",
+      "feature": "webhook.delivery_metadata",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo",
+          "x-ankusa-received-at": "1720000000000",
+          "x-ankusa-body-sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        },
+        "body": {
+          "text": "hello"
+        },
+        "receiver": {
+          "allow_unsigned": true
+        },
+        "now": 1720000000
+      },
+      "expect": {
+        "ok": {
+          "verified": false,
+          "id": "01a0",
+          "source": "demo",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null,
+          "received_at": 1720000000000,
+          "body_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
           "verification": null
         }
       }

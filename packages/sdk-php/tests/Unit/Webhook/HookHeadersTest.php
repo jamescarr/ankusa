@@ -100,6 +100,35 @@ final class HookHeadersTest extends TestCase
         self::assertNull($headers->contentType);
     }
 
+    public function testReadsWhenTheEdgeAcceptedTheHookAndTheBodySha256(): void
+    {
+        $sha256 = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
+        $request = new ServerRequest('POST', 'https://hooks.test/inbound', [
+            'x-ankusa-id' => '01a0',
+            'X-Ankusa-Received-At' => '1720000000000',
+            'x-ankusa-body-sha256' => $sha256,
+        ]);
+
+        foreach ([$request, ['x-ankusa-id' => '01a0', 'x-ankusa-received-at' => '1720000000000', 'x-ankusa-body-sha256' => $sha256]] as $source) {
+            $headers = HookHeaders::fromHeaders($source);
+
+            self::assertSame(1_720_000_000_000, $headers->receivedAt);
+            self::assertSame($sha256, $headers->bodySha256);
+        }
+    }
+
+    public function testMalformedDeliveryMetadataIsNull(): void
+    {
+        $headers = HookHeaders::fromHeaders([
+            'x-ankusa-id' => '01a0',
+            'x-ankusa-received-at' => '-1',
+            'x-ankusa-body-sha256' => 'ABC',
+        ]);
+
+        self::assertNull($headers->receivedAt);
+        self::assertNull($headers->bodySha256);
+    }
+
     public function testMissingIdIsRejected(): void
     {
         $err = self::expectMissingId(static fn(): HookHeaders => HookHeaders::fromHeaders(['x-ankusa-source' => 'stripe']));

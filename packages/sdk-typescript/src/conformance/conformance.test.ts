@@ -254,6 +254,8 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
         dedupe_key: received.dedupeKey,
         replay_id: received.replayId,
         idempotency_key: received.idempotencyKey,
+        received_at: received.receivedAt,
+        body_sha256: received.bodySha256,
         verification: received.verification,
       };
     }
@@ -267,6 +269,8 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
         dedupe_key: parsed.dedupeKey,
         replay_id: parsed.replayId,
         idempotency_key: parsed.idempotencyKey,
+        received_at: parsed.receivedAt,
+        body_sha256: parsed.bodySha256,
         verification: parsed.verification,
       };
     }

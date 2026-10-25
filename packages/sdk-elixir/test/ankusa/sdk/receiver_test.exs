@@ -91,6 +91,24 @@ defmodule Ankusa.SDK.ReceiverTest do
     assert hook.headers["x-github-event"] == "push"
   end
 
+  test "a delivery carries when the edge accepted it, from x-ankusa-received-at" do
+    conn =
+      post("/deliveries", @body,
+        "x-ankusa-id": "01a0",
+        "x-ankusa-received-at": "1720000000000",
+        "x-ankusa-body-sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+      )
+      |> Receiver.call(receiver_opts())
+
+    assert conn.status == 202
+    assert_received {:hook, %Hook{} = hook}
+
+    assert hook.received_at == 1_720_000_000_000
+
+    assert hook.headers["x-ankusa-body-sha256"] ==
+             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+  end
+
   test "a delivery carries how the node verified it, and a flagged one is untrusted" do
     verified =
       post("/deliveries", @body,

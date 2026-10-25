@@ -21,10 +21,15 @@ module Ankusa
   # nil when the delivery had no such header (a tenant only travels when the
   # source has one; `dedupe_key` only when the source declared a dedupe key;
   # `replay_id` only when the delivery is a replay; `idempotency_key` is
-  # missing only from a sender that predates the header). `verification` is nil
+  # missing only from a sender that predates the header). `received_at` (when
+  # the edge accepted the hook, unix milliseconds, an Integer) and `body_sha256`
+  # (the lowercase hex SHA-256 of the body Ankusa sent) are advisory: nil when
+  # the header is absent, empty or malformed (not 1 to 15 decimal digits; not
+  # exactly 64 lowercase hex characters), never an error. `verification` is nil
   # when `x-ankusa-verification` is absent or empty.
   HookHeaders = Data.define(
-    :id, :source, :tenant, :content_type, :dedupe_key, :replay_id, :idempotency_key, :verification
+    :id, :source, :tenant, :content_type, :dedupe_key, :replay_id, :idempotency_key,
+    :received_at, :body_sha256, :verification
   ) do
     # `Data.define` made `idempotency_key` the reader of the parsed header; keep
     # that value reachable here and let the helper below take over the name.
@@ -84,6 +89,8 @@ module Ankusa
       dedupe_key: presence(lowered["x-ankusa-dedupe-key"]),
       replay_id: presence(lowered["x-ankusa-replay-id"]),
       idempotency_key: presence(lowered["x-ankusa-idempotency-key"]),
+      received_at: parse_received_at(lowered["x-ankusa-received-at"]),
+      body_sha256: parse_body_sha256(lowered["x-ankusa-body-sha256"]),
       verification: parse_verification(lowered)
     )
   end
@@ -94,6 +101,18 @@ module Ankusa
     (value.nil? || value.empty?) ? nil : value
   end
   private_class_method :presence
+
+  # An Integer for 1 to 15 decimal digits and nothing else, else nil.
+  def self.parse_received_at(value)
+    value.to_i if value&.match?(/\A[0-9]{1,15}\z/)
+  end
+  private_class_method :parse_received_at
+
+  # The value when it is exactly 64 lowercase hex characters, else nil.
+  def self.parse_body_sha256(value)
+    value if value&.match?(/\A[0-9a-f]{64}\z/)
+  end
+  private_class_method :parse_body_sha256
 
   # `nil` when `x-ankusa-verification` is absent or empty; otherwise the
   # header's value as `status`, and `flagged` true exactly when

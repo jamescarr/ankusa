@@ -8,6 +8,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Delivery metadata (CON-4).** `Webhook.Headers.received_at` (when the edge accepted the hook, unix milliseconds, from `x-ankusa-received-at`) and `Webhook.Headers.body_sha256` (the lowercase hex SHA-256 of the body sent, from `x-ankusa-body-sha256`): `nil` when the header is absent, empty or malformed, never an error. `Receiver` now sets `Hook.received_at` from the header (it was always `nil` over HTTP).
+
 - **Wire-format evolution path (CON-2).** `Ankusa.SDK.Message.decode/1` accepts
   every `v` from `Message.min_supported_version/0` to
   `Message.max_supported_version/0` (1 and 2) into the one `Message`, with `v`

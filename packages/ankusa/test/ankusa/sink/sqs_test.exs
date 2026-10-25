@@ -342,7 +342,7 @@ defmodule Ankusa.Sink.SQSTest do
                }
              },
              message_bindings: %{},
-             ankusa_headers: false
+             ankusa_headers: true
            } = SQS.describe(%{source_id: "stripe", tenant_id: "acme"}, opts())
   end
 

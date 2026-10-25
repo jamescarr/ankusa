@@ -37,4 +37,23 @@ class WebhookTest < Minitest::Test
     refute_predicate skipped, :trusted?
     refute_predicate legacy, :trusted?
   end
+
+  def test_parse_headers_reads_delivery_metadata
+    sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    headers = Ankusa.parse_headers(
+      "x-ankusa-id" => "01a0", "x-ankusa-received-at" => "1720000000000", "x-ankusa-body-sha256" => sha256
+    )
+
+    assert_equal 1_720_000_000_000, headers.received_at
+    assert_equal sha256, headers.body_sha256
+  end
+
+  def test_parse_headers_malformed_delivery_metadata_is_nil
+    headers = Ankusa.parse_headers(
+      "x-ankusa-id" => "01a0", "x-ankusa-received-at" => "-1", "x-ankusa-body-sha256" => "ABC"
+    )
+
+    assert_nil headers.received_at
+    assert_nil headers.body_sha256
+  end
 end

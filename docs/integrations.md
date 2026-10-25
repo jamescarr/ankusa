@@ -40,7 +40,12 @@ sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", secret: Syst
   `content-type`; `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when the hook
   carries them. `x-ankusa-verification-flagged: true` marks a hook its source
   accepted despite a failed check (`on_verify_failure: accept_flag`): treat it
-  as unverified.
+  as unverified. `x-ankusa-received-at` (unix milliseconds the edge accepted
+  the hook, the queue message's `received_at`) and `x-ankusa-body-sha256` (the
+  lowercase hex SHA-256 of the body sent) come with every delivery; the SDKs
+  parse both as advisory (`received_at`, `body_sha256`: null when absent or
+  malformed, never an error), so a receiver can order by arrival time or check
+  the bytes it read without hashing them itself.
 - Respond `2xx` only after the job is durably enqueued: a `202` after an
   in-transaction insert commits, not before.
 - `408`, `429`, any other `4xx` not listed next, `5xx` and a timeout are

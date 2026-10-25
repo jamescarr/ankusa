@@ -183,6 +183,8 @@ defmodule Ankusa.SDK.ConformanceTest do
       "dedupe_key" => headers.dedupe_key,
       "replay_id" => headers.replay_id,
       "idempotency_key" => headers.idempotency_key,
+      "received_at" => headers.received_at,
+      "body_sha256" => headers.body_sha256,
       "verification" => verification_json(headers.verification)
     }
   end
@@ -198,6 +200,8 @@ defmodule Ankusa.SDK.ConformanceTest do
       "dedupe_key" => headers.dedupe_key,
       "replay_id" => headers.replay_id,
       "idempotency_key" => headers.idempotency_key,
+      "received_at" => headers.received_at,
+      "body_sha256" => headers.body_sha256,
       "verification" => verification_json(headers.verification)
     }
   end
