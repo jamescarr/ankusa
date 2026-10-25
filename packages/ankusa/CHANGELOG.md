@@ -114,7 +114,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   was `up`/`down`/`recovering`). The status codes are unchanged, and so are the
   gating rules of `store`, `intake` and `backup`. Both OpenAPI documents describe
   the new body.
-- **A stop drains before it closes anything (OPS-4).** `Ankusa.Application` and
+- **A stop drains before it closes anything (OPS-4).** Core's application and
   `AnkusaServer.Application` define `prep_stop/1`, which runs
   `Ankusa.Instance.Drain` when the VM is told to stop (SIGTERM, `docker stop`):
   `/ready` answers `503` with `"status": "draining"` and a `drain` check

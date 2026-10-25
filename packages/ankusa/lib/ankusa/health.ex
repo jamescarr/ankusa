@@ -57,8 +57,8 @@ defmodule Ankusa.Health do
   @doc """
   Start answering `/ready` with `503` and `status: "draining"`: this node is
   being stopped (`Ankusa.Instance.Drain`), so a load balancer should send it
-  nothing new. It stays that way until the instance starts again
-  (`Ankusa.Instance.init/1` clears it).
+  nothing new. It stays that way until the instance starts again (its supervisor
+  clears it when it initialises).
   """
   @spec drain(atom()) :: :ok
   def drain(instance), do: :persistent_term.put(drain_key(instance), true)

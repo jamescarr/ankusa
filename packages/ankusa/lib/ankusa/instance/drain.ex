@@ -2,10 +2,10 @@ defmodule Ankusa.Instance.Drain do
   @moduledoc """
   What a node does before its supervision tree stops, so a stop never turns a
   request that is being answered, or a hook that is being committed, into a
-  connection reset. Both applications run it from `prep_stop/1`
-  (`Ankusa.Application` for every instance in its own tree, `AnkusaServer.Application`
-  for the one it owns), which the VM calls when it is told to stop: SIGTERM, which
-  is what `docker stop` and a Kubernetes pod deletion send.
+  connection reset. Both applications run it from `prep_stop/1` (core's for every
+  instance in its own tree, `AnkusaServer.Application`'s for the one it owns),
+  which the VM calls when it is told to stop: SIGTERM, which is what `docker stop`
+  and a Kubernetes pod deletion send.
 
   In order:
 
@@ -25,7 +25,7 @@ defmodule Ankusa.Instance.Drain do
        inside the listener's own wait.
 
   It returns, and the tree stops in its own order: dispatch writes the outcomes it
-  still holds (`Ankusa.Dispatch.Pipeline.terminate/2`), the backup takes its final
+  still holds when it terminates, the backup takes its final
   checkpoint (`Ankusa.Store.Backup`, bounded by `backup.final_timeout_ms`), and the
   store closes last. A node's grace period therefore has to cover the delay, the
   drain timeout and the stop itself: set `terminationGracePeriodSeconds` to at
