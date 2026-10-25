@@ -410,7 +410,9 @@
           "replay_id": null,
           "idempotency_key": null,
           "headers": {},
-          "verification": null
+          "verification": null,
+          "traceparent": null,
+          "tracestate": null
         }
       }
     },

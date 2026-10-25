@@ -220,7 +220,9 @@ defmodule Ankusa.SDK.ConformanceTest do
       "replay_id" => message.replay_id,
       "idempotency_key" => message.idempotency_key,
       "headers" => message.headers,
-      "verification" => verification_json(message.verification)
+      "verification" => verification_json(message.verification),
+      "traceparent" => message.traceparent,
+      "tracestate" => message.tracestate
     }
   end
 

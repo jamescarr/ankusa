@@ -10,6 +10,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Ankusa.SDK.Message` carries `traceparent` and `tracestate`: the hook's W3C
+  trace context from the message, verbatim (`nil` when none); a non-string value
+  is `invalid_field`.
+
 - `Ankusa.SDK.ClaimRef.parse/1` and `Ankusa.SDK.ClaimCheck.redeem/3` accept
   signed, expiring v2 refs
   (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`): the

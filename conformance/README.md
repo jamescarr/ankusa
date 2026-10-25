@@ -78,9 +78,13 @@ then runs every registered SDK's native runner.
   "size", "body_base64": string|null, "claim": string|null,
   "sha256": string|null, "dedupe_key": string|null,
   "replay_id": string|null, "idempotency_key": string|null, "headers": {},
-  "verification": {"status": string, "flagged": bool}|null}`.
+  "verification": {"status": string, "flagged": bool}|null,
+  "traceparent": string|null, "tracestate": string|null}`.
   `body_base64` here is the decoded body re-encoded as standard base64, so
-  runners compare bytes. `verification` is the message's `verification`
+  runners compare bytes. `traceparent` and `tracestate` are the message's W3C
+  trace context, passed through verbatim (the SDK neither parses nor validates
+  them): a string, or `null` for a message with none or from a node older than
+  the fields. `verification` is the message's `verification`
   key verbatim; absent or `null` → `null` (a node older than the field);
   present but not an object of a non-empty string `status` and a boolean
   `flagged` → `invalid_field` (field `verification`); any `status` value
@@ -93,7 +97,8 @@ then runs every registered SDK's native runner.
   3. Field types, in this order, else `invalid_field` with `field` set to the
      key name: `id` a non-empty string; `source_id` a string; `received_at` an
      integer; `size` an integer ≥ 0; `tenant_id`/`content_type`/`dedupe_key`/
-     `replay_id`/`idempotency_key` a string, null, or absent; `headers` absent
+     `replay_id`/`idempotency_key`/`traceparent`/`tracestate` a string, null, or
+     absent; `headers` absent
      or an object whose values are all strings; `sha256` absent or 64 lowercase
      hex characters.
   4. Body form: both `body_base64` and `claim` → `ambiguous_body`; neither →

@@ -70,6 +70,31 @@ defmodule Ankusa.EnvelopeTest do
     end
 
     for version <- [0, 1] do
+      test "the trace context round-trips (v#{version}); a hook with none stays nil" do
+        trace = %{
+          traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+          tracestate: "vendor=value"
+        }
+
+        traced = envelope(%{trace: trace})
+        bin = Envelope.to_binary(traced, version: unquote(version))
+        assert Envelope.from_binary(bin) == {:ok, traced}
+        assert {:ok, %Envelope{trace: ^trace}} = Envelope.from_binary(bin)
+
+        plain = envelope(%{})
+        assert {:ok, %Envelope{trace: nil}} = Envelope.from_binary(Envelope.to_binary(plain))
+      end
+    end
+
+    test "a hook written before the trace field existed reads with trace nil" do
+      env = envelope(%{dedupe_key: "evt_1"})
+      legacy = env |> Map.from_struct() |> Map.delete(:trace) |> :erlang.term_to_binary()
+
+      assert {:ok, %Envelope{trace: nil} = read} = Envelope.from_binary(legacy)
+      assert read == env
+    end
+
+    for version <- [0, 1] do
       test "a field a newer node added is ignored (v#{version}), though its atom was never interned" do
         env = envelope(%{dedupe_key: "evt_1"})
         {field, bin} = envelope_from_the_future(env, unquote(version))

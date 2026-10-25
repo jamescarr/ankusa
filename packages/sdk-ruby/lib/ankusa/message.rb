@@ -50,14 +50,17 @@ module Ankusa
   # One decoded v1 queue message. `body` holds the inline bytes (or nil for the
   # claim form, where the bytes are fetched with `Ankusa::ClaimCheckClient`);
   # `claim` holds the ref string in that case. `headers` is the forwarded
-  # provider request headers, `{}` when the message carried none.
+  # provider request headers, `{}` when the message carried none. `traceparent`
+  # and `tracestate` are the hook's W3C trace context, verbatim (nil when the
+  # message carries none): continue the trace from them.
   #
   # `idempotency_key` is the one value a consumer should dedupe on, as
   # `Message#idempotency_key` (the field is nil only for a message from a node
   # that predates it); see `Ankusa.decode_message` for the decode rules.
   Message = Data.define(
     :v, :id, :source_id, :tenant_id, :received_at, :content_type, :size,
-    :body, :claim, :sha256, :dedupe_key, :replay_id, :idempotency_key, :headers, :verification
+    :body, :claim, :sha256, :dedupe_key, :replay_id, :idempotency_key, :headers, :verification,
+    :traceparent, :tracestate
   ) do
     # `Data.define` made `idempotency_key` the reader of the decoded field; keep
     # that value reachable here and let the helper below take over the name.
@@ -84,7 +87,7 @@ module Ankusa
 
   # The optional string-keyed fields that may be a string, null, or absent.
   # Checked in this order, so the first offending key is the one reported.
-  MESSAGE_STRING_FIELDS = %w[tenant_id content_type dedupe_key replay_id idempotency_key].freeze
+  MESSAGE_STRING_FIELDS = %w[tenant_id content_type dedupe_key replay_id idempotency_key traceparent tracestate].freeze
   private_constant :MESSAGE_STRING_FIELDS
 
   # Decodes one v1 queue message (the JSON body a sink or broker delivers) into
@@ -188,7 +191,9 @@ module Ankusa
       replay_id: parsed["replay_id"],
       idempotency_key: parsed["idempotency_key"],
       headers: headers,
-      verification: verification
+      verification: verification,
+      traceparent: parsed["traceparent"],
+      tracestate: parsed["tracestate"]
     )
   end
 

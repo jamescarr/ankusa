@@ -60,6 +60,9 @@ import tools.jackson.databind.JsonNode;
  * @param headers the forwarded provider request headers, lower-cased names, never null
  * @param verification how Ankusa verified the hook at ingest, or null from a node that predates the
  *     field
+ * @param traceparent the hook's W3C {@code traceparent}, verbatim, to continue the trace from; null
+ *     when the message carries none
+ * @param tracestate the W3C {@code tracestate} that goes with {@code traceparent}, or null
  */
 public record Message(
     int v,
@@ -76,7 +79,9 @@ public record Message(
     @Nullable String replayId,
     @Nullable String idempotencyKey,
     Map<String, String> headers,
-    @Nullable Verification verification) {
+    @Nullable Verification verification,
+    @Nullable String traceparent,
+    @Nullable String tracestate) {
 
   /** A lowercase-hex SHA-256, the only digest shape a message may carry. */
   private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
@@ -135,6 +140,8 @@ public record Message(
     String dedupeKey = nullableText(root, "dedupe_key");
     String replayId = nullableText(root, "replay_id");
     String idempotencyKey = nullableText(root, "idempotency_key");
+    String traceparent = nullableText(root, "traceparent");
+    String tracestate = nullableText(root, "tracestate");
     Map<String, String> headers = headers(root);
     String sha256 = sha256(root);
     Verification verification = verification(root);
@@ -177,7 +184,9 @@ public record Message(
           replayId,
           idempotencyKey,
           headers,
-          verification);
+          verification,
+          traceparent,
+          tracestate);
     }
 
     if (!claimNode.isString()) {
@@ -216,7 +225,9 @@ public record Message(
         replayId,
         idempotencyKey,
         headers,
-        verification);
+        verification,
+        traceparent,
+        tracestate);
   }
 
   /**

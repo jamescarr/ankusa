@@ -11,6 +11,10 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Message.Traceparent` and `Message.Tracestate`: the hook's W3C trace context
+  from the message, verbatim (`nil` when none); a non-string value is
+  `invalid_field`.
+
 - `verification` on parsed headers, decoded messages and received deliveries:
   how Ankusa verified the hook at ingest (`{status, flagged}`, `null` from a
   node older than the field).

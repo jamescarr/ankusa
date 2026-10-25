@@ -18,6 +18,10 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Message.traceparent` and `Message.tracestate`: the hook's W3C trace context
+  from the message, verbatim (`null` when none); a non-string value is
+  `invalid_field`.
+
 - The generated claim-check types (`src/claim-check/claim-check-schema.d.ts`)
   follow the gateway's integrity check: `integrity_mismatch` is an `Error` code,
   the `502` response is in `readClaim`, and `200`/`206` list the
