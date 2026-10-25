@@ -26,7 +26,8 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :fleet, :breaker]` | — | `:instance`, `:state` (`:open`, `:closed`) |
   | `[:ankusa, :fleet, :fallback]` | — | `:instance`, `:kind`, `:reason` (`:breaker_open`, `:error`). One per hook a fleet call did not answer |
   | `[:ankusa, :fleet, :settle_dropped]` | `:count` | `:instance`, `:reason` (`:queue_full`, `:error`). Dedupe claim outcomes that were not delivered to the fleet store |
-  | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts`, `:sink`, `:source_id`, `:tenant_id`, `:ordered` (the delivery was a lane head of an `ordered: true` sink) |
+  | `[:ankusa, :dispatch, :stop]` | `:attempt_ms` (the final attempt's wall time, as a float; absent when the delivery was dead-lettered without one: its source was deleted, or its hook is missing), `:since_received_ms` (the hook's age when the delivery settled, by `received_at`: the SLI behind `ankusa_delivery_latency_seconds`; absent for a replayed delivery, whose age is the replay's doing, and for a hook that did not decode) | `:instance`, `:result` (`:ok`, `:dlq`; direct mode: `:ok`, `:error`), `:attempts`, `:sink`, `:source_id`, `:tenant_id`, `:ordered` (the delivery was a lane head of an `ordered: true` sink). One per delivery that settled |
+  | `[:ankusa, :dispatch, :attempt]` | `:attempt_ms` (float: from the attempt's task starting, its claim-check write included, to dispatch recording its outcome; a sink that hits `dispatch.attempt_timeout_ms` reports the timeout) | `:instance`, `:result` (`:ok`, `:error`, `:timeout`), `:attempt` (1-based), `:sink`, `:source_id`, `:tenant_id`. One per attempt, retried or not; `ankusa_dispatch_attempt_duration_seconds{sink,result}`. Direct mode emits one per sink, timed inside the sink's own task |
   | `[:ankusa, :dispatch, :dlq]` | — | `:instance`, `:source_id`, `:tenant_id`, `:sink` |
   | `[:ankusa, :dispatch, :lane_key_missing]` | — | `:instance`, `:sink`. One per hook of an `ordered: true` sink whose `ordering_key` yielded nothing (no such header, a body that is not JSON or is over 1 MiB, a missing path, an MFA that raised): the hook went into the sink's keyless lane; `ankusa_dispatch_lane_key_missing_total{sink}` |
   | `[:ankusa, :dispatch, :config_error]` | — | `:instance`, `:sink`, `:source_id`, `:tenant_id`. One per delivery dead-lettered as `{:permanent, {:config, _}}` (a credential or destination the sink's service refuses); `ankusa_dispatch_config_errors_total{sink}` |
@@ -49,11 +50,13 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :sink_batch, :refused]` | — | `:instance`, `:sink`, `:reason` (`:entries`, `:bytes`, `:tenant`: the batcher's queue ceiling the delivery would pass) |
   | `[:ankusa, :sink_batch, :state]` | `:batchers`, `:queued`, `:queued_bytes` | `:instance` |
   | `[:ankusa, :compact, :stop]` | `:records`, `:bytes`, `:duration` | `:instance` |
+  | `[:ankusa, :compact, :failure]` | — | `:instance`, `:stage` (`:segment`: an archive segment was not written; `:retention`: the catalogue sweep failed; `:reclaim`: the hook reclaim sweep failed or was deferred). One per failed step; `ankusa_compact_failures_total{stage}` |
   | `[:ankusa, :backup, :stop]` | `:duration`, `:files`, `:bytes` | `:instance`, `:result` (`:ok`, `:error`), `:reason` (on `:error`) |
   | `[:ankusa, :backup, :state]` | `:age_seconds` (since the last successful backup, or since the uploader started) | `:instance` |
   | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size`, `:claims` | `:instance`, `:tenant_id`, `:pack_id` (the id the pack was written under, after any collision), `:result`, `:store` (index into `claim_check.blob_stores` the pack was written to, `nil` on failure) |
   | `[:ankusa, :claim_check, :pack_collision]` | — | `:instance`, `:tenant_id`, `:pack_id` (an id a claim store already held an object under; `check_in/4` mints a fresh one, up to 3 attempts) |
   | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:claim_id`, `:result` |
+  | `[:ankusa, :claim_check, :failure]` | — | `:instance`, `:op` (`:check_in`, `:redeem`), `:tenant_id`, `:reason` (never a label). One per `check_in/4` or `redeem/3` that failed on the node's side: a claim store that could not answer (`{:unavailable, _}`), refused this node's credential (`:forbidden`), or returned bytes that fail the claim's sha256 (`:integrity_mismatch`). A missing, expired or forged ref is the caller's, and is only on `:check_in`/`:redeem`'s `:result`. `ankusa_claim_check_failures_total{op}` |
   | `[:ankusa, :claim_check, :sweep]` | `:deleted` (partition directories removed), `:scanned` (the partitions of the one tenant the tick swept), `:packs` (pack objects deleted), `:kept` (packs a lease held back), `:leases_pruned` (lease rows deleted: grace over, or their hook no longer names the pack), `:backlog` (names the tick did not examine in the partition it stopped in), `:partitions_left` (expired partitions of that tenant it did not reach), `:tenants_left` (tenants the pass has yet to visit after this one), `:duration` | `:instance`, `:deleted` (`true` when the tick removed a partition, a pack or a lease row) |
   | `[:ankusa, :claim_check, :store_breaker]` | — | `:instance`, `:store` (index into `claim_check.blob_stores`), `:state` (`:open`, `:closed`), `:reason` (`nil` on `:closed`) |
   | `[:ankusa, :claim_check, :gateway]` | `:duration` | `:instance`, `:method`, `:status` (one per claim request the gateway answered; `502` is a claim, or its pack's manifest, that does not match the manifest's sha256) |
@@ -105,6 +108,25 @@ defmodule Ankusa.Telemetry do
   `ankusa.lifecycle.event`) beside the `:ingest`, `:verify` and `:commit` spans
   above, and does nothing without an OpenTelemetry SDK.
   """
+
+  @doc """
+  Milliseconds, as a float, from `started` (a `System.monotonic_time/0` reading)
+  to now.
+  """
+  @spec elapsed_ms(integer()) :: float()
+  def elapsed_ms(started),
+    do: System.convert_time_unit(System.monotonic_time() - started, :native, :microsecond) / 1000
+
+  @doc """
+  How long ago `env` was received, in milliseconds, or `nil` for anything that is
+  not a decoded envelope. Never negative: `received_at` is the receiving node's
+  clock, and a delivering node a few ms behind it must not report a past.
+  """
+  @spec since_received_ms(term()) :: non_neg_integer() | nil
+  def since_received_ms(%Ankusa.Envelope{received_at: at}) when is_integer(at),
+    do: max(System.system_time(:millisecond) - at, 0)
+
+  def since_received_ms(_other), do: nil
 
   @doc "Emit a telemetry event."
   @spec emit([atom()], map(), map()) :: :ok

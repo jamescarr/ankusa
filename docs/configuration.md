@@ -74,7 +74,7 @@ is the [key reference](#ankusa-config) below.
 | `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`), `min_free_bytes` (unset = no check; the free bytes `data_dir`'s file system must keep, or `/ready` answers `503` with `disk: failing`; see [`/ready`](deployment.md#running-the-container)) |
 | `log` | `level` (`info`), `format` (`text` \| `json`; `text`), `banner` (`true`; the ASCII-art banner on start, never printed with `format: json`). See [Logs](#logs) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`), `store_headers` (`drop`: `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`; `hash`: none). See [Stored headers](#stored-headers) |
-| `listener` | Limits for every HTTP listener, and the ingest port's TLS: `max_connections` (20000), `num_acceptors` (null = two per scheduler), `read_timeout_ms` (10000), `body_read_timeout_ms` (15000), `request_deadline_ms` (30000), `max_requests_per_connection` (1000), `max_header_count` (64), `max_header_length` (16384), `http2` (`false`), `tls` (`certfile`, `keyfile`, `cacertfile`, `verify` = `verify_none` \| `verify_peer`, `versions`, `ciphers`). See [Listeners](#listeners-limits-tls-and-mtls) |
+| `listener` | Limits for every HTTP listener, and the ingest port's TLS: `max_connections` (20000), `num_acceptors` (null = two per scheduler), `read_timeout_ms` (10000), `body_read_timeout_ms` (15000), `request_deadline_ms` (30000), `max_requests_per_connection` (1000), `max_header_count` (64), `max_header_length` (16384), `http2` (`false`), `drain_delay_ms` (5000) and `drain_timeout_ms` (30000: how a SIGTERM drains the node), `tls` (`certfile`, `keyfile`, `cacertfile`, `verify` = `verify_none` \| `verify_peer`, `versions`, `ciphers`). See [Listeners](#listeners-limits-tls-and-mtls) |
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it, and then needs `auth`), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled), `tls` (a TLS block, like `listener.tls`), `auth` (who may call it: `mode` = `none` \| `token` \| `jwt` \| `mtls`, `allow_insecure`, `tokens`, `jwt`, `mtls`; see [Control-plane authentication](#control-plane-authentication)) |
 | `metrics` | `enabled` (`false`), `port` (4004), `ip` (`127.0.0.1`), `tls`. A listener that serves only `/metrics`, `/health` and `/ready`. See [A separate metrics listener](#a-separate-metrics-listener) |
 | `tracing` | `enabled` (`false`), `otlp_endpoint` (`http://localhost:4318`), `sample_ratio` (`1.0`; 0 to 1). Image only. Starts the OpenTelemetry SDK and the OTLP exporter. See [Tracing](#tracing) |
@@ -733,6 +733,7 @@ config :ankusa,
 | `listener.max_requests_per_connection` | `1_000` | A keep-alive connection is closed after this many requests. |
 | `listener.max_header_count`, `listener.max_header_length` | `64`, `16_384` | Request-head limits, enforced before any body is read. |
 | `listener.http2` | `false` | Serve HTTP/2 (off: HTTP/1.1 only). |
+| `listener.drain_delay_ms`, `listener.drain_timeout_ms` | `5_000`, `30_000` | A stop (SIGTERM) first answers `/ready` with `503` and `"status": "draining"`, keeps serving for `drain_delay_ms` (an integer >= 0) so a load balancer sees the flip, then closes the ingest listener, which waits for the requests it is serving (`Ankusa.Listener.ingress_shutdown_timeout_ms/1`: the batcher's 15 s record deadline, a 2 s store commit and a 5 s margin = 22 s; 13 s under `wal: :none`, 24 s under `wal: :dual`), and waits for every batcher to hold nothing, all within `drain_timeout_ms` (an integer >= 1). A node with the `:edge` role refuses a `drain_timeout_ms` below that wait. Set `terminationGracePeriodSeconds` to at least `(drain_delay_ms + drain_timeout_ms) / 1000 + 10`, plus `backup.final_timeout_ms` when the node backs up ([`deployment.md`](deployment.md)). Not secret: `/v1/config` shows both. |
 | `listener.tls` | `nil` | The ingest listener's TLS block (`certfile`, `keyfile`, `cacertfile`, `verify`, `versions`, `ciphers`). The `listener` limits apply to every listener; this key is the ingest port's alone. See [Listeners](#listeners-limits-tls-and-mtls). |
 | `max_body_bytes` | `8_000_000` | Hard cap on a request body. A `Content-Length` over it is `413` before any of the body is read; a body without one (chunked) is cut off at the cap while streaming. |
 | `store_headers` | `%{drop: [...the six credential headers above], hash: []}` | Which request headers a hook is stored with (`Ankusa.Edge.StoredHeaders`), applied after verification. `drop` removes a header from the stored hook, `hash` keeps it with the value replaced by `"sha256:<hex>"`; names are case-insensitive and a name in both lists is dropped. An absent `drop` or `hash` keeps the default's list. See [Stored headers](#stored-headers). |
@@ -892,7 +893,7 @@ Boot checks ranges, not only types, and fails with `"<dotted.key> must be
 `routes.max_routes`, `routes.memory_budget_bytes` and every
 numeric `listener.*` key (`max_connections`, `num_acceptors`, the three
 timeouts, `max_requests_per_connection`, `max_header_count`,
-`max_header_length`) must be positive; `listener.http2` and `metrics.enabled`
+`max_header_length`) and `listener.drain_timeout_ms` must be positive (`listener.drain_delay_ms`, non-negative); `listener.http2` and `metrics.enabled`
 are booleans, `metrics.ip` an IP address, and a `tls` block names existing
 `certfile`/`keyfile`, a `verify` of `verify_none`/`verify_peer` (the latter
 with a `cacertfile`), non-empty `versions` from `tlsv1.2`/`tlsv1.3` and known
@@ -991,7 +992,7 @@ metric keeps a bounded number of them.
 | `metrics.detail` | Labels on the ingest, verify-failure, quarantine, rate-limit and delivery counters | Also |
 | --- | --- | --- |
 | `:tenant` (default) | `tenant_id` | the top-100 `ankusa_tenant_pending` and `ankusa_dispatch_tenant_inflight` gauges (label `tenant`) |
-| `:source` | `tenant_id` and `source_id` | the `ankusa_ingest_duration_seconds` histogram carries both, too |
+| `:source` | `tenant_id` and `source_id` | the `ankusa_ingest_duration_seconds` and `ankusa_delivery_latency_seconds` histograms carry both, too |
 | `:none` | neither | no per-tenant gauges: the series set is the same for one tenant and for a million |
 
 `metrics.max_series_per_metric` (default `5000`) caps the label sets one metric

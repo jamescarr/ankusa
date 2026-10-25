@@ -6,6 +6,19 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.SDK.Hook.trusted?/1`: `true` only when the node verified the hook at
+  ingest (`status: "ok"`) and did not flag it (`flagged: false`). Works on a
+  `Hook`, a decoded `Message` or the parsed `Webhook.Headers`; a flagged,
+  `failed` or `skipped` hook and one with no `verification` are untrusted.
+
+### Fixed
+
+- `Ankusa.SDK.Receiver` now sets `verification` on the `Hook` it hands to the
+  handler (it was always `nil` over HTTP, so a hook accepted after a failed
+  signature looked the same as a verified one).
+
 ## [0.6.0] - 2026-10-24
 
 ### Added

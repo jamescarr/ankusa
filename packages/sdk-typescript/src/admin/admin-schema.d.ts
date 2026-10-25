@@ -45,8 +45,10 @@ export interface paths {
          *     `backup` (`backup.max_age_ms`). `503` with `Retry-After: 1` while a check
          *     that gates is not `ok`: `store`, `intake`, `sinks` and `disk` always,
          *     `backup` only with `backup.require_fresh`, `backlog` never (a label).
-         *     A node with none of these checks is always ready. `/health` stays a
-         *     liveness probe.
+         *     A node with none of these checks is always ready. A node that is being
+         *     stopped (SIGTERM) answers `503` with `status: draining` and a `drain`
+         *     key from that moment until it exits, still serving the requests it
+         *     already holds. `/health` stays a liveness probe.
          */
         get: operations["getReady"];
         put?: never;
@@ -663,7 +665,7 @@ export interface components {
          */
         Readiness: {
             /** @enum {string} */
-            status: "ready" | "unavailable";
+            status: "ready" | "unavailable" | "draining";
             instance: string;
             /** @description Present on a node that runs the local store. */
             store?: components["schemas"]["CheckState"];
@@ -684,6 +686,11 @@ export interface components {
              *     uploader is not running). `503` only with `backup.require_fresh`.
              */
             backup?: components["schemas"]["CheckState"];
+            /**
+             * @description Present only while the node is being stopped (SIGTERM): `draining`,
+             *     and `status` is `draining`. Stop sending the node requests.
+             */
+            drain?: components["schemas"]["CheckState"];
             /** @description Present while a check is not `ok`, why, per check. */
             reasons?: {
                 /** @enum {string} */
@@ -698,6 +705,8 @@ export interface components {
                 backlog?: "over_threshold" | "unavailable" | "error";
                 /** @enum {string} */
                 backup?: "stale" | "error";
+                /** @enum {string} */
+                drain?: "shutting_down";
             };
         };
         Wal: {

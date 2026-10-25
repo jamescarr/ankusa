@@ -677,8 +677,14 @@ defmodule Ankusa.ClaimCheckTest do
         | claim_check: Map.put(config.claim_check, :blob_stores, [{TakenStore, pid: self()}])
       })
 
+      attach(ctx.inst, [[:ankusa, :claim_check, :failure]])
+
       assert {:error, {:unavailable, :pack_id_collision}} =
                ClaimCheck.check_in(ctx.inst, "acme", [item("acme", "never lands")])
+
+      # A store that cannot take the pack is the node's to fix: counted by op.
+      assert_received {:telemetry, [:ankusa, :claim_check, :failure],
+                       %{op: :check_in, tenant_id: "acme", reason: {:unavailable, _}}}
 
       keys =
         for _attempt <- 1..3 do

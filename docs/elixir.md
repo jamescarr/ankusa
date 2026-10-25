@@ -252,6 +252,17 @@ packages it needs), reads its own env vars, and calls `Ankusa.Config.new/1` +
 `Ankusa.Instance.start_link/1` directly. `ankusa` core stays a library; the
 wrapper is where "how do I actually deploy this" config lives.
 
+Stopping the node (SIGTERM) is the wrapper's to make graceful too. `:ankusa`'s own
+`prep_stop/1` drains every instance in its supervision tree (the autostarted
+default instance, or one you start with `Supervisor.start_child(Ankusa.Supervisor,
+{Ankusa.Instance, config})`). An instance your app supervises itself is not
+reachable from there: call `Ankusa.Instance.Drain.run(instance)` from your
+application's `prep_stop/1`, which answers `/ready` with `503 draining`, waits
+`listener.drain_delay_ms`, closes the ingest listener after the requests in
+flight and waits for the batchers (see
+[Deployment](deployment.md)). Set the pod's `terminationGracePeriodSeconds` to
+cover it.
+
 If that wrapper depends on `ankusa` directly *and* transitively through an
 adapter package, mark your direct entry `override: true`: the reason, and the
 Dockerfile/compose context that goes with it, is in

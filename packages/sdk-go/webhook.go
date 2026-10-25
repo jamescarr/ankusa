@@ -34,6 +34,22 @@ type Verification struct {
 	Flagged bool `json:"flagged"`
 }
 
+// Trusted reports whether the node verified the hook at ingest and nothing
+// flags it: true only for Status "ok" with Flagged false. A flagged hook
+// (accepted despite a failed check, on_verify_failure: accept_flag), a
+// "failed" or "skipped" one, any other status, and a nil Verification (a node
+// older than the field) are all untrusted. It is safe to call on a nil
+// *Verification.
+func (v *Verification) Trusted() bool {
+	return v != nil && v.Status == "ok" && !v.Flagged
+}
+
+// Trusted reports whether the node verified this delivery at ingest and
+// nothing flags it; see Verification.Trusted.
+func (h HookHeaders) Trusted() bool {
+	return h.Verification.Trusted()
+}
+
 // IdempotencyKey is the key a consumer dedupes this delivery on: the key
 // Ankusa shipped in x-ankusa-idempotency-key when it is non-empty. For a
 // delivery from a sender that predates the header it is computed:

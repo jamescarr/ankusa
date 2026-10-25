@@ -46,7 +46,16 @@ defmodule Ankusa.Config do
               # `/ready` answers 503 (`disk: "failing"`). Needs `:os_mon` (the
               # server image starts it); without it the free space cannot be
               # measured and the check fails. nil = no disk check. An integer >= 1.
-              ready_min_free_bytes: nil
+              ready_min_free_bytes: nil,
+              # how long, after `/ready` starts answering `503 draining` on a stop
+              # (SIGTERM), the ingress listener keeps serving before it closes, so
+              # load balancers see the flip first. 0 = close at once. An integer >= 0.
+              drain_delay_ms: 5_000,
+              # the bound on closing the ingress listener and then waiting for every
+              # batcher to hold nothing. At least
+              # `Ankusa.Listener.ingress_shutdown_timeout_ms/1` on a node with the
+              # `:edge` role. An integer >= 1.
+              drain_timeout_ms: 30_000
             },
             # {module, opts} implementing Ankusa.RouteResolver (URL scheme → identity)
             route_resolver: {Ankusa.RouteResolver.Path, []},
@@ -742,6 +751,7 @@ defmodule Ankusa.Config do
     |> normalize_listeners!()
     |> validate_ranges!()
     |> validate_intake!()
+    |> validate_drain!()
     |> normalize_store_headers!()
     |> normalize_backup!()
     |> validate_secrets!()
@@ -909,7 +919,8 @@ defmodule Ankusa.Config do
     {[:listener, :request_deadline_ms], "listener.request_deadline_ms"},
     {[:listener, :max_requests_per_connection], "listener.max_requests_per_connection"},
     {[:listener, :max_header_count], "listener.max_header_count"},
-    {[:listener, :max_header_length], "listener.max_header_length"}
+    {[:listener, :max_header_length], "listener.max_header_length"},
+    {[:listener, :drain_timeout_ms], "listener.drain_timeout_ms"}
   ]
 
   # `0` means something for these: no linger before a commit, roll at once,
@@ -923,7 +934,8 @@ defmodule Ankusa.Config do
     {[:claim_check, :read_retries], "claim_check.read_retries"},
     {[:claim_check, :read_queue_max], "claim_check.read_queue_max"},
     {[:claim_check, :read_cache_bytes], "claim_check.read_cache_bytes"},
-    {[:claim_check, :max_concurrent_reads], "claim_check.max_concurrent_reads"}
+    {[:claim_check, :max_concurrent_reads], "claim_check.max_concurrent_reads"},
+    {[:listener, :drain_delay_ms], "listener.drain_delay_ms"}
   ]
 
   @key_prefix ~r"\A([A-Za-z0-9._-]+/)+\z"
@@ -1143,10 +1155,6 @@ defmodule Ankusa.Config do
 
   @intake_id ~r/\A[a-z0-9._-]{1,64}\z/
 
-  # The batcher answers a record 503 after this long (`Ankusa.Edge.Batcher.commit/4`'s
-  # default): one intake attempt must end before the provider's answer is due.
-  @batcher_record_deadline_ms 15_000
-
   # The intake block: every range is checked whatever `wal` is; the cross-key
   # rules (ADR 0002, section 11) only under `wal: :dual`, which is where the
   # block is read.
@@ -1242,8 +1250,8 @@ defmodule Ankusa.Config do
       config,
       [:intake, :publish_timeout_ms],
       "intake.publish_timeout_ms",
-      "less than the batcher's record deadline (#{@batcher_record_deadline_ms} ms)",
-      &(&1 < @batcher_record_deadline_ms)
+      "less than the batcher's record deadline (#{Ankusa.Edge.Batcher.record_deadline_ms()} ms)",
+      &(&1 < Ankusa.Edge.Batcher.record_deadline_ms())
     )
 
     if config.dedupe.scope == :fleet and
@@ -1270,6 +1278,25 @@ defmodule Ankusa.Config do
     unless valid?.(value) do
       raise ArgumentError, "#{key} must be #{constraint}, got #{inspect(value)}"
     end
+  end
+
+  # `listener.drain_timeout_ms` bounds what `Ankusa.Instance.Drain` does after
+  # the delay: closing the ingress listener, which waits up to
+  # `Ankusa.Listener.ingress_shutdown_timeout_ms/1` for the requests in flight,
+  # and then the batchers. A shorter bound would stop waiting for a commit the
+  # drain itself let start.
+  defp validate_drain!(config) do
+    shutdown = Ankusa.Listener.ingress_shutdown_timeout_ms(config)
+
+    if role?(config, :edge) and config.listener.drain_timeout_ms < shutdown do
+      raise ArgumentError,
+            "listener.drain_timeout_ms (#{config.listener.drain_timeout_ms}) must be at least " <>
+              "the ingress listener's shutdown timeout (#{shutdown} ms, see " <>
+              "Ankusa.Listener.ingress_shutdown_timeout_ms/1), or a drain would stop " <>
+              "waiting for a commit it let start"
+    end
+
+    config
   end
 
   # The outbound pools' bounds (`Ankusa.HttpClient.Pools`). The positive-integer

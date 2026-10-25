@@ -12,6 +12,11 @@ this project follows [Semantic Versioning](https://semver.org/).
 - `decode` returns `:traceparent` and `:tracestate`: the hook's W3C trace
   context from the message, verbatim (`nil` when none); a non-string value is
   `invalid_field`.
+- `ankusa.sdk.verification/trusted?`: `true` only when the node verified the
+  hook at ingest (`{:status "ok" :flagged false}`); a flagged, `"failed"` or
+  `"skipped"` hook and one with no `:verification` are untrusted.
+- `->hook` carries `:verification` from the message (it was dropped, so a
+  flagged message looked verified once turned into a hook).
 
 - `list-audit`: `GET /v1/audit`, the audit trail (newest first, paged by
   `cursor`/`limit`, filtered by `since`, `until`, `actor`, `action`,

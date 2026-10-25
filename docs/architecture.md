@@ -274,6 +274,7 @@ From here, ingest is done. Two independent consumers work off the same store:
 | Audit trail | Every change an operator (or code) makes to a source, a route, the global IP rules, a rate-limit override, the quarantine pen, a replay job or the node's log level (`PUT /v1/log-level`) leaves one row in the store's `audit` column family, with the actor (`Ankusa.Principal`), the client address, the request id, a keyed hash of the subject before and after, and the subject's `revision`. Rows are in **commit order** (`<<?a, seq, at>>`: `Ankusa.Audit` hands out `seq` and commits the batch, so a reader that remembers a `seq` never misses a later row, whatever the clock does) and never hold a secret. A change that lives in this node's store (API-managed sources, rate-limit overrides, quarantine, replay jobs) is committed **in the same synced batch** as its row: both survive `kill -9`, or neither. A change that lives elsewhere (route definitions and the Redis source store: the route store is pluggable and shared by a fleet) is a **dual write**: the row goes in first as a synced *pending* row, the change is applied, and the row is finished with the outcome. A node killed between the two leaves the pending row. For a source or a route the next boot settles it by reading the subject: its state hashes to the row's `after_hash` (the change happened: `"ok"`), to `before_hash` (it did not: `"failed"`), or to neither (someone changed it meanwhile: `"interrupted"`, with the current state announced); for anything else the row is recorded `"interrupted"` — the change **may or may not** have been applied. The trail never loses a change that was applied. A change whose row cannot be written is not made (`503`). A request that changes nothing writes no row. `GET /v1/audit` (scope `audit:read`; a tenant-scoped reader sees only its tenants' rows); `audit.retention_days` (default 365) prunes. Tests: `test/ankusa/admin/audit_test.exs` (`audit row survives kill`, `no secret in audit`, `filters`), `test/ankusa/admin/router_test.exs` (`runtime level`: the log level changes at once and is audited, and is not changed when the row cannot be written). |
 | Lifecycle events | When `lifecycle.sinks` is set, the audit row of a source or route change is flagged for publication and committed in the same synced batch as the change, with its redacted entity beside it (an audit row never holds a spec). `Ankusa.Lifecycle.Publisher` reads the flagged rows in commit order and keeps its place in `m:lifecycle_cursor` (synced on every advance), so a `kill -9` right after the change still delivers its event after the restart, and events of one instance arrive in `seq` order, each with the subject's `revision`. Delivery is **at least once**: an event's `id` is derived from its row, so a redelivery after a crash, and a replay (`POST /v1/replays {"kind":"lifecycle"}`), are the same event and a consumer dedupes on `id`. A sink whose retries run out loses the event *for that sink* (counted; replayable). **Retention never passes the outbox**: `audit.retention_days` does not delete a row, or its entity, at or above `m:lifecycle_cursor`, so a sink that is down for longer than the retention does not lose the events it has not seen; `ankusa_audit_retention_blocked_by_cursor` counts the expired rows held back. Tests: `test/ankusa/lifecycle_test.exs` (`survives kill`, `ordered by revision`, same id twice, pending-row verdicts), `test/ankusa/admin/audit_test.exs` (`a lifecycle sink that never confirms keeps every row at or above the cursor`), `test/ankusa/replay_test.exs` (`lifecycle replay`), `ankusa_redis`'s `redis_lifecycle_test.exs` (a `kill -9` on the Redis route and source stores). |
 | Tenant erase | `DELETE /v1/tenants/{tenant}?confirm={tenant}` (`tenants:write` + `tenant:*`) closes the tenant (its hooks are `503 tenant_erasing`, dispatch stops claiming its rows), waits for its running attempts, then removes its sources, routes, override, delivery rows, archive obligations, quarantine rows, claim objects (`claims/tenant=<t>/`), dedupe keys and lifecycle entities, and commits the tombstone `m:erased:<tenant>` with one `tenant.delete` audit row (the lifecycle event `io.ankusa.tenant.deleted`) in one synced batch. The job's progress is synced after each stage, so a `kill -9` resumes it at the next boot. After it, `Storage.fetch/2` answers `{:error, :gone}` (`410` where served) for the tenant's archived hooks, which stay in their multi-tenant segments until the bucket's lifecycle expires them; a backup older than the erase brings the tenant back. With `rate_limits.scope: fleet` the tenant's Redis buckets are deleted; its fleet dedupe claims expire on their own TTL. Tests: `tenant_test.exs` (`erase leaves no trace`, `resumes after kill -9`, `a running attempt cannot put a row back`, `a fetch of an erased hook is gone`), `tenant_s3_integration_test.exs` (claims prefix on S3). |
+| Shutdown (SIGTERM) | A stop drains before it closes anything (`Ankusa.Instance.Drain`, run from both applications' `prep_stop/1`): `/ready` answers `503 {"status":"draining"}` at once, the ingest listener keeps serving for `listener.drain_delay_ms` (5 s), then closes and waits for the requests it is serving (the batcher's 15 s record deadline, the store commit and a 5 s margin, so a commit that starts late is not killed mid-fsync), then every batcher is waited on until empty, within `listener.drain_timeout_ms` (30 s). Every request in flight is answered `201` (stored) or `503` (nothing stored), never reset, and every `201` is in the store after the restart; dispatch's outcomes and the backup's final checkpoint then run as the tree stops. Proof: `test/ankusa/drain_test.exs` (a child BEAM, 200 requests held in the batchers by a stalled writer, SIGTERM) and the `docker stop` drill of `mise run docker:smoke`. [Deployment](deployment.md) has the grace period to set. |
 
 ## Archive retention
 
@@ -570,3 +571,49 @@ long the store has been closed; alert on it staying above 0) and
 `ankusa_store_wal_replay_seconds`, and `/ready` names the same class as
 `reasons.store` in its `503` body. A closed store retries its open after 5 s, then 10, 20, 40 and 60 s
 (jittered), until it works ([`storage.md`](storage.md#durability-corruption-full-disk)).
+
+### SLIs and SLOs
+
+Four series answer "is the tier healthy" without logs:
+
+- `ankusa_ingest_duration_seconds`: the ack latency, how long `Ankusa.Edge.Ingest`
+  took to answer one request (its `outcome` is on `ankusa_ingest_requests_total`).
+- `ankusa_delivery_latency_seconds{sink,result}`: how old a hook was when its
+  delivery settled (`result="ok"`: the sink confirmed; `"dlq"`: it was
+  dead-lettered; direct mode `"error"`: the sink refused), measured from the
+  hook's `received_at`, so queueing, retries and their backoff count. A replayed
+  delivery is not sampled: its age is the replay's. It carries `tenant_id` and
+  `source_id` only at [`metrics.detail: source`](configuration.md#metric-cardinality)
+  (a histogram is a dozen series per label set, so the default `tenant` detail
+  keeps them off every histogram).
+- `ankusa_dispatch_attempt_duration_seconds{sink,result}`: one sample per
+  attempt, retried or not (`result` is `ok`, `error` or `timeout`), so a sink
+  that fails or hangs shows here before its deliveries settle. A timed-out
+  attempt reports `dispatch.attempt_timeout_ms`.
+- `ankusa_queue_oldest_due_age_seconds`: the backlog's age, the alert for a
+  dispatcher that has stopped.
+
+Three counters say a background stage is failing even though ingest still
+answers: `ankusa_compact_failures_total{stage}` (`segment`: an archive segment
+was not written; `retention`: the catalogue sweep; `reclaim`: the hook reclaim
+sweep), `ankusa_claim_check_failures_total{op}` (`check_in` or `redeem` failed
+on a claim store: unavailable, refused this node's credential, or bytes that
+fail the claim's sha256) and `ankusa_backup_failures_total`. The events behind
+them are in `Ankusa.Telemetry`'s moduledoc.
+
+The objectives (ground rule 10 of the hardening plan, `ANKUSA_HARDENING_PLAN.md`),
+per node unless stated:
+
+| SLI | Target | Metric |
+| --- | --- | --- |
+| Ack latency (steady, 10 KB bodies, 1 k req/s/node) | p99 ≤ 50 ms | `ankusa_ingest_duration_seconds` |
+| Ack latency during chaos (pod kills) | p99 ≤ 250 ms, zero `missing` | loadgen chaos phase |
+| Ingest throughput (1 KB bodies, in-process bench) | ≥ 10 k/s/node | `bench/core_bench.exs` |
+| Delivery latency, healthy sinks (received → confirmed) | p99 ≤ 5 s | `ankusa_delivery_latency_seconds` |
+| Backlog age (oldest due row) | alert at 5 min | `ankusa_queue_oldest_due_age_seconds` |
+| Memory growth, 1 h soak at target rate | ≤ 5 % RSS | soak job |
+| `/metrics` size | ≤ 10 k series/node, independent of tenant count | metrics test |
+| Drain on SIGTERM | zero connection resets, every in-flight request answered | OPS-4 test |
+
+`metrics_test.exs` (`slo series present`) reads this table and fails if a metric
+it names is missing from a scrape.

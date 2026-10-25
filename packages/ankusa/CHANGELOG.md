@@ -25,6 +25,19 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `:without_dedupe`) counts them. Tests: `salesforce preset`, `warns without
   dedupe`.
 
+- **SLI metrics (OPS-3).** `[:ankusa, :dispatch, :stop]` now measures `attempt_ms`
+  (the final attempt) and `since_received_ms` (the hook's age when the delivery
+  settled; absent for a replayed delivery), and a new `[:ankusa, :dispatch,
+  :attempt]` event (`attempt_ms`; `result` `ok`, `error` or `timeout`) fires per
+  attempt, in direct mode too. New on `/metrics`:
+  `ankusa_delivery_latency_seconds{sink,result}` (buckets to 60 s; `tenant_id` and
+  `source_id` only at `metrics.detail: source`, like the ingest histogram),
+  `ankusa_dispatch_attempt_duration_seconds{sink,result}`,
+  `ankusa_compact_failures_total{stage}` (`segment`, `retention`, `reclaim`; from
+  the new `[:ankusa, :compact, :failure]`), `ankusa_claim_check_failures_total{op}`
+  (`check_in`, `redeem`; from `[:ankusa, :claim_check, :failure]`, only for a
+  claim store's fault) and `ankusa_backup_failures_total`. The SLO table is in
+  [`architecture.md`](../../docs/architecture.md#slis-and-slos).
 - **Opt-in ordering lanes (DEL-1.b, ADR 0004).** A sink entry with
   `ordered: true` and an `ordering_key` (`{:header, name}`, `{:json, "a.b"}`,
   `{mod, fun, args}`) delivers the hooks of one lane (`{tenant, source, sink,
@@ -114,6 +127,13 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `/v1/config` (none is a secret). They live in existing sections, so
   `Ankusa.Config` keeps its 31 struct fields.
 
+- **Drain keys (OPS-4).** `listener.drain_delay_ms` (5000, an integer >= 0): how
+  long the node keeps serving after `/ready` flips to `draining`.
+  `listener.drain_timeout_ms` (30000, an integer >= 1): the bound on closing the
+  ingress listener and waiting for the batchers. Both range-checked, shown by
+  `/v1/config` (neither is a secret), and in the existing `listener` section, so
+  `Ankusa.Config` keeps its 31 struct fields.
+
 ### Changed
 
 - **`/ready` lists every readiness check (OPS-5).** `Ankusa.Health.ready/1` runs
@@ -131,6 +151,29 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   was `up`/`down`/`recovering`). The status codes are unchanged, and so are the
   gating rules of `store`, `intake` and `backup`. Both OpenAPI documents describe
   the new body.
+- **A stop drains before it closes anything (OPS-4).** Core's application and
+  `AnkusaServer.Application` define `prep_stop/1`, which runs
+  `Ankusa.Instance.Drain` when the VM is told to stop (SIGTERM, `docker stop`):
+  `/ready` answers `503` with `"status": "draining"` and a `drain` check
+  (`Ankusa.Health.Check.Drain`, `Ankusa.Health.drain/1`) at once, the ingress
+  listener keeps serving for `listener.drain_delay_ms`, then closes and waits for
+  the requests it is serving, then every batcher is waited on until it holds
+  nothing (`Ankusa.Edge.Batcher.queued/2`), all within `listener.drain_timeout_ms`.
+  Dispatch's outcomes and the backup's final checkpoint run as the tree stops.
+  **Wire change:** `/ready`'s `status` is `"draining"` (was `"unavailable"`) while
+  a check reports `draining`; both OpenAPI documents and the TypeScript admin
+  types follow. The ingest Bandit child is `id: :ingress`, and its Thousand Island
+  `shutdown_timeout` is `Ankusa.Listener.ingress_shutdown_timeout_ms/1` (22 s;
+  13 s under `wal: :none`, 24 s under `wal: :dual`), no longer Thousand Island's
+  15 s default, which was the batcher's own record deadline, so a commit that
+  started late was killed mid-fsync and the provider saw a reset for a committed
+  hook. `Ankusa.Listener.bandit_options/3` takes extra Thousand Island options.
+  A node with the `:edge` role refuses a `listener.drain_timeout_ms` below that
+  wait at `Ankusa.Config.new/1`. `Ankusa.Edge.Batcher.record_deadline_ms/0` is the
+  one definition of the 15 s record deadline (the `intake.publish_timeout_ms`
+  bound reads it). Set `terminationGracePeriodSeconds` to at least
+  `(drain_delay_ms + drain_timeout_ms) / 1000 + 10`
+  ([`deployment.md`](../../docs/deployment.md)).
 
 ## [0.7.0] - 2026-10-24
 

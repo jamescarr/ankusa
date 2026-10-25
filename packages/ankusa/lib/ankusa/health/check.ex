@@ -7,6 +7,8 @@ defmodule Ankusa.Health.Check do
   whether a failure of it makes the node unready (`gates?/1`), and `run/1`s
   itself. `all/0` is the registry, in the order the body lists them:
 
+    * `Ankusa.Health.Check.Drain`: the node is being stopped
+      (`Ankusa.Health.drain/1`). Only present while it is; reports `draining`. Gates.
     * `Ankusa.Health.Check.Store`: the store takes a synced write. Gates.
     * `Ankusa.Health.Check.Intake`: the `wal: :dual` intake log answers. Gates.
     * `Ankusa.Health.Check.Sinks`: under `wal: :none`, no sink failed its last
@@ -45,6 +47,7 @@ defmodule Ankusa.Health.Check do
   @spec all() :: [module()]
   def all do
     [
+      __MODULE__.Drain,
       __MODULE__.Store,
       __MODULE__.Intake,
       __MODULE__.Sinks,

@@ -6,6 +6,13 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Message::is_trusted`, `HookHeaders::is_trusted` and `Verification::is_trusted`:
+  `true` only when the node verified the hook at ingest (status `ok`) and did
+  not flag it. A flagged, `failed` or `skipped` hook and one with no
+  verification are untrusted.
+
 ## [0.6.0] - 2026-10-24
 
 ### Added

@@ -1008,6 +1008,65 @@ defmodule Ankusa.ConfigTest do
     end
   end
 
+  describe "the drain keys (OPS-4)" do
+    test "defaults: five seconds of delay, thirty to drain" do
+      config = Config.new([])
+      assert config.listener.drain_delay_ms == 5_000
+      assert config.listener.drain_timeout_ms == 30_000
+    end
+
+    test "every key is range-checked at Config.new/1, naming the key" do
+      assert_raise ArgumentError,
+                   "listener.drain_delay_ms must be a non-negative integer, got -1",
+                   fn -> Config.new(listener: %{drain_delay_ms: -1}) end
+
+      assert_raise ArgumentError,
+                   "listener.drain_delay_ms must be a non-negative integer, got nil",
+                   fn -> Config.new(listener: %{drain_delay_ms: nil}) end
+
+      assert_raise ArgumentError,
+                   "listener.drain_timeout_ms must be a positive integer, got 0",
+                   fn -> Config.new(listener: %{drain_timeout_ms: 0}) end
+
+      assert Config.new(listener: %{drain_delay_ms: 0}).listener.drain_delay_ms == 0
+    end
+
+    test "an edge node's drain timeout covers the ingress listener's wait for requests in flight" do
+      # 15 s record deadline + 2 s store commit + 5 s margin
+      assert Ankusa.Listener.ingress_shutdown_timeout_ms(Config.new([])) == 22_000
+
+      assert_raise ArgumentError,
+                   ~r/listener.drain_timeout_ms \(21999\) must be at least the ingress listener's shutdown timeout \(22000 ms/,
+                   fn -> Config.new(listener: %{drain_timeout_ms: 21_999}) end
+
+      assert Config.new(listener: %{drain_timeout_ms: 22_000})
+
+      # no edge role, no ingress listener to wait for
+      assert Config.new(roles: [:dispatch], listener: %{drain_timeout_ms: 1})
+    end
+
+    test "the wait follows the ack path: sinks under wal: :none, the intake publish under dual" do
+      assert Ankusa.Listener.ingress_shutdown_timeout_ms(
+               Config.new(wal: :none, roles: [:edge], direct_publish_timeout_ms: 8_000)
+             ) == 13_000
+
+      assert Config.new(wal: :none, roles: [:edge], listener: %{drain_timeout_ms: 13_000})
+
+      assert_raise ArgumentError, ~r/\(12999\) must be at least .* \(13000 ms/, fn ->
+        Config.new(wal: :none, roles: [:edge], listener: %{drain_timeout_ms: 12_999})
+      end
+
+      # 22 s + the intake attempt (`intake.publish_timeout_ms`, 2 s)
+      assert Ankusa.Listener.ingress_shutdown_timeout_ms(Config.new(dual([]))) == 24_000
+
+      assert_raise ArgumentError, ~r/\(23999\) must be at least .* \(24000 ms/, fn ->
+        Config.new(dual(listener: %{drain_timeout_ms: 23_999}))
+      end
+
+      assert Config.new(dual(listener: %{drain_timeout_ms: 24_000}))
+    end
+  end
+
   describe "the listener and metrics sections" do
     @tls_dir Path.expand("../fixtures/tls", __DIR__)
     @listener_positive ~w(max_connections num_acceptors read_timeout_ms body_read_timeout_ms

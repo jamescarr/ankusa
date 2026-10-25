@@ -26,6 +26,8 @@ ADMIN_TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 # The mutual-TLS container's ingest and metrics ports.
 MTLS_PORT="${SMOKE_MTLS_PORT:-4010}"
 METRICS_PORT="${SMOKE_METRICS_PORT:-4014}"
+# The container the SIGTERM drain drill stops and restarts.
+DRAIN_PORT="${SMOKE_DRAIN_PORT:-4016}"
 # Who may have signed a published image: this repo's docker.yml, on main or on a
 # server tag, with GitHub's OIDC issuer. Override for a fork.
 COSIGN_IDENTITY="${SMOKE_COSIGN_IDENTITY:-^https://github\.com/jamescarr/ankusa/\.github/workflows/docker\.yml@refs/(heads/main|tags/ankusa_server-v.+)$}"
@@ -39,8 +41,9 @@ cleanup() {
     echo "--- container logs ($NAME) ---" >&2
     docker logs "$NAME" >&2 || true
     docker logs "$NAME-mtls" >&2 2>&1 || true
+    docker logs "$NAME-drain" >&2 2>&1 || true
   fi
-  docker rm -f "$NAME" "$NAME-mtls" >/dev/null 2>&1 || true
+  docker rm -f "$NAME" "$NAME-mtls" "$NAME-drain" >/dev/null 2>&1 || true
   rm -rf "$WORK"
   exit "$rc"
 }
@@ -192,6 +195,107 @@ for path in /v1/config /v1/dlq /v1/wal; do
   [ "$code" = "404" ] || fail "the metrics listener answered $path with $code, expected 404"
 done
 docker rm -f "$NAME-mtls" >/dev/null 2>&1 || true
+
+echo "==> docker stop drains: /ready flips to draining, no request in flight is reset, every 201 survives a restart"
+# 200 uploads throttled to 1 KiB/s (a 4 KiB body takes ~4 s) are in flight when
+# the stop arrives. `listener.drain_delay_ms` is 2 s, so the node keeps serving
+# while /ready already answers 503; the ingest listener then waits for the
+# uploads to finish before the container exits.
+cat >"$WORK/drain.yml" <<'EOF'
+node: {data_dir: /var/lib/ankusa}
+listener: {drain_delay_ms: 2000}
+sources:
+  demo: {verify: {type: none}, on_verify_failure: accept_flag, sinks: [{type: log}]}
+EOF
+docker rm -f "$NAME-drain" >/dev/null 2>&1 || true
+docker run -d --name "$NAME-drain" -p "127.0.0.1:$DRAIN_PORT:4000" \
+  -v "$WORK/drain.yml:/etc/ankusa/ankusa.yml:ro" "$IMAGE" >/dev/null
+
+wait_ready() {
+  local up=false
+  for _ in $(seq 1 30); do
+    if [ "$(http_code "$WORK/dready" "http://127.0.0.1:$DRAIN_PORT/ready")" = "200" ]; then
+      up=true
+      break
+    fi
+    [ "$(docker inspect -f '{{.State.Running}}' "$NAME-drain")" = "true" ] ||
+      fail "the drain container exited during startup"
+    sleep 1
+  done
+  [ "$up" = "true" ] || fail "the drain container's /ready never returned 200 within 30s"
+}
+wait_ready
+
+mkdir -p "$WORK/drain"
+printf '{"pad":"%s"}' "$(head -c 4096 /dev/zero | tr '\0' x)" >"$WORK/drain/body"
+upload_pids=""
+for i in $(seq 1 200); do
+  (
+    rc=0
+    code=$(curl -s -o "$WORK/drain/$i.out" -w '%{http_code}' --max-time 120 --limit-rate 1k \
+      -H 'content-type: application/json' --data-binary "@$WORK/drain/body" \
+      "http://127.0.0.1:$DRAIN_PORT/webhooks/demo") || rc=$?
+    echo "$rc $code" >"$WORK/drain/$i.res"
+  ) &
+  upload_pids="$upload_pids $!"
+done
+sleep 1
+
+docker stop -t 60 "$NAME-drain" >/dev/null &
+stop_pid=$!
+
+flipped=false
+for _ in $(seq 1 20); do
+  code=$(http_code "$WORK/dready" "http://127.0.0.1:$DRAIN_PORT/ready" || true)
+  if [ "$code" = "503" ] && grep -q '"status":"draining"' "$WORK/dready"; then
+    flipped=true
+    break
+  fi
+  sleep 0.1
+done
+[ "$flipped" = "true" ] || fail "/ready did not answer 503 draining within 2s of docker stop: $code $(cat "$WORK/dready")"
+
+for pid in $upload_pids; do wait "$pid"; done
+wait "$stop_pid" || fail "docker stop failed"
+
+resets=0
+answered=0
+acked=0
+: >"$WORK/drain/ids"
+for i in $(seq 1 200); do
+  read -r rc code <"$WORK/drain/$i.res"
+  if [ "$rc" != "0" ]; then
+    resets=$((resets + 1))
+    continue
+  fi
+  case "$code" in
+    201)
+      acked=$((acked + 1))
+      # grep -o prints each match on its own line; the response has no trailing newline.
+      { grep -o '"id":"[^"]*"' "$WORK/drain/$i.out" || true; } | cut -d'"' -f4 >>"$WORK/drain/ids"
+      ;;
+    503) ;;
+    *) fail "upload $i was answered $code during the drain, expected 201 or 503" ;;
+  esac
+  answered=$((answered + 1))
+done
+[ "$resets" = "0" ] || fail "$resets of 200 uploads were reset by the drain (curl failed); $answered answered"
+[ "$acked" -gt 0 ] || fail "no upload was acked during the drain"
+[ "$(wc -l <"$WORK/drain/ids" | tr -d ' ')" = "$acked" ] || fail "an acked upload carried no hook id"
+
+exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$NAME-drain")
+[ "$exit_code" = "0" ] || fail "the drained container exited $exit_code, expected 0 (a drain that overran docker stop's 60s is 137)"
+
+docker start "$NAME-drain" >/dev/null
+wait_ready
+docker exec "$NAME-drain" docker-entrypoint rpc \
+  '{:ok, hooks} = Ankusa.Queue.hooks(:default, 0, 1_000_000); Enum.each(hooks, &IO.puts(&1.id))' \
+  | sort >"$WORK/drain/stored"
+sort "$WORK/drain/ids" >"$WORK/drain/acked"
+missing=$(comm -23 "$WORK/drain/acked" "$WORK/drain/stored" | wc -l | tr -d ' ')
+[ "$missing" = "0" ] || fail "$missing of $acked acked hooks are missing after the restart"
+echo "drain: ready flipped, zero resets, $acked x 201 and $((answered - acked)) x 503, every 201 present after restart"
+docker rm -f "$NAME-drain" >/dev/null 2>&1 || true
 
 echo "==> a missing config file exits 78 (EX_CONFIG)"
 set +e
