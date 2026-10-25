@@ -70,7 +70,7 @@ defmodule Ankusa.Edge.Ingest do
     StoredHeaders
   }
 
-  alias Ankusa.{Envelope, Source, Trace, Verification}
+  alias Ankusa.{Envelope, Ordering, Source, Trace, Verification}
 
   @type result ::
           {:ok, Envelope.t()}
@@ -347,18 +347,25 @@ defmodule Ankusa.Edge.Ingest do
       # A forged, flag-accepted request must not claim a provider event key and
       # suppress the real event, so no key is extracted when the hook was flagged.
       case Quarantine.hit(instance, env.source_id, env.tenant_id) do
-        :ok -> commit_stored(instance, source, env, nil)
-        {:rate_limited, ms} -> {{:error, {:quarantine_rate_limited, ms}}, 0}
-        {:error, :store_unavailable} -> {{:error, :store_unavailable}, 0}
+        :ok ->
+          commit_stored(instance, source, env, nil, Ordering.lanes(instance, source, env))
+
+        {:rate_limited, ms} ->
+          {{:error, {:quarantine_rate_limited, ms}}, 0}
+
+        {:error, :store_unavailable} ->
+          {{:error, :store_unavailable}, 0}
       end
     else
-      # The dedupe key is read from the complete header list: a source may
-      # dedupe on a header the stored-header policy then removes.
-      env = %{env | dedupe_key: Ankusa.Dedupe.key(source.dedupe, env)}
+      # The dedupe key and the ordering lanes are read from the complete header
+      # list: a source may dedupe or order on a header the stored-header policy
+      # then removes. One JSON decode serves both (`Ankusa.Ordering.resolve/3`).
+      {dedupe_key, lanes} = Ordering.resolve(instance, source, env)
+      env = %{env | dedupe_key: dedupe_key}
 
       case Fleet.admit(instance, source, env) do
         {:ok, claim} ->
-          commit_stored(instance, source, env, claim)
+          commit_stored(instance, source, env, claim, lanes)
 
         {:duplicate, hook_id} ->
           {{:duplicate, %{env | id: hook_id, seq: nil}}, 0}
@@ -409,9 +416,9 @@ defmodule Ankusa.Edge.Ingest do
   # (`{:error, {:half, reason, id}}`) is carried to completion by the reconciler,
   # so its claim is neither promoted nor released: the reconciler promotes it when
   # both halves are confirmed, and the provider's retry meets it pending.
-  defp commit_stored(instance, source, env, claim) do
+  defp commit_stored(instance, source, env, claim, lanes) do
     {env, dropped} = store_headers(instance, source, env)
-    {settle(instance, claim, commit(instance, source, env)), dropped}
+    {settle(instance, claim, commit(instance, source, env, lanes)), dropped}
   end
 
   defp settle(instance, claim, {:error, {:half, reason, id}}) do
@@ -494,14 +501,14 @@ defmodule Ankusa.Edge.Ingest do
 
   # `Ankusa.config/1` is a `:persistent_term` read: this branch costs nothing
   # on the hot path.
-  defp commit(instance, source, env) do
+  defp commit(instance, source, env, lanes) do
     wal = Ankusa.config(instance).wal
 
     Trace.span("ankusa.commit", [attributes: fn -> %{"ankusa.wal" => to_string(wal)} end], fn ->
       result =
         case wal do
           :none -> Publish.publish(instance, source, env)
-          _ -> buffered_or_full(instance, source, env)
+          _ -> buffered_or_full(instance, source, env, lanes)
         end
 
       trace_failure(result)
@@ -512,20 +519,21 @@ defmodule Ankusa.Edge.Ingest do
   # A DLQ over `queue.dlq.max_rows`/`max_bytes` with no archived row left to evict
   # refuses new hooks (`503 dlq_full`) rather than discard an acked one
   # (`Ankusa.Queue.DlqReaper`): a `:persistent_term` read.
-  defp buffered_or_full(instance, source, env) do
+  defp buffered_or_full(instance, source, env, lanes) do
     if Ankusa.Queue.DlqReaper.full?(instance),
       do: {:error, :dlq_full},
-      else: buffered_commit(instance, source, env)
+      else: buffered_commit(instance, source, env, lanes)
   end
 
   # The sinks travel with the hook: the queue writes one delivery row per sink in
   # the same batch as the hook itself.
-  defp buffered_commit(instance, source, env) do
+  defp buffered_commit(instance, source, env, lanes) do
     partition = BatcherSupervisor.partition(instance, env.id)
 
     record = %{
       envelope: env,
       sinks: source.sinks,
+      lanes: lanes,
       dedupe_ttl_ms: source.dedupe && source.dedupe.ttl_ms
     }
 

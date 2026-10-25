@@ -110,11 +110,17 @@ defmodule Ankusa.Dedupe do
 
   A key longer than #{@max_key_bytes} bytes is replaced by its lowercase hex
   SHA-256, prefixed `"sha256:"`.
-  """
-  @spec key(t() | nil, Ankusa.Envelope.t()) :: String.t() | nil
-  def key(nil, _env), do: nil
 
-  def key(%__MODULE__{from: {:header, name}}, env) do
+  `decoded` is the body's JSON when the caller has decoded it already
+  (`{:ok, term}` or `{:error, reason}`: `Ankusa.Ordering` shares one decode between
+  an ordering key and a `dedupe: json`); `:skip` decodes it here.
+  """
+  @spec key(t() | nil, Ankusa.Envelope.t(), {:ok, term()} | {:error, term()} | :skip) ::
+          String.t() | nil
+  def key(dedupe, env, decoded \\ :skip)
+  def key(nil, _env, _decoded), do: nil
+
+  def key(%__MODULE__{from: {:header, name}}, env, _decoded) do
     case Ankusa.Envelope.header(env, name) do
       nil -> nil
       "" -> nil
@@ -122,20 +128,25 @@ defmodule Ankusa.Dedupe do
     end
   end
 
-  def key(%__MODULE__{from: {:json, path}}, env) do
-    case JSON.decode(env.body) do
-      {:ok, decoded} ->
-        case walk(decoded, path) do
-          value when is_binary(value) and value != "" -> clamp(value)
-          _ -> nil
-        end
+  def key(%__MODULE__{from: {:json, path}}, env, :skip),
+    do: key_from_json(path, JSON.decode(env.body))
 
-      {:error, _reason} ->
-        nil
+  def key(%__MODULE__{from: {:json, path}}, _env, decoded), do: key_from_json(path, decoded)
+
+  defp key_from_json(path, {:ok, decoded}) do
+    case walk(decoded, path) do
+      value when is_binary(value) and value != "" -> clamp(value)
+      _ -> nil
     end
   end
 
-  defp walk(value, []) do
+  defp key_from_json(_path, {:error, _reason}), do: nil
+
+  @doc false
+  # The value at `path` (map keys only): a string, an integer as its decimal
+  # string, or `nil`.
+  @spec walk(term(), [String.t()]) :: String.t() | nil
+  def walk(value, []) do
     case value do
       v when is_binary(v) -> v
       v when is_integer(v) -> Integer.to_string(v)
@@ -143,14 +154,14 @@ defmodule Ankusa.Dedupe do
     end
   end
 
-  defp walk(value, [segment | rest]) when is_map(value) do
+  def walk(value, [segment | rest]) when is_map(value) do
     case Map.fetch(value, segment) do
       {:ok, next} -> walk(next, rest)
       :error -> nil
     end
   end
 
-  defp walk(_value, [_segment | _rest]), do: nil
+  def walk(_value, [_segment | _rest]), do: nil
 
   defp clamp(key) do
     if byte_size(key) > @max_key_bytes do

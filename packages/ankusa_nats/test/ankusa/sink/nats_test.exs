@@ -127,6 +127,20 @@ defmodule Ankusa.Sink.NATSTest do
     assert info.state.last_seq == 1
   end
 
+  test "an ordered sink's message carries the lane's key as a header, and a plain one does not",
+       %{instance: inst, subject: subject, admin: admin} do
+    {:ok, _sid} = Gnat.sub(admin, self(), subject)
+    ordered = Map.merge(ctx(inst), %{ordering_key: "cus_1", lane: "abc"})
+
+    assert :ok = deliver(envelope(), ordered, opts(subject))
+    assert_receive {:msg, %{topic: ^subject, headers: headers}}, 2_000
+    assert Map.new(headers)["ankusa_ordering_key"] == "cus_1"
+
+    assert :ok = deliver(envelope(), ctx(inst), opts(subject))
+    assert_receive {:msg, %{topic: ^subject, headers: headers}}, 2_000
+    refute Map.has_key?(Map.new(headers), "ankusa_ordering_key")
+  end
+
   test "a fat payload is checked in through ClaimCheck and the message carries a ticket", %{
     instance: inst,
     subject: subject,
