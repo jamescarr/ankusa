@@ -11,6 +11,38 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Added
+
+- **Readiness thresholds (OPS-5).** `listener.ready_sink_error_window_ms` (5000):
+  under `wal: :none`, a sink whose last publish failed within this long ago makes
+  `/ready` `503` with `sinks: "failing"`; a sink that publishes again clears
+  itself at once (`Ankusa.Health.SinkErrors`, one ETS write per publish in the
+  request process, bounded at 10 000 entries and swept every window).
+  `listener.ready_min_free_bytes` (`nil`): below it `disk` is failing and the node
+  unready, measured by `:disksup` (`:os_mon`; with none running the reason is
+  `unmeasured`). `queue.max_oldest_due_ms` (`nil`): past it `backlog` is failing,
+  a label that never makes the node unready. All range-checked, and shown by
+  `/v1/config` (none is a secret). They live in existing sections, so
+  `Ankusa.Config` keeps its 31 struct fields.
+
+### Changed
+
+- **`/ready` lists every readiness check (OPS-5).** `Ankusa.Health.ready/1` runs
+  each `Ankusa.Health.Check` that applies to the node (`store`, `intake` under
+  `wal: :dual`, `sinks` under `wal: :none`, `disk`, `backlog`, `backup`) and the
+  body carries one key per check with its state, `"ok"`, `"failing"` or
+  `"draining"`, plus `reasons` (a fixed set of atoms per check) while one is not
+  `"ok"`. It answers `503` when a check that gates is not ok: `store`, `intake`,
+  `sinks` and `disk` always, `backup` with `backup.require_fresh`, never
+  `backlog`. **Wire change:** `store` is now `"ok"`/`"failing"` (it was `"ok"`,
+  `"none"`, `"store_unavailable"`, `"write_failed"`) and the failure class moved
+  from the top-level `reason` to `reasons.store`; a node with no store has no
+  `store` key; `backup` is `"ok"`/`"failing"` (it was `"fresh"`/`"stale"`) and
+  `intake` is `"ok"`/`"failing"` with `reasons.intake` `down` or `recovering` (it
+  was `up`/`down`/`recovering`). The status codes are unchanged, and so are the
+  gating rules of `store`, `intake` and `backup`. Both OpenAPI documents describe
+  the new body.
+
 ## [0.7.0] - 2026-10-24
 
 ### Added

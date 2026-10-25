@@ -6,6 +6,14 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The generated admin types (`src/admin/admin-schema.d.ts`) follow the server's new
+  `GET /ready` body (OPS-5): `Readiness` lists one `CheckState` (`ok`, `failing`
+  or `draining`) per readiness check (`store`, `intake`, `sinks`, `disk`,
+  `backlog`, `backup`) and `reasons`; `store` is no longer `none`,
+  `store_unavailable` or `write_failed`, and `backup` no longer `fresh`/`stale`.
+
 ## [0.6.0] - 2026-10-24
 
 ### Added
