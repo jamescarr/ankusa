@@ -130,13 +130,11 @@ defmodule Ankusa.Sink.GooglePubSubIntegrationTest do
           seen
       end
 
-    cond do
-      map_size(seen) >= count or attempts <= 1 ->
-        Map.values(seen)
-
-      true ->
-        Process.sleep(100)
-        pull_count(subscription, count, seen, attempts - 1)
+    if map_size(seen) >= count or attempts <= 1 do
+      Map.values(seen)
+    else
+      Process.sleep(100)
+      pull_count(subscription, count, seen, attempts - 1)
     end
   end
 

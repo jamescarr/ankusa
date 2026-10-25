@@ -553,26 +553,24 @@ defmodule Ankusa.Sink.Batcher do
   defp take(state, acc, n, bytes, idle) do
     config = state.config
 
-    cond do
-      :queue.is_empty(state.ring) or n >= config.max_entries or bytes >= config.max_bytes or
-          idle <= 0 ->
-        {acc, state}
+    if :queue.is_empty(state.ring) or n >= config.max_entries or bytes >= config.max_bytes or
+         idle <= 0 do
+      {acc, state}
+    else
+      {{:value, tenant}, ring} = :queue.out(state.ring)
+      state = %{state | ring: ring}
 
-      true ->
-        {{:value, tenant}, ring} = :queue.out(state.ring)
-        state = %{state | ring: ring}
+      case take_one(state, tenant, acc != [], bytes) do
+        {:ok, entry, state} ->
+          state = requeue(state, tenant)
+          take(state, [entry | acc], n + 1, bytes + entry.bytes, map_size(state.queues))
 
-        case take_one(state, tenant, acc != [], bytes) do
-          {:ok, entry, state} ->
-            state = requeue(state, tenant)
-            take(state, [entry | acc], n + 1, bytes + entry.bytes, map_size(state.queues))
+        {:full, state} ->
+          {acc, requeue(state, tenant)}
 
-          {:full, state} ->
-            {acc, requeue(state, tenant)}
-
-          {:none, state} ->
-            take(requeue(state, tenant), acc, n, bytes, idle - 1)
-        end
+        {:none, state} ->
+          take(requeue(state, tenant), acc, n, bytes, idle - 1)
+      end
     end
   end
 
