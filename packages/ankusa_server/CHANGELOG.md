@@ -8,6 +8,9 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`dedupe.max_json_bytes` (PERF-1).** The biggest body a `json` dedupe source
+  decodes (default 1048576, an integer >= 1); a larger body is stored with no
+  dedupe key and never decoded. See the `ankusa` changelog.
 - **`node.region` (`ANKUSA_REGION`) (CON-2).** The region the node runs in: a
   non-empty string of at most 64 bytes. Every queue message carries it as
   `region` (beside `instance`, the instance's name) and `GET /asyncapi.json`

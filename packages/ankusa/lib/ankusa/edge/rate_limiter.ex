@@ -65,9 +65,13 @@ defmodule Ankusa.Edge.RateLimiter do
   One ETS row per bucket holds its GCRA theoretical arrival time, and `hit/3`
   and friends update it with a compare-and-swap (`:ets.select_replace/2`), so
   concurrent requests on one bucket can never overshoot the limit. A denial
-  writes nothing. Rows whose TAT has passed are a full bucket — identical to
-  having no row — so a periodic sweep deletes them, which also bounds memory
-  when the route resolver lets senders mint tenant ids.
+  writes nothing. The rows are spread over 16 tables, a bucket in the one its
+  key hashes to (`:erlang.phash2(tenant, 16)`; a tenant's hook and byte buckets
+  share one). Rows whose TAT has passed are a full bucket — identical to having
+  no row — so a periodic sweep deletes them, which also bounds memory when the
+  route resolver lets senders mint tenant ids. Each tick sweeps one shard, in
+  turn, every 3.75 s, so a table of a million rows is never scanned whole in
+  one tick.
 
   Queue occupancy is two counters per tenant (`:ets.update_counter/4`: charge,
   compare, undo on refusal), held only while records are in flight and deleted
@@ -118,7 +122,11 @@ defmodule Ankusa.Edge.RateLimiter do
   # The per-IP table's ceiling: addresses hash into this many buckets.
   @ip_buckets 1_048_576
 
+  # The buckets are `@shards` tables; a tick sweeps one, so each is swept once
+  # per `@sweep_ms`.
+  @shards 16
   @sweep_ms 60_000
+  @sweep_tick_ms div(@sweep_ms, @shards)
 
   # A tenant over its queue share clears as its own commits finish.
   @tenant_overload_retry_ms 1_000
@@ -168,14 +176,20 @@ defmodule Ankusa.Edge.RateLimiter do
     :ets.insert(settings, {:settings, :crypto.strong_rand_bytes(8), proxies})
 
     # `:public`, because every request process runs `hit/3`'s compare-and-swap
-    # against it — that is the whole point of the CAS.
-    :ets.new(buckets_table(instance), [
-      :named_table,
-      :public,
-      :set,
-      read_concurrency: true,
-      write_concurrency: true
-    ])
+    # against one — that is the whole point of the CAS. The table ids are a
+    # tuple in `:persistent_term`, written here and never on the request path:
+    # a request finds its shard without a name lookup.
+    tables =
+      for _shard <- 1..@shards do
+        :ets.new(:ankusa_rate_buckets, [
+          :public,
+          :set,
+          read_concurrency: true,
+          write_concurrency: true
+        ])
+      end
+
+    :persistent_term.put({__MODULE__, :buckets, instance}, List.to_tuple(tables))
 
     # `{tenant, queued_hooks, queued_bytes}`, updated by the request processes.
     :ets.new(queue_table(instance), [
@@ -188,8 +202,8 @@ defmodule Ankusa.Edge.RateLimiter do
 
     case load_persisted(instance, overrides) do
       :ok ->
-        Process.send_after(self(), :sweep, @sweep_ms)
-        {:ok, %{instance: instance, config: config}}
+        timer = Process.send_after(self(), :sweep, @sweep_tick_ms)
+        {:ok, %{instance: instance, config: config, shard: 0, timer: timer}}
 
       {:error, reason} ->
         {:stop, {:rate_limits_load_failed, reason}}
@@ -205,17 +219,29 @@ defmodule Ankusa.Edge.RateLimiter do
   def format_status(status), do: status
 
   @impl true
-  def handle_info(:sweep, state) do
+  def handle_info(:sweep, %{instance: instance, shard: shard, timer: timer} = state) do
+    # A tick sent by hand (a test) must not leave a second timer chain running.
+    Process.cancel_timer(timer)
+    sweep(instance, shard)
+
+    {:noreply,
+     %{
+       state
+       | shard: rem(shard + 1, @shards),
+         timer: Process.send_after(self(), :sweep, @sweep_tick_ms)
+     }}
+  end
+
+  # A row with `tat <= now` is a full bucket: dropping it admits exactly what
+  # keeping it would. One shard, so a tick's work is a sixteenth of the table.
+  @doc false
+  @spec sweep(atom(), non_neg_integer()) :: non_neg_integer()
+  def sweep(instance, shard) do
     now = System.monotonic_time()
 
-    # A row with `tat <= now` is a full bucket: dropping it admits exactly what
-    # keeping it would.
-    :ets.select_delete(buckets_table(state.instance), [
+    :ets.select_delete(bucket_table(instance, shard), [
       {{:_, :"$1"}, [{:"=<", :"$1", now}], [true]}
     ])
-
-    Process.send_after(self(), :sweep, @sweep_ms)
-    {:noreply, state}
   end
 
   # ── config validation ───────────────────────────────────────────────────────
@@ -523,7 +549,7 @@ defmodule Ankusa.Edge.RateLimiter do
         :ok
 
       {limit, _source} ->
-        table = buckets_table(instance)
+        table = table_for(instance, tenant_id)
 
         with :ok <- charge(table, tenant_id, limit.rate, limit.burst, 1) do
           hit_bytes(table, tenant_id, limit, bytes)
@@ -618,7 +644,8 @@ defmodule Ankusa.Edge.RateLimiter do
 
           ip ->
             bucket = :erlang.phash2({salt, ip_prefix(ip)}, @ip_buckets)
-            charge(buckets_table(instance), {:ip, bucket}, rate, burst, 1)
+            key = {:ip, bucket}
+            charge(table_for(instance, key), key, rate, burst, 1)
         end
     end
   end
@@ -644,7 +671,7 @@ defmodule Ankusa.Edge.RateLimiter do
   def hit_node(instance) do
     case Ankusa.config(instance).rate_limits.node do
       nil -> :ok
-      %{rate: rate, burst: burst} -> charge(buckets_table(instance), :node, rate, burst, 1)
+      %{rate: rate, burst: burst} -> charge(table_for(instance, :node), :node, rate, burst, 1)
     end
   end
 
@@ -656,7 +683,13 @@ defmodule Ankusa.Edge.RateLimiter do
   def hit_source_bytes(instance, source_id, bytes) when bytes > 0 do
     case Ankusa.config(instance).rate_limits.sources do
       %{default: %{bytes_per_second: rate} = source} ->
-        charge(buckets_table(instance), {:src, source_id}, rate, burst_bytes(source), bytes)
+        charge(
+          table_for(instance, {:src, source_id}),
+          {:src, source_id},
+          rate,
+          burst_bytes(source),
+          bytes
+        )
 
       _ ->
         :ok
@@ -745,6 +778,20 @@ defmodule Ankusa.Edge.RateLimiter do
     {min(cost * interval, capacity), capacity}
   end
 
+  # A bucket lives in the shard its key hashes to. A tenant's hook bucket
+  # (`tenant_id`) and byte bucket (`{:bytes, tenant_id}`) are looked up by the
+  # tenant alone, so they share one table; every other key hashes as itself.
+  @doc false
+  @spec bucket_shard(term()) :: non_neg_integer()
+  def bucket_shard(key), do: :erlang.phash2(key, @shards)
+
+  @doc false
+  @spec bucket_table(atom(), non_neg_integer()) :: :ets.tid()
+  def bucket_table(instance, shard),
+    do: elem(:persistent_term.get({__MODULE__, :buckets, instance}), shard)
+
+  defp table_for(instance, key), do: bucket_table(instance, bucket_shard(key))
+
   # GCRA: a bucket is described by its theoretical arrival time. The next charge
   # is `increment` after that, and it is early — denied — if arriving then would
   # put the bucket more than `capacity` ahead of now. Equivalent to a token
@@ -789,7 +836,7 @@ defmodule Ankusa.Edge.RateLimiter do
 
   # A tenant's buckets: its hooks and its bytes.
   defp reset_buckets(instance, tenant_id) do
-    table = buckets_table(instance)
+    table = table_for(instance, tenant_id)
     :ets.delete(table, tenant_id)
     :ets.delete(table, {:bytes, tenant_id})
     Ankusa.Edge.Fleet.reset_tenant(instance, tenant_id)
@@ -956,10 +1003,6 @@ defmodule Ankusa.Edge.RateLimiter do
   # The instance name is operator config: one atom per instance, never request input.
   # sobelow_skip ["DOS.BinToAtom"]
   defp overrides_table(instance), do: :"ankusa_rate_limits_#{instance}"
-
-  # The instance name is operator config: one atom per instance, never request input.
-  # sobelow_skip ["DOS.BinToAtom"]
-  defp buckets_table(instance), do: :"ankusa_rate_buckets_#{instance}"
 
   # The instance name is operator config: one atom per instance, never request input.
   # sobelow_skip ["DOS.BinToAtom"]

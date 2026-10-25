@@ -65,13 +65,44 @@ defmodule Ankusa.Envelope do
 
   @doc "Fetch the first value of a request header (case-insensitive)."
   @spec header(t(), String.t()) :: String.t() | nil
-  def header(%__MODULE__{headers: headers}, name) do
-    name = String.downcase(name)
+  def header(%__MODULE__{headers: headers}, name), do: find_header(headers, String.downcase(name))
 
-    Enum.find_value(headers, fn {k, v} ->
-      if String.downcase(k) == name, do: v
-    end)
+  @doc """
+  `header/2` for a `name` that is already lowercase (`String.downcase/1`): a
+  compiled signature template, a dedupe or ordering spec, which lower the name
+  once when they are built, not on every request.
+  """
+  @spec header_downcased(t(), String.t()) :: String.t() | nil
+  def header_downcased(%__MODULE__{headers: headers}, name), do: find_header(headers, name)
+
+  defp find_header([], _name), do: nil
+
+  defp find_header([{key, value} | rest], name) do
+    if same_name?(key, name), do: value, else: find_header(rest, name)
   end
+
+  # `String.downcase(key) == name` without the downcased copy of every header
+  # name the request carries: ASCII folds byte by byte; the first byte past
+  # ASCII hands the whole key to `String.downcase/1`, whose Unicode and
+  # invalid-UTF-8 behaviour is the contract.
+  defp same_name?(key, name) do
+    case fold_equal(key, name) do
+      :unicode -> String.downcase(key) == name
+      equal? -> equal?
+    end
+  end
+
+  defp fold_equal(<<>>, <<>>), do: true
+  defp fold_equal(<<c, _::binary>>, _name) when c > 127, do: :unicode
+
+  defp fold_equal(<<c, key_rest::binary>>, <<n, name_rest::binary>>) do
+    if fold_byte(c) == n, do: fold_equal(key_rest, name_rest), else: false
+  end
+
+  defp fold_equal(_key, _name), do: false
+
+  defp fold_byte(c) when c in ?A..?Z, do: c + 32
+  defp fold_byte(c), do: c
 
   @doc "The tenant-scoped key a consumer dedupes this hook on; see docs/delivery.md."
   @spec idempotency_key(t()) :: String.t()

@@ -13,6 +13,20 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Allocation cuts on the request path (PERF-1).** A signature is verified
+  without a second copy of the body: `Ankusa.Verifier.Template` compiles a
+  scheme's `signed` template once (`compile/1`; a preset's at build time) and
+  `Hmac` feeds the pieces to the MAC one at a time (`signed_iodata/3`), the body
+  by reference, where `Regex.replace` used to build the whole signed message
+  again for every hook. `Envelope.header/2` folds ASCII header names byte by
+  byte instead of downcasing every header of the request
+  (`Envelope.header_downcased/2` for a name already lowercase). A `json` dedupe
+  source reads no body past the new `dedupe.max_json_bytes` (1 MiB by default,
+  an integer >= 1): it is stored with no dedupe key and never decoded. The rate
+  limiter's bucket table is 16 tables sharded by `phash2(tenant, 16)`, and each
+  60 s sweep is 16 ticks of one shard, not one `select_delete` over every row.
+  Tests: `verifier_test.exs` "allocations per verify", `dedupe_test.exs`
+  "dedupe.max_json_bytes", `edge_rate_limit_test.exs` "the bucket sweep".
 - **Wire-format evolution path and producer conformance (CON-2).** Every queue
   message (`Ankusa.Sink.Message`) carries `instance` (the instance's name) and
   `region` (`dispatch.region`, `null` for none), and `Ankusa.AsyncApi` documents

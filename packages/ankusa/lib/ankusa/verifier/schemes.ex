@@ -15,6 +15,7 @@ defmodule Ankusa.Verifier.Schemes do
 
   alias Ankusa.Verifier.Asymmetric
   alias Ankusa.Verifier.Hmac.Scheme
+  alias Ankusa.Verifier.Template
 
   @asymmetric_presets %{
     # Standard Webhooks `v1a`: Ed25519 over `<webhook-id>.<webhook-timestamp>.<body>`,
@@ -82,6 +83,14 @@ defmodule Ankusa.Verifier.Schemes do
   @secret_decodes [:raw, :whsec_base64]
   @algorithms [:ed25519, :rsa_sha256]
 
+  # The presets' `signed` templates, compiled once at build time: `verify/2`
+  # fills them per request (`Ankusa.Verifier.Template.signed_iodata/3`) and
+  # never parses one.
+  @compiled Map.new(@presets, fn {name, scheme} -> {name, Template.compile(scheme.signed)} end)
+  @asymmetric_compiled Map.new(@asymmetric_presets, fn {name, scheme} ->
+                         {name, Template.compile(scheme.signed)}
+                       end)
+
   @doc "Every named `Ankusa.Verifier.Hmac` preset, keyed by scheme name."
   @spec all() :: %{atom() => Scheme.t()}
   def all, do: @presets
@@ -94,6 +103,17 @@ defmodule Ankusa.Verifier.Schemes do
 
   def fetch(_), do: :error
 
+  @doc "A named `Ankusa.Verifier.Hmac` preset with its `signed` template compiled."
+  @spec fetch_compiled(atom()) :: {:ok, Scheme.t(), Template.compiled()} | :error
+  def fetch_compiled(name) when is_atom(name) do
+    case @presets do
+      %{^name => scheme} -> {:ok, scheme, Map.fetch!(@compiled, name)}
+      _ -> :error
+    end
+  end
+
+  def fetch_compiled(_), do: :error
+
   @doc "Every named `Ankusa.Verifier.Asymmetric` preset, keyed by scheme name."
   @spec asymmetric_all() :: %{atom() => Asymmetric.Scheme.t()}
   def asymmetric_all, do: @asymmetric_presets
@@ -105,6 +125,18 @@ defmodule Ankusa.Verifier.Schemes do
   end
 
   def fetch_asymmetric(_), do: :error
+
+  @doc "A named `Ankusa.Verifier.Asymmetric` preset with its `signed` template compiled."
+  @spec fetch_asymmetric_compiled(atom()) ::
+          {:ok, Asymmetric.Scheme.t(), Template.compiled()} | :error
+  def fetch_asymmetric_compiled(name) when is_atom(name) do
+    case @asymmetric_presets do
+      %{^name => scheme} -> {:ok, scheme, Map.fetch!(@asymmetric_compiled, name)}
+      _ -> :error
+    end
+  end
+
+  def fetch_asymmetric_compiled(_), do: :error
 
   @doc """
   Validate a scheme descriptor (`Ankusa.Verifier.Hmac.Scheme` or

@@ -227,12 +227,13 @@ defmodule Ankusa.Ordering do
   an `ordering_key: {:json, _}` on the same source.
   """
   @spec resolve(atom(), Source.t(), Envelope.t()) :: {String.t() | nil, [lane() | nil] | nil}
-  def resolve(_instance, %Source{ordering: nil, dedupe: dedupe}, env),
-    do: {Dedupe.key(dedupe, env), nil}
+  def resolve(instance, %Source{ordering: nil, dedupe: dedupe}, env),
+    do: {Dedupe.key(dedupe, env, :skip, Dedupe.max_json_bytes(instance)), nil}
 
   def resolve(instance, %Source{ordering: ordering, dedupe: dedupe} = source, env) do
     decoded = decode_for(ordering, env)
-    {Dedupe.key(dedupe, env, decoded), lanes(instance, source, env, decoded)}
+    key = Dedupe.key(dedupe, env, decoded, Dedupe.max_json_bytes(instance))
+    {key, lanes(instance, source, env, decoded)}
   end
 
   @doc "The lanes of `env` for `source` alone (see `resolve/3`)."

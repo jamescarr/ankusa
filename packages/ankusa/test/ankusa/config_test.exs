@@ -1732,20 +1732,25 @@ defmodule Ankusa.ConfigTest do
   end
 
   describe "dedupe ceilings" do
-    test "the defaults bound the index" do
-      assert %{max_entries: 100_000_000, max_entries_per_tenant: 30_000_000, scope: :node} =
-               Config.new().dedupe
+    test "the defaults bound the index and the JSON the dedupe key is read from" do
+      assert %{
+               max_entries: 100_000_000,
+               max_entries_per_tenant: 30_000_000,
+               max_json_bytes: 1_048_576,
+               scope: :node
+             } = Config.new().dedupe
     end
 
-    test "max_entries and max_entries_per_tenant are positive integers" do
-      for key <- [:max_entries, :max_entries_per_tenant], bad <- [0, -1, 1.5, "10", nil] do
+    test "max_entries, max_entries_per_tenant and max_json_bytes are positive integers" do
+      for key <- [:max_entries, :max_entries_per_tenant, :max_json_bytes],
+          bad <- [0, -1, 1.5, "10", nil] do
         assert_raise ArgumentError, ~r/dedupe\.#{key} must be an integer >= 1/, fn ->
           Config.new(dedupe: [{key, bad}])
         end
       end
 
-      assert %{max_entries: 1, max_entries_per_tenant: 1} =
-               Config.new(dedupe: [max_entries: 1, max_entries_per_tenant: 1]).dedupe
+      assert %{max_entries: 1, max_entries_per_tenant: 1, max_json_bytes: 1} =
+               Config.new(dedupe: [max_entries: 1, max_entries_per_tenant: 1, max_json_bytes: 1]).dedupe
     end
   end
 
