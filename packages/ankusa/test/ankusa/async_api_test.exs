@@ -78,6 +78,24 @@ defmodule Ankusa.AsyncApiTest do
     assert "verification" in required
   end
 
+  test "the document names the instance's region in x-ankusa-region, and says nothing without one" do
+    sources = static(%{"stripe" => source(address: "ankusa.hooks")})
+
+    assert document_map(source_store: sources, dispatch: %{region: "eu-west-1"})[
+             "x-ankusa-region"
+           ] == "eu-west-1"
+
+    refute Map.has_key?(document_map(source_store: sources), "x-ankusa-region")
+  end
+
+  test "SinkMessageV1 describes the origin fields" do
+    map = document_map(source_store: static(%{"stripe" => source(address: "ankusa.hooks")}))
+
+    assert %{"SinkMessageV1" => %{"properties" => properties}} = map["components"]["schemas"]
+    assert properties["instance"]["type"] == ["string", "null"]
+    assert properties["region"]["type"] == ["string", "null"]
+  end
+
   test "different addresses, brokers, and bindings are different channels and servers" do
     map =
       document_map(

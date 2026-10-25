@@ -256,6 +256,57 @@ defmodule Ankusa.Sink.MessageTest do
     refute List.keymember?(Message.attributes(env, ctx), "ankusa_ordering_key", 0)
   end
 
+  describe "origin" do
+    test "a message names its instance and, with none configured, a null region", %{ctx: ctx} do
+      assert {:ok, json} = Message.encode(envelope("x"), ctx, 100)
+      decoded = JSON.decode!(json)
+
+      assert decoded["instance"] == Atom.to_string(ctx.instance)
+      assert Map.fetch!(decoded, "region") == nil
+    end
+
+    test "the region of the instance's config rides in every message form", %{ctx: ctx} do
+      dir = Ankusa.TestHelpers.unique_data_dir(ctx.instance)
+
+      Ankusa.put_config(
+        Ankusa.Config.new(
+          instance: ctx.instance,
+          data_dir: dir,
+          dispatch: %{region: "eu-west-1"}
+        )
+      )
+
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      for inline_max_bytes <- [100, 10] do
+        assert {:ok, json} =
+                 Message.encode(envelope(String.duplicate("x", 50)), ctx, inline_max_bytes)
+
+        decoded = JSON.decode!(json)
+
+        assert decoded["instance"] == Atom.to_string(ctx.instance)
+        assert decoded["region"] == "eu-west-1"
+      end
+    end
+
+    test "a ctx with no instance (a sink called outside dispatch) has neither field set" do
+      assert {:ok, json} = Message.encode(envelope("x"), %{attempt: 1}, 100)
+      decoded = JSON.decode!(json)
+
+      assert Map.fetch!(decoded, "instance") == nil
+      assert Map.fetch!(decoded, "region") == nil
+    end
+
+    test "an instance that never started has no region" do
+      ctx = %{instance: :never_started_for_message_test, attempt: 1}
+      assert {:ok, json} = Message.encode(envelope("x"), ctx, 100)
+      decoded = JSON.decode!(json)
+
+      assert decoded["instance"] == "never_started_for_message_test"
+      assert Map.fetch!(decoded, "region") == nil
+    end
+  end
+
   describe "trace context" do
     @traceparent "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 

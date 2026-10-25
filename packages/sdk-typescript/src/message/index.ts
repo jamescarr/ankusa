@@ -4,7 +4,7 @@ import { parseClaimRef, type ParsedClaimRef } from "../claim-check/ref.js";
 import type { HookHeaders, Verification } from "../webhook/headers.js";
 
 /**
- * A decoded v1 queue message — the same JSON a broker carries, so the field
+ * A decoded queue message — the same JSON a broker carries, so the field
  * names are the wire's (snake_case), matching the generated admin/route types.
  *
  * `body` is the decoded inline body, exposed as a non-enumerable property so
@@ -12,7 +12,8 @@ import type { HookHeaders, Verification } from "../webhook/headers.js";
  * the claim body form (the bytes live behind `claim`).
  */
 export type Message = {
-  v: 1;
+  /** The wire version, 1 to 2 (`MIN_SUPPORTED_VERSION`, `MAX_SUPPORTED_VERSION`). */
+  v: number;
   id: string;
   source_id: string;
   tenant_id: string | null;
@@ -46,6 +47,10 @@ export type Message = {
   traceparent: string | null;
   /** The W3C `tracestate` that goes with `traceparent`, verbatim; `null` when none. */
   tracestate: string | null;
+  /** The name of the Ankusa instance that published the message; `null` when it says so or predates the field. */
+  instance: string | null;
+  /** The region that instance is configured with; `null` when it has none or predates the field. */
+  region: string | null;
   /** The decoded inline body (non-enumerable); `null` for a claim message. */
   body: Uint8Array | null;
 };
@@ -81,6 +86,17 @@ export class InvalidMessageError extends Error {
   }
 }
 
+/**
+ * The message versions `decodeMessage` understands, both ends inclusive. `v` is
+ * the wire format's major version: a `v: 2` message is a `v: 1` message plus
+ * additive fields, decoded exactly like it (the keys this decoder does not
+ * know are ignored) into the one `Message` type, with `v` as the wire said it.
+ * Raising `MAX_SUPPORTED_VERSION` is the whole change an SDK needs for a
+ * producer that starts writing the next additive version.
+ */
+export const MIN_SUPPORTED_VERSION = 1;
+export const MAX_SUPPORTED_VERSION = 2;
+
 // The standard base64 alphabet, in whole 4-character groups with canonical
 // padding: what `Buffer.from(s, "base64")` accepts is far looser (it skips
 // garbage), so validate before decoding.
@@ -104,7 +120,8 @@ function decodeVerification(value: unknown): Verification | null {
 }
 
 /**
- * Decode a v1 queue message, verifying its body.
+ * Decode a queue message of any supported `v` (`MIN_SUPPORTED_VERSION` to
+ * `MAX_SUPPORTED_VERSION`), verifying its body.
  *
  * `data` is the raw message JSON (a string or its UTF-8 bytes). Every failure
  * raises `InvalidMessageError` with `retryable=false`; the checks run in order
@@ -123,7 +140,15 @@ export function decodeMessage(data: string | Uint8Array): Message {
   }
   const raw = parsed as Record<string, unknown>;
 
-  if (raw.v !== 1) throw new InvalidMessageError("unsupported_version");
+  const version = raw.v;
+  if (
+    typeof version !== "number" ||
+    !Number.isInteger(version) ||
+    version < MIN_SUPPORTED_VERSION ||
+    version > MAX_SUPPORTED_VERSION
+  ) {
+    throw new InvalidMessageError("unsupported_version");
+  }
 
   // Field types, in the contract's order.
   const id = raw.id;
@@ -146,6 +171,8 @@ export function decodeMessage(data: string | Uint8Array): Message {
     "idempotency_key",
     "traceparent",
     "tracestate",
+    "instance",
+    "region",
   ] as const) {
     const value = raw[key];
     if (!(value === undefined || value === null || typeof value === "string")) {
@@ -206,7 +233,7 @@ export function decodeMessage(data: string | Uint8Array): Message {
   }
 
   const message = {
-    v: 1,
+    v: version,
     id,
     source_id: sourceId,
     tenant_id: tenantId,
@@ -223,6 +250,8 @@ export function decodeMessage(data: string | Uint8Array): Message {
     verification,
     traceparent: (raw.traceparent ?? null) as string | null,
     tracestate: (raw.tracestate ?? null) as string | null,
+    instance: (raw.instance ?? null) as string | null,
+    region: (raw.region ?? null) as string | null,
   } as Message;
   // Non-enumerable, so a decoded message still serializes to exactly the wire
   // shape (and deep-equals the conformance vectors).

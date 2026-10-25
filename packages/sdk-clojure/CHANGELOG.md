@@ -9,6 +9,15 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Wire-format evolution path (CON-2).** `ankusa.sdk.message/decode` accepts
+  every `v` from `min-supported-version` to `max-supported-version` (1 and 2)
+  into the one message map, with `:v` as the wire said it: a `v: 2` message is a
+  `v: 1` message plus additive fields, so the keys it does not know are ignored.
+  `:instance` and `:region`: the name of the Ankusa instance that published the
+  message and the region it is configured with (`nil` when null or absent).
+  `ankusa.sdk.lifecycle/decode` decodes the CloudEvents lifecycle events of the
+  instance's lifecycle sinks.
+
 - `decode` returns `:traceparent` and `:tracestate`: the hook's W3C trace
   context from the message, verbatim (`nil` when none); a non-string value is
   `invalid_field`.

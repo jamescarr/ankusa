@@ -547,26 +547,47 @@ Message shape (`Ankusa.Sink.Message`, byte-identical for `Sink.Kafka`):
 {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
  "content_type": "application/json", "size": 245, "dedupe_key": "evt_1", "replay_id": null,
  "idempotency_key": "acme:stripe:evt_1", "verification": {"status": "ok", "flagged": false},
- "headers": {"x-github-event": "push"}, "sha256": "2cf24d...", "body_base64": "eyJpZCI6..."}
+ "headers": {"x-github-event": "push"}, "instance": "default", "region": "eu-west-1",
+ "sha256": "2cf24d...", "body_base64": "eyJpZCI6..."}
 
 // fat payload
 {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
  "content_type": "application/octet-stream", "size": 3145728, "dedupe_key": "evt_1",
  "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
  "verification": {"status": "ok", "flagged": false}, "headers": {},
+ "instance": "default", "region": "eu-west-1",
  "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002", "sha256": "3bea8a..."}
 ```
 
-`"v"` changes only when an existing field changes meaning or disappears;
-consumers must ignore keys they don't know.
+**Versioning.** `"v"` is the message format's major version. The producer writes
+`"v": 1`.
+Every SDK accepts `min_supported <= v <= max_supported` (1 and 2; each SDK
+exposes both bounds) and decodes either into its one current message type,
+reporting the `v` the wire carried. A `v: 2` message is defined as a `v: 1`
+message plus additive fields, so a consumer on an SDK that accepts 2 reads it
+exactly like a `v: 1` message and ignores the keys it does not know; a producer
+can therefore move to an additive `v: 2` without breaking a deployed consumer
+that was upgraded to the SDK that accepts it. Consumers must ignore keys they
+don't know. A field that changes meaning or disappears needs a `v` no SDK
+accepts yet (3 or later): a message with a `v` outside the range is
+`unsupported_version`, a permanent failure to dead-letter, never retry.
+
+The messages core writes are pinned by the producer vectors in
+[`conformance/cases/producer.json`](https://github.com/jamescarr/ankusa/blob/main/conformance/cases/producer.json),
+generated from `Sink.Message.encode/3` by `mix ankusa.conformance.gen`. `mise run
+check:conformance` regenerates them and fails when the checked-in file differs,
+so a field added to the encoder without a vector update fails the build, and
+every SDK has to decode what the encoder writes.
 
 Every message carries `sha256` (lowercase hex, inline bodies too), the
 provider event `dedupe_key` (or `null`), the `replay_id` of the replay job when
 this delivery is a replay (else `null`), the `idempotency_key` (below), the
 `verification` result (see [Idempotent receivers](#idempotent-receivers) above),
-and the forwarded provider request `headers` (lowercased; the source's
+the forwarded provider request `headers` (lowercased; the source's
 `forward_headers` option decides which — see
-[`configuration.md`](configuration.md#sources)).
+[`configuration.md`](configuration.md#sources)), and where it was published
+from: `instance`, the name of the Ankusa instance, and `region`, the instance's
+configured `dispatch.region` (YAML `node.region`; `null` when none is set).
 
 **Idempotency key.** Consumers dedupe on `idempotency_key`, which Ankusa
 computes once per hook and ships everywhere the hook goes: the message's

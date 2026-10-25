@@ -179,6 +179,16 @@ is untrusted.
 
 ## Consuming queue messages
 
+The message's `v` is the wire format's major version: `Message::decode()`
+accepts every `v` from `Message::MIN_SUPPORTED_VERSION` to
+`Message::MAX_SUPPORTED_VERSION` (1 and 2) into the one `Message`, with `$v` as
+the wire said it. A `v: 2` message is a `v: 1` message plus additive fields, so
+a consumer reads it the same way; any other `v` is `unsupported_version`
+(permanent: dead-letter it). `$message->instance` and `$message->region` are the
+Ankusa instance that published the message and the region it is configured with
+(`null` for none). A message from the instance's lifecycle sinks carries a
+CloudEvents event as its body: `LifecycleEvent::decode($body)`.
+
 A queue consumer (Redis or a broker; the HTTP sink sends the original body
 plus `x-ankusa-*` headers, read with `HookHeaders`) decodes one v1
 message, verifies its integrity, and reads the key it dedupes on before it

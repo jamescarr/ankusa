@@ -256,6 +256,22 @@ jobs:
           key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-sdk-rust-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-${{ hashFiles('packages/sdk-rust/Cargo.lock') }}
           restore-keys: |
             cargo-v1-${{ runner.os }}-${{ runner.arch }}-sdk-rust-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-
+      # `check.mjs` regenerates the producer vectors with core's own encoder
+      # (`mix ankusa.conformance.gen`, MIX_ENV=test), which compiles RocksDB:
+      # restore the `ankusa` package job's entry (same key and prefix, so keep
+      # the `mix-v` here and there in step; whichever job saves first wins).
+      - name: cache mix deps
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            packages/ankusa/deps
+            packages/ankusa/_build
+          key: mix-v17-${{ runner.os }}-${{ runner.arch }}-ankusa-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          restore-keys: |
+            mix-v17-${{ runner.os }}-${{ runner.arch }}-ankusa-${{ hashFiles('.mise.toml') }}-
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - run: mix local.hex --force && mix local.rebar --force
       - run: mise run check:conformance
 
   # The deployable wrappers and TypeScript workers: path-dep consumers of the

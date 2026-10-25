@@ -222,7 +222,9 @@ defmodule Ankusa.SDK.ConformanceTest do
       "headers" => message.headers,
       "verification" => verification_json(message.verification),
       "traceparent" => message.traceparent,
-      "tracestate" => message.tracestate
+      "tracestate" => message.tracestate,
+      "instance" => message.instance,
+      "region" => message.region
     }
   end
 
@@ -246,6 +248,19 @@ defmodule Ankusa.SDK.ConformanceTest do
       end
 
     %{"trusted" => Ankusa.SDK.Hook.trusted?(hook)}
+  end
+
+  defp run("supported_versions", _case, _params_by_id, _input, _base_url, _recorder) do
+    %{"min" => Message.min_supported_version(), "max" => Message.max_supported_version()}
+  end
+
+  defp run("decode_lifecycle", _case, _params_by_id, input, _base_url, _recorder) do
+    event = unwrap!(Ankusa.SDK.LifecycleEvent.decode(input["event"]))
+
+    Map.new(
+      ~w(specversion id source type subject time datacontenttype data revision actor instance sequence replayid traceparent tracestate)a,
+      &{Atom.to_string(&1), Map.fetch!(event, &1)}
+    )
   end
 
   defp run("redeem", _case, _params_by_id, input, base_url, recorder) do

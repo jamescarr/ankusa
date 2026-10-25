@@ -14,7 +14,18 @@ import (
 // characters.
 var lowercaseHex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// Message is a decoded v1 queue message, as published by Ankusa's sinks. The
+// The message versions DecodeMessage understands, both ends inclusive. `v` is
+// the wire format's major version: a `v: 2` message is a `v: 1` message plus
+// additive fields, decoded exactly like it (the keys this decoder does not
+// know are ignored) into the one Message type, with V as the wire said it.
+// Raising MaxSupportedVersion is the whole change an SDK needs for a producer
+// that starts writing the next additive version.
+const (
+	MinSupportedVersion = 1
+	MaxSupportedVersion = 2
+)
+
+// Message is a decoded queue message, as published by Ankusa's sinks. The
 // body travels either inline (BodyBase64, with Body holding the decoded
 // bytes) or as a claim-check reference (Claim) to be redeemed separately.
 //
@@ -48,12 +59,18 @@ type Message struct {
 	// from a node older than the fields).
 	Traceparent *string `json:"traceparent"`
 	Tracestate  *string `json:"tracestate"`
+	// Instance is the name of the Ankusa instance that published the message,
+	// and Region the region it is configured with; nil when the message says
+	// null or predates the fields.
+	Instance *string `json:"instance"`
+	Region   *string `json:"region"`
 
 	// Body is the decoded inline body. It is nil for a claim message.
 	Body []byte `json:"-"`
 }
 
-// DecodeMessage decodes a v1 queue message. Every failure is a
+// DecodeMessage decodes a queue message of any supported version
+// (MinSupportedVersion to MaxSupportedVersion). Every failure is a
 // *InvalidMessageError with a Code, a Field (nil when no field applies), and
 // Retryable() false: a malformed message will never decode, so it must be
 // dead-lettered rather than retried.
@@ -77,12 +94,14 @@ func DecodeMessage(data []byte) (Message, error) {
 		return Message{}, &InvalidMessageError{Code: "not_an_object"}
 	}
 
-	// 2. Version: `v` must be the integer 1.
-	if v, ok := integerValue(obj["v"]); !ok || v != 1 {
+	// 2. Version: `v` must be an integer from MinSupportedVersion to
+	// MaxSupportedVersion; the message carries the wire's `v`.
+	v, ok := integerValue(obj["v"])
+	if !ok || v < MinSupportedVersion || v > MaxSupportedVersion {
 		return Message{}, &InvalidMessageError{Code: "unsupported_version"}
 	}
 
-	msg := Message{V: 1, Headers: map[string]string{}}
+	msg := Message{V: int(v), Headers: map[string]string{}}
 
 	// 3. Field types, in order.
 	id, ok := obj["id"].(string)
@@ -150,6 +169,18 @@ func DecodeMessage(data []byte) (Message, error) {
 		return Message{}, invalidField("tracestate")
 	}
 	msg.Tracestate = tracestate
+
+	instance, ok := optionalString(obj, "instance")
+	if !ok {
+		return Message{}, invalidField("instance")
+	}
+	msg.Instance = instance
+
+	region, ok := optionalString(obj, "region")
+	if !ok {
+		return Message{}, invalidField("region")
+	}
+	msg.Region = region
 
 	if headers, ok := headersValue(obj["headers"]); ok {
 		msg.Headers = headers

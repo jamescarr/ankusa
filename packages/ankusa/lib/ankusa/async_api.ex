@@ -32,6 +32,10 @@ defmodule Ankusa.AsyncApi do
   The document describes the envelope, not the hook: the provider's own body is
   opaque bytes inside `body_base64`.
 
+  An instance that sets `region` (YAML `node.region`) says so in the document's
+  `x-ankusa-region` extension; each message's `region` and `instance` fields say
+  the same per message.
+
   Nothing in the document is secret. Descriptions carry no userinfo and no
   credentials (`Ankusa.Sink.Description`).
   """
@@ -63,6 +67,7 @@ defmodule Ankusa.AsyncApi do
     %Document{
       id: "urn:ankusa:instance:#{instance}",
       default_content_type: "application/json",
+      extensions: region_extension(Ankusa.config(instance).dispatch.region),
       info: %Info{
         title: "Ankusa",
         version: to_string(Application.spec(:ankusa, :vsn)),
@@ -77,6 +82,11 @@ defmodule Ankusa.AsyncApi do
         Map.new(channels, fn {id, _channel, operation} -> {"send-" <> id, operation} end)
     }
   end
+
+  # The instance's region, when it declares one, as the document-level
+  # `x-ankusa-region` extension: a consumer learns where the channels live.
+  defp region_extension(region) when is_binary(region), do: %{"x-ankusa-region" => region}
+  defp region_extension(nil), do: %{}
 
   # ── entries ───────────────────────────────────────────────────────────────
 

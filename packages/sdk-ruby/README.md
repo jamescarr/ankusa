@@ -185,6 +185,17 @@ untrusted.
 
 ## Consuming queue messages
 
+The message's `v` is the wire format's major version: `Ankusa.decode_message`
+accepts every `v` from `Ankusa::MIN_SUPPORTED_VERSION` to
+`Ankusa::MAX_SUPPORTED_VERSION` (1 and 2) into the one `Message`, with `v` as
+the wire said it. A `v: 2` message is a `v: 1` message plus additive fields, so
+a consumer reads it the same way; any other `v` is `unsupported_version`
+(permanent: dead-letter it). `message.instance` and `message.region` are the
+Ankusa instance that published the message and the region it is configured with
+(nil for none). A message from the instance's lifecycle sinks carries a
+CloudEvents event as its body: `Ankusa.decode_lifecycle(body)` returns an
+`Ankusa::LifecycleEvent`.
+
 Every message sink — RabbitMQ, Kafka, NATS, Redis — delivers one JSON message
 per hook (the HTTP sink sends the original body plus `x-ankusa-*` headers
 instead):

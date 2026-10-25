@@ -19,7 +19,16 @@ from .claim_check import (
     ParsedClaimRef,
     parse_claim_ref,
 )
-from .message import InvalidMessageError, Message, decode_message, idempotency_key, is_trusted
+from .lifecycle import LifecycleEvent, decode_lifecycle
+from .message import (
+    MAX_SUPPORTED_VERSION,
+    MIN_SUPPORTED_VERSION,
+    InvalidMessageError,
+    Message,
+    decode_message,
+    idempotency_key,
+    is_trusted,
+)
 from .routes import (
     InvalidRouteIdError,
     RouteNotFoundError,
@@ -95,4 +104,8 @@ __all__ = [
     "decode_message",
     "idempotency_key",
     "is_trusted",
+    "MIN_SUPPORTED_VERSION",
+    "MAX_SUPPORTED_VERSION",
+    "LifecycleEvent",
+    "decode_lifecycle",
 ]

@@ -412,7 +412,9 @@
           "headers": {},
           "verification": null,
           "traceparent": null,
-          "tracestate": null
+          "tracestate": null,
+          "instance": null,
+          "region": null
         }
       }
     },

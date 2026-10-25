@@ -145,6 +145,13 @@ defmodule Ankusa.Config do
               # the longest pause a sink's `Retry-After` / throttle answer can
               # impose on one retry (the retry horizon still ends it)
               max_retry_after_ms: 3_600_000,
+              # the region this deployment runs in (YAML `node.region`): stamped on
+              # every queue message as `region` and on the AsyncAPI document as
+              # `x-ankusa-region`. nil = none; else a non-empty string of at most
+              # 64 bytes. It lives here, not in a field of its own, because
+              # `Ankusa.Config` is at the 31 fields a struct may have before it
+              # stops being a flat map.
+              region: nil,
               # Per-tenant shares of the three global limits above, so one tenant
               # cannot exhaust what everyone else needs: `default` applies to every
               # tenant, `tenants["acme"]` (a tenant id string) overrides any of its
@@ -1032,6 +1039,14 @@ defmodule Ankusa.Config do
         ] do
       check!(config, path, key, "nil or an integer >= 1", &nil_or_positive?/1)
     end
+
+    check!(
+      config,
+      [:dispatch, :region],
+      "dispatch.region",
+      "nil or a non-empty string of at most 64 bytes",
+      &(&1 == nil or (is_binary(&1) and byte_size(&1) in 1..64))
+    )
 
     check!(
       config,
