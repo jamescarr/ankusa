@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Sink.RabbitMQ`: a hook of an `ordered: true` sink carries the lane's key as the
+  `ankusa_ordering_key` AMQP header (consumer-side ordering, ADR 0004).
 ## [0.7.0] - 2026-10-24
 
 ### Added

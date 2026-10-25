@@ -169,7 +169,14 @@ defmodule Ankusa.Sink.GooglePubSub do
   def publish(payload, %Envelope{} = env, ctx, opts) do
     max = max_message_bytes(opts)
     attributes = Map.new(Message.attributes(env, ctx))
-    key = Messaging.resolve(Keyword.get(opts, :ordering_key), env)
+    # An ordered sink's key is the lane's (`ctx.ordering_key`, ADR 0004); else the
+    # sink's own `:ordering_key`, which keeps its meaning.
+    key =
+      case ctx[:ordering_key] do
+        lane_key when is_binary(lane_key) -> lane_key
+        _ -> Messaging.resolve(Keyword.get(opts, :ordering_key), env)
+      end
+
     size = size(payload, attributes, key)
 
     # Checked before a message joins a batch: a request is refused as a whole, so

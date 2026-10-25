@@ -25,7 +25,10 @@ defmodule Ankusa.Queue do
           required(:sinks) => [{module(), keyword()}],
           optional(:dedupe_ttl_ms) => pos_integer() | nil,
           # set on every delivery row as `replay:` (a released quarantine hook)
-          optional(:replay_id) => String.t()
+          optional(:replay_id) => String.t(),
+          # one per sink: `nil` (unordered) or `{lane, key}` (`Ankusa.Ordering`, ADR
+          # 0004); the delivery row joins that lane instead of becoming due at once
+          optional(:lanes) => [Ankusa.Ordering.lane() | nil] | nil
         }
 
   @doc """
@@ -102,7 +105,8 @@ defmodule Ankusa.Queue do
   end
 
   # What the writer is handed: the items (`{envelope, binary, rows, dedupe ttl,
-  # replay id}`, `rows` being the encoded delivery row of each sink, stamped with
+  # replay id}`, `rows` being `{encoded delivery row, lane or nil}` of each sink,
+  # stamped with
   # the time the hook was received), their count and body bytes, and, with
   # `prefetch?`, the stored value of every dedupe key read at `read_at` (a
   # `System.monotonic_time(:millisecond)` taken before the read, which is what
@@ -116,10 +120,14 @@ defmodule Ankusa.Queue do
         bin = Envelope.to_binary(%{env | seq: nil})
         replay_id = Map.get(entry, :replay_id)
         size = byte_size(bin)
+        lanes = Map.get(entry, :lanes) || List.duplicate(nil, length(sinks))
 
         rows =
-          Enum.map(sinks, fn {mod, _opts} ->
-            Deliveries.encode_row(row(env, size, mod, replay_id, at))
+          sinks
+          |> Enum.zip(lanes)
+          |> Enum.map(fn {{mod, _opts}, lane} ->
+            row = Deliveries.new_row(mod, at, size, env.source_id, replay: replay_id, lane: lane)
+            {Deliveries.encode_row(row), lane && elem(lane, 0)}
           end)
 
         {env, bin, rows, Map.get(entry, :dedupe_ttl_ms), replay_id}
@@ -136,22 +144,6 @@ defmodule Ankusa.Queue do
          read_at: read_at
        }}
     end
-  end
-
-  # A row without `:replay` is a live delivery; a released quarantine hook's
-  # rows carry the job's id, like a replayed dead letter's.
-  defp row(env, size, mod, replay_id, at) do
-    base = %{
-      module: mod,
-      state: :pending,
-      attempts: 0,
-      at: at,
-      error: nil,
-      size: size,
-      source_id: env.source_id
-    }
-
-    if is_binary(replay_id), do: Map.put(base, :replay, replay_id), else: base
   end
 
   defp prefetch(instance, items) do
@@ -171,6 +163,8 @@ defmodule Ankusa.Queue do
   end
 
   @type redrive_entry :: %{
+          # per entry of `sinks`: `nil` or `{lane, key}` (ADR 0004); absent is unordered
+          optional(:lanes) => [Ankusa.Ordering.lane() | nil] | nil,
           bin: binary(),
           size: non_neg_integer(),
           sinks: [{non_neg_integer(), module()}],

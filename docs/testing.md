@@ -356,11 +356,25 @@ The always-on tests cover:
   restart while a delivered row is not (D7); a row that became visible below
   the scan floor (a stalled commit) is delivered when its wake arrives; and a
   window that drained is refilled even when housekeeping flushes the outcomes
-  first. Ordering is not asserted: lanes are gone. `replay_test.exs` covers
+  first. Ordering is asserted only for `ordered: true` sinks (below). `replay_test.exs` covers
   the replay jobs, including a `quarantine` job that leaves a hook failing the
   current secret in the pen, releases it once the secret is rotated (past the
   timestamp tolerance: the window is judged at receive time) with its original
   id and the job's `replay_id`, and finds nothing left on a second run.
+- **Ordering lanes (DEL-1.b, ADR 0004)** (`dispatch/ordering_test.exs`,
+  `source_ordering_test.exs`, `queue/deliveries_test.exs`,
+  `store_upgrade_test.exs`): `ordered lane` (100 hooks for one key with a
+  mid-stream retry arrive in order, one attempt of the lane in flight at a
+  time), `other keys concurrent` (a slow lane holds no slot, window room or
+  process), `survives restart` (a busy lane, a retrying head and their members),
+  `dead head releases lane`, `replay respects lanes`, `keyless lane`, `key
+  missing counter`, `racing writer` (a member committed between a release's
+  read and its write is promoted by the sweep) and the `lane invariant`
+  property (random ingest, claim, retry, delivered, dead, revive and purge:
+  every `?O` has an `?H` or `?P`, every `?H` names one row of `?D`/`?F`,
+  counters equal a fold). `source_ordering_test.exs` is the option grammar and
+  lane resolution; the 7 → 8 migration and the `store-v8` fixture (a busy lane,
+  a lane whose head waits out a retry, a keyless lane) are in the upgrade test.
 - **Dispatch, retry horizon and error classes (DEL-2)** (`dispatch_test.exs`,
   `retry_policy_exponential_test.exs`, `retry_policy_test.exs`,
   `sink/{sqs,google_pubsub,http}_test.exs`): a row 7 h in with 200 attempts
@@ -1217,17 +1231,27 @@ A hot-path change must not make ingest slower unnoticed, so
 [`bench/gate.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/gate.exs)
 runs the bench for `BODY_BYTES` 512 and 10240 (`N=20000`, `CONCURRENCY=256`,
 `SINK_LATENCY_MS=5`) and for 512 bytes at `CONCURRENCY=32`, three runs each,
-takes the median of every metric per cell (`512B`, `10240B`, `512B-c32`),
+takes the median of every metric per cell (`512B`, `10240B`, `512B-c32`,
+`512B-ordered`),
 writes `packages/ankusa/bench/last.json`, and compares it with the checked-in
 [`bench/baseline.json`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/baseline.json)
 (`{"512B": {"ingest_per_s", "p50_ms", "p99_ms", "end_to_end_per_s"}, "10240B":
-{...}, "512B-c32": {...}, "runner": "<class>"}`). It prints a table with the
+{...}, "512B-c32": {...}, "512B-ordered": {...}, "runner": "<class>"}`). It prints a table with the
 delta per metric and fails when a cell's `p99_ms` is above 1.2× the baseline or
 its `ingest_per_s` below 0.8× it:
 
 ```text
 FAIL p99_ms 512B-c32: 45.10 > 1.2×21.60 (limit 25.92)
 ```
+
+The `-ordered` cell is the `512B` cell with the source's sink `ordered: true`
+(`ORDERED=1`: 64 keys, so 64 lanes run at once; ADR 0004): the cost of the lane
+key at ingest (`ankusa_dispatch_lane*`), the member put and the sweep. Measured on
+one machine (`BENCH_REBASELINE=1`) it runs within 3 % of `512B` on `ingest_per_s`
+(27 596 vs 28 313) and no slower on `p99_ms` (15.4 vs 17.2 ms); its checked-in
+entry is the `github-linux-x64` `512B` entry with `ingest_per_s` scaled by that
+ratio (22 772), p99 unchanged. An unordered source pays one counter read per scan
+(`lane_members == 0` gates the sweep): the three older cells did not move.
 
 The `-c32` cell exists because of Little's law. At 256 workers the pipeline is
 throughput-bound and latency is simply 256 ÷ throughput, so a fixed delay in

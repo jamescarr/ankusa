@@ -113,7 +113,11 @@ defmodule Ankusa.Queue.DeliveriesTest do
   defp pick([], _i), do: nil
   defp pick(list, i), do: Enum.at(list, rem(i, length(list)))
 
-  defp write!(inst, ops), do: :ok = Store.write(inst, Deliveries.coalesce(ops), sync: true)
+  # Like the Pipeline's write: a lane head's release is a placeholder until here.
+  defp write!(inst, ops) do
+    {:ok, ops} = Deliveries.Lanes.expand(inst, ops, System.system_time(:millisecond))
+    :ok = Store.write(inst, Deliveries.coalesce(ops), sync: true)
+  end
 
   defp row!(inst, seq, sink) do
     {:ok, row} = Deliveries.row(inst, seq, sink)
@@ -998,16 +1002,229 @@ defmodule Ankusa.Queue.DeliveriesTest do
     end
   end
 
+  describe "ordering lanes (ADR 0004)" do
+    alias Ankusa.Queue.Deliveries.Lanes
+
+    defp lane_entry(tenant, key) do
+      lane = Ankusa.Ordering.lane_id(0, "load", key)
+      %{envelope: envelope(tenant), sinks: [{Log, []}], lanes: [{lane, key}]}
+    end
+
+    defp lane_enqueue(inst, tenant, key, n) do
+      {:ok, results} = Queue.enqueue(inst, for(_ <- 1..n, do: lane_entry(tenant, key)))
+      for {:committed, env} <- results, do: env
+    end
+
+    defp lane_of(key), do: Ankusa.Ordering.lane_id(0, "load", key)
+
+    defp members(inst),
+      do: fold(inst, :lane_members, fn key, _v -> Keys.decode_lane_member(key) end)
+
+    defp heads(inst),
+      do: fold(inst, :lane_heads, fn key, v -> {Keys.decode_lane_head(key), v} end)
+
+    defp markers(inst),
+      do: fold(inst, :lane_markers, fn key, _v -> Keys.decode_lane_marker(key) end)
+
+    # What the Pipeline does for one visit of a tenant.
+    defp sweep!(inst, tenant) do
+      ord = tenant_ord!(inst, tenant)
+      {:ok, ops, _more} = Lanes.sweep(inst, ord, System.system_time(:millisecond) + 1, 100)
+      write!(inst, ops)
+    end
+
+    test "ingest writes members and a marker, never a due row" do
+      inst = start_instance(roles: [:edge])
+      [first, second] = lane_enqueue(inst, "acme", "k1", 2)
+      ord = tenant_ord!(inst, "acme")
+      lane = lane_of("k1")
+
+      assert due_rows(inst) == []
+      assert [{^ord, ^lane, seq1, 0}, {^ord, ^lane, seq2, 0}] = members(inst)
+      assert seq1 == first.seq and seq2 == second.seq and seq1 < seq2
+      assert markers(inst) == [{ord, lane}]
+      assert heads(inst) == []
+
+      assert {:ok, %{pending: 2, scheduled: 0}} = Queue.pending_for_tenant(inst, "acme")
+      assert {:ok, %{lane_members: 2, lanes: 0, lanes_blocked: 0}} = Counters.read(inst, ord)
+      assert {:ok, %{lane_members: 2}} = Counters.read(inst, 0)
+      assert_counters_equal_fold(inst)
+
+      # The tenant is visited: a due-row marker exists for it.
+      assert {:ok, [{^ord, _buckets}]} =
+               Deliveries.active_tenants(inst, System.system_time(:millisecond) + 5_000, 100)
+    end
+
+    test "promotion makes the lowest member the head: ?H, a kind 2 due row, the marker gone" do
+      inst = start_instance(roles: [:edge])
+      [first, second] = lane_enqueue(inst, "acme", "k1", 2)
+      ord = tenant_ord!(inst, "acme")
+      lane = lane_of("k1")
+
+      sweep!(inst, "acme")
+
+      first_seq = first.seq
+      assert [%{seq: ^first_seq, sink: 0, kind: 2, ord: ^ord}] = due_rows(inst)
+      assert [{{^ord, ^lane}, <<^first_seq::64, 0::16>>}] = heads(inst)
+      assert [{^ord, ^lane, seq, 0}] = members(inst)
+      assert seq == second.seq
+      assert markers(inst) == []
+
+      assert {:ok, %{pending: 2, lanes: 1, lanes_blocked: 0, lane_members: 1}} =
+               Counters.read(inst, ord)
+
+      assert_counters_equal_fold(inst)
+      assert_no_due_row_without_marker(inst)
+
+      # A second sweep of a busy lane promotes nothing.
+      sweep!(inst, "acme")
+      assert [%{seq: ^first_seq}] = due_rows(inst)
+    end
+
+    test "kind 2 and 3 claim and retry move pending, scheduled, inflight and lanes_blocked" do
+      inst = start_instance(roles: [:edge])
+      lane_enqueue(inst, "acme", "k1", 2)
+      ord = tenant_ord!(inst, "acme")
+      sweep!(inst, "acme")
+
+      [head] = due_rows(inst)
+      assert head.kind == 2
+      :ok = Deliveries.claim(inst, [head])
+
+      assert {:ok, %{pending: 1, scheduled: 0, inflight: 1, lanes: 1, lanes_blocked: 0}} =
+               Counters.read(inst, ord)
+
+      assert_counters_equal_fold(inst)
+
+      # A retry keeps the head: kind 3 due row, `lanes_blocked`, `?H` untouched.
+      row = row!(inst, head.seq, head.sink)
+      at = System.system_time(:millisecond) + 3_600_000
+      write!(inst, Deliveries.retry_ops(ord, head.seq, head.sink, %{row | attempts: 1}, at, "x"))
+
+      assert [%{kind: 3, seq: seq}] = due_rows(inst)
+      assert seq == head.seq
+      assert [{{^ord, _lane}, <<^seq::64, 0::16>>}] = heads(inst)
+
+      assert {:ok, %{pending: 1, scheduled: 1, inflight: 0, lanes: 1, lanes_blocked: 1}} =
+               Counters.read(inst, ord)
+
+      assert_counters_equal_fold(inst)
+
+      # Claimed again: the head is no longer waiting.
+      [retry] = due_rows(inst)
+      :ok = Deliveries.claim(inst, [retry])
+
+      assert {:ok, %{scheduled: 0, inflight: 1, lanes: 1, lanes_blocked: 0}} =
+               Counters.read(inst, ord)
+
+      assert_counters_equal_fold(inst)
+    end
+
+    test "a delivered head releases its lane: the next member is promoted in the same batch" do
+      inst = start_instance(roles: [:edge])
+      [_first, second] = lane_enqueue(inst, "acme", "k1", 2)
+      ord = tenant_ord!(inst, "acme")
+      sweep!(inst, "acme")
+      [head] = due_rows(inst)
+      :ok = Deliveries.claim(inst, [head])
+
+      row = row!(inst, head.seq, head.sink)
+      ops = Deliveries.delivered_ops(ord, head.seq, head.sink, head.size, row)
+      assert Enum.any?(ops, &Lanes.placeholder?/1)
+      assert {:ok, expanded} = Lanes.expand(inst, ops, System.system_time(:millisecond))
+      refute Enum.any?(expanded, &Lanes.placeholder?/1)
+      write!(inst, expanded)
+
+      second_seq = second.seq
+      assert [%{seq: ^second_seq, kind: 2}] = due_rows(inst)
+      assert members(inst) == []
+      assert [{{^ord, _lane}, <<^second_seq::64, 0::16>>}] = heads(inst)
+
+      # The lane stays busy: `lanes` did not move.
+      assert {:ok, %{lanes: 1, lane_members: 0}} = Counters.read(inst, ord)
+      assert_counters_equal_fold(inst)
+    end
+
+    test "the last hook of a lane releases it: ?H goes and lanes returns to 0" do
+      inst = start_instance(roles: [:edge])
+      lane_enqueue(inst, "acme", "k1", 1)
+      ord = tenant_ord!(inst, "acme")
+      sweep!(inst, "acme")
+      [head] = due_rows(inst)
+      :ok = Deliveries.claim(inst, [head])
+
+      row = row!(inst, head.seq, head.sink)
+      write!(inst, Deliveries.delivered_ops(ord, head.seq, head.sink, head.size, row))
+
+      assert heads(inst) == []
+      assert {:ok, counters} = Counters.read(inst, ord)
+      assert %{lanes: 0, lanes_blocked: 0, lane_members: 0} = counters
+      assert_counters_equal_fold(inst)
+    end
+
+    test "purge_tenant removes every lane family and counter" do
+      inst = start_instance(roles: [:edge])
+      lane_enqueue(inst, "acme", "k1", 3)
+      lane_enqueue(inst, "acme", "k2", 2)
+      lane_enqueue(inst, "globex", "k1", 2)
+      acme = tenant_ord!(inst, "acme")
+      globex = tenant_ord!(inst, "globex")
+
+      sweep!(inst, "acme")
+      sweep!(inst, "globex")
+      # One head claimed, one still due (kind 2), members behind both.
+      [claimed | _] = Enum.filter(due_rows(inst), &(&1.ord == acme))
+      :ok = Deliveries.claim(inst, [claimed])
+      assert_counters_equal_fold(inst)
+
+      assert {:ok, %{pending: removed}} =
+               Queue.purge_tenant(inst, "acme", [:pending, :inflight, :dead])
+
+      # Three due/claimed... every pending row of acme: 2 heads' due rows (one was
+      # claimed), 3 members; plus the claimed head under `inflight`.
+      assert removed == 4
+
+      for {ord, _lane, _seq, _sink} <- members(inst), do: assert(ord == globex)
+      for {{ord, _lane}, _value} <- heads(inst), do: assert(ord == globex)
+      for {ord, _lane} <- markers(inst), do: assert(ord == globex)
+
+      assert {:ok, counters} = Counters.read(inst, acme)
+      assert %{lanes: 0, lanes_blocked: 0, lane_members: 0, pending: 0, inflight: 0} = counters
+
+      assert {:ok, %{lanes: 1, lane_members: 1}} = Counters.read(inst, globex)
+      assert_counters_equal_fold(inst)
+    end
+
+    test "purging only :pending keeps the ?H of a claimed head" do
+      inst = start_instance(roles: [:edge])
+      lane_enqueue(inst, "acme", "k1", 3)
+      ord = tenant_ord!(inst, "acme")
+      sweep!(inst, "acme")
+      [head] = due_rows(inst)
+      :ok = Deliveries.claim(inst, [head])
+
+      assert {:ok, _} = Queue.purge_tenant(inst, "acme", [:pending])
+
+      assert members(inst) == []
+      assert [{{^ord, _lane}, _value}] = heads(inst)
+      assert [%{seq: seq}] = inflight_rows(inst)
+      assert seq == head.seq
+      assert_counters_equal_fold(inst)
+    end
+  end
+
   describe "the layout" do
-    test "only Deliveries builds a ?D, ?F, ?X or ?A key" do
+    test "only Deliveries builds a ?D, ?F, ?X, ?A, ?O, ?H or ?P key" do
       lib = Path.expand("../../../lib", __DIR__)
 
       allowed = [
         Path.join(lib, "ankusa/queue/deliveries.ex"),
+        Path.join(lib, "ankusa/queue/deliveries/lanes.ex"),
         Path.join(lib, "ankusa/store/keys.ex")
       ]
 
-      constructor = ~r/Keys\.(due|inflight|dead_by_tenant|active)\(|<<\?[DFXA]\b/
+      constructor =
+        ~r/Keys\.(due|inflight|dead_by_tenant|active|lane_member|lane_head|lane_marker)\(|<<\?[DFXAOHP]\b/
 
       offenders =
         for file <- Path.wildcard(Path.join(lib, "**/*.ex")),

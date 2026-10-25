@@ -7,7 +7,8 @@
 # MIX_ENV=test because `config/config.exs` autostarts the default instance
 # (port 4000) outside `:test`.
 #
-# Env knobs: N (20000), CONCURRENCY (256), SINK_LATENCY_MS (5), BODY_BYTES (512).
+# Env knobs: N (20000), CONCURRENCY (256), SINK_LATENCY_MS (5), BODY_BYTES (512),
+# ORDERED (0; 1 makes the sink an ordered lane sink over 64 keys).
 #
 # Prints one JSON line (`ingest_per_s`, `p50_ms`, `p99_ms`, `end_to_end_per_s`,
 # ... — `p50_ms`/`p99_ms` are the ingest latency percentiles; `mise run
@@ -31,6 +32,10 @@ n = String.to_integer(System.get_env("N", "20000"))
 concurrency = String.to_integer(System.get_env("CONCURRENCY", "256"))
 latency_ms = String.to_integer(System.get_env("SINK_LATENCY_MS", "5"))
 body_bytes = String.to_integer(System.get_env("BODY_BYTES", "512"))
+# ORDERED=1: the source's sink is `ordered: true` (ADR 0004), keyed by an
+# `x-entity` header that cycles through 64 keys, so 64 lanes run concurrently.
+ordered? = System.get_env("ORDERED") in ["1", "true"]
+lane_keys = 64
 
 :ets.new(:bench_delivered, [:set, :public, :named_table])
 
@@ -60,7 +65,11 @@ config =
          "bench" => [
            verifier: {Ankusa.Verifier.None, []},
            on_verify_failure: :accept_flag,
-           sinks: [{Bench.Sink, latency_ms: latency_ms}]
+           sinks: [
+             {Bench.Sink,
+              [latency_ms: latency_ms] ++
+                if(ordered?, do: [ordered: true, ordering_key: {:header, "x-entity"}], else: [])}
+           ]
          ]
        }}
   )
@@ -88,7 +97,7 @@ results =
           source_id: "bench",
           method: "POST",
           path: "/webhooks/bench",
-          headers: [],
+          headers: if(ordered?, do: [{"x-entity", "k#{rem(i, lane_keys)}"}], else: []),
           body: body
         })
 
