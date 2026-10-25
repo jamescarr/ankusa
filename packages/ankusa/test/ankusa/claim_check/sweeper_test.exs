@@ -294,4 +294,111 @@ defmodule Ankusa.ClaimCheck.SweeperTest do
       refute Sweeper.run?(node.(roles: [:storage]))
     end
   end
+
+  # ── one tenant per tick (PERF-2) ─────────────────────────────────────────
+
+  describe "bounded sweep" do
+    @tenants 100
+    @days 100
+    @cursor "m:claim_sweep_cursor"
+
+    defp tenant_name(n), do: "t" <> String.pad_leading(Integer.to_string(n), 3, "0")
+
+    defp claims_root(inst), do: Path.join(Config.path(Ankusa.config(inst), "segments"), "claims")
+
+    # `@tenants` tenants with `@days` expired day partitions each, a pack in every one.
+    defp expired_partitions(inst) do
+      root = claims_root(inst)
+      today = Date.utc_today()
+
+      for t <- 0..(@tenants - 1), d <- 0..(@days - 1) do
+        date = Date.add(today, -(10 + d))
+        dir = Path.join([root, "tenant=" <> tenant_name(t), "dt=#{date}"])
+        File.mkdir_p!(dir)
+
+        File.write!(
+          Path.join(dir, Ref.pack_id(days_ago(10 + d), :crypto.strong_rand_bytes(8))),
+          "p"
+        )
+      end
+    end
+
+    defp partitions_of(inst, tenant),
+      do: Path.wildcard(Path.join(claims_root(inst), "tenant=#{tenant}/dt=*"))
+
+    @tag timeout: 300_000
+    test "bounded sweep: 10 000 partitions sweep one tenant per tick, and resume after a restart",
+         %{inst: inst} do
+      expired_partitions(inst)
+      assert length(Path.wildcard(Path.join(claims_root(inst), "tenant=*/dt=*"))) == 10_000
+
+      # Every tick looks at one tenant's 100 partitions and nobody else's.
+      for n <- 1..50 do
+        left = @tenants - n
+
+        assert %{scanned: 100, deleted: 100, packs: 100, backlog: 0, partitions_left: 0} =
+                 report = Sweeper.report(inst)
+
+        assert report.tenants_left == left
+        assert partitions_of(inst, tenant_name(n - 1)) == []
+      end
+
+      assert {:ok, "t049"} = Store.get(inst, :default, @cursor)
+      assert length(partitions_of(inst, "t050")) == 100
+
+      # A restart resumes after the tenant the last tick finished: t050 next.
+      :ok = stop_supervised!({Sweeper, inst})
+      start_supervised!({Sweeper, instance: inst})
+
+      assert %{scanned: 100, deleted: 100, tenants_left: 49} = Sweeper.report(inst)
+      assert partitions_of(inst, "t050") == []
+      assert length(partitions_of(inst, "t051")) == 100
+
+      for left <- 48..0//-1 do
+        assert %{scanned: 100, deleted: 100, tenants_left: ^left} = Sweeper.report(inst)
+      end
+
+      assert Path.wildcard(Path.join(claims_root(inst), "tenant=*/dt=*")) == []
+
+      # The pass is over: its cursor is gone, and the next one starts at the first tenant.
+      assert :not_found = Store.get(inst, :default, @cursor)
+      assert %{scanned: 0, deleted: 0, tenants_left: 99} = Sweeper.report(inst)
+    end
+
+    test "a tenant the budget cuts short stays the next tick's, and the cursor stays behind it",
+         %{inst: inst} do
+      config = Ankusa.config(inst)
+      Ankusa.put_config(%{config | claim_check: %{config.claim_check | sweep_max_objects: 2}})
+      :ok = stop_supervised!({Sweeper, inst})
+      start_supervised!({Sweeper, instance: inst})
+
+      for tenant <- ["acme", "globex"], n <- 1..3 do
+        ClaimCheck.check_in(inst, tenant, [%{id: UUIDv7.generate(), body: "p#{n}"}],
+          pack_id: Ref.pack_id(days_ago(10), :crypto.strong_rand_bytes(8))
+        )
+      end
+
+      # acme: 3 packs in one partition, 2 a tick. globex waits behind it.
+      assert %{packs: 2, backlog: 1, tenants_left: 1} = Sweeper.report(inst)
+      assert :not_found = Store.get(inst, :default, @cursor)
+      assert %{packs: 1, backlog: 0, deleted: 1, tenants_left: 1} = Sweeper.report(inst)
+      assert {:ok, "acme"} = Store.get(inst, :default, @cursor)
+      assert %{packs: 2, backlog: 1, tenants_left: 0} = Sweeper.report(inst)
+      assert %{packs: 1, backlog: 0, deleted: 1, tenants_left: 0} = Sweeper.report(inst)
+      assert :not_found = Store.get(inst, :default, @cursor)
+    end
+
+    test "a tenant whose name holds glob characters is swept like any other, by its own name",
+         %{inst: inst} do
+      dir = Path.join([claims_root(inst), "tenant=a*b", "dt=#{Date.add(Date.utc_today(), -20)}"])
+      File.mkdir_p!(dir)
+      File.write!(Path.join(dir, Ref.pack_id(days_ago(20), :crypto.strong_rand_bytes(8))), "p")
+      keep = Path.join([claims_root(inst), "tenant=axb", "dt=#{Date.utc_today()}"])
+      File.mkdir_p!(keep)
+
+      assert {1, 1} = Sweeper.sweep(inst)
+      refute File.exists?(dir)
+      assert File.dir?(keep)
+    end
+  end
 end

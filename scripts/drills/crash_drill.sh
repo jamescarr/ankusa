@@ -180,7 +180,7 @@ t0=$(now_ms)
 
 refused=0 # POSTs answered 503 store_unavailable while the fault was on
 not_ready=0 # /ready probes answered 503 while the fault was on
-named=0 # of those, the ones whose body carried a `reason`
+named=0 # of those, the ones whose body named a `reasons.store`
 
 # One look at what the node says: a POST and /ready.
 probe_once() {
@@ -189,7 +189,7 @@ probe_once() {
   fi
   if [ "$(ready_code)" = 503 ]; then
     not_ready=$((not_ready + 1))
-    if grep -q '"reason":"[a-z_]*"' "$ready_body"; then named=$((named + 1)); fi
+    if grep -q '"reasons":{[^}]*"store":"[a-z_]*"' "$ready_body"; then named=$((named + 1)); fi
   fi
 }
 

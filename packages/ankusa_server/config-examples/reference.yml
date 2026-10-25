@@ -21,6 +21,19 @@ node:
   roles: [edge, dispatch, storage]
   # [env ANKUSA_DATA_DIR] the RocksDB store (hooks, delivery rows and DLQ, quarantine pen, API-managed sources, rate-limit overrides) and local segments land here.
   data_dir: /var/lib/ankusa
+  # Readiness disk floor, in bytes (default: unset, no check). `GET /ready` answers
+  # 503 with `disk: failing` while the file system holding data_dir has fewer bytes
+  # free, so the load balancer drains the node before the store hits ENOSPC. The
+  # image starts os_mon, which measures it. An integer >= 1.
+  # min_free_bytes: 10737418240
+
+# What `GET /ready` checks beyond the store (see docs/deployment.md, "Running the container").
+health:
+  # wal.type none only: a sink whose last publish failed within this many ms makes
+  # `/ready` answer 503 with `sinks: failing` (the provider's retry is the only
+  # retry in that mode, so a broker that refuses every publish should leave the
+  # load balancer). A sink that publishes again clears itself at once. An integer >= 1.
+  sink_error_window_ms: 5000
 
 log:
   # [env ANKUSA_LOG_LEVEL] debug | info | warning | error
@@ -413,6 +426,10 @@ quarantine:
 # look: raise the cache on a node whose store holds tens of millions of dedupe keys
 # (the filters live in it).
 queue:
+  # Readiness backlog threshold, in ms (default: unset, no check). Once the oldest due
+  # delivery has waited longer, `GET /ready` says `backlog: failing`: a label, the
+  # node stays ready (200) and the alert is the signal. An integer >= 1.
+  # max_oldest_due_ms: 300000
   rocksdb:
     # LRU block cache shared by every column family, index and filter blocks included
     block_cache_bytes: 67108864

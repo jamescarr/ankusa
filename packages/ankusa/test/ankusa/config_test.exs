@@ -916,6 +916,58 @@ defmodule Ankusa.ConfigTest do
     end
   end
 
+  describe "the readiness keys (OPS-5)" do
+    test "defaults: a five-second sink window, no disk floor, no backlog threshold" do
+      config = Config.new([])
+      assert config.listener.ready_sink_error_window_ms == 5_000
+      assert config.listener.ready_min_free_bytes == nil
+      assert config.queue.max_oldest_due_ms == nil
+    end
+
+    test "a section override merges over the defaults, and the struct keeps its 31 fields" do
+      config =
+        Config.new(
+          listener: %{ready_min_free_bytes: 1_000_000},
+          queue: %{max_oldest_due_ms: 300_000}
+        )
+
+      assert config.listener.ready_min_free_bytes == 1_000_000
+      assert config.listener.ready_sink_error_window_ms == 5_000
+      assert config.listener.max_connections == 20_000
+      assert config.queue.max_oldest_due_ms == 300_000
+      assert config.queue.dlq.retention_days == 30
+
+      # `Ankusa.Config` stays a flat map (32 keys with `__struct__`): a 32nd
+      # field would make every `Ankusa.config/1` read a hash-map lookup.
+      assert map_size(Map.from_struct(%Config{})) == 31
+    end
+
+    test "every key is range-checked at Config.new/1, naming the key" do
+      assert_raise ArgumentError,
+                   "listener.ready_sink_error_window_ms must be a positive integer, got 0",
+                   fn -> Config.new(listener: %{ready_sink_error_window_ms: 0}) end
+
+      assert_raise ArgumentError,
+                   "listener.ready_sink_error_window_ms must be a positive integer, got nil",
+                   fn -> Config.new(listener: %{ready_sink_error_window_ms: nil}) end
+
+      assert_raise ArgumentError,
+                   "listener.ready_min_free_bytes must be nil or an integer >= 1, got 0",
+                   fn -> Config.new(listener: %{ready_min_free_bytes: 0}) end
+
+      assert_raise ArgumentError,
+                   ~s(listener.ready_min_free_bytes must be nil or an integer >= 1, got "1GB"),
+                   fn -> Config.new(listener: %{ready_min_free_bytes: "1GB"}) end
+
+      assert_raise ArgumentError,
+                   "queue.max_oldest_due_ms must be nil or an integer >= 1, got -5",
+                   fn -> Config.new(queue: %{max_oldest_due_ms: -5}) end
+
+      assert Config.new(listener: %{ready_sink_error_window_ms: 1}).listener.ready_sink_error_window_ms ==
+               1
+    end
+  end
+
   describe "the listener and metrics sections" do
     @tls_dir Path.expand("../fixtures/tls", __DIR__)
     @listener_positive ~w(max_connections num_acceptors read_timeout_ms body_read_timeout_ms

@@ -29,7 +29,7 @@ defmodule Ankusa.Intake.Recovery do
 
   It runs as an `Ankusa.Instance` child after the source store (replay resolves
   sinks through it) and before the writer: the node serves nothing until it is
-  done, and `Health.ready/1` says `intake: "recovering"` meanwhile.
+  done, and `Health.ready/1` says `intake: "failing"` (reason `recovering`) meanwhile.
   """
 
   use GenServer

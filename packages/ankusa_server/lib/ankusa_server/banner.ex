@@ -8,17 +8,17 @@ defmodule AnkusaServer.Banner do
   # Lists of lines, not heredocs, so the leading spaces survive `mix format`.
   # The `▓` runs are the yellow bands of the logo.
   @goad [
-    "         ▄▄▄▄▄▄▄▄",
-    "       ▄█▀▀▀▀▀▀▀▀█▄",
-    "      ▟▛          ▀█▖",
-    "    ▗▟▛            ▐█",
-    "   ▐▓▓▌            ▐▛",
-    "   ▟█▛            ▗▛",
-    "  ▟█▛             ▘",
-    " ▟█▛",
-    "▐▓▓▌",
-    "██▛",
-    "▀▀"
+    "                   ▗▟▘",
+    "                 ▄█▛",
+    "              ▗▟█▛▘",
+    "            ▗▓▓▓▓▄▄",
+    "          ▗▟█▛▘ ▝▀▜█▙",
+    "        ▗▓▓▓▘     ▗█▛",
+    "      ▗▟█▛▘    ▄▟▛▀▘",
+    "    ▗▟█▛▘",
+    "  ▗▓▓▓▘",
+    "▗▟█▛▘",
+    "▓▓▓"
   ]
 
   @title [

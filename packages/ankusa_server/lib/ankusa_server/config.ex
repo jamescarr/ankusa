@@ -72,8 +72,9 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive)
-  @node_keys ~w(roles data_dir)
+  @root_keys ~w(node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive health)
+  @node_keys ~w(roles data_dir min_free_bytes)
+  @health_keys ~w(sink_error_window_ms)
   @log_keys ~w(level banner)
   @tracing_keys ~w(enabled otlp_endpoint sample_ratio)
   @default_otlp_endpoint "http://localhost:4318"
@@ -148,7 +149,7 @@ defmodule AnkusaServer.Config do
   @quarantine_keys ~w(burst rate max_bytes retention_days)
   @egress_pools_keys ~w(pool_size pool_count pool_timeout pool_max_idle_ms conn_max_idle_ms max_pools max_pools_per_tenant protocols)
   @audit_keys ~w(retention_days max_rows max_bytes outbox_max_backlog)
-  @queue_keys ~w(dlq rocksdb)
+  @queue_keys ~w(dlq rocksdb max_oldest_due_ms)
   @dlq_keys ~w(retention_days max_rows max_bytes)
   @archive_keys ~w(retention_days)
   @rocksdb_keys ~w(block_cache_bytes bloom_bits_per_key max_open_files compaction_style rate_limiter_bytes_per_sec max_background_jobs write_buffer_bytes)
@@ -607,6 +608,7 @@ defmodule AnkusaServer.Config do
 
     opts =
       node_section(doc) ++
+        health_section(doc) ++
         http_section(doc) ++
         listener_section(doc) ++
         admin_section(doc) ++
@@ -666,6 +668,26 @@ defmodule AnkusaServer.Config do
       :data_dir,
       node["data_dir"] && expect_string(node["data_dir"], ["node", "data_dir"])
     )
+  end
+
+  # Types only; the ranges are core's (`Ankusa.Config`). `node.min_free_bytes` and
+  # `health.sink_error_window_ms` are the two thresholds of what `GET /ready`
+  # checks beyond the store (`Ankusa.Health`); core keeps them in its `listener`
+  # section (`ready_min_free_bytes`, `ready_sink_error_window_ms`), because
+  # `Ankusa.Config` has no field to spare.
+  defp health_section(doc) do
+    node = section!(doc, "node", @node_keys, [])
+    health = section!(doc, "health", @health_keys, [])
+
+    [
+      listener:
+        []
+        |> put_opt(:ready_min_free_bytes, int_opt(node, "min_free_bytes", ["node"]))
+        |> put_opt(
+          :ready_sink_error_window_ms,
+          int_opt(health, "sink_error_window_ms", ["health"])
+        )
+    ]
   end
 
   # `to_atom` after `enum!`, not `to_existing_atom`: under `bin/ankusa eval`
@@ -1855,14 +1877,16 @@ defmodule AnkusaServer.Config do
     dlq = section!(queue, "dlq", @dlq_keys, ["queue"])
 
     [
-      queue: [
-        dlq:
-          []
-          |> put_opt(:retention_days, int_opt(dlq, "retention_days", ["queue", "dlq"]))
-          |> put_opt(:max_rows, int_opt(dlq, "max_rows", ["queue", "dlq"]))
-          |> put_opt(:max_bytes, int_opt(dlq, "max_bytes", ["queue", "dlq"])),
-        rocksdb: rocksdb_opts(queue)
-      ]
+      queue:
+        [
+          dlq:
+            []
+            |> put_opt(:retention_days, int_opt(dlq, "retention_days", ["queue", "dlq"]))
+            |> put_opt(:max_rows, int_opt(dlq, "max_rows", ["queue", "dlq"]))
+            |> put_opt(:max_bytes, int_opt(dlq, "max_bytes", ["queue", "dlq"])),
+          rocksdb: rocksdb_opts(queue)
+        ]
+        |> put_opt(:max_oldest_due_ms, int_opt(queue, "max_oldest_due_ms", ["queue"]))
     ]
   end
 

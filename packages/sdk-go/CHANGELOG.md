@@ -7,6 +7,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-24
+
 ### Added
 
 - `Message.Traceparent` and `Message.Tracestate`: the hook's W3C trace context
@@ -102,6 +104,7 @@ this project follows [Semantic Versioning](https://semver.org/).
   encoded as JSON (an unencodable `Metadata` value in `CreateRoute`,
   `ReplaceRoute`, or `UpdateRoute`).
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-go-v0.5.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-go-v0.6.0...HEAD
+[0.6.0]: https://github.com/jamescarr/ankusa/compare/sdk-go-v0.5.0...sdk-go-v0.6.0
 [0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-go-v0.3.0...sdk-go-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-go-v0.3.0

@@ -114,6 +114,9 @@ defmodule AnkusaServer.ConfigTest do
            } = config.dispatch
 
     assert config.batcher.max_queue_bytes == 268_435_456
+    assert config.listener.ready_sink_error_window_ms == 5_000
+    assert config.listener.ready_min_free_bytes == nil
+    assert config.queue.max_oldest_due_ms == nil
     assert config.storage.key_prefix == ""
 
     assert %{
@@ -2226,6 +2229,43 @@ defmodule AnkusaServer.ConfigTest do
              breaker_failure_rate: 0.25,
              breaker_open_ms: 10_000
            }
+  end
+
+  test "the readiness keys (OPS-5) map to core's listener and queue keys and are range checked" do
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          node: {min_free_bytes: 10737418240}
+          health: {sink_error_window_ms: 2500}
+          queue: {max_oldest_due_ms: 300000}
+          """),
+        env: %{}
+      ).config
+
+    assert config.listener.ready_sink_error_window_ms == 2_500
+    assert config.listener.ready_min_free_bytes == 10_737_418_240
+    # The rest of `listener` and `queue` keeps core's defaults.
+    assert config.listener.max_connections == %Ankusa.Config{}.listener.max_connections
+    assert config.queue.max_oldest_due_ms == 300_000
+    assert config.queue.dlq == %Ankusa.Config{}.queue.dlq
+
+    for {yaml, message} <- [
+          {"node: {min_free_bytes: 0}",
+           "listener.ready_min_free_bytes must be nil or an integer >= 1, got 0"},
+          {"node: {min_free_bytes: lots}",
+           ~s(node.min_free_bytes: expected an integer, got "lots")},
+          {"health: {sink_error_window_ms: 0}",
+           "listener.ready_sink_error_window_ms must be a positive integer, got 0"},
+          {"health: {window: 1}", ~s(health: unknown key "window")},
+          {"queue: {max_oldest_due_ms: -1}",
+           "queue.max_oldest_due_ms must be nil or an integer >= 1, got -1"}
+        ] do
+      error =
+        assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml <> "\n"), env: %{}) end
+
+      assert Exception.message(error) =~ message
+    end
   end
 
   test "no fleet keys means node scope, as core defaults" do

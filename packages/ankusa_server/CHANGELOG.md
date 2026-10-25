@@ -16,6 +16,18 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `OTEL_EXPORTER_OTLP_HEADERS`. With it off, only core's no-op API runs and a
   hook's `traceparent` still reaches the consumer unchanged. Not part of
   `/v1/config`: it configures the image, not an instance, and holds no secret.
+- **Readiness keys (OPS-5).** `node.min_free_bytes` (unset): `/ready` answers `503`
+  with `disk: failing` while `data_dir`'s file system has fewer bytes free.
+  `health.sink_error_window_ms` (5000): under `wal.type: none`, a sink whose last
+  publish failed within this long ago makes `/ready` `503` with `sinks: failing`.
+  `queue.max_oldest_due_ms` (unset): past it `/ready` carries `backlog: failing`,
+  a label that never makes the node unready. See `config-examples/reference.yml`.
+  `/ready`'s body now lists every check with `ok`/`failing`/`draining` and
+  `reasons` (see the `ankusa` changelog for the wire change).
+
+## [0.7.0] - 2026-10-24
+
+### Added
 
 - **Forwarded-header caps and sink message limits (DEL-5).** A source takes
   `max_headers` (default 64) and `forward_headers_max_bytes` (default 16384):
@@ -690,7 +702,8 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   fleet (Postgres + S3), Kafka/RabbitMQ fan-out, and multi-tenant examples.
 - Compose files for a single node and for a fleet behind nginx basic auth.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.6.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.7.0...HEAD
+[0.7.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.6.0...ankusa_server-v0.7.0
 [0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.4.0...ankusa_server-v0.6.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.3.0...ankusa_server-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.4...ankusa_server-v0.3.0

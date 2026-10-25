@@ -27,6 +27,56 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `ankusa.claim_check`, `ankusa.replay` and `ankusa.lifecycle.event` make a
   hook one trace. New `Ankusa.Sink.attempt/5` and `Ankusa.Lifecycle.traced_envelope/4`.
 
+- **Readiness thresholds (OPS-5).** `listener.ready_sink_error_window_ms` (5000):
+  under `wal: :none`, a sink whose last publish failed within this long ago makes
+  `/ready` `503` with `sinks: "failing"`; a sink that publishes again clears
+  itself at once (`Ankusa.Health.SinkErrors`, one ETS write per publish in the
+  request process, bounded at 10 000 entries and swept every window).
+  `listener.ready_min_free_bytes` (`nil`): below it `disk` is failing and the node
+  unready, measured by `:disksup` (`:os_mon`; with none running the reason is
+  `unmeasured`). `queue.max_oldest_due_ms` (`nil`): past it `backlog` is failing,
+  a label that never makes the node unready. All range-checked, and shown by
+  `/v1/config` (none is a secret). They live in existing sections, so
+  `Ankusa.Config` keeps its 31 struct fields.
+
+### Changed
+
+- **`/ready` lists every readiness check (OPS-5).** `Ankusa.Health.ready/1` runs
+  each `Ankusa.Health.Check` that applies to the node (`store`, `intake` under
+  `wal: :dual`, `sinks` under `wal: :none`, `disk`, `backlog`, `backup`) and the
+  body carries one key per check with its state, `"ok"`, `"failing"` or
+  `"draining"`, plus `reasons` (a fixed set of atoms per check) while one is not
+  `"ok"`. It answers `503` when a check that gates is not ok: `store`, `intake`,
+  `sinks` and `disk` always, `backup` with `backup.require_fresh`, never
+  `backlog`. **Wire change:** `store` is now `"ok"`/`"failing"` (it was `"ok"`,
+  `"none"`, `"store_unavailable"`, `"write_failed"`) and the failure class moved
+  from the top-level `reason` to `reasons.store`; a node with no store has no
+  `store` key; `backup` is `"ok"`/`"failing"` (it was `"fresh"`/`"stale"`) and
+  `intake` is `"ok"`/`"failing"` with `reasons.intake` `down` or `recovering` (it
+  was `up`/`down`/`recovering`). The status codes are unchanged, and so are the
+  gating rules of `store`, `intake` and `backup`. Both OpenAPI documents describe
+  the new body.
+
+## [0.7.0] - 2026-10-24
+
+### Added
+
+- **Bounded claim sweeper and claim batch error handling (PERF-2).**
+  `Ankusa.ClaimCheck.Sweeper` sweeps one tenant per tick instead of globbing every
+  `claims/tenant=*/dt=*` directory: a pass lists the tenant directories once, in name
+  order, and each tick takes the next tenant's day partitions (by name, never a glob).
+  The tenant a pass last finished is persisted (`m:claim_sweep_cursor`, additive: a
+  build that does not know the row ignores it, so a rollback needs no step), so a
+  restart resumes after it. While tenants are left the next step follows in 100 ms;
+  `scanned` and `partitions_left` of `[:ankusa, :claim_check, :sweep]` now count the
+  one tenant swept, and `tenants_left` (gauge `ankusa_claim_check_sweep_tenants_left`)
+  is new. `Ankusa.ClaimCheck.check_in_batch/2` uploads its packs unlinked: an upload
+  process that dies is `{:error, {:unavailable, reason}}` for that pack's items and no
+  longer takes the dispatch packing task down, and an item no pack can hold is
+  `{:error, :too_large}`; the claim-count and size limits now live in `split/3`, and
+  `check_in/4` answers `{:error, :too_large}` for more than 65 000 claims or about
+  4 GiB instead of raising from `Pack.build/1`. See
+  [`claim-check.md`](../../docs/claim-check.md#claim-leases).
 - **Message size preflight and forwarded-header caps (DEL-5).** A queue sink
   that `use`s `Ankusa.Sink.Messaging` now checks every message against its
   `c:Ankusa.Sink.Messaging.max_message_bytes/1` (implemented for you: the
@@ -2099,7 +2149,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   defaults to `false`, so depending on `ankusa` never binds a port as a side
   effect.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.6.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.7.0...HEAD
+[0.7.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.6.0...ankusa-v0.7.0
 [0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.4.0...ankusa-v0.6.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.3.0...ankusa-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.2.4...ankusa-v0.3.0
