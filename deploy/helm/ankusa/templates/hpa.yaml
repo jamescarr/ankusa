@@ -1,0 +1,37 @@
+{{- if and (eq (include "ankusa.wal" .) "none") .Values.autoscaling.enabled }}
+# Stateless nodes only: a store-backed pod holds hooks, and scaling it away strands them.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "ankusa.fullname" . }}
+  labels:
+    {{- include "ankusa.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "ankusa.fullname" . }}
+  minReplicas: {{ int .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ int .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ int .Values.autoscaling.cpuUtilization }}
+    {{- if .Values.autoscaling.queuePending.enabled }}
+    # Needs a custom-metrics adapter that serves the node's `ankusa_queue_pending` gauge.
+    - type: Pods
+      pods:
+        metric:
+          name: ankusa_queue_pending
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.autoscaling.queuePending.averageValue | quote }}
+    {{- end }}
+  {{- with .Values.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

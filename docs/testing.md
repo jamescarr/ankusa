@@ -370,10 +370,28 @@ The always-on tests cover:
   resolves through a loopback stub of Vault KV v2 and AWS `GetSecretValue`
   (SigV4 header, token header, a JSON field, a binary secret) and a missing or
   unreachable secret fails the boot naming the reference; a signed POST
-  verifies with the new secret after a file swap and a reload while the old one
-  stays valid until it leaves the list; a manager outage or a deleted file at
-  reload keeps the last value and logs a warning; a reload that cannot be
-  applied changes nothing; an API-submitted spec cannot name a file.
+  verifies with the new secret after a file swap and a reload (`AnkusaServer.Reload`)
+  while the old one stays valid until it leaves the list; a manager outage or a
+  deleted file at reload keeps the last value and logs a warning; a reload that
+  cannot be applied changes nothing; an API-submitted spec cannot name a file.
+- **Config reload and `config_version`** (`ankusa/test/ankusa/reload_test.exs`;
+  `ankusa_server/test/ankusa_server/reload_test.exs`, `config_test.exs`): core's
+  `apply_config/3` applies the reloadable set to a running instance and keeps
+  every other field (a rate limit read on the next request, the dispatch
+  pipeline's limits, the gauge poller and metric definitions rebuilt, the seed's
+  difference through the routes API with API routes left alone, static sources),
+  refuses a config that would not boot with nothing applied and no audit row, and
+  records a seed route that collides with an API route as a `failed` row;
+  `POST /v1/config/reload` is `401` / `403` and maps each answer of the loader to
+  its status. The server suite boots an instance from a YAML file, edits the
+  file and reloads over the admin router: `applies reloadable` (`log.level`, a
+  tenant rate limit, a source secret, the seed and `dispatch.concurrency` all
+  change with no restart, one audit row names the keys), `refuses non-reloadable`
+  (a changed `http.port` is `409` naming it and nothing else in the file is
+  applied), a level set at runtime survives a reload that leaves `log` alone, a
+  file that no longer loads is `422`, and a real `SIGHUP` reloads as the system.
+  `config_test.exs` covers `config_version`: absent is 1, a newer version or a
+  non-integer is refused naming the key, `migrate!/3` runs each step.
 - **Dispatch** (`dispatch_test.exs`): a hook reaches every sink of its source
   exactly once; a failing sink is retried until it succeeds; a failing sink's
   retries do not hold the slots a healthy source needs (D1); one dead row per
@@ -1484,10 +1502,26 @@ bounded by the delivery contract, not asserted to be zero.
 
 CI: [`.github/workflows/e2e.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/e2e.yml)
 runs it nightly, on `workflow_dispatch`, on every release tag, and on a pull
-request that touches the example, beside `mise run e2e` (the kind drill below).
+request that touches the example, beside `mise run e2e` (the kind drills below).
 The load generator's reports are uploaded as the `fleet-e2e-reports` artifact.
 `RATE`, `DURATION` (at least 40), `BURST_SECONDS`, `CONCURRENCY`, `KEEP=1` and
 `BUILD_ANKUSA=0` (use the image named by `ANKUSA_IMAGE`) tune a run.
+
+### The same fleet from the Helm chart, on kind
+
+[`examples/fleet-e2e/kind.sh`](https://github.com/jamescarr/ankusa/blob/main/examples/fleet-e2e/kind.sh)
+(`mise run e2e fleet`) runs the compose fleet's `disk` drill from
+[`deploy/helm/ankusa`](https://github.com/jamescarr/ankusa/tree/main/deploy/helm/ankusa)
+on a `kind` cluster: two StatefulSet pods (a PVC each) and a claim-check gateway in a
+namespace that **enforces the `restricted` Pod Security Standard**, and Redis, MinIO,
+RabbitMQ, the consumer and Postgres in another. It asserts that the pods run as uid 100
+on a read-only root file system, that a path nobody defined is a `404`, then drives
+steady load, six 20 KB hooks redeemed at the gateway, a chaos phase (`ankusa-0` deleted
+with the drain, `ankusa-1` `SIGKILL`ed with grace period 0, the consumer deleted) and a
+burst, and prints `verify: missing=0 sha_mismatches=0 extra_deliveries=<n>
+claim_redeemed=true duplicate_hooks=0`. Knobs: the compose run's (`RATE`, `DURATION`,
+`BURST_SECONDS`, `CONCURRENCY`, `KEEP=1`, `BUILD_ANKUSA=0` with `ANKUSA_IMAGE`).
+`mise run check:examples` renders the same values with `kubeconform`.
 
 ## Load and end-to-end (kind + Oban)
 
@@ -1512,9 +1546,10 @@ written by the idempotent `WebhookWorker.perform/1` upsert) until every acked
 id shows up or its timeout expires, and fails the run on any `missing > 0` or
 `sha_mismatches > 0`.
 
-Run it yourself: `mise run e2e` (needs `docker`; `kind`, `kubectl`, and
-Elixir come from `.mise.toml`). `RATE` defaults to 300; `KEEP=1` keeps the
-cluster.
+Run it yourself: `mise run e2e oban` (needs `docker`; `kind`, `kubectl`, and
+Elixir come from `.mise.toml`; plain `mise run e2e` also runs the
+[fleet from the Helm chart](#the-same-fleet-from-the-helm-chart-on-kind) after it).
+`RATE` defaults to 300; `KEEP=1` keeps the cluster.
 
 Results from `RATE=60` and `RATE=300` verification runs, `kind` cluster
 otherwise idle (`RATE=60` is the same load the pre-fix numbers below used, so

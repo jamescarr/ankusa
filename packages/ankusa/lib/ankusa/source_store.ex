@@ -401,18 +401,30 @@ defmodule Ankusa.SourceStore.Static do
   """
   @spec publish(atom(), %{String.t() => keyword() | map() | Source.t()}) :: {:ok, [String.t()]}
   def publish(instance, sources) when is_map(sources) do
-    %Config{source_store: {__MODULE__, opts}} =
-      config =
-      case Ankusa.config(instance) do
-        %Config{source_store: {__MODULE__, _}} = config ->
-          config
+    case Ankusa.config(instance) do
+      %Config{source_store: {__MODULE__, _}} = config ->
+        {updated, changed} = with_sources(config, sources)
+        :ok = Ankusa.put_config(updated)
+        {:ok, changed}
 
-        %Config{source_store: {mod, _}} ->
-          raise ArgumentError,
-                "#{inspect(__MODULE__)}.publish/2 needs the static source store, " <>
-                  "instance #{inspect(instance)} runs #{inspect(mod)}"
-      end
+      %Config{source_store: {mod, _}} ->
+        raise ArgumentError,
+              "#{inspect(__MODULE__)}.publish/2 needs the static source store, " <>
+                "instance #{inspect(instance)} runs #{inspect(mod)}"
+    end
+  end
 
+  @doc """
+  `config` with `sources` as its static sources, checked with the rules the
+  instance boots under (see `publish/2`), and the ids that were added, removed or
+  changed, sorted. Nothing is stored: `Ankusa.Reload` applies the result together
+  with the other keys a config reload changes. Raises `ArgumentError` naming the
+  source when a spec is refused.
+  """
+  @spec with_sources(Config.t(), %{String.t() => keyword() | map() | Source.t()}) ::
+          {Config.t(), [String.t()]}
+  def with_sources(%Config{source_store: {__MODULE__, opts}} = config, sources)
+      when is_map(sources) do
     old = config |> Ankusa.Queue.static_sources() |> Map.new()
     updated = %Config{config | source_store: {__MODULE__, Keyword.put(opts, :sources, sources)}}
 
@@ -423,7 +435,6 @@ defmodule Ankusa.SourceStore.Static do
     Ankusa.HttpClient.Egress.validate_config!(updated)
 
     new = updated |> Ankusa.Queue.static_sources() |> Map.new()
-    :ok = Ankusa.put_config(updated)
 
     changed =
       (Map.keys(old) ++ Map.keys(new))
@@ -431,6 +442,6 @@ defmodule Ankusa.SourceStore.Static do
       |> Enum.filter(&(Map.get(old, &1) != Map.get(new, &1)))
       |> Enum.sort()
 
-    {:ok, changed}
+    {updated, changed}
   end
 end

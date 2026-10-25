@@ -8,7 +8,9 @@ name: E2E
 #           killed mid-run and a provider retry sent to the other node. It also
 #           runs on a pull request that touches the example, so a change to it
 #           is proven before it merges.
-#   kind  : `mise run e2e`. The Oban consumer on a kind cluster, pods killed.
+#   kind  : `mise run e2e`. The Oban consumer on a kind cluster, pods killed, and
+#           the fleet run from the Helm chart (deploy/helm/ankusa) on kind, pods
+#           deleted and SIGKILLed.
 
 on:
   schedule:
@@ -74,11 +76,12 @@ jobs:
           if-no-files-found: ignore
 
   kind:
-    name: kind + Oban end to end
+    name: kind end to end (Oban, and the Helm chart's fleet)
     # Heavy, and untouched by a change to the fleet example.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Two clusters, two image builds (RocksDB compiles in each), two load runs.
+    timeout-minutes: 90
     env:
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     steps:
@@ -100,5 +103,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kind-e2e-reports
-          path: examples/oban-consumer/.e2e-out/
+          path: |
+            examples/oban-consumer/.e2e-out/
+            examples/fleet-e2e/.e2e-out-kind/
           if-no-files-found: ignore

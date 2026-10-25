@@ -865,6 +865,54 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message =~ "admin.ip"
   end
 
+  describe "config_version" do
+    @minimal "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+
+    defp load_versioned(value),
+      do: Config.load!(path: tmp_config("config_version: #{value}\n" <> @minimal), env: %{})
+
+    test "a file without the key is version 1, and so is one that says 1" do
+      assert %{doc: %{"config_version" => 1}} = Config.load!(path: tmp_config(@minimal), env: %{})
+      assert %{doc: %{"config_version" => 1}} = load_versioned(1)
+    end
+
+    test "a version this image does not read is refused, naming the key" do
+      error = assert_raise ConfigError, fn -> load_versioned(2) end
+      assert error.message =~ "config_version: 2 is newer than this image reads (up to 1)"
+
+      for bad <- ["0", "-1", "1.5", "\"1\"", "true", "[1]"] do
+        error = assert_raise ConfigError, fn -> load_versioned(bad) end
+        assert error.message =~ "config_version: expected a positive integer"
+      end
+    end
+
+    test "migrate!/3 runs every step from the file's version up to the current one" do
+      migrations = %{
+        1 => &Map.put(&1, "step1", true),
+        2 => &Map.put(&1, "step2", true)
+      }
+
+      assert Config.migrate!(%{"config_version" => 1}, 3, migrations) ==
+               %{"config_version" => 3, "step1" => true, "step2" => true}
+
+      # no key is version 1
+      assert Config.migrate!(%{}, 3, migrations) ==
+               %{"config_version" => 3, "step1" => true, "step2" => true}
+
+      # a file already at version 2 only needs the last step
+      assert Config.migrate!(%{"config_version" => 2}, 3, migrations) ==
+               %{"config_version" => 3, "step2" => true}
+
+      # the current version is left as it is
+      assert Config.migrate!(%{"config_version" => 3, "a" => 1}, 3, migrations) ==
+               %{"config_version" => 3, "a" => 1}
+
+      assert_raise ConfigError, ~r/no migration from version 2 to 3/, fn ->
+        Config.migrate!(%{}, 3, %{1 => & &1})
+      end
+    end
+  end
+
   describe "listener hardening and TLS" do
     @tls_dir Path.expand("../../../ankusa/test/fixtures/tls", __DIR__)
     @sources "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
