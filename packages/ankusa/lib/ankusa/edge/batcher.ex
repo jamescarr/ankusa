@@ -72,6 +72,24 @@ defmodule Ankusa.Edge.Batcher do
     }
   end
 
+  # The latest a record may wait before its batch starts committing (see
+  # "Deadlines" in the moduledoc). `Ankusa.Listener.ingress_shutdown_timeout_ms/1`
+  # and `Ankusa.Config` size the shutdown and the intake attempt from it.
+  @record_deadline_ms 15_000
+
+  @doc "The default record deadline in milliseconds: the latest a record may wait before its batch starts committing."
+  @spec record_deadline_ms() :: pos_integer()
+  def record_deadline_ms, do: @record_deadline_ms
+
+  @doc """
+  How many records the partition holds, buffered and in flight. A drain waits
+  for every partition to report `0` (`Ankusa.Instance.Drain`): each of those
+  records belongs to a request that has not been answered yet.
+  """
+  @spec queued(atom(), non_neg_integer()) :: non_neg_integer()
+  def queued(instance, partition),
+    do: GenServer.call(Ankusa.via(instance, {:batcher, partition}), :queued, 5_000)
+
   @doc """
   Submit a record and block until it is durably committed (or shed).
 
@@ -107,7 +125,7 @@ defmodule Ankusa.Edge.Batcher do
           | {:error, :intake_unavailable | :intake_pending}
           | {:error, {:half, :intake_unavailable | :store_unavailable, String.t()}}
           | {:error, {:tenant_overload, pos_integer()}}
-  def commit(instance, partition, record, timeout \\ 15_000) do
+  def commit(instance, partition, record, timeout \\ @record_deadline_ms) do
     case acquire(instance, record) do
       {:ok, lease} ->
         try do
@@ -229,6 +247,12 @@ defmodule Ankusa.Edge.Batcher do
       {:noreply, state |> maybe_flush() |> ensure_expiry(from, deadline)}
     end
   end
+
+  # Records this partition holds: buffered and in flight. `queued/2` is the
+  # caller's view of it; nothing else reads it, so the hot path pays one more
+  # clause, not one more counter.
+  def handle_call(:queued, _from, state),
+    do: {:reply, state.count + state.inflight_count, state}
 
   @impl true
   def handle_info(:flush, state) do

@@ -31,6 +31,15 @@ defmodule Ankusa.Instance do
       instance process registered. `Ankusa.Instance.RegistryWatch` notices and
       stops the instance, so whatever supervises it starts it again, every
       process registered anew.
+
+  ## Stopping
+
+  A stop that should not reset a request in flight runs
+  `Ankusa.Instance.Drain.run/1` first (both applications do, from `prep_stop/1`):
+  `/ready` flips to `draining`, the edge's ingress listener (the `:ingress` child
+  of the edge subtree) closes after the requests it is serving, and the
+  batchers empty. Then this tree stops in reverse start order: dispatch writes
+  its outcomes, the backup takes its final checkpoint, the store closes.
   """
 
   use Supervisor
@@ -73,6 +82,8 @@ defmodule Ankusa.Instance do
     # Every child reads the config back by name (`Ankusa.config/1`): a
     # supervisor prints its children's start arguments.
     config = Ankusa.config(instance)
+    # A restart after a drain is a node that takes hooks again.
+    Ankusa.Health.undrain(instance)
     Ankusa.Dispatch.Pipeline.validate_config!(config)
     Ankusa.ClaimCheck.validate_config!(config)
     Ankusa.Verifier.validate_config!(config)
@@ -283,9 +294,18 @@ defmodule Ankusa.Instance do
           batcher_children(config, opts) ++
           sink_error_children(config, opts) ++
           [
-            {Bandit,
-             Listener.bandit_options(config, config.listener.tls) ++
-               [plug: {Ankusa.Edge.Router, [instance: config.instance]}, port: config.port]}
+            # `id: :ingress`: `Ankusa.Instance.Drain` closes this child alone on a
+            # stop, and the listener waits `ingress_shutdown_timeout_ms/1` for the
+            # requests it is serving (Thousand Island's default, 15 s, is the
+            # batcher's own record deadline).
+            Supervisor.child_spec(
+              {Bandit,
+               Listener.bandit_options(config, config.listener.tls,
+                 shutdown_timeout: Listener.ingress_shutdown_timeout_ms(config)
+               ) ++
+                 [plug: {Ankusa.Edge.Router, [instance: config.instance]}, port: config.port]},
+              id: :ingress
+            )
           ] ++
           dedupe_sweeper_children(config, opts)
 

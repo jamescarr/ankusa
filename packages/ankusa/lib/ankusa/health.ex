@@ -27,13 +27,17 @@ defmodule Ankusa.Health do
     * `disk` (`listener.ready_min_free_bytes`): `"below_floor"` or `"unmeasured"`.
     * `backlog` (`queue.max_oldest_due_ms`): `"over_threshold"` or `"unavailable"`.
     * `backup` (`backup.max_age_ms`): `"stale"`.
+    * `drain` (only while the node is being stopped): `"shutting_down"`.
 
-  The answer is `503` (`status: "unavailable"`) when a check that *gates* is not
-  ok: `store`, `intake`, `sinks` and `disk` always, `backup` with
-  `backup.require_fresh`. `backlog` never does: it is a label, so a node that
-  is behind stays in the load balancer and the alert, not the probe, says so.
-  A node with none of these checks (one that runs only the claim check gateway,
-  so no store) is ready while it runs.
+  A stop is announced first: `drain/1` adds a `drain` key (`"draining"`, reason
+  `"shutting_down"`) to every body, so a probe sees the flip before the
+  listener closes (`Ankusa.Health.Check.Drain`). The answer is `503` with
+  `status: "draining"` while it lasts, and `503` with `status: "unavailable"`
+  when any other check that *gates* is not ok: `store`, `intake`, `sinks` and
+  `disk` always, `backup` with `backup.require_fresh`. `backlog` never does: it
+  is a label, so a node that is behind stays in the load balancer and the
+  alert, not the probe, says so. A node with none of these checks (one that
+  runs only the claim check gateway, so no store) is ready while it runs.
   """
 
   alias Ankusa.Health.Check
@@ -49,6 +53,30 @@ defmodule Ankusa.Health do
 
   @spec ready(atom()) :: {:ok, body()} | {:error, body()}
   def ready(instance), do: evaluate(instance, Check.all())
+
+  @doc """
+  Start answering `/ready` with `503` and `status: "draining"`: this node is
+  being stopped (`Ankusa.Instance.Drain`), so a load balancer should send it
+  nothing new. It stays that way until the instance starts again
+  (`Ankusa.Instance.init/1` clears it).
+  """
+  @spec drain(atom()) :: :ok
+  def drain(instance), do: :persistent_term.put(drain_key(instance), true)
+
+  @doc "Whether `drain/1` has been called for `instance` since it last started."
+  @spec draining?(atom()) :: boolean()
+  def draining?(instance), do: :persistent_term.get(drain_key(instance), false)
+
+  @doc false
+  # Erasing a `:persistent_term` scans every process (a global GC), so the key is
+  # only erased when it is there: a node that never drained pays nothing.
+  @spec undrain(atom()) :: :ok
+  def undrain(instance) do
+    if draining?(instance), do: :persistent_term.erase(drain_key(instance))
+    :ok
+  end
+
+  defp drain_key(instance), do: {__MODULE__, :draining, instance}
 
   @doc false
   # `ready/1` over an explicit list of checks, so a test can run one that no
@@ -72,9 +100,13 @@ defmodule Ankusa.Health do
         reasons -> Map.put(body, :reasons, Map.new(reasons))
       end
 
-    if Enum.any?(results, fn {check, result} -> result != :ok and check.gates?(config) end),
-      do: {:error, %{body | status: "unavailable"}},
-      else: {:ok, body}
+    gating = for {check, result} <- results, result != :ok, check.gates?(config), do: result
+
+    cond do
+      gating == [] -> {:ok, body}
+      Enum.any?(gating, &match?({:draining, _}, &1)) -> {:error, %{body | status: "draining"}}
+      true -> {:error, %{body | status: "unavailable"}}
+    end
   end
 
   defp state(:ok), do: "ok"

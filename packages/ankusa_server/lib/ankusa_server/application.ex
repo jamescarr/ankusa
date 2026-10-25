@@ -12,6 +12,9 @@ defmodule AnkusaServer.Application do
   A bad config exits 78 (`EX_CONFIG` from `sysexits.h`) after printing the
   message — a config error is an operator mistake to be read and fixed, not a
   BEAM crash dump to be decoded.
+
+  On SIGTERM it drains the instance (`prep_stop/1`, `Ankusa.Instance.Drain`)
+  before the tree stops.
   """
 
   use Application
@@ -26,8 +29,21 @@ defmodule AnkusaServer.Application do
       # `mix test` (and any embedder that wants the supervision tree without a
       # running instance): read no config, bind no port. Otherwise the suite
       # would fight a developer's own Ankusa for 4000/4002 and write into ./data.
-      Supervisor.start_link([], strategy: :one_for_one, name: AnkusaServer.Supervisor)
+      with {:ok, pid} <-
+             Supervisor.start_link([], strategy: :one_for_one, name: AnkusaServer.Supervisor),
+           do: {:ok, pid, nil}
     end
+  end
+
+  # SIGTERM (`docker stop`, a pod deletion): drain the instance before the tree
+  # stops, so `/ready` flips first and no request in flight is reset
+  # (`Ankusa.Instance.Drain`). The state is the instance name `start/2` returned.
+  @impl true
+  def prep_stop(nil), do: nil
+
+  def prep_stop(instance) do
+    Ankusa.Instance.Drain.run(instance)
+    instance
   end
 
   defp start_instance do
@@ -48,10 +64,12 @@ defmodule AnkusaServer.Application do
     )
 
     # The GCP token cache first: the blob store and Pub/Sub sinks ask it for tokens.
-    Supervisor.start_link([AnkusaServer.GcpToken, {Ankusa.Instance, config}],
-      strategy: :one_for_one,
-      name: AnkusaServer.Supervisor
-    )
+    with {:ok, pid} <-
+           Supervisor.start_link([AnkusaServer.GcpToken, {Ankusa.Instance, config}],
+             strategy: :one_for_one,
+             name: AnkusaServer.Supervisor
+           ),
+         do: {:ok, pid, config.instance}
   end
 
   @doc "This image's version. Independently versioned from the Hex packages."

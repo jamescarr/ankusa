@@ -566,7 +566,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/telemetry.ex:24-30`, `dispatch/pipeline.ex:746-752,1273-1278`, `metrics.ex:46-47,159-179,251-271`.
   *Evidence:* —
 
-- [ ] **OPS-4 — Graceful drain on SIGTERM** · P0 · Deps: DUR-6 (after: 59)
+- [x] **OPS-4 — Graceful drain on SIGTERM** · P0 · Deps: DUR-6 (after: 59)
   *Why:* neither application defines `prep_stop/1`; readiness never flips; the ThousandIsland `shutdown_timeout` (15 s) equals the batcher's 15 s commit-start deadline, so a commit that starts late is killed mid-fsync and the provider sees a reset for a committed hook (`ankusa_server/application.ex:27-50`, `instance.ex:180-205`, `health.ex:3-22`).
   *Change:* `prep_stop/1` in `Ankusa.Application` and `AnkusaServer.Application`: `Ankusa.Health.drain(instance)` (`/ready` → `503 {"status":"draining"}`), sleep `listener.drain_delay_ms` (default 5 s), stop the edge listener with `shutdown_timeout = batcher.deadline_ms + commit p99 budget + 5 s` computed from config, wait until every batcher's in-flight count is 0 (bounded by `listener.drain_timeout_ms`, default 30 s), let dispatch flush outcomes, run the DUR-6 final checkpoint, then let the tree stop. `deployment.md`: `terminationGracePeriodSeconds ≥ drain_delay + drain_timeout + 10`.
   *Done when:* SIGTERM with 200 in-flight POSTs against a slow sink yields every request a `201` or `503`, zero connection resets, `/ready` 503 within 100 ms of the signal, and every `201` present after restart.

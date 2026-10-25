@@ -13,6 +13,9 @@ this project follows [Semantic Versioning](https://semver.org/).
   or `draining`) per readiness check (`store`, `intake`, `sinks`, `disk`,
   `backlog`, `backup`) and `reasons`; `store` is no longer `none`,
   `store_unavailable` or `write_failed`, and `backup` no longer `fresh`/`stale`.
+- The generated admin types follow the drain (OPS-4): `Readiness.status` may be
+  `draining` while the node is being stopped, with a `drain` check state and
+  `reasons.drain` (`shutting_down`).
 
 ## [0.6.0] - 2026-10-24
 

@@ -717,6 +717,24 @@ defmodule Ankusa.Admin.RouterTest do
     assert decoded["queue"]["max_oldest_due_ms"] == 300_000
   end
 
+  test "GET /v1/config shows the drain keys (OPS-4) as they are: neither is a secret" do
+    config =
+      test_config(
+        roles: [:edge],
+        admin: %{enabled: true},
+        listener: %{drain_delay_ms: 1_500, drain_timeout_ms: 45_000}
+      )
+
+    put_config(config)
+
+    conn = call(config.instance, :get, "/v1/config")
+    assert conn.status == 200
+
+    decoded = JSON.decode!(conn.resp_body)
+    assert decoded["listener"]["drain_delay_ms"] == 1_500
+    assert decoded["listener"]["drain_timeout_ms"] == 45_000
+  end
+
   test "GET /v1/config shows a {module, fun, args} callback without its args" do
     config =
       test_config(
