@@ -100,6 +100,7 @@ defmodule Ankusa.Dispatch.IsolationTest do
       end
     end
   end
+
   # A batching sink that holds each attempt until the test says go, and tells it
   # whether dispatch said it may batch.
   defmodule BatchedHoldSink do
@@ -305,6 +306,7 @@ defmodule Ankusa.Dispatch.IsolationTest do
       assert_receive {:delivered, :fast, ^id, 1}, 1_000
     end
   end
+
   # What dispatch does for a sink that batches (`c:Ankusa.Sink.batched?/1`): its
   # attempts wait for a batch's response, so they are not counted against the
   # concurrency limits, and each still settles its own row.

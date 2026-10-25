@@ -163,6 +163,18 @@ Repository secrets, under Settings → Secrets and variables → Actions.
   Access Tokens → Generate New Token → Automation: this type bypasses
   2FA-on-publish, which a personal "Publish" token does not), scoped to the
   `ankusa` package once it exists, or unscoped for the first publish.
+  `release-npm.yml` also supports Trusted Publishing (OIDC): a trusted
+  publisher is already configured on npmjs.com (GitHub Actions, repo
+  `jamescarr/ankusa`, workflow `release-npm.yml`, `main`), but it can't be
+  switched on yet — npm's registry rejects this repo's immutable OIDC
+  subject claim with a misleading "package not found"
+  ([npm/cli#9969](https://github.com/npm/cli/issues/9969), open,
+  untriaged). The repository **variable** `NPM_AUTH` (Settings → Secrets
+  and variables → Actions → Variables, not Secrets) picks the path: unset,
+  or anything other than `oidc`, uses `NPM_TOKEN`; set to `oidc` to drop
+  the token and publish via the trusted publisher instead. Flip it once
+  #9969 is fixed, confirm one release through it, then delete the
+  `NPM_TOKEN` secret.
 - **PyPI:** no repository secret — publishing uses
   [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (OIDC). The
   one-time setup lives on PyPI, not here: see

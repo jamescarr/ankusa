@@ -1,7 +1,7 @@
 defmodule AnkusaRedis.MixProject do
   use Mix.Project
 
-  @version "0.5.0"
+  @version "0.6.0"
   @source_url "https://github.com/jamescarr/ankusa"
 
   # Forced split: `ankusa` core stays free of `:redix`, and every deployment
@@ -89,12 +89,13 @@ defmodule AnkusaRedis.MixProject do
         {:async_api_spex, path: "../async_api_spex", override: true}
       ]
     else
-      # `~> 0.6`, not older: the route store publishes through the ETS
-      # `Ankusa.Routes.Snapshot` (`publish/1,2`, `mutate/3`,
-      # `drop_generation/2`), and the source store reads and writes through
-      # core's internal `Ankusa.SourceStore.Table`; core ships both from 0.6.0.
+      # `~> 0.7`, not older: the sink is built on `Ankusa.Sink.Messaging` and
+      # its connections on `Ankusa.Sink.Connections`, which core ships from
+      # 0.7.0, beside what the stores need from 0.6.0 (the ETS
+      # `Ankusa.Routes.Snapshot`'s `publish/1,2`, `mutate/3` and
+      # `drop_generation/2`, and core's internal `Ankusa.SourceStore.Table`).
       # Publish core first.
-      [{:ankusa, "~> 0.6"}]
+      [{:ankusa, "~> 0.7"}]
     end
   end
 end

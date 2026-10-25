@@ -159,6 +159,8 @@ defmodule Ankusa.Sink.Batcher do
     }
   end
 
+  defp default_inflight(nil), do: @default_max_inflight
+
   defp default_inflight(instance) do
     case Ankusa.config(instance).dispatch do
       %{sink_concurrency: n} when is_integer(n) and n >= 1 -> n
@@ -166,6 +168,27 @@ defmodule Ankusa.Sink.Batcher do
     end
   rescue
     _ -> @default_max_inflight
+  end
+
+  @doc """
+  Raise `ArgumentError` naming the option unless `opts`' `:batch` is a boolean and
+  its `batch_*` options are in range for `codec`. What `Ankusa.Sink.SQS.validate_opts!/1`
+  and `Ankusa.Sink.GooglePubSub.validate_opts!/1` run, so a bad value fails at
+  load; a delivery that reaches a batcher with one is dead-lettered with the same
+  message.
+  """
+  @spec validate_opts!(module(), keyword()) :: :ok
+  def validate_opts!(codec, opts) do
+    case Keyword.get(opts, :batch, true) do
+      batch when is_boolean(batch) ->
+        :ok
+
+      other ->
+        raise ArgumentError, ":batch must be true or false, got #{inspect(other)}"
+    end
+
+    codec.batch_config(opts, nil)
+    :ok
   end
 
   defp option!(opts, key, default, min, max) do
@@ -196,18 +219,30 @@ defmodule Ankusa.Sink.Batcher do
   """
   @spec deliver(module(), atom(), keyword(), entry()) :: result()
   def deliver(codec, instance, opts, entry) do
-    config = codec.batch_config(opts, instance)
-    key = {:sink_batcher, codec, digest(codec.batch_identity(opts), config)}
-    message = {:enqueue, Map.put(entry, :callers, [self() | Process.get(:"$callers", [])])}
+    # An option out of range is the operator's to fix, not a failure of the
+    # destination: dead-lettered at once, like a refused credential.
+    config =
+      try do
+        {:ok, codec.batch_config(opts, instance)}
+      rescue
+        error in ArgumentError ->
+          {:error, {:permanent, {:config, {:batch_options, Exception.message(error)}}}}
+      end
 
-    call(instance, codec, opts, config, key, message, entry.attempt, 1)
+    with {:ok, config} <- config do
+      key = {:sink_batcher, codec, digest(codec.batch_identity(opts), config)}
+      message = {:enqueue, Map.put(entry, :callers, [self() | Process.get(:"$callers", [])])}
+
+      call(instance, codec, opts, config, key, message, entry.attempt, 1)
+    end
   end
 
   defp call(instance, codec, opts, config, key, message, attempt, retries) do
     with {:ok, pid} <- ensure(instance, codec, opts, config, key) do
       case GenServer.call(pid, message, :infinity) do
         {:refused, reason} ->
-          {:error, {:retry_after, jitter_ms(attempt), {:batch_queue_full, reason}}}
+          {:error,
+           {:retry_after, Ankusa.Sink.throttle_after_ms(attempt), {:batch_queue_full, reason}}}
 
         result ->
           result
@@ -255,16 +290,6 @@ defmodule Ankusa.Sink.Batcher do
     end
   catch
     :exit, reason -> {:error, {:batcher_start, reason}}
-  end
-
-  @doc """
-  Full jitter over an exponential window: the `ms` of the
-  `{:retry_after, ms, reason}` a throttled or refused delivery answers with.
-  """
-  @spec jitter_ms(pos_integer()) :: pos_integer()
-  def jitter_ms(attempt) when is_integer(attempt) and attempt >= 1 do
-    window = min(30_000, 500 * Integer.pow(2, min(attempt - 1, 6)))
-    1 + :rand.uniform(window)
   end
 
   @doc """

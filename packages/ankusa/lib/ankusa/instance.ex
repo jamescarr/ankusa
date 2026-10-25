@@ -73,6 +73,7 @@ defmodule Ankusa.Instance do
     # Every child reads the config back by name (`Ankusa.config/1`): a
     # supervisor prints its children's start arguments.
     config = Ankusa.config(instance)
+    Ankusa.Dispatch.Pipeline.validate_config!(config)
     Ankusa.ClaimCheck.validate_config!(config)
     Ankusa.Verifier.validate_config!(config)
     Ankusa.Verifier.validate_shared!(config)
@@ -81,10 +82,10 @@ defmodule Ankusa.Instance do
     Ankusa.Lifecycle.validate_config!(config)
     Ankusa.Edge.RateLimiter.validate_config!(config)
     Ankusa.Edge.Quarantine.validate_config!(config)
-    Ankusa.Dispatch.Pipeline.validate_config!(config)
     Ankusa.Store.Backup.validate_config!(config)
     Ankusa.BlobStore.validate_config!(config)
     Ankusa.HttpClient.Egress.validate_config!(config)
+    Ankusa.HttpClient.Pools.validate_config!(config)
     Ankusa.Intake.validate_config!(config)
     if config.wal == :dual, do: Ankusa.Intake.Pending.create(instance)
     opts = [instance: config.instance]
@@ -99,7 +100,7 @@ defmodule Ankusa.Instance do
         store_children(config, opts) ++
         erase_children(config, opts) ++
         backup_children(config, opts) ++
-        [{Ankusa.Sink.Http.Pool, opts}, {Ankusa.Sink.Batcher.Workers, opts}] ++
+        [{Ankusa.Sink.Batcher.Workers, opts}] ++
         source_store_children(config, opts) ++
         lifecycle_children(config, opts) ++
         edge_children(config, opts) ++
@@ -281,6 +282,7 @@ defmodule Ankusa.Instance do
             {Ankusa.Edge.RateLimiter, opts}
           ] ++
           batcher_children(config, opts) ++
+          sink_error_children(config, opts) ++
           [
             {Bandit,
              Listener.bandit_options(config, config.listener.tls) ++
@@ -319,6 +321,12 @@ defmodule Ankusa.Instance do
   # ingest publishes to the sinks in the request instead.
   defp batcher_children(%Config{wal: :none}, _opts), do: []
   defp batcher_children(_config, opts), do: [{Ankusa.Edge.BatcherSupervisor, opts}]
+
+  # `wal: :none` only: the last failed publish per sink, which the `sinks`
+  # readiness check reads (`Ankusa.Health.SinkErrors`). Before the listener, so
+  # the table exists before the first request publishes.
+  defp sink_error_children(%Config{wal: :none}, opts), do: [{Ankusa.Health.SinkErrors, opts}]
+  defp sink_error_children(_config, _opts), do: []
 
   defp routes_children(config, opts) do
     if routes?(config) do

@@ -9,9 +9,11 @@ defmodule Ankusa.Sink.GooglePubSub.Batcher do
 
     * a `200` with one id for each message: every entry is `:ok`; any other
       `200` fails every entry with `{:unexpected_reply, body}`.
-    * a transient error (`UNAVAILABLE`, `NOT_FOUND`, a `5xx`, a timeout, no
-      credentials) or a throttle (`RESOURCE_EXHAUSTED`, `429`, `503`): every
-      entry gets it, with its own retry class and jitter, and retries on its own.
+    * a transient error (`UNAVAILABLE`, a `5xx`, a timeout, no credentials), a
+      config error (`NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED`: every
+      message's fault, so a permanent `{:config, _}` for each) or a throttle
+      (`RESOURCE_EXHAUSTED`, `429`, `503`): every entry gets it, with its own retry
+      class and jitter, and retries on its own.
     * `INVALID_ARGUMENT` for one message: the request is **bisected**. Its two
       halves are published one after the other (so the entries' order is kept),
       and a half that is refused again is split again, until the refused message
@@ -128,9 +130,15 @@ defmodule Ankusa.Sink.GooglePubSub.Batcher do
   defp outcome({:ok, status, body}, items) do
     results = Enum.map(items, &GooglePubSub.error_reply(status, body, &1.attempt))
 
+    # Only `INVALID_ARGUMENT` says a message is at fault. A refused credential or
+    # topic (`{:permanent, {:config, _}}`) is every message's, and no split of
+    # the batch changes the answer.
     case results do
-      [{:error, {:permanent, reason}} | _] -> {:permanent, reason}
-      _ -> {:fail, results}
+      [{:error, {:permanent, {:pubsub, _status, "INVALID_ARGUMENT", _message} = reason}} | _] ->
+        {:permanent, reason}
+
+      _ ->
+        {:fail, results}
     end
   end
 

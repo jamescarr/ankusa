@@ -72,8 +72,9 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http listener admin metrics routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive)
-  @node_keys ~w(roles data_dir)
+  @root_keys ~w(node log http listener admin metrics routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive health)
+  @node_keys ~w(roles data_dir min_free_bytes)
+  @health_keys ~w(sink_error_window_ms)
   @log_keys ~w(level banner)
   @http_keys ~w(port max_body_bytes routing prefix store_headers)
   @store_headers_keys ~w(drop hash)
@@ -91,9 +92,9 @@ defmodule AnkusaServer.Config do
   @tls_verifies ~w(verify_none verify_peer)
   @tls_versions %{"tlsv1.2" => :"tlsv1.2", "tlsv1.3" => :"tlsv1.3"}
   @batcher_keys ~w(partitions max_batch max_commits group_commit_max_bytes group_commit_max_records group_commit_delay_ms max_delay_ms max_queue max_queue_bytes)
-  @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms sink_concurrency breaker_failures breaker_open_ms breaker_max_open_ms retry tenants)
+  @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms sink_concurrency breaker_failures breaker_open_ms breaker_max_open_ms max_retry_after_ms retry tenants)
   @dispatch_tenant_keys ~w(max_inflight max_inflight_bytes concurrency)
-  @retry_keys ~w(base_ms max_ms max_attempts jitter)
+  @retry_keys ~w(base_ms max_ms max_attempts jitter max_elapsed_ms)
   @wal_keys ~w(type publish_timeout_ms)
   @intake_types ~w(kafka)
   @intake_keys ~w(type node_id fleet topic kafka publish_timeout_ms reconcile_deadline_ms breaker_failures probe_ms retry_after_s offset_flush_ms pending max_record_bytes recover_on_boot verify_topic)
@@ -122,7 +123,7 @@ defmodule AnkusaServer.Config do
                   signing_key final_timeout_ms max_age_ms require_fresh)
   @source_store_keys ~w(type url namespace tick_ms timeout_ms load_timeout_ms)
   @lifecycle_keys ~w(sinks)
-  @egress_keys ~w(allow_insecure_http deny_cidrs allow_cidrs allow_hosts deny_hosts)
+  @egress_keys ~w(allow_insecure_http deny_cidrs allow_cidrs allow_hosts deny_hosts pools)
   @routes_keys ~w(enabled max_routes memory_budget_bytes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
   @routes_store_keys ~w(type url namespace tick_ms timeout_ms load_timeout_ms)
   # Keys a Redis store owns (`routes.store`, `source_store`); the other store
@@ -144,8 +145,9 @@ defmodule AnkusaServer.Config do
   @rate_limit_sources_keys ~w(default)
   @source_limit_keys ~w(bytes_per_second burst_bytes)
   @quarantine_keys ~w(burst rate max_bytes retention_days)
+  @egress_pools_keys ~w(pool_size pool_count pool_timeout pool_max_idle_ms conn_max_idle_ms max_pools max_pools_per_tenant protocols)
   @audit_keys ~w(retention_days max_rows max_bytes outbox_max_backlog)
-  @queue_keys ~w(dlq rocksdb)
+  @queue_keys ~w(dlq rocksdb max_oldest_due_ms)
   @dlq_keys ~w(retention_days max_rows max_bytes)
   @archive_keys ~w(retention_days)
   @rocksdb_keys ~w(block_cache_bytes bloom_bits_per_key max_open_files compaction_style rate_limiter_bytes_per_sec max_background_jobs write_buffer_bytes)
@@ -165,7 +167,7 @@ defmodule AnkusaServer.Config do
   # A rotation window needs two keys; a handful covers any overlap a provider
   # forces. More is a misconfiguration (each key costs an HMAC per hook).
   @max_secrets 8
-  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers store_headers trust_url_tenant)
+  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers max_headers forward_headers_max_bytes store_headers trust_url_tenant retry)
   @dedupe_keys ~w(preset header json ttl_seconds)
   @dedupe_presets %{
     "github" => :github,
@@ -182,12 +184,12 @@ defmodule AnkusaServer.Config do
   @verify_client_cert_keys ~w(type fingerprints subjects)
   @log_sink_keys ~w(type)
   @http_sink_keys ~w(type url method headers timeout_ms secret allow_unsigned max_response_bytes cacertfile allow_insecure_tls)
-  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_inflight idle_timeout_ms)
+  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_message_bytes max_inflight idle_timeout_ms)
   @kafka_sink_keys ~w(type brokers topic key inline_max_bytes max_record_bytes ssl sasl idle_timeout_ms)
   @sasl_keys ~w(mechanism username password)
-  @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth idle_timeout_ms)
+  @nats_sink_keys ~w(type servers subject inline_max_bytes max_message_bytes publish_timeout_ms tls auth idle_timeout_ms)
   @nats_auth_keys ~w(username password token nkey_seed jwt)
-  @redis_sink_keys ~w(type url channel inline_max_bytes publish_timeout_ms idle_timeout_ms)
+  @redis_sink_keys ~w(type url channel inline_max_bytes max_message_bytes publish_timeout_ms idle_timeout_ms)
   @batch_sink_keys ~w(batch batch_linger_ms batch_max_entries batch_max_bytes batch_queue_max batch_queue_max_bytes batch_queue_tenant_max batch_max_inflight)
   @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token) ++
                    @batch_sink_keys
@@ -540,6 +542,7 @@ defmodule AnkusaServer.Config do
 
     opts =
       node_section(doc) ++
+        health_section(doc) ++
         http_section(doc) ++
         listener_section(doc) ++
         admin_section(doc) ++
@@ -599,6 +602,26 @@ defmodule AnkusaServer.Config do
       :data_dir,
       node["data_dir"] && expect_string(node["data_dir"], ["node", "data_dir"])
     )
+  end
+
+  # Types only; the ranges are core's (`Ankusa.Config`). `node.min_free_bytes` and
+  # `health.sink_error_window_ms` are the two thresholds of what `GET /ready`
+  # checks beyond the store (`Ankusa.Health`); core keeps them in its `listener`
+  # section (`ready_min_free_bytes`, `ready_sink_error_window_ms`), because
+  # `Ankusa.Config` has no field to spare.
+  defp health_section(doc) do
+    node = section!(doc, "node", @node_keys, [])
+    health = section!(doc, "health", @health_keys, [])
+
+    [
+      listener:
+        []
+        |> put_opt(:ready_min_free_bytes, int_opt(node, "min_free_bytes", ["node"]))
+        |> put_opt(
+          :ready_sink_error_window_ms,
+          int_opt(health, "sink_error_window_ms", ["health"])
+        )
+    ]
   end
 
   # `to_atom` after `enum!`, not `to_existing_atom`: under `bin/ankusa eval`
@@ -949,6 +972,7 @@ defmodule AnkusaServer.Config do
         |> put_opt(:breaker_open_ms, int_opt(dispatch, "breaker_open_ms", ["dispatch"]))
         |> put_opt(:breaker_max_open_ms, int_opt(dispatch, "breaker_max_open_ms", ["dispatch"]))
         |> put_opt(:retry, retry_policy(retry))
+        |> put_opt(:max_retry_after_ms, int_opt(dispatch, "max_retry_after_ms", ["dispatch"]))
         |> put_opt(:tenants, dispatch_tenants(dispatch))
     ]
   end
@@ -999,13 +1023,41 @@ defmodule AnkusaServer.Config do
     if retry == %{} do
       nil
     else
-      {Ankusa.RetryPolicy.Exponential,
-       []
-       |> put_opt(:base_ms, int_opt(retry, "base_ms", path))
-       |> put_opt(:max_ms, int_opt(retry, "max_ms", path))
-       |> put_opt(:max_attempts, int_opt(retry, "max_attempts", path))
-       |> put_opt(:jitter, bool_opt(retry, "jitter", path))}
+      {Ankusa.RetryPolicy.Exponential, retry_opts(retry, path)}
     end
+  end
+
+  # `sources.<id>.retry`: options laid over the instance's `dispatch.retry`.
+  # Absent is no override; the ranges are core's (`Ankusa.RetryPolicy`), reported
+  # here with the key's path.
+  defp source_retry(source, path) do
+    case source["retry"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["retry"]
+        opts = retry_opts(section!(value, @retry_keys, path), path)
+
+        try do
+          for {key, value} <- opts,
+              do: Ankusa.RetryPolicy.validate_opt!(key, value, render_path(path))
+
+          opts
+        rescue
+          error in ArgumentError ->
+            reraise ConfigError, [message: Exception.message(error)], __STACKTRACE__
+        end
+    end
+  end
+
+  defp retry_opts(retry, path) do
+    []
+    |> put_opt(:base_ms, int_opt(retry, "base_ms", path))
+    |> put_opt(:max_ms, int_opt(retry, "max_ms", path))
+    |> put_opt(:max_attempts, int_opt(retry, "max_attempts", path))
+    |> put_opt(:jitter, bool_opt(retry, "jitter", path))
+    |> put_opt(:max_elapsed_ms, int_opt(retry, "max_elapsed_ms", path))
   end
 
   # ── wal ─────────────────────────────────────────────────────────────────────
@@ -1700,6 +1752,39 @@ defmodule AnkusaServer.Config do
     ]
   end
 
+  # ── egress.pools ────────────────────────────────────────────────────────────
+
+  # Types only; the ranges are core's (`Ankusa.Config`), so `check-config` and an
+  # embedded boot fail with the same message.
+  defp egress_pools(egress) do
+    path = ["egress", "pools"]
+    pools = section!(egress, "pools", @egress_pools_keys, ["egress"])
+
+    []
+    |> put_opt(:pool_size, int_opt(pools, "pool_size", path))
+    |> put_opt(:pool_count, int_opt(pools, "pool_count", path))
+    |> put_opt(:pool_timeout, int_opt(pools, "pool_timeout", path))
+    |> put_opt(:pool_max_idle_ms, int_opt(pools, "pool_max_idle_ms", path))
+    |> put_opt(:conn_max_idle_ms, int_opt(pools, "conn_max_idle_ms", path))
+    |> put_opt(:max_pools, int_opt(pools, "max_pools", path))
+    |> put_opt(:max_pools_per_tenant, int_opt(pools, "max_pools_per_tenant", path))
+    |> put_opt(:protocols, protocols_opt(pools, path))
+  end
+
+  # `http1` and `http2`, a list or one comma-separated string; the closed list is
+  # checked before any atom is made.
+  defp protocols_opt(pools, path) do
+    case pools["protocols"] do
+      nil ->
+        nil
+
+      value ->
+        value
+        |> string_list!(path ++ ["protocols"])
+        |> Enum.map(&String.to_existing_atom(enum!(&1, ~w(http1 http2), path ++ ["protocols"])))
+    end
+  end
+
   # ── audit ───────────────────────────────────────────────────────────────────
 
   # Types only; the range is core's (`Ankusa.Config`), so `check-config` and an
@@ -1726,14 +1811,16 @@ defmodule AnkusaServer.Config do
     dlq = section!(queue, "dlq", @dlq_keys, ["queue"])
 
     [
-      queue: [
-        dlq:
-          []
-          |> put_opt(:retention_days, int_opt(dlq, "retention_days", ["queue", "dlq"]))
-          |> put_opt(:max_rows, int_opt(dlq, "max_rows", ["queue", "dlq"]))
-          |> put_opt(:max_bytes, int_opt(dlq, "max_bytes", ["queue", "dlq"])),
-        rocksdb: rocksdb_opts(queue)
-      ]
+      queue:
+        [
+          dlq:
+            []
+            |> put_opt(:retention_days, int_opt(dlq, "retention_days", ["queue", "dlq"]))
+            |> put_opt(:max_rows, int_opt(dlq, "max_rows", ["queue", "dlq"]))
+            |> put_opt(:max_bytes, int_opt(dlq, "max_bytes", ["queue", "dlq"])),
+          rocksdb: rocksdb_opts(queue)
+        ]
+        |> put_opt(:max_oldest_due_ms, int_opt(queue, "max_oldest_due_ms", ["queue"]))
     ]
   end
 
@@ -1801,7 +1888,16 @@ defmodule AnkusaServer.Config do
     end
   end
 
-  defp egress_section(doc), do: [egress: Map.new(egress_given(doc))]
+  # `egress.pools` is core's, not part of the policy the sinks' URLs are judged
+  # by: it goes to `Ankusa.Config` only, which merges it over its defaults.
+  defp egress_section(doc) do
+    given = Map.new(egress_given(doc))
+
+    case egress_pools(section!(doc, "egress", @egress_keys, [])) do
+      [] -> [egress: given]
+      pools -> [egress: Map.put(given, :pools, Map.new(pools))]
+    end
+  end
 
   defp egress_policy!(doc) do
     Map.merge(Ankusa.HttpClient.Egress.default_policy(), Map.new(egress_given(doc)))
@@ -1963,8 +2059,14 @@ defmodule AnkusaServer.Config do
       |> Keyword.put(:sinks, sinks!(source, path))
       |> put_opt(:dedupe, dedupe(source, path))
       |> put_opt(:forward_headers, forward_headers(source, path))
+      |> put_opt(:max_headers, positive_int_opt(source, "max_headers", path))
+      |> put_opt(
+        :forward_headers_max_bytes,
+        positive_int_opt(source, "forward_headers_max_bytes", path)
+      )
       |> put_opt(:store_headers, store_headers(source, path))
       |> put_opt(:trust_url_tenant, bool_opt(source, "trust_url_tenant", path))
+      |> put_opt(:retry, source_retry(source, path))
 
     check_sink_schemes!(opts[:sinks], egress, path)
     opts
@@ -2061,6 +2163,21 @@ defmodule AnkusaServer.Config do
       other ->
         raise ConfigError,
           message: type_error(path ++ ["forward_headers"], "a list of header names", other)
+    end
+  end
+
+  # Like `int_opt/3`, for keys that name a size or a count: zero and below are
+  # a misconfiguration, refused with the key's dotted path.
+  defp positive_int_opt(map, key, path) do
+    case int_opt(map, key, path) do
+      nil ->
+        nil
+
+      n when n > 0 ->
+        n
+
+      n ->
+        raise ConfigError, message: "#{render_path(path ++ [key])}: must be > 0, got #{n}"
     end
   end
 
@@ -2523,6 +2640,7 @@ defmodule AnkusaServer.Config do
          |> put_opt(:exchange_type, atom_enum_opt(sink, "exchange_type", @exchange_types, path))
          |> put_opt(:routing_key, string_opt(sink, "routing_key", path))
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+         |> put_opt(:max_message_bytes, positive_int_opt(sink, "max_message_bytes", path))
          |> put_opt(:max_inflight, int_opt(sink, "max_inflight", path))
          |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))}
 
@@ -2550,6 +2668,7 @@ defmodule AnkusaServer.Config do
             subject: required_string!(sink, "subject", path)
           ]
           |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+          |> put_opt(:max_message_bytes, positive_int_opt(sink, "max_message_bytes", path))
           |> put_opt(:publish_timeout_ms, int_opt(sink, "publish_timeout_ms", path))
           |> put_opt(:tls, bool_opt(sink, "tls", path))
           |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))
@@ -2565,46 +2684,54 @@ defmodule AnkusaServer.Config do
            channel: required_string!(sink, "channel", path)
          ]
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+         |> put_opt(:max_message_bytes, positive_int_opt(sink, "max_message_bytes", path))
          |> put_opt(:publish_timeout_ms, int_opt(sink, "publish_timeout_ms", path))
          |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))}
 
       "sqs" ->
         check_keys!(sink, @sqs_sink_keys, path)
 
-        {Ankusa.Sink.SQS,
-         [
-           queue_url: required_string!(sink, "queue_url", path),
-           region: required_string!(sink, "region", path)
-         ]
-         |> put_opt(:endpoint, string_opt(sink, "endpoint", path))
-         |> put_opt(:message_group_id, string_opt(sink, "message_group_id", path))
-         |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
-         |> put_opt(:max_message_bytes, int_opt(sink, "max_message_bytes", path))
-         |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))
-         |> put_opt(:access_key_id, string_opt(sink, "access_key_id", path))
-         |> put_opt(:secret_access_key, string_opt(sink, "secret_access_key", path))
-         |> put_opt(:session_token, string_opt(sink, "session_token", path))
-         |> Kernel.++(batch_opts(sink, path))}
+        opts =
+          [
+            queue_url: required_string!(sink, "queue_url", path),
+            region: required_string!(sink, "region", path)
+          ]
+          |> put_opt(:endpoint, string_opt(sink, "endpoint", path))
+          |> put_opt(:message_group_id, string_opt(sink, "message_group_id", path))
+          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+          |> put_opt(:max_message_bytes, int_opt(sink, "max_message_bytes", path))
+          |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))
+          |> put_opt(:access_key_id, string_opt(sink, "access_key_id", path))
+          |> put_opt(:secret_access_key, string_opt(sink, "secret_access_key", path))
+          |> put_opt(:session_token, string_opt(sink, "session_token", path))
+          |> Kernel.++(batch_opts(sink, path))
+
+        validate_batch_sink!(Ankusa.Sink.SQS, opts, path)
+        {Ankusa.Sink.SQS, opts}
 
       "google_pubsub" ->
         check_keys!(sink, @google_pubsub_sink_keys, path)
 
-        {Ankusa.Sink.GooglePubSub,
-         ([
-            project: required_string!(sink, "project", path),
-            topic: required_string!(sink, "topic", path)
-          ]
-          |> put_opt(:endpoint, string_opt(sink, "endpoint", path))
-          |> put_opt(:ordering_key, string_opt(sink, "ordering_key", path))
-          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
-          |> put_opt(:max_message_bytes, int_opt(sink, "max_message_bytes", path))
-          |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))) ++
-           batch_opts(sink, path) ++ gcp_auth!(sink, path)}
+        opts =
+          ([
+             project: required_string!(sink, "project", path),
+             topic: required_string!(sink, "topic", path)
+           ]
+           |> put_opt(:endpoint, string_opt(sink, "endpoint", path))
+           |> put_opt(:ordering_key, string_opt(sink, "ordering_key", path))
+           |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+           |> put_opt(:max_message_bytes, int_opt(sink, "max_message_bytes", path))
+           |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))) ++
+            batch_opts(sink, path) ++ gcp_auth!(sink, path)
+
+        validate_batch_sink!(Ankusa.Sink.GooglePubSub, opts, path)
+        {Ankusa.Sink.GooglePubSub, opts}
     end
   end
 
   # The batching options of `Ankusa.Sink.SQS` and `Ankusa.Sink.GooglePubSub`
-  # (`Ankusa.Sink.Batcher`).
+  # (`Ankusa.Sink.Batcher`). Types only here; the ranges are the sink's, checked
+  # by `validate_batch_sink!/3`.
   defp batch_opts(sink, path) do
     [
       batch: bool_opt(sink, "batch", path),
@@ -2618,7 +2745,14 @@ defmodule AnkusaServer.Config do
     ]
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
-    end
+
+  # A batch option out of range fails at load, naming the sink, like a bad
+  # `Sink.Http` (`validate_http_sink!/2`), not at the first delivery.
+  defp validate_batch_sink!(mod, opts, path) do
+    mod.validate_opts!(opts)
+  rescue
+    error in ArgumentError ->
+      reraise ConfigError, [message: "#{render_path(path)}: #{error.message}"], __STACKTRACE__
   end
 
   defp headers(nil, _path), do: nil

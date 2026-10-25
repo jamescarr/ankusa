@@ -65,6 +65,8 @@ defmodule Ankusa.Sink.Redis do
                               (`rediss://` for TLS), passed to `Redix.start_link/2`
     * `:channel`            — required; a string, or `(Envelope.t() -> String.t())`
     * `:inline_max_bytes`   — default 64 KiB (65,536), configurable
+    * `:max_message_bytes`  — the largest message published; default
+                              `536_870_912`, Redis's `proto-max-bulk-len` (512 MiB)
     * `:publish_timeout_ms` — how long `deliver/3` waits for the `PUBLISH`
                               reply; default `5_000`
     * `:idle_timeout_ms`    — close the connection after this long without a
@@ -73,30 +75,34 @@ defmodule Ankusa.Sink.Redis do
                               1 s. See `Ankusa.Sink.Reaper`
   """
 
-  @behaviour Ankusa.Sink
+  use Ankusa.Sink.Messaging
 
   alias Ankusa.Envelope
-  alias Ankusa.Sink.Description
-  alias Ankusa.Sink.Message
+  alias Ankusa.Sink.{Connections, Description, Messaging}
   alias Ankusa.Sink.Reaper
 
   @default_publish_timeout_ms 5_000
 
+  @default_max_message_bytes 536_870_912
+
+  @impl Ankusa.Sink.Messaging
+  def max_message_bytes(opts),
+    do: Keyword.get(opts, :max_message_bytes, @default_max_message_bytes)
+
   @impl true
-  def deliver(%Envelope{} = env, ctx, opts) do
+  def publish(payload, %Envelope{} = env, ctx, opts) do
     url = Keyword.fetch!(opts, :url)
     timeout = Keyword.get(opts, :publish_timeout_ms, @default_publish_timeout_ms)
 
-    with {:ok, conn} <- ensure_connection(ctx.instance, url),
-         {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)) do
-      idle = Reaper.idle_ms(opts, timeout + 1_000)
-      :ok = Reaper.touch(Ankusa.Sink.Redis.Reaper, reaper_key(ctx.instance, url), conn, idle)
-      publish(conn, channel(env, opts), payload, timeout)
+    with {:ok, conn} <- connection(ctx.instance, url, Reaper.idle_ms(opts, timeout + 1_000)) do
+      publish_channel(
+        conn,
+        Messaging.resolve(Keyword.fetch!(opts, :channel), env),
+        payload,
+        timeout
+      )
     end
   end
-
-  @impl true
-  def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
 
   @impl true
   def describe(subject, opts) do
@@ -117,12 +123,7 @@ defmodule Ankusa.Sink.Redis do
 
   # Only a configured static channel is a fixed address; a function computes it
   # per hook, so the document cannot name it.
-  defp address(_subject, opts) do
-    case Keyword.fetch!(opts, :channel) do
-      channel when is_binary(channel) -> channel
-      fun when is_function(fun, 1) -> nil
-    end
-  end
+  defp address(_subject, opts), do: Messaging.static(Keyword.fetch!(opts, :channel))
 
   # Pub/sub keeps no copy, so a hook this sink accepts can be lost to a
   # subscriber that disconnects afterwards (see the moduledoc). Dispatch must
@@ -132,7 +133,7 @@ defmodule Ankusa.Sink.Redis do
 
   # `PUBLISH`'s reply is the number of subscribers the message was handed to.
   # Zero of them is the failure mode this sink exists to make visible.
-  defp publish(conn, channel, payload, timeout) do
+  defp publish_channel(conn, channel, payload, timeout) do
     case command(conn, ["PUBLISH", channel, payload], timeout) do
       {:ok, 0} ->
         {:error, :no_subscribers}
@@ -167,21 +168,21 @@ defmodule Ankusa.Sink.Redis do
     :exit, _reason -> {:error, :not_connected}
   end
 
-  defp channel(env, opts) do
-    case Keyword.fetch!(opts, :channel) do
-      channel when is_binary(channel) -> channel
-      fun when is_function(fun, 1) -> fun.(env)
-    end
-  end
-
   # ── connection lifecycle ────────────────────────────────────────────────
 
-  # The registry lookup first: the common case must not serialize every
-  # delivery through the DynamicSupervisor.
-  defp ensure_connection(instance, url) do
-    case Ankusa.whereis(instance, connection_key(url)) do
-      pid when is_pid(pid) -> {:ok, pid}
-      nil -> start_connection(instance, url)
+  defp connection(instance, url, idle_ms) do
+    key = connection_key(url)
+
+    case Connections.ensure(
+           __MODULE__,
+           reaper_key(instance, url),
+           fn -> Ankusa.whereis(instance, key) end,
+           fn -> redix_spec(instance, key, url) end,
+           idle_ms
+         ) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, %Redix.ConnectionError{reason: reason}} -> {:error, {:connection, reason}}
+      {:error, reason} -> {:error, {:connection, reason}}
     end
   end
 
@@ -189,11 +190,10 @@ defmodule Ankusa.Sink.Redis do
   # with backoff; the start never waits on the network. `:temporary` because a
   # connection that does exit (a bad URL) is started again by the next
   # `deliver/3`, not crash-looped here.
-  defp start_connection(instance, url) do
-    key = connection_key(url)
+  defp redix_spec(instance, key, url) do
     password = {__MODULE__, :connection_password, [fn -> Ankusa.Redis.Options.password(url) end]}
 
-    child = %{
+    %{
       id: key,
       start:
         {Redix, :start_link,
@@ -203,13 +203,6 @@ defmodule Ankusa.Sink.Redis do
          ]},
       restart: :temporary
     }
-
-    case DynamicSupervisor.start_child(Ankusa.Sink.Redis.Supervisor, child) do
-      {:ok, pid} -> {:ok, pid}
-      {:error, {:already_started, pid}} -> {:ok, pid}
-      {:error, %Redix.ConnectionError{reason: reason}} -> {:error, {:connection, reason}}
-      {:error, reason} -> {:error, {:connection, reason}}
-    end
   end
 
   @doc false

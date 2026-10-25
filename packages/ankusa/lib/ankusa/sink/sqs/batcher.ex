@@ -140,7 +140,7 @@ defmodule Ankusa.Sink.SQS.Batcher do
 
     headers =
       [
-        {"host", authority(url)},
+        {"host", HttpClient.authority(url)},
         {"content-type", "application/x-amz-json-1.0"},
         {"x-amz-target", target}
       ] ++
@@ -175,17 +175,10 @@ defmodule Ankusa.Sink.SQS.Batcher do
     case Keyword.get(opts, :endpoint) do
       nil ->
         url = Keyword.fetch!(opts, :queue_url)
-        URI.parse(url).scheme <> "://" <> authority(url)
+        URI.parse(url).scheme <> "://" <> HttpClient.authority(url)
 
       endpoint ->
         String.trim_trailing(endpoint, "/")
     end
-  end
-
-  @doc false
-  def authority(url) do
-    %URI{host: host, port: port, scheme: scheme} = URI.parse(url)
-    default = if scheme == "https", do: 443, else: 80
-    if port == default, do: host, else: "#{host}:#{port}"
   end
 end

@@ -13,8 +13,10 @@ defmodule Ankusa.Config do
             port: 4000,
             # limits for every HTTP listener this instance runs (the edge, the admin
             # and route-management APIs, the claim-check gateway, the metrics
-            # listener), and the TLS block of the ingest listener (see
-            # `Ankusa.Listener`).
+            # listener), the TLS block of the ingest listener (see
+            # `Ankusa.Listener`), and the two thresholds of the `/ready` every
+            # listener serves beyond the store (`Ankusa.Health`; YAML
+            # `health.sink_error_window_ms` and `node.min_free_bytes`).
             listener: %{
               # nil, or %{certfile, keyfile, cacertfile, verify, versions, ciphers}
               tls: nil,
@@ -33,7 +35,18 @@ defmodule Ankusa.Config do
               max_requests_per_connection: 1_000,
               max_header_count: 64,
               max_header_length: 16_384,
-              http2: false
+              http2: false,
+              # `wal: :none` only: a sink whose last publish failed within this
+              # long ago makes `/ready` answer 503 (`sinks: "failing"`). The
+              # provider's retry is the only retry in that mode, so a broker that
+              # refuses every publish should leave the load balancer. An integer
+              # >= 1.
+              ready_sink_error_window_ms: 5_000,
+              # nil | the free bytes `data_dir`'s file system must keep: below it
+              # `/ready` answers 503 (`disk: "failing"`). Needs `:os_mon` (the
+              # server image starts it); without it the free space cannot be
+              # measured and the check fails. nil = no disk check. An integer >= 1.
+              ready_min_free_bytes: nil
             },
             # {module, opts} implementing Ankusa.RouteResolver (URL scheme → identity)
             route_resolver: {Ankusa.RouteResolver.Path, []},
@@ -115,7 +128,14 @@ defmodule Ankusa.Config do
               breaker_failures: 5,
               breaker_open_ms: 30_000,
               breaker_max_open_ms: 300_000,
+              # `{module, opts}` implementing `Ankusa.RetryPolicy`. Whatever the
+              # policy, `max_elapsed_ms` (default 24 h) is the wall-clock horizon:
+              # a delivery still failing that long after its first attempt is
+              # dead-lettered. A source's own `retry:` overrides these opts.
               retry: {Ankusa.RetryPolicy.Exponential, []},
+              # the longest pause a sink's `Retry-After` / throttle answer can
+              # impose on one retry (the retry horizon still ends it)
+              max_retry_after_ms: 3_600_000,
               # Per-tenant shares of the three global limits above, so one tenant
               # cannot exhaust what everyone else needs: `default` applies to every
               # tenant, `tenants["acme"]` (a tenant id string) overrides any of its
@@ -138,6 +158,11 @@ defmodule Ankusa.Config do
             # and the catalogue can find it. A DLQ over a ceiling with nothing
             # archived refuses new hooks with `503 dlq_full` instead of deleting
             # an acked one. Integers >= 1.
+            #
+            # `max_oldest_due_ms` is the readiness threshold on the backlog: once
+            # the oldest due row has waited longer, `GET /ready` says
+            # `backlog: "failing"` (a label; the node stays ready). `nil` = no
+            # backlog check. An integer >= 1.
             #
             # `rocksdb` is the RocksDB settings of the node's store
             # (`Ankusa.Store`), read when the database opens (a change needs a
@@ -163,6 +188,7 @@ defmodule Ankusa.Config do
             # `/v1/config` shows the section as it is.
             queue: %{
               dlq: %{retention_days: 30, max_rows: 10_000_000, max_bytes: 53_687_091_200},
+              max_oldest_due_ms: nil,
               rocksdb: %{
                 block_cache_bytes: 64 * 1024 * 1024,
                 bloom_bits_per_key: 10,
@@ -553,6 +579,7 @@ defmodule Ankusa.Config do
             # `allow_hosts` exempts it; `deny_hosts` names are refused before any
             # lookup. `allow_cidrs` is how a deployment opts in to the private
             # network its sinks live on; `deny_cidrs` replaces the default list.
+            # `pools` bounds the connections that outbound HTTP uses (below).
             egress: %{
               allow_insecure_http: false,
               deny_cidrs: [
@@ -570,7 +597,31 @@ defmodule Ankusa.Config do
               ],
               allow_cidrs: [],
               allow_hosts: [],
-              deny_hosts: ["metadata.google.internal"]
+              deny_hosts: ["metadata.google.internal"],
+              # The node's outbound HTTP connection pools (`Ankusa.HttpClient.Pools`):
+              # one Finch pool per origin (per connection profile), owned by the
+              # instance, bounded in connections, count and idle time, and closed when
+              # idle. `pool_size` connections (HTTP/1) per pool and `pool_count`
+              # shards: keep `pool_size * pool_count` at or above `dispatch.concurrency`
+              # when several sinks post to one receiver (boot warns when it is not).
+              # `pool_timeout` is how long a request waits for a free connection. A
+              # pool idle for `pool_max_idle_ms` is closed; a connection idle for
+              # `conn_max_idle_ms` is not reused. `max_pools` caps the live pools of
+              # the instance and `max_pools_per_tenant` those one tenant's deliveries
+              # opened: past either, the least recently used idle pool (of that
+              # tenant, for its own cap) is closed, and when none is idle a request is
+              # refused as `{:error, {:unavailable, :pool_limit}}` (retried).
+              # `protocols` is the HTTP versions a connection may negotiate (ALPN).
+              pools: %{
+                pool_size: 32,
+                pool_count: 1,
+                pool_timeout: 5_000,
+                pool_max_idle_ms: 60_000,
+                conn_max_idle_ms: 30_000,
+                max_pools: 1_024,
+                max_pools_per_tenant: 256,
+                protocols: [:http1, :http2]
+              }
             },
             # secrets at rest (`Ankusa.Crypto.Envelope`): the key-encryption key
             # that source specs' secrets (verify secrets, sink credentials) are
@@ -623,7 +674,7 @@ defmodule Ankusa.Config do
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
   sections (`:listener`, `:batcher`, `:dispatch`, `:storage`, `:claim_check`,
   `:backup`, `:admin`, `:metrics`, `:routes`, `:rate_limits`, `:dedupe`, `:fleet`,
-  `:quarantine`, `:tenants`, `:lifecycle`, `:egress`, `:secrets`) over the defaults. Every `tls` block (`listener.tls`,
+  `:quarantine`, `:tenants`, `:lifecycle`, `:egress`, `:secrets`) over the defaults (`egress.pools` is merged one level down). Every `tls` block (`listener.tls`,
   `admin.tls`, `routes.admin.tls`, `claim_check.tls`, `metrics.tls`) is
   validated and normalised by `Ankusa.Listener.normalize_tls!/2`, and
   `listener.num_acceptors: nil` becomes two per scheduler.
@@ -839,10 +890,13 @@ defmodule Ankusa.Config do
     {[:claim_check, :read_cache_max_entry_bytes], "claim_check.read_cache_max_entry_bytes"},
     {[:backup, :interval_ms], "backup.interval_ms"},
     {[:backup, :keep], "backup.keep"},
+    {[:listener, :ready_sink_error_window_ms], "listener.ready_sink_error_window_ms"},
     {[:backup, :timeout_ms], "backup.timeout_ms"},
     {[:backup, :final_timeout_ms], "backup.final_timeout_ms"},
     {[:admin, :gauge_interval_ms], "admin.gauge_interval_ms"},
     {[:metrics, :max_series_per_metric], "metrics.max_series_per_metric"},
+    {[:egress, :pools, :pool_max_idle_ms], "egress.pools.pool_max_idle_ms"},
+    {[:egress, :pools, :conn_max_idle_ms], "egress.pools.conn_max_idle_ms"},
     {[:routes, :max_routes], "routes.max_routes"},
     {[:fleet, :pending_ttl_ms], "fleet.pending_ttl_ms"},
     {[:fleet, :breaker_window_ms], "fleet.breaker_window_ms"},
@@ -960,7 +1014,9 @@ defmodule Ankusa.Config do
 
     for {path, key} <- [
           {[:claim_check, :retention_days], "claim_check.retention_days"},
-          {[:claim_check, :bucket_expiry_days], "claim_check.bucket_expiry_days"}
+          {[:claim_check, :bucket_expiry_days], "claim_check.bucket_expiry_days"},
+          {[:listener, :ready_min_free_bytes], "listener.ready_min_free_bytes"},
+          {[:queue, :max_oldest_due_ms], "queue.max_oldest_due_ms"}
         ] do
       check!(config, path, key, "nil or an integer >= 1", &nil_or_positive?/1)
     end
@@ -1026,6 +1082,7 @@ defmodule Ankusa.Config do
       &(&1 == "" or (is_binary(&1) and Regex.match?(@key_prefix, &1)))
     )
 
+    validate_pools!(config)
     validate_fleet!(config)
     validate_backup!(config)
 
@@ -1215,6 +1272,34 @@ defmodule Ankusa.Config do
     end
   end
 
+  # The outbound pools' bounds (`Ankusa.HttpClient.Pools`). The positive-integer
+  # check above runs first; these are the upper bounds and the protocol list.
+  defp validate_pools!(config) do
+    for {key, max} <- [
+          pool_size: 1_024,
+          pool_count: 64,
+          pool_timeout: 600_000,
+          max_pools: 65_536,
+          max_pools_per_tenant: 65_536
+        ] do
+      check!(
+        config,
+        [:egress, :pools, key],
+        "egress.pools.#{key}",
+        "an integer from 1 to #{max}",
+        &(is_integer(&1) and &1 in 1..max)
+      )
+    end
+
+    check!(
+      config,
+      [:egress, :pools, :protocols],
+      "egress.pools.protocols",
+      "a non-empty list of :http1 and :http2",
+      &(is_list(&1) and &1 != [] and Enum.all?(&1, fn p -> p in [:http1, :http2] end))
+    )
+  end
+
   # The fleet block's own ranges, and the rule that a fleet scope has a store to
   # scope into.
   defp validate_fleet!(config) do
@@ -1329,6 +1414,13 @@ defmodule Ankusa.Config do
             rocksdb: %{rocksdb | write_buffer_bytes: buffers}
         }
     }
+  end
+
+  # `egress.pools` is one level down: a partial `pools` keeps the other defaults.
+  defp put_section(acc, :egress, v) do
+    merged = merge_known!(acc.egress, v, "egress")
+    pools = merge_known!(acc.egress.pools, merged.pools, "egress.pools")
+    %{acc | egress: %{merged | pools: pools}}
   end
 
   defp put_section(acc, k, v) do

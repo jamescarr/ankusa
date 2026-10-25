@@ -23,7 +23,9 @@ defmodule Ankusa.Sink.Kafka do
   (`required_acks: -1`, not configurable). A record the broker will never take
   is `{:error, {:permanent, reason}}`, dead-lettered at once (see "Error
   classes" in `Ankusa.Sink`): a value plus key over `:max_record_bytes` is
-  refused before it is produced, and a produce the broker answers with
+  refused before it is produced (a body that cannot fit at all; a message whose
+  inline base64 would not fit is checked in instead, see
+  `Ankusa.Sink.Message`), and a produce the broker answers with
   `message_too_large`, `invalid_message` or `invalid_record` is permanent too.
   Anything else — unreachable broker, unknown topic, timeout, failed claim
   check — returns `{:error, reason}` into the source's `Ankusa.RetryPolicy`,
@@ -77,11 +79,10 @@ defmodule Ankusa.Sink.Kafka do
     * `:ssl`, `:sasl`       — passed to brod's client config when given
   """
 
-  @behaviour Ankusa.Sink
+  use Ankusa.Sink.Messaging
 
   alias Ankusa.Envelope
-  alias Ankusa.Sink.Description
-  alias Ankusa.Sink.Message
+  alias Ankusa.Sink.{Connections, Description, Message, Messaging}
   alias Ankusa.Sink.Reaper
 
   @default_max_record_bytes 1_000_000
@@ -89,18 +90,20 @@ defmodule Ankusa.Sink.Kafka do
   # Produce error codes no retry can fix.
   @permanent_codes [:message_too_large, :invalid_message, :invalid_record]
 
+  # The message ceiling is the record's: `Message.encode/4` checks the value
+  # against it before `publish/4`, which then adds the key.
+  @impl Ankusa.Sink.Messaging
+  def max_message_bytes(opts), do: Keyword.get(opts, :max_record_bytes, @default_max_record_bytes)
+
   @impl true
-  def deliver(%Envelope{} = env, ctx, opts) do
+  def publish(payload, %Envelope{} = env, ctx, opts) do
     topic = Keyword.fetch!(opts, :topic)
     timeout = Keyword.get(opts, :produce_timeout_ms, 5_000)
     client = client_id(ctx.instance, Keyword.get(opts, :client, :default))
-    max = Keyword.get(opts, :max_record_bytes, @default_max_record_bytes)
+    key = Messaging.resolve(Keyword.get(opts, :key, &default_key/1), env)
 
-    with {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)),
-         key = key(env, opts),
-         :ok <- fits(payload, key, max),
-         {:ok, pid} <- ensure_client(client, opts, timeout),
-         :ok <- Reaper.touch(Ankusa.Sink.Kafka.Reaper, client, pid, idle_ms(opts, timeout)),
+    with :ok <- Message.fits(byte_size(payload) + byte_size(key || ""), max_message_bytes(opts)),
+         {:ok, _pid} <- client(client, opts, timeout),
          {:ok, partition} <- partition(client, topic, key),
          {:ok, call_ref} <-
            :brod.produce(client, topic, partition, key, record(env, ctx, payload)) do
@@ -115,14 +118,6 @@ defmodule Ankusa.Sink.Kafka do
   # under one.
   defp idle_ms(opts, timeout), do: Reaper.idle_ms(opts, timeout + 1_000)
 
-  defp fits(payload, key, max) do
-    size = byte_size(payload) + byte_size(key || "")
-
-    if size > max,
-      do: {:error, {:permanent, {:message_too_large, size, max}}},
-      else: :ok
-  end
-
   # brod reports a broker's error code as an atom somewhere inside the reason
   # (`{:producer_down, {:not_retriable, {_, :message_too_large}}}` and the like).
   defp classify(reason) do
@@ -135,15 +130,16 @@ defmodule Ankusa.Sink.Kafka do
   defp permanent?(_other), do: false
 
   @impl true
-  def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
-
-  @impl true
   def describe(subject, opts) do
     topic = Keyword.fetch!(opts, :topic)
 
     %Description{
       protocol: "kafka",
-      host: opts |> Keyword.fetch!(:brokers) |> Enum.map_join(",", &broker/1),
+      host:
+        opts
+        |> Keyword.fetch!(:brokers)
+        |> Messaging.endpoints()
+        |> Enum.map_join(",", fn {host, port} -> "#{host}:#{port}" end),
       address: topic,
       channel_bindings: %{"kafka" => %{"topic" => topic, "bindingVersion" => "0.5.0"}},
       message_bindings: %{
@@ -152,9 +148,6 @@ defmodule Ankusa.Sink.Kafka do
       ankusa_headers: true
     }
   end
-
-  defp broker({host, port}), do: "#{host}:#{port}"
-  defp broker(host_port) when is_binary(host_port), do: host_port
 
   # `subject.tenant_id` is nil when the tenant varies per hook, so the default
   # key is only a single constant when the tenant is known up front.
@@ -192,33 +185,8 @@ defmodule Ankusa.Sink.Kafka do
     end
   end
 
-  defp record(env, ctx, payload) do
-    %{
-      ts: env.received_at,
-      value: payload,
-      headers:
-        [
-          {"ankusa_id", env.id},
-          {"ankusa_source_id", env.source_id},
-          {"ankusa_tenant_id", env.tenant_id || ""},
-          {"ankusa_message_version", "1"},
-          {"ankusa_idempotency_key", Ankusa.Envelope.idempotency_key(env)},
-          {"content_type", "application/json"}
-        ]
-        |> maybe_header("ankusa_dedupe_key", env.dedupe_key)
-        |> maybe_header("ankusa_replay_id", ctx[:replay_id])
-    }
-  end
-
-  defp maybe_header(headers, _name, nil), do: headers
-  defp maybe_header(headers, name, value) when is_binary(value), do: headers ++ [{name, value}]
-
-  defp key(env, opts) do
-    case Keyword.get(opts, :key, &default_key/1) do
-      key when is_binary(key) -> key
-      fun when is_function(fun, 1) -> fun.(env)
-    end
-  end
+  defp record(env, ctx, payload),
+    do: %{ts: env.received_at, value: payload, headers: Message.headers(env, ctx)}
 
   defp default_key(env), do: "#{env.tenant_id}/#{env.source_id}"
 
@@ -226,17 +194,24 @@ defmodule Ankusa.Sink.Kafka do
 
   defp client_id(instance, client), do: :"ankusa_kafka.#{instance}.#{client}"
 
-  # `whereis` first: the common case must not serialize every delivery
-  # through the DynamicSupervisor.
-  defp ensure_client(client, opts, timeout) do
-    case Process.whereis(client) do
-      pid when is_pid(pid) -> {:ok, pid}
-      nil -> start_client(client, opts, timeout)
-    end
+  # Registered globally, as brod requires; the client id is also the reaper's
+  # key, and it names no broker or credential.
+  defp client(client, opts, timeout) do
+    Connections.ensure(
+      __MODULE__,
+      client,
+      fn -> Process.whereis(client) end,
+      fn -> client_spec(client, opts, timeout) end,
+      idle_ms(opts, timeout)
+    )
   end
 
-  defp start_client(client, opts, timeout) do
-    endpoints = opts |> Keyword.fetch!(:brokers) |> Enum.map(&endpoint/1)
+  defp client_spec(client, opts, timeout) do
+    endpoints =
+      opts
+      |> Keyword.fetch!(:brokers)
+      |> Messaging.endpoints()
+      |> Enum.map(fn {host, port} -> {to_charlist(host), port} end)
 
     config =
       [
@@ -254,23 +229,10 @@ defmodule Ankusa.Sink.Kafka do
     # Restarting it here would crash-loop past the supervisor's restart
     # intensity and take the application down; the next `deliver/3` starts
     # it again instead, inside the source's retry policy.
-    child = %{
+    %{
       id: client,
       start: {:brod_client, :start_link, [endpoints, client, config]},
       restart: :temporary
     }
-
-    case DynamicSupervisor.start_child(Ankusa.Sink.Kafka.Supervisor, child) do
-      {:ok, pid} -> {:ok, pid}
-      {:error, {:already_started, pid}} -> {:ok, pid}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp endpoint({host, port}), do: {to_charlist(host), port}
-
-  defp endpoint(host_port) when is_binary(host_port) do
-    [host, port] = String.split(host_port, ":", parts: 2)
-    {to_charlist(host), String.to_integer(port)}
   end
 end

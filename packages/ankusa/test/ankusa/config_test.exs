@@ -34,6 +34,51 @@ defmodule Ankusa.ConfigTest do
     assert config.batcher.max_queue == 5
   end
 
+  describe "the egress.pools section" do
+    test "defaults to bounded, idle-swept pools" do
+      assert %{
+               pool_size: 32,
+               pool_count: 1,
+               pool_timeout: 5_000,
+               pool_max_idle_ms: 60_000,
+               conn_max_idle_ms: 30_000,
+               max_pools: 1_024,
+               max_pools_per_tenant: 256,
+               protocols: [:http1, :http2]
+             } = Config.new().egress.pools
+    end
+
+    test "merges over the defaults, and every number is range checked" do
+      config = Config.new(egress: [pools: [pool_size: 4]])
+
+      assert %{pool_size: 4, max_pools: 1_024} = config.egress.pools
+      # The policy beside it keeps its defaults, and a policy key keeps the pools'.
+      assert config.egress.deny_hosts == ["metadata.google.internal"]
+      assert %{pool_size: 32} = Config.new(egress: [allow_hosts: ["hooks.example"]]).egress.pools
+
+      for {key, bad, message} <- [
+            {:pool_size, 0, "an integer from 1 to 1024"},
+            {:pool_size, 1_025, "an integer from 1 to 1024"},
+            {:pool_count, 65, "an integer from 1 to 64"},
+            {:pool_timeout, 600_001, "an integer from 1 to 600000"},
+            {:max_pools, 65_537, "an integer from 1 to 65536"},
+            {:max_pools_per_tenant, 0, "an integer from 1 to 65536"},
+            {:pool_max_idle_ms, 0, "a positive integer"},
+            {:conn_max_idle_ms, -1, "a positive integer"},
+            {:protocols, [], "a non-empty list of :http1 and :http2"},
+            {:protocols, [:http3], "a non-empty list of :http1 and :http2"}
+          ] do
+        assert_raise ArgumentError, ~r/egress\.pools\.#{key} must be #{message}/, fn ->
+          Config.new(egress: [pools: [{key, bad}]])
+        end
+      end
+
+      assert_raise ArgumentError, ~r/egress\.pools\.pool_sizes/, fn ->
+        Config.new(egress: [pools: [pool_sizes: 1]])
+      end
+    end
+  end
+
   describe "the routes section" do
     test "defaults to off, with an ETS store and no trusted proxies" do
       config = Config.new()
@@ -517,6 +562,80 @@ defmodule Ankusa.ConfigTest do
       end
     end
 
+    test "max_retry_after_ms defaults to 1 h and is an integer from 1 s to 24 h" do
+      assert Config.new().dispatch.max_retry_after_ms == 3_600_000
+
+      for ok <- [1_000, 3_600_000, 86_400_000] do
+        assert :ok =
+                 Ankusa.Dispatch.Pipeline.validate_config!(
+                   Config.new(dispatch: %{max_retry_after_ms: ok})
+                 )
+      end
+
+      for bad <- [0, 999, 86_400_001, -1, 1.5, nil, "3600000"] do
+        assert_raise ArgumentError,
+                     ~r/dispatch.max_retry_after_ms must be an integer from 1000 to 86400000, got #{Regex.escape(inspect(bad))}/,
+                     fn ->
+                       Ankusa.Dispatch.Pipeline.validate_config!(
+                         Config.new(dispatch: %{max_retry_after_ms: bad})
+                       )
+                     end
+      end
+    end
+
+    test "dispatch.retry's max_elapsed_ms defaults to 24 h and is an integer from 1 s to 30 days" do
+      assert Ankusa.RetryPolicy.max_elapsed_ms(elem(Config.new().dispatch.retry, 1)) == 86_400_000
+
+      for ok <- [1_000, 86_400_000, 2_592_000_000] do
+        retry = {Ankusa.RetryPolicy.Exponential, [max_elapsed_ms: ok]}
+
+        assert :ok =
+                 Ankusa.Dispatch.Pipeline.validate_config!(Config.new(dispatch: %{retry: retry}))
+      end
+
+      for bad <- [0, 999, 2_592_000_001, -1, 1.5, nil, "86400000"] do
+        retry = {Ankusa.RetryPolicy.Exponential, [max_elapsed_ms: bad]}
+
+        assert_raise ArgumentError,
+                     ~r/dispatch.retry.max_elapsed_ms must be an integer from 1000 to 2592000000, got #{Regex.escape(inspect(bad))}/,
+                     fn ->
+                       Ankusa.Dispatch.Pipeline.validate_config!(
+                         Config.new(dispatch: %{retry: retry})
+                       )
+                     end
+      end
+    end
+
+    test "the other retry options are range-checked, and retry must be {module, opts}" do
+      check = fn retry ->
+        Ankusa.Dispatch.Pipeline.validate_config!(Config.new(dispatch: %{retry: retry}))
+      end
+
+      mod = Ankusa.RetryPolicy.Exponential
+
+      assert :ok = check.({mod, base_ms: 0, max_ms: 1, max_attempts: nil, jitter: false})
+
+      assert_raise ArgumentError, ~r/dispatch.retry.base_ms must be an integer from 0 to/, fn ->
+        check.({mod, base_ms: -1})
+      end
+
+      assert_raise ArgumentError, ~r/dispatch.retry.max_ms must be an integer from 1 to/, fn ->
+        check.({mod, max_ms: 0})
+      end
+
+      assert_raise ArgumentError,
+                   ~r/dispatch.retry.max_attempts must be an integer from 1 to/,
+                   fn -> check.({mod, max_attempts: 0}) end
+
+      assert_raise ArgumentError, ~r/dispatch.retry.jitter must be true or false/, fn ->
+        check.({mod, jitter: 1})
+      end
+
+      assert_raise ArgumentError, ~r/dispatch.retry must be \{module, keyword_opts\}/, fn ->
+        check.(:exponential)
+      end
+    end
+
     test "sink_concurrency defaults to 8 and is nil or a positive integer" do
       assert Config.new().dispatch.sink_concurrency == 8
 
@@ -794,6 +913,58 @@ defmodule Ankusa.ConfigTest do
       assert_raise ArgumentError, "backup.secondary must be nil or {module, opts}", fn ->
         Ankusa.Store.Backup.validate_config!(Config.new(backup: %{secondary: "s3://secret"}))
       end
+    end
+  end
+
+  describe "the readiness keys (OPS-5)" do
+    test "defaults: a five-second sink window, no disk floor, no backlog threshold" do
+      config = Config.new([])
+      assert config.listener.ready_sink_error_window_ms == 5_000
+      assert config.listener.ready_min_free_bytes == nil
+      assert config.queue.max_oldest_due_ms == nil
+    end
+
+    test "a section override merges over the defaults, and the struct keeps its 31 fields" do
+      config =
+        Config.new(
+          listener: %{ready_min_free_bytes: 1_000_000},
+          queue: %{max_oldest_due_ms: 300_000}
+        )
+
+      assert config.listener.ready_min_free_bytes == 1_000_000
+      assert config.listener.ready_sink_error_window_ms == 5_000
+      assert config.listener.max_connections == 20_000
+      assert config.queue.max_oldest_due_ms == 300_000
+      assert config.queue.dlq.retention_days == 30
+
+      # `Ankusa.Config` stays a flat map (32 keys with `__struct__`): a 32nd
+      # field would make every `Ankusa.config/1` read a hash-map lookup.
+      assert map_size(Map.from_struct(%Config{})) == 31
+    end
+
+    test "every key is range-checked at Config.new/1, naming the key" do
+      assert_raise ArgumentError,
+                   "listener.ready_sink_error_window_ms must be a positive integer, got 0",
+                   fn -> Config.new(listener: %{ready_sink_error_window_ms: 0}) end
+
+      assert_raise ArgumentError,
+                   "listener.ready_sink_error_window_ms must be a positive integer, got nil",
+                   fn -> Config.new(listener: %{ready_sink_error_window_ms: nil}) end
+
+      assert_raise ArgumentError,
+                   "listener.ready_min_free_bytes must be nil or an integer >= 1, got 0",
+                   fn -> Config.new(listener: %{ready_min_free_bytes: 0}) end
+
+      assert_raise ArgumentError,
+                   ~s(listener.ready_min_free_bytes must be nil or an integer >= 1, got "1GB"),
+                   fn -> Config.new(listener: %{ready_min_free_bytes: "1GB"}) end
+
+      assert_raise ArgumentError,
+                   "queue.max_oldest_due_ms must be nil or an integer >= 1, got -5",
+                   fn -> Config.new(queue: %{max_oldest_due_ms: -5}) end
+
+      assert Config.new(listener: %{ready_sink_error_window_ms: 1}).listener.ready_sink_error_window_ms ==
+               1
     end
   end
 

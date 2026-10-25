@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-24
+
+### Added
+
+- `:max_message_bytes` (default 1 MiB, NATS's `max_payload`; DEL-5). A message
+  over it is never sent: an inline body whose base64 would not fit is checked
+  in and published as a claim, and a body over the limit by itself is
+  `{:permanent, {:message_too_large, size, max}}` without a server call.
+  Requires an `ankusa` release with the `max_message_bytes` sink callback;
+  publish core first.
+
 ### Changed
 
 - Requires `gnat ~> 1.18`. The sink hands `:password`, `:token` and
@@ -17,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{:error, {:permanent, :max_payload_exceeded}}` and is dead-lettered at once.
   gnat 1.18 refuses it before sending; on 1.17 the server closed the
   connection, cutting off every publish in flight on it.
+- Requires `ankusa ~> 0.7` (`Ankusa.Sink.Messaging`, `Ankusa.Sink.Connections`);
+  publish core first.
+- `Ankusa.Sink.NATS` is built on core's `Ankusa.Sink.Messaging` and
+  `Ankusa.Sink.Connections`. Same headers and values; `ankusa_message_version`
+  now comes before `ankusa_idempotency_key`, the order `Ankusa.Sink.Kafka`
+  sends. An entry of `:servers` without a port raises `ArgumentError` instead
+  of `MatchError`.
 
 ## [0.6.0] - 2026-10-14
 
@@ -113,7 +131,8 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 - The message `claim` field is now a claim-check ref URN string instead of a
   nested ticket object, breaking for consumers; the message `v` stays `1`.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.6.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.7.0...HEAD
+[0.7.0]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.6.0...ankusa_nats-v0.7.0
 [0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.4.0...ankusa_nats-v0.6.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.3.0...ankusa_nats-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.2.1...ankusa_nats-v0.3.0

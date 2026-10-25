@@ -6,8 +6,14 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-24
+
 ### Added
 
+- `:max_message_bytes` on `Ankusa.Sink.Redis` (default 512 MiB, Redis's bulk
+  limit; DEL-5): the size preflight of `Ankusa.Sink.Messaging`. Requires an
+  `ankusa` release with the `max_message_bytes` sink callback; publish core
+  first.
 - **Streaming loads and incremental writes for 10⁶ entries (TEN-9).** The route
   store and the source store read their hash a page at a time (`HSCAN … COUNT
   1000`, `Ankusa.Redis.Scan`) instead of one `HGETALL`, with `timeout_ms`
@@ -57,6 +63,13 @@ follows [Semantic Versioning](https://semver.org/).
   mirror. `Ankusa.SourceStore.Redis.rewrap/1` moves plaintext and
   previous-key entries to the current key, compare-and-set in batches, safe
   beside other nodes. Requires the `ankusa` release with `secrets`.
+
+### Changed
+
+- Requires `ankusa ~> 0.7` (`Ankusa.Sink.Messaging`, `Ankusa.Sink.Connections`);
+  publish core first.
+- `Ankusa.Sink.Redis` is built on core's `Ankusa.Sink.Messaging` and
+  `Ankusa.Sink.Connections`. What it publishes is unchanged.
 
 ## [0.5.0] - 2026-10-14
 
@@ -191,7 +204,8 @@ follows [Semantic Versioning](https://semver.org/).
 - Depends on `ankusa` `~> 0.2`, which introduced `Ankusa.Routes.Store` and
   `Ankusa.Routes.Snapshot`.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.5.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.6.0...HEAD
+[0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.5.0...ankusa_redis-v0.6.0
 [0.5.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.4.0...ankusa_redis-v0.5.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.3.0...ankusa_redis-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.2.4...ankusa_redis-v0.3.0

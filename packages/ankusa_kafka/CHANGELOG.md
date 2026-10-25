@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-24
+
 ### Added
+
+- `Ankusa.Sink.Kafka` implements `max_message_bytes/1` from `:max_record_bytes`
+  (DEL-5): an inline record whose base64 value would pass it is produced as a
+  claim instead of being refused, and a body that is over it by itself is
+  `{:permanent, {:message_too_large, size, max}}` without a broker call.
+  Requires an `ankusa` release with the `max_message_bytes` sink callback;
+  publish core first.
 
 - **`Ankusa.Intake.Kafka`: the intake log of `wal.type: dual` (DUR-1.b.b,
   [ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)).** Every acked hook is also a record in a replicated Kafka
@@ -25,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three-broker KRaft cluster joins the package's `docker-compose.yml` (the
   Redpanda service stays for the sink's tests); `bench/partition_bench.exs` measures
   what one partition carries.
+
+### Changed
+
+- Requires `ankusa ~> 0.7` (`Ankusa.Sink.Messaging`, `Ankusa.Sink.Connections`,
+  `Ankusa.Intake`); publish core first.
+- `Ankusa.Sink.Kafka` is built on core's `Ankusa.Sink.Messaging` and
+  `Ankusa.Sink.Connections`. Records are unchanged; `:brokers` also takes one
+  comma-separated `"host:port,host:port"` string, and an entry without a port
+  raises `ArgumentError` instead of `MatchError`.
 
 ## [0.6.0] - 2026-10-14
 
@@ -124,7 +142,8 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 - Synchronous produce with `acks=all`
 - Kafka headers: `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`, `content_type`
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.6.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.7.0...HEAD
+[0.7.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.6.0...ankusa_kafka-v0.7.0
 [0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.4.0...ankusa_kafka-v0.6.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.3.0...ankusa_kafka-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.2.1...ankusa_kafka-v0.3.0

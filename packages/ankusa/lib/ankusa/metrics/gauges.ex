@@ -26,9 +26,9 @@ defmodule Ankusa.Metrics.Gauges do
     * `[:ankusa, :disk, :state]` — `free_bytes` and `total_bytes` of the file
       system holding `data_dir`, only while `:disksup` (`:os_mon`) runs. Core
       does not start `:os_mon`; `ankusa_server` does.
-    * `[:ankusa, :sink_http, :state]` — `origins`, how many receivers have an
-      open connection pool in `Ankusa.Sink.Http.Pool` (computed `Sink.Http`
-      destinations); a constant-time read.
+    * `[:ankusa, :http, :state]` — `pools`, how many outbound HTTP connection
+      pools the instance has open in `Ankusa.HttpClient.Pools`; a read of the
+      pool rows, bounded by `egress.pools.max_pools`.
     * `[:ankusa, :sink_batch, :state]` — `batchers`, `queued` and `queued_bytes`
       across the `Ankusa.Sink.Batcher`s (SQS, Pub/Sub) of the instance; summed
       from counters each batcher keeps, no queue is scanned.
@@ -46,10 +46,10 @@ defmodule Ankusa.Metrics.Gauges do
   @compile {:no_warn_undefined, :disksup}
 
   alias Ankusa.{Config, Instance, Queue}
+  alias Ankusa.HttpClient.Pools, as: HttpPools
   alias Ankusa.Queue.Deliveries
   alias Ankusa.Queue.Deliveries.Counters
   alias Ankusa.Queue.Tenants
-  alias Ankusa.Sink.Http.Pool
 
   @top_tenants 100
   @candidate_tenants 10_000
@@ -80,7 +80,7 @@ defmodule Ankusa.Metrics.Gauges do
     if store?, do: probe(instance, :audit, &audit/1)
     if Config.role?(config, :edge), do: probe(instance, :quarantine, &quarantine/1)
     probe(instance, :disk, &disk(&1, config))
-    probe(instance, :sink_http, &sink_http/1)
+    probe(instance, :http, &http_pools/1)
     probe(instance, :sink_batch, &sink_batch/1)
     if config.wal == :dual, do: probe(instance, :intake, &intake/1)
     :ok
@@ -128,10 +128,8 @@ defmodule Ankusa.Metrics.Gauges do
       else: :ok
   end
 
-  defp sink_http(instance) do
-    if Pool.started?(instance),
-      do: emit(instance, :sink_http, %{origins: Pool.origins(instance)}),
-      else: :ok
+  defp http_pools(instance) do
+    emit(instance, :http, %{pools: HttpPools.count(instance)})
   end
 
   defp store(instance) do

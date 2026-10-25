@@ -207,4 +207,168 @@ defmodule Ankusa.Sink.MessageTest do
     assert decoded["headers"] == %{"x-a" => "1"}
     assert decoded["sha256"] == Base.encode16(:crypto.hash(:sha256, env.body), case: :lower)
   end
+
+  # ── transport metadata ────────────────────────────────────────────────────
+
+  test "headers/2 always carries the tenant header, empty without a tenant", %{ctx: ctx} do
+    env = envelope("x", %{tenant_id: nil})
+
+    assert Message.headers(env, ctx) == [
+             {"ankusa_id", env.id},
+             {"ankusa_source_id", "src"},
+             {"ankusa_tenant_id", ""},
+             {"ankusa_message_version", "1"},
+             {"ankusa_idempotency_key", Ankusa.Envelope.idempotency_key(env)},
+             {"content_type", "application/json"}
+           ]
+  end
+
+  test "headers/2 appends the dedupe key and the replay id when the hook has them",
+       %{ctx: ctx} do
+    env = envelope("x", %{dedupe_key: "evt_1"})
+
+    assert Message.headers(env, Map.put(ctx, :replay_id, "rid")) == [
+             {"ankusa_id", env.id},
+             {"ankusa_source_id", "src"},
+             {"ankusa_tenant_id", "t1"},
+             {"ankusa_message_version", "1"},
+             {"ankusa_idempotency_key", "t1:src:evt_1"},
+             {"content_type", "application/json"},
+             {"ankusa_dedupe_key", "evt_1"},
+             {"ankusa_replay_id", "rid"}
+           ]
+  end
+
+  test "delivery_id/2 is the hook's id, made distinct per replay", %{ctx: ctx} do
+    env = envelope("x")
+
+    assert Message.delivery_id(env, ctx) == env.id
+    assert Message.delivery_id(env, Map.put(ctx, :replay_id, "rid")) == env.id <> ":replay:rid"
+  end
+
+  test "fits/2 takes exactly max bytes and refuses one more as permanent" do
+    assert Message.fits(100, 100) == :ok
+    assert Message.fits(101, 100) == {:error, {:permanent, {:message_too_large, 101, 100}}}
+  end
+
+  # ── DEL-5: size preflight and forwarded-header caps ───────────────────────
+
+  @doc false
+  def report(_event, measurements, meta, pid), do: send(pid, {:dropped, measurements, meta})
+
+  defp attach_dropped do
+    handler = "message-dropped-#{System.unique_integer([:positive])}"
+    :telemetry.attach(handler, [:ankusa, :sink, :headers_dropped], &__MODULE__.report/4, self())
+    on_exit(fn -> :telemetry.detach(handler) end)
+  end
+
+  defp numbered_headers(count), do: for(n <- 0..(count - 1), do: {"x-h#{n}", "v"})
+
+  test "max_bytes/1 is the sink's :max_message_bytes, 1 MiB by default" do
+    assert Message.max_bytes([]) == 1_048_576
+    assert Message.max_bytes(max_message_bytes: 5) == 5
+    assert Message.default_max_message_bytes() == 1_048_576
+  end
+
+  test "a 1 MiB header value is dropped whole and counted; the message stays under 1 MiB",
+       %{ctx: ctx} do
+    attach_dropped()
+
+    env =
+      envelope("hello", %{
+        headers: [{"x-small", "ok"}, {"x-huge", String.duplicate("a", 1_048_576)}]
+      })
+
+    assert {:ok, json} = Message.encode(env, ctx, 100)
+    assert JSON.decode!(json)["headers"] == %{"x-small" => "ok"}
+    assert byte_size(json) < 1_048_576
+
+    assert_receive {:dropped, %{count: 1},
+                    %{instance: instance, source_id: "src", tenant_id: "t1", reason: :bytes}}
+
+    assert instance == ctx.instance
+    refute_receive {:dropped, _, %{instance: ^instance}}
+  end
+
+  test "more than max_headers names: the first 64 by arrival are kept, the rest counted" do
+    attach_dropped()
+    env = envelope("x", %{headers: numbered_headers(70)})
+
+    kept = Message.forwarded_headers(env, %{instance: :cap_test, attempt: 1})
+
+    assert map_size(kept) == 64
+    assert Map.has_key?(kept, "x-h0") and Map.has_key?(kept, "x-h63")
+    refute Map.has_key?(kept, "x-h64")
+    assert_receive {:dropped, %{count: 6}, %{instance: :cap_test, reason: :count}}
+
+    # The bare-mode call is capped by the same defaults, without telemetry.
+    assert map_size(Message.forwarded_headers(env)) == 64
+    assert map_size(Message.forwarded_headers(env, :default)) == 64
+    refute_receive {:dropped, _, %{instance: :cap_test}}
+  end
+
+  test "a source's own max_headers and forward_headers_max_bytes apply" do
+    attach_dropped()
+    env = envelope("x", %{headers: numbered_headers(5)})
+    ctx = %{instance: :cap_test, attempt: 1, max_headers: 2}
+
+    assert Message.forwarded_headers(env, ctx) == %{"x-h0" => "v", "x-h1" => "v"}
+    assert_receive {:dropped, %{count: 3}, %{reason: :count}}
+
+    # 13 bytes fit in 20, 33 do not, and the 4 after it still do: dropped whole,
+    # later smaller headers still considered.
+    env =
+      envelope("x", %{
+        headers: [{"x-a", "1234567890"}, {"x-b", String.duplicate("b", 30)}, {"x-c", "z"}]
+      })
+
+    ctx = %{instance: :cap_test, attempt: 1, forward_headers_max_bytes: 20}
+
+    assert Message.forwarded_headers(env, ctx) == %{"x-a" => "1234567890", "x-c" => "z"}
+    assert_receive {:dropped, %{count: 1}, %{reason: :bytes}}
+  end
+
+  test "headers within both caps emit nothing", %{ctx: ctx} do
+    attach_dropped()
+    env = envelope("x", %{headers: numbered_headers(64)})
+
+    assert map_size(Message.forwarded_headers(env, ctx)) == 64
+    instance = ctx.instance
+    refute_receive {:dropped, _, %{instance: ^instance}}
+  end
+
+  test "a body over the limit by itself is permanent and writes no claim", %{ctx: ctx} do
+    env = envelope(:binary.copy("a", 200))
+
+    assert Message.encode(env, ctx, 1_000, 100) ==
+             {:error, {:permanent, {:message_too_large, 200, 100}}}
+
+    assert list_claims(ctx.instance) == {:ok, []}
+  end
+
+  test "an inline message over the limit whose body fits is sent as a claim", %{ctx: ctx} do
+    body = :crypto.strong_rand_bytes(300)
+    env = envelope(body)
+    assert {:ok, inline} = Message.encode(env, ctx, 1_000, 1_000_000)
+    assert JSON.decode!(inline)["body_base64"]
+    max = byte_size(inline) - 1
+
+    assert {:ok, json} = Message.encode(env, ctx, 1_000, max)
+    decoded = JSON.decode!(json)
+
+    assert byte_size(json) <= max
+    refute Map.has_key?(decoded, "body_base64")
+    assert {:ok, ^body} = ClaimCheck.redeem(ctx.instance, decoded["claim"], decoded["sha256"])
+  end
+
+  test "a message whose metadata alone is over the limit is permanent, with no claim written",
+       %{ctx: ctx} do
+    env = envelope(:crypto.strong_rand_bytes(101))
+
+    assert {:error, {:permanent, {:message_too_large, size, 50}}} =
+             Message.encode(env, ctx, 100, 50)
+
+    assert size > 50
+    assert list_claims(ctx.instance) == {:ok, []}
+  end
 end

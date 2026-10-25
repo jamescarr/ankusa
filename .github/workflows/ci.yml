@@ -54,10 +54,42 @@ jobs:
         package: ${{ fromJSON(needs.discover.outputs.packages) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A package job needs one toolchain, not the repo's whole set: the
+      # shared mise cache is 655 MB and restoring it costs 8–16 s of every
+      # job's 18–30 s mise-action step (the tools themselves report "already
+      # installed 0ms" — restore is the cost). Install and cache per kind, so
+      # `sdk-go` (2 s check) restores go, not rust/java/clojure/php too.
+      - id: toolchain
+        name: the package's toolchain
+        run: |
+          set -euo pipefail
+          source .mise/lib/pkg.sh
+          kind=$(pkg_kind "${{ matrix.package }}")
+          case "$kind" in
+            hex | docker) tools="elixir erlang cmake"; cache=hex ;;
+            npm) tools="node"; cache=npm ;;
+            python) tools="uv"; cache=python ;;
+            cargo) tools="rust"; cache=cargo ;;
+            ruby) tools="ruby"; cache=ruby ;;
+            go) tools="go"; cache=go ;;
+            php) tools="http:php http:composer"; cache=php ;;
+            java) tools="java sbt"; cache=java ;;
+            clojure) tools="java clojure"; cache=clojure ;;
+            *)
+              echo "::error::no toolchain for kind $kind"
+              exit 1
+              ;;
+          esac
+          {
+            echo "kind=$kind"
+            echo "tools=$tools"
+            echo "cache=$cache"
+          } >> "$GITHUB_OUTPUT"
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
-          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+          install_args: ${{ steps.toolchain.outputs.tools }}
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-${{ steps.toolchain.outputs.cache }}" # the default key skips .mise/conf.d/
       # `_build` also holds dialyzer's PLTs (`_build/plts`, see each mix.exs), so
       # this key — the OTP/Elixir pins in .mise.toml plus mix.lock — is the PLT
       # cache key: a run rebuilds a PLT only when the toolchain or a dep changed.
@@ -76,7 +108,12 @@ jobs:
       # TEN-9: `Ankusa.Routes.Snapshot.check_budget/2`, called by
       # `ankusa_redis`'s stores, is new; DUR-1.b.b: `Ankusa.Intake.Recovery.parse_args/1`,
       # `run_offline/2` and `format_summary/1`, called by the image's `recover`
-      # command, are new).
+      # command, are new; the sink layer: `Ankusa.Sink.Messaging`, which every
+      # adapter sink `use`s, and `Ankusa.Sink.Connections`, which every adapter
+      # `Application` starts, are new; DEL-2: `Ankusa.RetryPolicy.validate_opt!/3` and
+      # `Ankusa.ClaimCheck.validate_stored_horizons!/2`, called by the image's loader and
+      # `ankusa_redis`'s source store, are new; DEL-5: `Ankusa.Sink.Message.max_bytes/1`,
+      # which every adapter sink's `use Ankusa.Sink.Messaging` calls, is new).
       # The `v` is in the restore prefix too, so bumping it still misses.
       # A mix.lock change alone matches the prefix: the entry built from the
       # previous lockfile is restored, `mix deps.get --check-locked` fetches
@@ -89,9 +126,9 @@ jobs:
           path: |
             packages/${{ matrix.package }}/deps
             packages/${{ matrix.package }}/_build
-          key: mix-v10-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
+          key: mix-v13-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
           restore-keys: |
-            mix-v10-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
+            mix-v13-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
       # sdk-go has no dependencies outside the standard library, but
       # `go test -race -count=1` rebuilds the race-instrumented standard
       # library and the package on every run — 39 s of a 77 s job; locally the
@@ -127,9 +164,15 @@ jobs:
           key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-sdk-rust-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-${{ hashFiles('packages/sdk-rust/Cargo.lock') }}
           restore-keys: |
             cargo-v1-${{ runner.os }}-${{ runner.arch }}-sdk-rust-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-
+      # Only the Mix projects compile rocksdb/erlang-rocksdb (and brod's
+      # crc32cer) — the cargo/go/java/clojure/php/python/ruby/npm jobs have no
+      # native dependency to link against and no use for `mix`. Both steps
+      # cost 5–11 s of a job whose check can be as short as 2 s (sdk-go).
       - name: rocksdb system deps
+        if: steps.toolchain.outputs.kind == 'hex' || steps.toolchain.outputs.kind == 'docker'
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
-      - run: mix local.hex --force && mix local.rebar --force
+      - if: steps.toolchain.outputs.kind == 'hex' || steps.toolchain.outputs.kind == 'docker'
+        run: mix local.hex --force && mix local.rebar --force
       # check:package pulls each package's docker-compose images from Docker
       # Hub; anonymous pulls from shared runner IPs hit Hub's rate limit.
       - name: Log in to Docker Hub
@@ -228,6 +271,20 @@ jobs:
           key: mix-v5-${{ runner.os }}-${{ runner.arch }}-examples-${{ hashFiles('.mise.toml') }}-${{ hashFiles('examples/*/*/mix.lock') }}
           restore-keys: |
             mix-v5-${{ runner.os }}-${{ runner.arch }}-examples-${{ hashFiles('.mise.toml') }}-
+      # `check:examples` runs `cargo fmt --check && cargo clippy --locked
+      # --all-targets -- -D warnings` for examples/nats-consumer, which
+      # compiles async-nats/tokio/serde from scratch every run (26 s of the
+      # 80 s step; 24–26 s in 439eae5, a69bf9c and d0406db). Same keying as
+      # `sdk-rust`'s target cache: rust's fingerprints are rustc-version
+      # specific, and a Cargo.lock change matches the prefix so cargo
+      # rebuilds only the crates whose sources changed.
+      - name: cache cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: examples/nats-consumer/target
+          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-examples-nats-consumer-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-${{ hashFiles('examples/nats-consumer/Cargo.lock') }}
+          restore-keys: |
+            cargo-v1-${{ runner.os }}-${{ runner.arch }}-examples-nats-consumer-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force

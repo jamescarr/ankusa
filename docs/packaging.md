@@ -236,11 +236,21 @@ release, many roles, config decides what boots. See
    wiring. Add the real dependency, and a `docker-compose.yml` if the adapter
    needs live infra to test against. No config is needed to keep `ankusa`'s
    built-in demo instance from booting: `autostart` defaults to `false`.
-3. Implement the behaviour. Register any supervised process (a connection
-   pool, a channel) through `Ankusa.Registry`/`Ankusa.via/2` exactly like the
-   framework's own processes do: this is what lets the facade
-   (`Ankusa.Sink`'s `deliver/3` call sites, for example) dispatch to
-   your adapter without `ankusa` core knowing your package exists.
+3. Implement the behaviour. A queue-style sink `use`s `Ankusa.Sink.Messaging`
+   and implements `publish/4`: the hook arrives already encoded as
+   `Ankusa.Sink.Message`, and `Ankusa.Sink.Message.headers/2`,
+   `delivery_id/2` and `fits/2` cover the shared metadata, dedupe id and
+   size gate. The message is already checked against
+   `max_message_bytes/1` (default 1 MiB, the `:max_message_bytes` option;
+   override it for a transport with another limit) before `publish/4` runs,
+   so `publish/4` only gates what it adds (a key, attributes). The scaffold's `Application` starts the adapter's
+   `Ankusa.Sink.Connections` tree; `Ankusa.Sink.Connections.ensure/5` finds
+   or starts a broker connection under it and keeps the idle reaper
+   informed. Register any supervised process (a connection pool, a channel)
+   through `Ankusa.Registry`/`Ankusa.via/2` exactly like the framework's own
+   processes do: this is what lets the facade (`Ankusa.Sink`'s `deliver/3`
+   call sites, for example) dispatch to your adapter without `ankusa` core
+   knowing your package exists.
 4. **Verify against real infrastructure, not mocks.** `ankusa_rabbitmq`,
    `ankusa_kafka`, `ankusa_nats`, and `ankusa_redis` are tested against real
    RabbitMQ/Redpanda/NATS/Redis containers: a protocol implementation (AMQP

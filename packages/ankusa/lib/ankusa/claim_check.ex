@@ -28,7 +28,7 @@ defmodule Ankusa.ClaimCheck do
 
   Permanent errors (`:not_found`, `:integrity_mismatch`, `:invalid_ref`,
   `:invalid_tenant`, `:invalid_id`, `:unsigned_ref`, `:bad_signature`,
-  `:ref_expired`) mean retrying won't help — callers should dead-letter.
+  `:ref_expired`, `:too_large`) mean retrying won't help — callers should dead-letter.
   `{:unavailable, reason}` is transient, and so is `:forbidden` (the object
   store refused this node's credential: a configuration fault to fix, not a
   reason to drop the claim).
@@ -37,7 +37,7 @@ defmodule Ankusa.ClaimCheck do
   require Logger
 
   alias Ankusa.ClaimCheck.{Cache, Pack, Reader, Ref, Stores}
-  alias Ankusa.{Config, Telemetry}
+  alias Ankusa.{Config, RetryPolicy, Sink, Telemetry}
 
   # ZIP without ZIP64 caps an archive at 65,534 entries (two are the index and
   # the manifest) and 4 GiB; a claim id's 16 position bits cap it at 65,536.
@@ -67,6 +67,7 @@ defmodule Ankusa.ClaimCheck do
           | :bad_signature
           | :ref_expired
           | :forbidden
+          | :too_large
           | {:unavailable, term()}
 
   @typedoc "A checked-in claim: its ref, and the lowercase hex sha256 of its bytes."
@@ -106,7 +107,10 @@ defmodule Ankusa.ClaimCheck do
   claim store `op_deadline_ms`): past it the call returns an error rather than
   keep a dispatch task and its connections busy. A store that throttles with a
   `Retry-After` that does not fit is `{:error, {:unavailable, {:throttled,
-  seconds}}}` at once, for dispatch's own backoff to schedule. opts:
+  seconds}}}` at once, for dispatch's own backoff to schedule. Items that no
+  single pack can hold (more than 65 000 claims, or about 4 GiB of them) are
+  `{:error, :too_large}` before anything is built; `check_in_batch/2` splits
+  its packs inside both limits. opts:
 
     * `:pack_id` — the first pack id tried (`Ankusa.ClaimCheck.Ref.pack_id/2`);
       default a freshly minted one (`Ref.new_pack_id/0`: now plus 64 random bits).
@@ -119,7 +123,8 @@ defmodule Ankusa.ClaimCheck do
 
     {result, pack_id} =
       with :ok <- Ref.validate_tenant(tenant_id),
-           :ok <- Ref.validate_pack_id(first_id) do
+           :ok <- Ref.validate_pack_id(first_id),
+           :ok <- fits(items) do
         config = Ankusa.config(instance)
         deadline = Stores.write_deadline(config)
         write_pack(instance, config, tenant_id, items, first_id, deadline, @max_pack_attempts)
@@ -203,7 +208,10 @@ defmodule Ankusa.ClaimCheck do
   group into packs of at most `claim_check.pack_max_bytes`, and upload the
   packs concurrently. A body larger than the cap gets a pack of its own.
 
-  Returns a result per item id. A failed pack fails only its own items.
+  Returns a result per item id. A failed pack fails only its own items: a store
+  that raises, or an upload process that dies, is `{:error, {:unavailable,
+  reason}}` for that pack's items and never takes the caller down. An item no
+  pack can hold (over ZIP's 4 GiB) is `{:error, :too_large}`.
   """
   @spec check_in_batch(atom(), [item()]) :: %{String.t() => {:ok, claim()} | {:error, reason()}}
   def check_in_batch(_instance, []), do: %{}
@@ -211,21 +219,52 @@ defmodule Ankusa.ClaimCheck do
   def check_in_batch(instance, items) do
     %Config{claim_check: %{pack_max_bytes: cap}} = Ankusa.config(instance)
 
-    items
-    |> Enum.group_by(& &1.tenant_id)
-    |> Enum.flat_map(fn {tenant_id, group} ->
-      group |> split(cap) |> Enum.map(&{tenant_id, &1})
-    end)
-    |> Task.async_stream(
-      fn {tenant_id, pack} -> {pack, check_in(instance, tenant_id, pack)} end,
-      max_concurrency: @upload_concurrency,
-      timeout: :infinity
-    )
-    |> Enum.reduce(%{}, fn {:ok, {pack, result}}, acc ->
+    splits =
+      items
+      |> Enum.group_by(& &1.tenant_id)
+      |> Enum.map(fn {tenant_id, group} -> {tenant_id, split(group, cap)} end)
+
+    packs = for {tenant_id, {chunks, _over}} <- splits, chunk <- chunks, do: {tenant_id, chunk}
+    refused = for {_tenant_id, {_chunks, over}} <- splits, item <- over, do: item
+
+    results = Map.new(refused, &{&1.id, {:error, :too_large}})
+
+    packs
+    |> upload(instance)
+    |> Enum.reduce(results, fn {pack, result}, acc ->
       Enum.reduce(pack, acc, fn item, acc ->
         Map.put(acc, item.id, item_result(result, item.id))
       end)
     end)
+  end
+
+  # Every pack's `{items, check_in/3's result}`. The uploads run unlinked under a
+  # supervisor of this call's own, so one that dies (killed, or a crash past
+  # `check_in/4`'s own guards) is that pack's `:unavailable` and not the
+  # caller's exit: the caller is the dispatch packing task.
+  defp upload([], _instance), do: []
+
+  defp upload(packs, instance) do
+    {:ok, sup} = Task.Supervisor.start_link()
+
+    try do
+      sup
+      |> Task.Supervisor.async_stream_nolink(
+        packs,
+        fn {tenant_id, pack} -> check_in(instance, tenant_id, pack) end,
+        max_concurrency: @upload_concurrency,
+        timeout: :infinity
+      )
+      |> Enum.zip(packs)
+      |> Enum.map(fn
+        {{:ok, result}, {_tenant_id, pack}} -> {pack, result}
+        {{:exit, reason}, {_tenant_id, pack}} -> {pack, {:error, {:unavailable, reason}}}
+      end)
+    after
+      # Unlinked first: stopping it must not signal a caller that traps exits.
+      Process.unlink(sup)
+      Supervisor.stop(sup)
+    end
   end
 
   @doc """
@@ -687,10 +726,14 @@ defmodule Ankusa.ClaimCheck do
     * `claim_check.retention_days` set with any non-`LocalFS` claim store (the
       sweeper only ever covers `LocalFS`; S3/GCS need a bucket lifecycle rule)
     * `claim_check.bucket_expiry_days` declared with an object-store claim store
-      shorter than the longest a claim can be needed: the retry horizon of the
-      default policy (21 days) + `queue.dlq.retention_days` + `claim_check.redeem_grace_ms`.
-      A bucket lifecycle rule cannot see claim leases, so the declared age is
-      the real cutoff; undeclared, boot warns with the minimum
+      shorter than the longest a claim can be needed: the retry horizon (the
+      instance's `dispatch.retry` `max_elapsed_ms`, 24 hours by default, or the
+      longest `retry.max_elapsed_ms` of a configured source that uses the claim
+      check) + `queue.dlq.retention_days` + `claim_check.redeem_grace_ms`, each
+      rounded up to days. A bucket lifecycle rule cannot see claim leases, so
+      the declared age is the real cutoff; undeclared, boot warns with the
+      minimum. Sources written later are held to it too
+      (`check_retry_horizon/2`)
     * `max_body_bytes` of 4 GiB or more: a pack can't hold a body that large
     * `claim_check.ref_signing_keys` must be a list of strings of at least 16
       bytes, and not empty while `claim_check.accept_unsigned_refs` is `false`
@@ -767,10 +810,7 @@ defmodule Ankusa.ClaimCheck do
     validate_authorize!(cc)
   end
 
-  # The retry horizon of the default exponential policy: 84 attempts, each at
-  # most 6 h apart (`Ankusa.RetryPolicy.Exponential`). A custom policy's horizon
-  # is the operator's to add to `bucket_expiry_days`.
-  @default_retry_horizon_days 21
+  @day_ms 86_400_000
 
   # A bucket lifecycle rule expires claim objects by age and cannot see claim
   # leases, so for object-store claims the declared bucket age is the real
@@ -780,8 +820,11 @@ defmodule Ankusa.ClaimCheck do
     %Config{claim_check: cc} = config
 
     if Enum.any?(modules, &(&1 != Ankusa.BlobStore.LocalFS)) do
-      grace_days = div(cc.redeem_grace_ms + 86_399_999, 86_400_000)
-      needed = @default_retry_horizon_days + config.queue.dlq.retention_days + grace_days
+      sources = for {_id, source} <- Ankusa.Queue.static_sources(config), do: source
+      horizon_ms = retry_horizon_ms(config, sources)
+      horizon_days = ceil_days(horizon_ms)
+      grace_days = ceil_days(cc.redeem_grace_ms)
+      needed = horizon_days + config.queue.dlq.retention_days + grace_days
 
       cond do
         cc.bucket_expiry_days == nil and Config.role?(config, :dispatch) ->
@@ -789,14 +832,14 @@ defmodule Ankusa.ClaimCheck do
             "[ankusa] claim packs are in an object store and claim_check.bucket_expiry_days " <>
               "is not declared: a bucket lifecycle rule cannot see claim leases, so it must " <>
               "expire claims/ objects no earlier than #{needed} days (retry horizon " <>
-              "#{@default_retry_horizon_days} + queue.dlq.retention_days " <>
+              "#{horizon_days} + queue.dlq.retention_days " <>
               "#{config.queue.dlq.retention_days} + redeem grace #{grace_days})"
           )
 
         cc.bucket_expiry_days != nil and cc.bucket_expiry_days < needed ->
           raise ArgumentError,
                 "claim_check.bucket_expiry_days is #{cc.bucket_expiry_days} but a claim can be " <>
-                  "needed for #{needed} days (retry horizon #{@default_retry_horizon_days} + " <>
+                  "needed for #{needed} days (retry horizon #{horizon_days} + " <>
                   "queue.dlq.retention_days #{config.queue.dlq.retention_days} + redeem grace " <>
                   "#{grace_days}): raise the bucket rule and this key, or lower the others"
 
@@ -804,6 +847,95 @@ defmodule Ankusa.ClaimCheck do
           :ok
       end
     end
+  end
+
+  defp ceil_days(ms), do: div(ms + @day_ms - 1, @day_ms)
+
+  @doc """
+  The longest, in milliseconds, a hook can keep retrying: the instance's
+  `dispatch.retry` horizon (`max_elapsed_ms`), or a longer one of any of
+  `sources` that routes to a sink using the claim check. The first term of how
+  long a claim in an object store is needed (then `queue.dlq.retention_days` and
+  `claim_check.redeem_grace_ms`); the 24-hour default is what the bucket rule
+  has to outlast, not the 21 days the old 84-attempt policy was assumed to take.
+  """
+  @spec retry_horizon_ms(Config.t(), [Ankusa.Source.t()]) :: pos_integer()
+  def retry_horizon_ms(%Config{dispatch: %{retry: retry}}, sources) do
+    {_mod, opts} = retry
+
+    Enum.reduce(sources, RetryPolicy.max_elapsed_ms(opts), fn source, longest ->
+      if uses_claims?(source) do
+        {_mod, source_opts} = RetryPolicy.for_source(retry, source.retry)
+        max(longest, RetryPolicy.max_elapsed_ms(source_opts))
+      else
+        longest
+      end
+    end)
+  end
+
+  # Does any sink of the source declare an inline threshold, i.e. could a hook
+  # of this source be checked in?
+  defp uses_claims?(%Ankusa.Source{sinks: sinks}) do
+    Enum.any?(sinks, fn {mod, opts} ->
+      match?({:ok, max} when is_integer(max), Sink.inline_max_bytes(mod, opts))
+    end)
+  end
+
+  @doc """
+  Refuse a source whose retry horizon outlasts the bucket's lifecycle rule:
+  `{:error, message}` when the source routes to a claim-checking sink, claims
+  are in an object store, `claim_check.bucket_expiry_days` is declared, and
+  `max(dispatch.retry horizon, the source's) + queue.dlq.retention_days +
+  claim_check.redeem_grace_ms` (in days) exceeds it. A pack the rule deleted
+  mid-retry would be a silent loss, so this runs on every source write
+  (`Ankusa.SourceStore.put/6` answers `422 retry_exceeds_claim_expiry`) and
+  over the stored sources at boot (`validate_stored_horizons!/2`).
+  """
+  @spec check_retry_horizon(Config.t(), Ankusa.Source.t()) :: :ok | {:error, String.t()}
+  def check_retry_horizon(%Config{claim_check: cc} = config, %Ankusa.Source{} = source) do
+    cond do
+      cc.bucket_expiry_days == nil ->
+        :ok
+
+      not Enum.any?(Stores.list(config), fn {_index, mod, _opts} ->
+        mod != Ankusa.BlobStore.LocalFS
+      end) ->
+        :ok
+
+      not uses_claims?(source) ->
+        :ok
+
+      true ->
+        horizon_days = ceil_days(retry_horizon_ms(config, [source]))
+        grace_days = ceil_days(cc.redeem_grace_ms)
+        needed = horizon_days + config.queue.dlq.retention_days + grace_days
+
+        if cc.bucket_expiry_days >= needed do
+          :ok
+        else
+          {:error,
+           "source #{source.id}: its retry horizon (#{horizon_days} days) makes a claim " <>
+             "needed for #{needed} days (+ queue.dlq.retention_days " <>
+             "#{config.queue.dlq.retention_days} + redeem grace #{grace_days}), but " <>
+             "claim_check.bucket_expiry_days is #{cc.bucket_expiry_days}: the bucket rule " <>
+             "would delete the pack mid-retry. Lower the source's retry.max_elapsed_ms, or " <>
+             "raise the rule and claim_check.bucket_expiry_days"}
+        end
+    end
+  end
+
+  @doc """
+  `check_retry_horizon/2` over the sources a writable store loaded at boot:
+  raises `ArgumentError` naming the first source whose horizon outlasts the
+  bucket rule, as `validate_config!/1` does for the configured ones.
+  """
+  @spec validate_stored_horizons!(Config.t(), [Ankusa.Source.t()]) :: :ok
+  def validate_stored_horizons!(%Config{} = config, sources) do
+    for source <- sources, {:error, message} <- [check_retry_horizon(config, source)] do
+      raise ArgumentError, message
+    end
+
+    :ok
   end
 
   defp valid_stores?([_ | _] = stores),
@@ -888,14 +1020,21 @@ defmodule Ankusa.ClaimCheck do
     div(System.system_time(:millisecond) + ttl_ms + 999, 1000)
   end
 
+  @doc false
   # Greedy, order-preserving: start a new pack when the next item would push
-  # this one past the cap (or past what a ZIP can hold). A single oversized
-  # item still gets a pack of its own.
-  defp split(items, cap) do
-    cap = min(cap, @max_pack_bytes)
+  # this one past `cap` (or past what a ZIP can hold: `max_bytes`) or past the
+  # claims a ZIP index holds. A single item bigger than `cap` still gets a
+  # pack of its own; one that no pack `Pack.build/1` can write (its cost alone
+  # is over `max_bytes`) is returned apart, for the caller to refuse. So every
+  # pack this returns builds: the limits live here, and `Pack.build/1` raises
+  # only for a caller that skipped them.
+  @spec split([item()], pos_integer(), pos_integer()) :: {[[item()]], [item()]}
+  def split(items, cap, max_bytes \\ @max_pack_bytes) do
+    cap = min(cap, max_bytes)
+    {fit, too_large} = Enum.split_with(items, &(cost(&1) <= max_bytes))
 
     {packs, current, _size, _count} =
-      Enum.reduce(items, {[], [], 0, 0}, fn item, {packs, current, size, count} ->
+      Enum.reduce(fit, {[], [], 0, 0}, fn item, {packs, current, size, count} ->
         cost = cost(item)
 
         if current != [] and (size + cost > cap or count == @max_pack_claims) do
@@ -905,7 +1044,17 @@ defmodule Ankusa.ClaimCheck do
         end
       end)
 
-    Enum.reverse([Enum.reverse(current) | packs])
+    packs = if current == [], do: packs, else: [Enum.reverse(current) | packs]
+    {Enum.reverse(packs), too_large}
+  end
+
+  # Whether `items` are one pack `Pack.build/1` can write: the claim count and
+  # byte limits `split/3` keeps every batch pack inside.
+  defp fits(items) do
+    if length(items) <= @max_pack_claims and
+         Enum.reduce(items, 0, &(cost(&1) + &2)) <= @max_pack_bytes,
+       do: :ok,
+       else: {:error, :too_large}
   end
 
   defp cost(item) do

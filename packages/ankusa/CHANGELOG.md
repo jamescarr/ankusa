@@ -34,9 +34,13 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `batch_max_entries`, `batch_max_bytes`, `batch_queue_max`,
   `batch_queue_max_bytes`, `batch_queue_tenant_max`, `batch_max_inflight`; new
   optional callback `c:Ankusa.Sink.batched?/1` and `Sink.batched?/2`; new
-  `Ankusa.Sink.SQS.classify_error/4`, `Ankusa.Sink.GooglePubSub.classify_error/4`
-  (a throttle, `RESOURCE_EXHAUSTED` or a `429`/`503`, is now `{:retry_after, ms, _}`
-  on the single-message path too). New series
+  `Ankusa.Sink.SQS.classify_error/4` and `Ankusa.Sink.GooglePubSub.classify_error/4`
+  (the DEL-2 classes, shared by a whole request and one entry of a batch), and
+  `validate_opts!/1` on both (range checks of the `batch_*` options; the server
+  image runs them at load, a delivery that meets a bad one is a permanent
+  `{:config, {:batch_options, _}}`). SQS's `MissingParameter`,
+  `InvalidAttributeName`, `InvalidAttributeValue` and `KmsThrottled` are now
+  classified (permanent and throttled). New series
   `ankusa_sink_batch_{requests,entries,bisections,refused}_total` and
   `ankusa_sink_batch_{batchers,queued,queued_bytes}`; events
   `[:ankusa, :sink_batch, :flush | :refused | :state]`. **Behaviour change:** for a
@@ -46,6 +50,113 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `sink_concurrency` counts the batcher's requests. `batch: false` restores the
   old one-request-per-message behaviour for a sink.
 
+- **Readiness thresholds (OPS-5).** `listener.ready_sink_error_window_ms` (5000):
+  under `wal: :none`, a sink whose last publish failed within this long ago makes
+  `/ready` `503` with `sinks: "failing"`; a sink that publishes again clears
+  itself at once (`Ankusa.Health.SinkErrors`, one ETS write per publish in the
+  request process, bounded at 10 000 entries and swept every window).
+  `listener.ready_min_free_bytes` (`nil`): below it `disk` is failing and the node
+  unready, measured by `:disksup` (`:os_mon`; with none running the reason is
+  `unmeasured`). `queue.max_oldest_due_ms` (`nil`): past it `backlog` is failing,
+  a label that never makes the node unready. All range-checked, and shown by
+  `/v1/config` (none is a secret). They live in existing sections, so
+  `Ankusa.Config` keeps its 31 struct fields.
+
+### Changed
+
+- **`/ready` lists every readiness check (OPS-5).** `Ankusa.Health.ready/1` runs
+  each `Ankusa.Health.Check` that applies to the node (`store`, `intake` under
+  `wal: :dual`, `sinks` under `wal: :none`, `disk`, `backlog`, `backup`) and the
+  body carries one key per check with its state, `"ok"`, `"failing"` or
+  `"draining"`, plus `reasons` (a fixed set of atoms per check) while one is not
+  `"ok"`. It answers `503` when a check that gates is not ok: `store`, `intake`,
+  `sinks` and `disk` always, `backup` with `backup.require_fresh`, never
+  `backlog`. **Wire change:** `store` is now `"ok"`/`"failing"` (it was `"ok"`,
+  `"none"`, `"store_unavailable"`, `"write_failed"`) and the failure class moved
+  from the top-level `reason` to `reasons.store`; a node with no store has no
+  `store` key; `backup` is `"ok"`/`"failing"` (it was `"fresh"`/`"stale"`) and
+  `intake` is `"ok"`/`"failing"` with `reasons.intake` `down` or `recovering` (it
+  was `up`/`down`/`recovering`). The status codes are unchanged, and so are the
+  gating rules of `store`, `intake` and `backup`. Both OpenAPI documents describe
+  the new body.
+
+## [0.7.0] - 2026-10-24
+
+### Added
+
+- **Bounded claim sweeper and claim batch error handling (PERF-2).**
+  `Ankusa.ClaimCheck.Sweeper` sweeps one tenant per tick instead of globbing every
+  `claims/tenant=*/dt=*` directory: a pass lists the tenant directories once, in name
+  order, and each tick takes the next tenant's day partitions (by name, never a glob).
+  The tenant a pass last finished is persisted (`m:claim_sweep_cursor`, additive: a
+  build that does not know the row ignores it, so a rollback needs no step), so a
+  restart resumes after it. While tenants are left the next step follows in 100 ms;
+  `scanned` and `partitions_left` of `[:ankusa, :claim_check, :sweep]` now count the
+  one tenant swept, and `tenants_left` (gauge `ankusa_claim_check_sweep_tenants_left`)
+  is new. `Ankusa.ClaimCheck.check_in_batch/2` uploads its packs unlinked: an upload
+  process that dies is `{:error, {:unavailable, reason}}` for that pack's items and no
+  longer takes the dispatch packing task down, and an item no pack can hold is
+  `{:error, :too_large}`; the claim-count and size limits now live in `split/3`, and
+  `check_in/4` answers `{:error, :too_large}` for more than 65 000 claims or about
+  4 GiB instead of raising from `Pack.build/1`. See
+  [`claim-check.md`](../../docs/claim-check.md#claim-leases).
+- **Message size preflight and forwarded-header caps (DEL-5).** A queue sink
+  that `use`s `Ankusa.Sink.Messaging` now checks every message against its
+  `c:Ankusa.Sink.Messaging.max_message_bytes/1` (implemented for you: the
+  `:max_message_bytes` option, default 1 MiB) before `publish/4`, in
+  `Ankusa.Sink.Message.encode/4`. An inline body whose base64 message would not
+  fit is checked in and published as a claim; a body that is over the limit by
+  itself is `{:permanent, {:message_too_large, size, max}}`, dead-lettered at
+  once with no broker call. `Message.max_bytes/1` and
+  `default_max_message_bytes/0` are new. `Sink.GooglePubSub` (10 MB) overrides
+  the default; `Sink.SQS` keeps `:max_message_bytes`.
+- **`max_headers` (64) and `forward_headers_max_bytes` (16 KiB) on
+  `Ankusa.Source`.** `Ankusa.Sink.Message.forwarded_headers/2` now takes a
+  sink `ctx` (or a bare mode, as before) and drops a header past either cap,
+  whole, emitting `[:ankusa, :sink, :headers_dropped]`
+  (`ankusa_sink_headers_dropped_total{reason="count" | "bytes"}`). `Sink.Http`
+  is capped too. Sources that forward more than 64 headers, or more than 16 KiB
+  of them, lose the excess: raise the two keys to keep them.
+- **Owned, bounded HTTP connection pools (DEL-3).** Every `Ankusa.HttpClient`
+  request that does not name its own transport (`Sink.Http`, SQS, Pub/Sub, JWKS and
+  secret-provider fetches) goes through `Ankusa.HttpClient.Pools`, one Finch for the
+  node (`Ankusa.HttpClient.Finch`, started with the application) with a pool per
+  receiver address and connection profile per instance, instead of Req's default of
+  one 50-connection pool per origin that is never closed. New `egress.pools` config
+  (inside the `egress` section, so `Ankusa.Config` keeps its 31 struct fields):
+  `pool_size` (32), `pool_count` (1), `pool_timeout` (5000), `pool_max_idle_ms`
+  (60000), `conn_max_idle_ms` (30000), `max_pools` (1024), `max_pools_per_tenant`
+  (256) and `protocols` (`[:http1, :http2]`, so HTTP/2 negotiates by ALPN), all
+  range-checked, and a per-sink `pool: [pool_size:, pool_count:, pool_timeout:,
+  protocols:]` on `Sink.Http`. An idle-pool sweep (every 30 s, mirroring
+  `Sink.Reaper`) closes pools idle for `pool_max_idle_ms`; deleting a source closes
+  its idle pools; at a ceiling the least recently used idle pool (the tenant's own,
+  for `max_pools_per_tenant`) is closed to make room, and with every pool serving a
+  request the call is `{:error, {:unavailable, :pool_limit}}`, retried. Boot warns
+  when `pool_size * pool_count` is below `dispatch.concurrency` or `max_pools *
+  pool_size * pool_count` passes `ulimit -n`. Gauge `ankusa_http_pools`
+  (`[:ankusa, :http, :state]`), counters `ankusa_http_pool_closed_total{reason}` and
+  `ankusa_http_pool_refused_total{scope}`. `Ankusa.HttpClient.request/6` takes the
+  pool context options `:instance`, `:tenant`, `:source` and `:pool`. Tests:
+  `http_client_test.exs`, `sink/http_test.exs`, `config_test.exs`; `bench/pools_bench.exs`.
+  See [`delivery.md`](../../docs/delivery.md#sinkhttp-connection-pools).
+
+- **`Ankusa.Sink.Messaging` and `Ankusa.Sink.Connections`: the shared shape of
+  a queue-style sink.** `use Ankusa.Sink.Messaging` and implement `publish/4`:
+  the injected `deliver/3` encodes the hook as `Ankusa.Sink.Message` (inline,
+  or its claim) and hands the payload over, and `inline_max_bytes/1` is
+  implemented for you; `resolve/2`/`static/1` read a "string or function of
+  the hook" option, `endpoints/1` a broker list (`"host:port"`,
+  `{host, port}`, or one comma-separated string).
+  `Ankusa.Sink.Connections.start_link/1` starts an adapter's
+  `<sink>.Supervisor` + `<sink>.Reaper` tree under `<sink>.TopSup`, and
+  `ensure/5` finds or starts a connection under it and touches it in the
+  reaper. `Ankusa.Sink.Message` gains `headers/2` (the `ankusa_*` transport
+  headers, tenant always present), `delivery_id/2` (`id`, or
+  `id:replay:<replay_id>`) and `fits/2` (the
+  `{:permanent, {:message_too_large, size, max}}` gate);
+  `Ankusa.HttpClient.authority/1` is public. `mise run new:adapter` scaffolds
+  the new shape. Docs: `packaging.md#adding-a-new-adapter-package`.
 - **Claim gateway integrity check, and gateway, sweep and archive metrics
   (CLM-1).** `claim_check.integrity_check` (`:manifest`, the default, or
   `:off`): the gateway holds every whole-claim `GET` to the sha256 its pack's
@@ -353,13 +464,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `Sink.Http.describe/2` reports `computed: [...]` and `payload: :body` in the
   new `Sink.Description` fields of those names (`payload: :message`, the
   default, is what the AsyncAPI document keeps; `host` may now be `nil`).
-  Computed URLs connect through `Ankusa.Sink.Http.Pool`, one bounded Finch per
-  instance started by `Ankusa.Instance` (4 connections per origin, an origin's
-  pool closed after 30 s idle, new origins refused with
-  `{:error, :pool_origins_exhausted}` past 4,096, gauge
-  `ankusa_sink_http_pool_origins`), instead of Req's pool per origin that is
-  never closed; owned pools for every outbound client are DEL-3, which replaces
-  it. A computed `:url` cannot also set `:cacertfile` or `:allow_insecure_tls`.
+  Computed URLs connect through the owned pools of DEL-3 below (the per-instance
+  `Ankusa.Sink.Http.Pool` this entry first shipped was folded into them).
   `finch` is now a declared dependency (already locked through Req).
   `HttpClient` honours `req_options: [finch: [name: pool]]`, which raised
   before (Req refuses `:finch` beside the `:connect_options` it always set); the
@@ -825,6 +931,55 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- **`Sink.Http` pins `https` destinations too (DEL-3).** `Egress.pin/3` always
+  rewrites the URL to the address it validated (with the name as the TLS
+  `hostname`, so the certificate is still checked against the name), and the
+  connection pool is keyed by that address, so every connection a pool opens goes
+  to the checked address and a name rebound after the check cannot reach the
+  private network through an open pool. Its `:pin_https` option is gone. A computed
+  `:url` may now combine with `:cacertfile` and `:allow_insecure_tls` (the TLS
+  options are the pool's), and the `{:permanent, {:computed, :url, :tls_override}}`
+  and `:unpinnable` results no longer exist. `Sink.Http.Pool` and the gauge
+  `ankusa_sink_http_pool_origins` are replaced by `Ankusa.HttpClient.Pools` and
+  `ankusa_http_pools`.
+- **Retry horizon: 24 hours by wall clock, not 84 attempts; per-source `retry:`;
+  explicit error classes (DEL-2).** Every delivery now gets `max_elapsed_ms`
+  (default 24 h, `dispatch.retry`'s option, 1 s to 30 days) from its first
+  attempt, kept in the delivery row as `first_attempt_at` (an additive key under
+  the row versioning: a row written before it gets the stamp when dispatch first
+  takes it), and is dead-lettered by the first failure at or after it; no retry is
+  scheduled later than it. `Ankusa.RetryPolicy.Exponential`'s `max_attempts`
+  default is now `nil` (it was `84`, about 6 hours), so a sink that is down for 30
+  hours dead-letters its hooks at 24 hours, and a deployment that wants the old
+  window sets `max_elapsed_ms: 21_600_000`. Rows parked behind an open circuit
+  breaker age too: due no later than their horizon, dead-lettered as
+  `{:retry_horizon, module}` past it. A DLQ replay gives the row a fresh horizon.
+  `Ankusa.Source` has a `retry:` field (`base_ms`, `max_ms`, `max_attempts`,
+  `jitter`, `max_elapsed_ms`) laid over `dispatch.retry`; lifecycle events keep the
+  instance's. `dispatch.max_retry_after_ms` (default 1 h, was a constant) caps a
+  sink's `Retry-After`. `Ankusa.RetryPolicy` gains `schedule/5`, `for_source/2`,
+  `normalize_opts!/2`.
+
+  Sinks classify explicitly: SQS `AccessDenied`/`QueueDoesNotExist`/credential
+  errors and Pub/Sub `PERMISSION_DENIED`/`NOT_FOUND`/`UNAUTHENTICATED` are
+  `{:permanent, {:config, _}}` (dead-lettered at once, counted in
+  `ankusa_dispatch_config_errors_total{sink}` / `[:ankusa, :dispatch,
+  :config_error]`; they used to be retried for hours); SQS `Throttling` and
+  Pub/Sub `RESOURCE_EXHAUSTED`, and any `429`/`503` from them, are `{:retry_after,
+  ms, _}` with a full-jitter `ms` (`Ankusa.Sink.throttle_after_ms/1`); `Sink.Http`
+  treats `451` as permanent, `425` as a pause and `409` as transient. See
+  [`delivery.md`](../../docs/delivery.md#retry-horizon).
+- **A source's retry horizon cannot outlast the claim bucket's lifecycle rule
+  (DEL-2).** `claim_check.bucket_expiry_days` is now checked against the longest of
+  `dispatch.retry`'s horizon and every claim-using source's `retry.max_elapsed_ms`
+  (+ `queue.dlq.retention_days` + `redeem_grace_ms`, in days: 32 by default, was a
+  21-day assumption, 52). A source write that would exceed it is `{:error,
+  :retry_exceeds_claim_expiry, message}` (`422 retry_exceeds_claim_expiry` from the
+  admin API), and boot refuses a stored source that does
+  (`Ankusa.ClaimCheck.validate_stored_horizons!/2`).
+
+- `Ankusa.Sink.SQS` and `Ankusa.Sink.GooglePubSub` are built on
+  `Ankusa.Sink.Messaging`; what they send is unchanged.
 - **The quarantine pen no longer serializes every flagged hook (DUR-9).** A
   source's bucket is one ETS row updated with a compare-and-swap
   (`RateLimiter.hit_bucket/4`), the pen's byte count and the number of writes
@@ -2017,7 +2172,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   defaults to `false`, so depending on `ankusa` never binds a port as a side
   effect.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.6.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.7.0...HEAD
+[0.7.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.6.0...ankusa-v0.7.0
 [0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.4.0...ankusa-v0.6.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.3.0...ankusa-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.2.4...ankusa-v0.3.0

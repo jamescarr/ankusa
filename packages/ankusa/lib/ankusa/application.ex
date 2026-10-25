@@ -14,9 +14,17 @@ defmodule Ankusa.Application do
     :ok = Ankusa.BlobStore.Azure.ManagedIdentity.create_table()
     :ok = Ankusa.BlobStore.Breaker.create_table()
     :ok = Ankusa.BlobStore.TokenCache.create_table()
+    :ok = Ankusa.HttpClient.Pools.create_table()
 
+    # The node's outbound HTTP pools (`Ankusa.HttpClient.Pools`): the Finch first,
+    # then the process that opens, bounds and sweeps its pools. A restart of
+    # either restarts everything after it.
     children =
-      [{Registry, keys: :unique, name: Ankusa.Registry}] ++ default_instance()
+      [
+        Ankusa.HttpClient.Pools.finch_child_spec(),
+        Ankusa.HttpClient.Pools,
+        {Registry, keys: :unique, name: Ankusa.Registry}
+      ] ++ default_instance()
 
     # `rest_for_one`: a Registry restart forgets every registered name, so
     # anything started after it (the default instance) must restart with it.

@@ -19,6 +19,7 @@ defmodule Ankusa.Edge.Publish do
   require Logger
 
   alias Ankusa.{Envelope, Sink, Source}
+  alias Ankusa.Health.SinkErrors
   alias Ankusa.Sink.Message
 
   @spec publish(atom(), Source.t(), Envelope.t()) ::
@@ -89,6 +90,11 @@ defmodule Ankusa.Edge.Publish do
           end
         end)
 
+      # What `/ready` reports as `sinks` (`Ankusa.Health.SinkErrors`).
+      source.sinks
+      |> Enum.zip(outcomes)
+      |> Enum.each(fn {sink, {_mod, outcome}} -> SinkErrors.record(instance, sink, outcome) end)
+
       Enum.each(outcomes, fn {mod, outcome} -> emit(instance, env, mod, outcome) end)
 
       if Enum.all?(outcomes, &match?({_mod, :ok}, &1)) do
@@ -107,7 +113,9 @@ defmodule Ankusa.Edge.Publish do
       source_id: env.source_id,
       tenant_id: env.tenant_id,
       attempt: 1,
-      forward_headers: source.forward_headers
+      forward_headers: source.forward_headers,
+      max_headers: source.max_headers,
+      forward_headers_max_bytes: source.forward_headers_max_bytes
     }
 
     case claim_needed(source.sinks, env) do

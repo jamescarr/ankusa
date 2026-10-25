@@ -71,14 +71,14 @@ is the [key reference](#ankusa-config) below.
 
 | Section | Keys (default) |
 | --- | --- |
-| `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`) |
+| `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`), `min_free_bytes` (unset = no check; the free bytes `data_dir`'s file system must keep, or `/ready` answers `503` with `disk: failing`; see [`/ready`](deployment.md#running-the-container)) |
 | `log` | `level` (`info`), `banner` (`true`; the ASCII-art banner on start) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`), `store_headers` (`drop`: `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`; `hash`: none). See [Stored headers](#stored-headers) |
 | `listener` | Limits for every HTTP listener, and the ingest port's TLS: `max_connections` (20000), `num_acceptors` (null = two per scheduler), `read_timeout_ms` (10000), `body_read_timeout_ms` (15000), `request_deadline_ms` (30000), `max_requests_per_connection` (1000), `max_header_count` (64), `max_header_length` (16384), `http2` (`false`), `tls` (`certfile`, `keyfile`, `cacertfile`, `verify` = `verify_none` \| `verify_peer`, `versions`, `ciphers`). See [Listeners](#listeners-limits-tls-and-mtls) |
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it, and then needs `auth`), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled), `tls` (a TLS block, like `listener.tls`), `auth` (who may call it: `mode` = `none` \| `token` \| `jwt` \| `mtls`, `allow_insecure`, `tokens`, `jwt`, `mtls`; see [Control-plane authentication](#control-plane-authentication)) |
 | `metrics` | `enabled` (`false`), `port` (4004), `ip` (`127.0.0.1`), `tls`. A listener that serves only `/metrics`, `/health` and `/ready`. See [A separate metrics listener](#a-separate-metrics-listener) |
 | `batcher` | `partitions` (4), `max_batch` (256), `max_commits` (64), `group_commit_max_bytes` (4194304), `group_commit_max_records` (1024), `group_commit_delay_ms` (1), `max_delay_ms` (0), `max_queue` (10000), `max_queue_bytes` (268435456) |
-| `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `sink_concurrency` (8; null = only `concurrency`), `breaker_failures` (5; 0 disables breakers), `breaker_open_ms` (30000), `breaker_max_open_ms` (300000), `tenants` (`default` and one entry per tenant id, each any of `max_inflight` (1024), `max_inflight_bytes` (33554432), `concurrency` (16)), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (84), `retry.jitter` (`true`). See [`delivery.md`](delivery.md#a-slow-or-dead-sink) and [Dispatch fairness between tenants](delivery.md#fairness-between-tenants) |
+| `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `sink_concurrency` (8; null = only `concurrency`), `breaker_failures` (5; 0 disables breakers), `breaker_open_ms` (30000), `breaker_max_open_ms` (300000), `tenants` (`default` and one entry per tenant id, each any of `max_inflight` (1024), `max_inflight_bytes` (33554432), `concurrency` (16)), `max_retry_after_ms` (3600000; 1000 to 86400000), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (null: no attempt limit), `retry.jitter` (`true`), `retry.max_elapsed_ms` (86400000, 24 h; 1000 to 2592000000: the wall-clock horizon, see [Retry horizon](delivery.md#retry-horizon)). See [`delivery.md`](delivery.md#a-slow-or-dead-sink) and [Dispatch fairness between tenants](delivery.md#fairness-between-tenants) |
 | `wal` | `type` (`disk` \| `dual` \| `none`; the queue's mode — the name is historical; `dual` also confirms every hook in the intake log, see `intake`), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
 | `intake` | The intake log behind `wal.type: dual` ([ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)); read whatever `wal.type` is, required under `dual`. `type` (`kafka`; required under `dual`), `node_id` (required under `dual`; `[a-z0-9._-]{1,64}`, the node's **stable** identity, the same on a replacement; `ANKUSA_INTAKE_NODE_ID`), `fleet` (`default`), `topic` (`ankusa.intake.<fleet>`), `kafka` (`brokers`: a list of `host:port`, required; `ssl`: bool; `sasl`: `mechanism` (`plain` \| `scram_sha_256` \| `scram_sha_512`), `username`, `password`; the same shape as a Kafka sink), `publish_timeout_ms` (`2000`; 100–60000, under the batcher's 15 s record deadline: the one publish attempt's deadline), `reconcile_deadline_ms` (`20000`; 1000–600000, and under `fleet.pending_ttl_ms` with `dedupe.scope: fleet`), `breaker_failures` (`3`; 1–100), `probe_ms` (`1000`; 100–60000), `retry_after_s` (`2`; 1–300), `offset_flush_ms` (`1000`; 100–60000), `pending.max_records` (`50000`; 1–10⁷), `pending.max_bytes` (`268435456`), `max_record_bytes` (`10000000`; at least `http.max_body_bytes` + 65536), `recover_on_boot` (`true`), `verify_topic` (`true`; `false` skips the boot check of the topic's settings and the startup line says `intake topic settings UNVERIFIED`). `kafka.sasl` is redacted in `GET /v1/config`. Boot refuses `dual` without `intake.type`, `intake.node_id`, `backup.enabled` and `backup.max_age_ms`. See [Host loss and the intake log](deployment.md#host-loss-and-the-intake-log) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000; a partial segment waits this long), `max_segments_per_tick` (16), `key_prefix` (`""`; `name/` parts prepended to every segment key, so nodes can share a bucket), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
@@ -98,8 +98,9 @@ is the [key reference](#ankusa-config) below.
 | `audit` | `retention_days` (365, an integer ≥ 1). How long the [audit trail](architecture.md#guarantees-by-component) keeps its rows: an hourly sweep deletes older ones, but never a row a lifecycle sink has not yet seen (`m:lifecycle_cursor`). Read with `GET /v1/audit` (scope `audit:read`). Per node |
 | `tenants` | `max` (1000000, an integer from 1 to 4294967294). How many tenants the node's store hands a dense ordinal to ([ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md)); the hook of one past it is refused with `503 {"error":"tenant_limit"}` and `Retry-After: 300`. Tenants it already knows are never refused, and a tenant keeps its ordinal forever. Per node |
 | `queue` | `dlq` (`retention_days` 30, `max_rows` 10000000, `max_bytes` 53687091200; see [`delivery.md`](delivery.md)) and `rocksdb`: the RocksDB settings of the node's store, read at open: `block_cache_bytes` (67108864), `bloom_bits_per_key` (10; 0 = off), `max_open_files` (65536; -1 = no limit), `compaction_style` (`level` \| `universal`), `rate_limiter_bytes_per_sec` (0 = unlimited), `max_background_jobs` (4), `write_buffer_bytes` (a map of the column families `default`, `hooks`, `deliveries`, `index`, `archive`, `quarantine`, `audit`, `tenants`, `counters`, each at least 65536). See [`storage.md`](storage.md#rocksdb-tuning-and-the-index-filters) |
+| `health` | `sink_error_window_ms` (5000, an integer ≥ 1). `wal.type: none` only: a sink whose last publish failed within this many ms makes `/ready` answer `503` with `sinks: failing`; a sink that publishes again clears itself at once. The other two readiness thresholds live beside the things they measure: `node.min_free_bytes` (the disk floor) and `queue.max_oldest_due_ms` (unset = no check; the oldest due delivery's wait, in ms, past which `/ready` carries `backlog: failing`, a label that never makes the node unready). See [`/ready`](deployment.md#running-the-container) |
 | `lifecycle` | `sinks` (required and non-empty when the section is present; omit the section to turn events off). Sinks, shaped like a source's, that receive a CloudEvent when a source or route is created, updated, or deleted. See [AsyncAPI and lifecycle events](asyncapi.md) |
-| `egress` | `allow_insecure_http` (`false`: `http` sink URLs fail the load), `deny_cidrs` (loopback, RFC 1918, carrier-grade NAT, link-local, unique-local IPv6 and the unspecified addresses; setting it replaces the list), `allow_cidrs` (`[]`), `allow_hosts` (`[]`), `deny_hosts` (`[metadata.google.internal]`). Where `type: http` sinks may connect, checked on every attempt. See [Egress](#egress) |
+| `egress` | `allow_insecure_http` (`false`: `http` sink URLs fail the load), `deny_cidrs` (loopback, RFC 1918, carrier-grade NAT, link-local, unique-local IPv6 and the unspecified addresses; setting it replaces the list), `allow_cidrs` (`[]`), `allow_hosts` (`[]`), `deny_hosts` (`[metadata.google.internal]`), `pools` (`pool_size` (32), `pool_count` (1), `pool_timeout` (5000), `pool_max_idle_ms` (60000), `conn_max_idle_ms` (30000), `max_pools` (1024), `max_pools_per_tenant` (256), `protocols` (`[http1, http2]`)). Where `type: http` sinks may connect, checked on every attempt; and `egress.pools`, the outbound HTTP connection pools: one per receiver address, bounded in connections, count and idle time. See [Egress](#egress) and [Outbound connection pools](#outbound-connection-pools) |
 
 `storage.s3`/`storage.gcs` are read only when the matching
 `type` is set. See
@@ -120,7 +121,10 @@ One source per provider endpoint; the key is the catch-URL segment
 | `sinks` | At least one; every sink is tried on every delivered hook. |
 | `dedupe` | Collapse provider retries at ingest. A preset name (`github`, `standard_webhooks`, `svix`, `shopify`, `stripe`), or a mapping with exactly one of `preset` (same names), `header` (the event-id header, e.g. `X-GitHub-Delivery`) or `json` (a dot path into the body, e.g. `data.id`), plus an optional `ttl_seconds` (default 259 200 = 72 h). Hooks that share a key within the TTL get the same `201` and the original id, with `"duplicate": true` on the later ones. Keys are scoped to the tenant and the source, so two tenants behind one `tenant_path` source never collapse each other's events. The key travels into every delivery as `dedupe_key`. |
 | `forward_headers` | Which provider request headers travel into sink messages (and `Sink.Http` requests): a list of names (lowercased; still minus the never-forwarded set below), or absent for the default set: every header except `authorization`, `proxy-authorization`, `cookie`, `x-api-key`, `host`, `content-length`, `content-type`, `connection`, `keep-alive`, `transfer-encoding`, `te`, `trailer`, `upgrade`, `expect`, and every `x-ankusa-*` header. (`:default` is the Elixir value only; YAML takes a list or nothing.) |
+| `max_headers` | The most forwarded headers one sink message carries (default 64, a positive integer). Names are kept in order of arrival; one past the limit is dropped and counted (`ankusa_sink_headers_dropped_total{reason="count"}`). |
+| `forward_headers_max_bytes` | The most bytes of forwarded header names plus values one sink message carries (default 16384, a positive integer). A header that would pass it is dropped whole, never truncated, and counted (`reason="bytes"`); later, smaller headers are still considered. The message then stays near `inline_max_bytes × 4/3` plus about 1 KiB plus this, however large the provider's headers are. |
 | `store_headers` | `drop` / `hash` lists of header names that override `http.store_headers` for this source, key by key (an absent list inherits). See [Stored headers](#stored-headers). |
+| `retry` | Overrides `dispatch.retry` for this source, key by key (an absent key inherits): `base_ms`, `max_ms`, `max_attempts`, `jitter`, and `max_elapsed_ms`, the horizon after which a delivery still failing since its first attempt is dead-lettered (default `86400000`, 24 h). Same ranges as `dispatch.retry`. A source that routes to a claim-checking sink in an object store cannot retry longer than `claim_check.bucket_expiry_days` allows: boot refuses it, and the admin API answers `422 retry_exceeds_claim_expiry`. See [Retry horizon](delivery.md#retry-horizon). |
 
 #### Stored headers
 
@@ -293,10 +297,10 @@ and `public_key`.
 | --- | --- |
 | `log` | none |
 | `http` | `url` (`https://` unless `egress.allow_insecure_http`), `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000), `secret` (**required** unless `allow_unsigned: true`: a `whsec_` secret, or a list while rotating, signs every delivery the Standard Webhooks way; `secret_file` reads it from a file instead, see [Secret sources](#secret-sources)), `allow_unsigned` (`false`; `true` sends deliveries with no signature, so any host that can reach the URL can inject hooks. A `secret` still signs when both are set. A sink with neither does not load, and the admin API answers `400 invalid_source` for a source that has one), `max_response_bytes` (65536; only the status is used), `cacertfile` (a PEM CA bundle to verify the receiver's certificate against, for a private CA; the file must exist at load), `allow_insecure_tls` (`false`; `true` skips certificate verification for this sink). `/v1/config` shows `allow_unsigned` (a boolean) and hides `secret`. Deliveries are not ordered; a consumer that needs order has to rebuild it from data it receives and tolerate redelivery. The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
-| `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (65536), `max_inflight` (256 unconfirmed publishes per connection; past it a publish fails fast and is retried), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least 16000). |
-| `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (65536), `max_record_bytes` (1000000; a larger record is dead-lettered at once), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`), `idle_timeout_ms` (600000; the client closes after this long with no delivery, `0` never; at least the produce timeout plus 1000). |
-| `nats` | `servers` (a list, or one comma-separated string; failover, one server at a time, picked at random per connect), `subject`, `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least `publish_timeout_ms` plus 1000). The stream must already exist. See [`delivery.md`](delivery.md#sinknats-subject-delivery). |
-| `redis` | `url` (credentials and db go in it: `redis://:password@host:6379/0`, `rediss://` for TLS), `channel` (a static string), `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least `publish_timeout_ms` plus 1000). Pub/sub keeps no copy, so a publish nobody is subscribed to is an error and the sink is never durable. See [`delivery.md`](delivery.md#sinkredis-pubsub-delivery). |
+| `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (65536), `max_message_bytes` (134217728, RabbitMQ's default `max_message_size`), `max_inflight` (256 unconfirmed publishes per connection; past it a publish fails fast and is retried), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least 16000). |
+| `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (65536), `max_record_bytes` (1000000; a record over it is never produced: see below), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`), `idle_timeout_ms` (600000; the client closes after this long with no delivery, `0` never; at least the produce timeout plus 1000). |
+| `nats` | `servers` (a list, or one comma-separated string; failover, one server at a time, picked at random per connect), `subject`, `inline_max_bytes` (65536), `max_message_bytes` (1048576, NATS's default `max_payload`; see below), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least `publish_timeout_ms` plus 1000). The stream must already exist. See [`delivery.md`](delivery.md#sinknats-subject-delivery). |
+| `redis` | `url` (credentials and db go in it: `redis://:password@host:6379/0`, `rediss://` for TLS), `channel` (a static string), `inline_max_bytes` (65536), `max_message_bytes` (536870912, Redis's bulk limit), `publish_timeout_ms` (5000), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least `publish_timeout_ms` plus 1000). Pub/sub keeps no copy, so a publish nobody is subscribed to is an error and the sink is never durable. See [`delivery.md`](delivery.md#sinkredis-pubsub-delivery). |
 | `sqs` | `queue_url`, `region`, `endpoint` (default: the queue URL's origin; set it for a VPC endpoint or an emulator), `message_group_id` (a static string), `inline_max_bytes` (65536), `max_message_bytes` (1048576, SQS's limit; body plus message attributes, a larger message is dead-lettered at once), `timeout_ms` (5000), `access_key_id` / `secret_access_key` / `session_token` (omit for the `AWS_*` env, IRSA, or the EC2 instance role). FIFO when `queue_url` ends `.fifo`: the group defaults to `tenant/source` and the deduplication id is the hook id (SQS dedupes for 5 minutes). The queue must already exist. See [`delivery.md`](delivery.md#sinksqs-queue-delivery). |
 | `google_pubsub` | `project`, `topic` (the id, not `projects/…/topics/…`), `endpoint` (default `https://pubsub.googleapis.com`; set it for a regional endpoint or an emulator), `ordering_key` (a static string; default none), `inline_max_bytes` (65536), `max_message_bytes` (10000000, Pub/Sub's limit; data plus attributes plus ordering key, a larger message is dead-lettered at once), `timeout_ms` (5000), `auth` = `metadata` \| `token` \| `none` (default `metadata`: the GCE/GKE metadata server; `token` is required when `auth: token`; `none` sends no credential, for an emulator). The topic must already exist, and a topic with no subscription drops the message. See [`delivery.md`](delivery.md#sinkgooglepubsub-google-cloud-pubsub-delivery). |
 
@@ -325,6 +329,15 @@ They are plain numbers and a boolean, so `/v1/config` shows them. A refusal is
 
 Bodies above a sink's `inline_max_bytes` are checked in to the object store and
 the message carries a claim reference. See [`claim-check.md`](claim-check.md).
+
+A message is also checked against the sink's `max_message_bytes` before it is
+published (`max_record_bytes` for Kafka). An inline body whose base64 message
+would not fit is checked in instead; a body that is over the limit by itself
+(`inline_max_bytes` at least its size) is dead-lettered at once as
+`{:message_too_large, size, max}`, with no broker call. Budget for an inline
+message: `inline_max_bytes × 4/3` plus about 1 KiB of envelope plus the
+forwarded headers (at most `forward_headers_max_bytes`, 16 KiB by default); the
+64 KiB default is about 106 KiB, under every transport's limit.
 
 The `http` sink's `url`, `headers` and `secret` are static strings here. An
 embedding app can set each to a function of the envelope instead, to route a
@@ -481,7 +494,7 @@ section is **deep-merged** over the defaults, so pass only the keys you want to
 change: `:listener`, `:batcher`, `:dispatch`, `:storage`, `:claim_check`,
 `:backup`, `:admin`, `:metrics`, `:routes`, `:rate_limits`, `:dedupe`,
 `:fleet`, `:quarantine`, `:queue`, `:archive`, `:lifecycle`, `:audit`,
-`:tenants`, `:egress`, `:secrets` and `:intake`.
+`:tenants`, `:egress` (`egress.pools` is merged one level down), `:secrets` and `:intake`.
 
 The example lists the keys `Ankusa.Config.new/1` accepts, at their defaults. As `config :ankusa` app env, the autostarted default instance reads only `:autostart`, `:port`, `:data_dir`, `:roles` and `:sources`; pass the rest to `Ankusa.Config.new/1` or an `Ankusa.Instance` child spec.
 
@@ -603,7 +616,17 @@ config :ankusa,
                    100.64.0.0/10 169.254.0.0/16 ::/128 ::1/128 fc00::/7 fe80::/10),
     allow_cidrs: [],
     allow_hosts: [],
-    deny_hosts: ["metadata.google.internal"]
+    deny_hosts: ["metadata.google.internal"],
+    pools: %{
+      pool_size: 32,
+      pool_count: 1,
+      pool_timeout: 5_000,
+      pool_max_idle_ms: 60_000,
+      conn_max_idle_ms: 30_000,
+      max_pools: 1_024,
+      max_pools_per_tenant: 256,
+      protocols: [:http1, :http2]
+    }
   }
 ```
 
@@ -656,7 +679,13 @@ config :ankusa,
 | `dispatch.tenants["acme"]` | _(none)_ | Overrides any of the three keys for the tenant with that id; a key it leaves out comes from `default`. In YAML the tenant id is the key under `dispatch.tenants` (`default` there is always the default entry, so a tenant named `default` takes it). `ankusa_dispatch_tenant_inflight{tenant}` reports the claimed rows of the 100 tenants holding the most. |
 | `dispatch.breaker_failures` | `5` | Consecutive failures that open a sink's breaker; `0` never opens one. An open sink's rows wait without spending attempts. |
 | `dispatch.breaker_open_ms`, `dispatch.breaker_max_open_ms` | `30_000`, `300_000` | How long a breaker stays open, doubling per consecutive open up to the max; one probe attempt then closes it or reopens it. In memory: a restart closes every breaker. |
-| `dispatch.retry` | `{Ankusa.RetryPolicy.Exponential, []}` | `{module, opts}` implementing `Ankusa.RetryPolicy`: dispatch-wide; there is no per-source retry policy. |
+| `dispatch.retry` | `{Ankusa.RetryPolicy.Exponential, []}` | `{module, opts}` implementing `Ankusa.RetryPolicy`: the instance's policy; a source's `retry:` lays options over `opts`. Whatever the module, `opts[:max_elapsed_ms]` (default `86_400_000`, 24 h; 1000 to 2 592 000 000) is the horizon: a delivery still failing that long after its first attempt is dead-lettered. The shipped policy's other options: `base_ms` (100), `max_ms` (300 000), `max_attempts` (`nil`: unlimited), `jitter` (`true`). |
+| `dispatch.max_retry_after_ms` | `3_600_000` | The longest pause a sink's `Retry-After` or throttle answer (`{:retry_after, ms, _}`) can impose on one retry. 1000 to 86 400 000. The horizon still ends the delivery. |
+| `egress.pools.pool_size`, `egress.pools.pool_count` | `32`, `1` | HTTP/1 connections per pool, and shards per pool, of the pool each receiver address gets (`Ankusa.HttpClient.Pools`). Integers 1 to 1024 and 1 to 64. Several sinks posting to one receiver share one pool, so keep `pool_size * pool_count` at or above `dispatch.concurrency`: boot warns when it is not, and a pool smaller than the concurrency that can reach it caps that receiver's throughput at `pool_size ÷ latency` with nothing to say so. A sink overrides them with `pool: [pool_size:, pool_count:, pool_timeout:, protocols:]`. |
+| `egress.pools.pool_timeout` | `5_000` | How long a request waits for a free connection of its pool; then that attempt fails as a transport error and is retried. 1 to 600000. |
+| `egress.pools.pool_max_idle_ms`, `egress.pools.conn_max_idle_ms` | `60_000`, `30_000` | A pool with no request in flight for `pool_max_idle_ms` is closed by the sweep (every 30 s), and so is a deleted source's idle pool at once; a connection idle for `conn_max_idle_ms` is not reused. Positive integers. |
+| `egress.pools.max_pools`, `egress.pools.max_pools_per_tenant` | `1_024`, `256` | The most live pools of the instance, and the most one tenant's deliveries opened. At a ceiling the least recently used idle pool (the tenant's own, for its ceiling) is closed to make room; when every pool in scope has a request in flight the request is refused as `{:error, {:unavailable, :pool_limit}}` and retried. `max_pools * pool_size * pool_count` is the most connections this can open: boot warns when it passes `ulimit -n`. Integers 1 to 65536. Gauge `ankusa_http_pools`, counters `ankusa_http_pool_closed_total{reason}` and `ankusa_http_pool_refused_total{scope}`. |
+| `egress.pools.protocols` | `[:http1, :http2]` | The HTTP versions a pooled connection may negotiate (ALPN). `[:http2]` alone multiplexes one connection per shard (`pool_size` does not apply). |
 | `storage.blob_store` | `{Ankusa.BlobStore.LocalFS, []}` | `{module, opts}` implementing `Ankusa.BlobStore`. See [`storage.md`](storage.md). |
 | `storage.key_prefix` | `""` | Prepended to the key of every new segment: `""`, or one or more `name/` parts (`[A-Za-z0-9._-]`). Nodes sharing one bucket each take their own, or share the prefix and differ by `intake.node_id` (the dated layout puts the node in the key). The archive catalogue records each segment's full key, so changing the prefix moves only new segments; archived ones are still read where they were written. Claims are never prefixed. |
 | `storage.codec` | `{Ankusa.Codec.Raw, []}` | `{module, opts}` implementing `Ankusa.Codec`: segment record framing. A module that exports `id/0` has that one-byte id written in the segment header (`Raw` is `1`). |
@@ -672,10 +701,10 @@ config :ankusa,
 | `claim_check.ip` | `"127.0.0.1"` | The address the gateway binds: a strict IPv4/IPv6 literal (or an `:inet` tuple). Loopback by default; `"0.0.0.0"` exposes it on every interface, which a container needs before a published port reaches it. |
 | `claim_check.pack_max_bytes` | `16_777_216` | Target size of one claim pack; a body larger than this still gets a pack of its own. Must be a positive integer. |
 | `claim_check.retention_days` | `nil` | LocalFS-only sweeper retention; `nil` disables the retention pass. A pack a claim lease holds is never deleted, whatever its date. |
-| `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval. A tick that left work behind is followed by one after 5 s. |
+| `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval: the lease pass and one tenant's claim partitions. A tick that left work behind in its tenant is followed by one after 5 s, and one that finished a tenant with more to visit by a step after 100 ms, so a pass over many tenants runs back to back and then waits this interval. |
 | `claim_check.redeem_grace_ms` | `86_400_000` | How long after its hook is delivered, or evicted from the DLQ, a claim pack stays leased, so the consumer of a queue message that carries the ref can still redeem it. At least the longest a consumer can lag its broker; ≥ 1. See [`claim-check.md`](claim-check.md#claim-leases). |
 | `claim_check.sweep_max_objects` | `10_000` | The most packs, and the most lease rows, one sweeper tick deletes; the rest is `ankusa_claim_check_sweep_backlog` and waits for the next tick. ≥ 1. |
-| `claim_check.bucket_expiry_days` | `nil` | Object-store claims only: the age, in days, at which the bucket's lifecycle rule expires `claims/` objects. A rule cannot see claim leases, so boot refuses a value below the assumed 21-day retry horizon (the shipped policy gives up after about 6 hours) + `queue.dlq.retention_days` + the redeem grace in days; `nil` logs the minimum instead. `nil` or ≥ 1. |
+| `claim_check.bucket_expiry_days` | `nil` | Object-store claims only: the age, in days, at which the bucket's lifecycle rule expires `claims/` objects. A rule cannot see claim leases, so boot refuses a value below the retry horizon + `queue.dlq.retention_days` + the redeem grace, each in whole days. The horizon is the longest of `dispatch.retry`'s `max_elapsed_ms` (24 h, so 1 day, by default) and the `retry.max_elapsed_ms` of every source that routes to a claim-checking sink; a source written later (the admin API, `Ankusa.SourceStore.put/6`) that would outlast the rule is refused with `422 retry_exceeds_claim_expiry`, and a stored source that does refuses boot. `nil` logs the minimum instead. `nil` or ≥ 1. |
 | `claim_check.blob_stores` | `nil` | `[{module, opts}, ...]`, the stores claim packs are written to and read from; `nil` uses `[storage.blob_store]`. A `LocalFS` claim store takes `root:` (an absolute path). A failed write moves to the next store; a read searches every one. Removing a store makes its claims unreadable. See [`claim-check.md`](claim-check.md#several-stores-and-failover). |
 | `storage.blob_store`, `backup.blob_store`, `backup.secondary`, `claim_check.blob_stores` transport options | see the row below | The HTTP stores (`S3`, `GCS`, `Azure`, `OCI`) take these adapter options besides their credentials: `:timeout_ms` (`10_000`, a request carrying at most 1 MiB), `:upload_timeout_ms` (`60_000`, one request carrying more), `:op_deadline_ms` (`120_000`, 1 000 to 3 600 000: **one absolute deadline per blob operation**, covering every attempt, multipart part and, for a claim check-in, pack-id retry; a `Retry-After` that does not fit it is `{:error, {:throttled, seconds}}` at once), `:multipart_threshold_bytes` (`8_388_608`) and `:multipart_part_bytes` (`8_388_608`; at least 5 MiB, a multiple of 256 KiB), `:retries` (`2`, 0 to 10), `:breaker_failures` (`5`; `0` turns the per-`{endpoint, bucket}` breaker off), `:breaker_open_ms` (`30_000`), `:breaker_slow_ms` (`5_000`: the breaker also opens when the p99 of recent requests passes it), `:pool_size` (`32`), `:pool_count` (`1`) and `:pool_timeout` (`5_000`) of the Finch pool the instance starts for the endpoint. A value out of range is a boot error naming the store. See [`storage.md`](storage.md#conditional-writes-retries-checksums-multipart-pools). |
 | `claim_check.placement` | `:ordered` | Which store a new pack goes to: `:ordered` the first, the others only while it fails; `:hash` the pack id's random bits pick one, spreading packs over every store. |
@@ -702,8 +731,11 @@ config :ankusa,
 | `backup.verify_interval_ms` | `nil` | Every this often the latest backup of every store is read back and checked (manifest signature, every file's size and sha256) without writing anything; a failure is logged and counted by `ankusa_backup_verify_failed_total{target}`. `nil` = never. A positive integer. |
 | `backup.signing_key` | `[]` | HMAC-SHA256 key(s), each a string of at least 32 bytes (`openssl rand -base64 32`), as a string or a list: the first signs every manifest, any of them verifies, so a rotation lists the new key first and keeps the old one until its backups have aged out. With keys configured a restore refuses an unsigned or mis-signed manifest (`{:manifest_invalid, id, :unsigned \| :bad_signature}`); with none it checks nothing. `/v1/config` shows each as `[REDACTED]`. |
 | `backup.final_timeout_ms` | `20_000` | A clean stop (SIGTERM, `docker stop`) takes one last backup before the store closes, at most this long. A positive integer; the supervisor waits this plus 10 s. |
-| `backup.max_age_ms` | `nil` | `/ready` carries `"backup": "fresh"` or `"stale"` once the last successful backup is older than this (or the uploader is not running). `nil` = no label. At least `backup.interval_ms`. |
+| `backup.max_age_ms` | `nil` | `/ready` carries `"backup": "ok"` or `"failing"` (reason `"stale"`) once the last successful backup is older than this (or the uploader is not running). `nil` = no `backup` key. At least `backup.interval_ms`. |
 | `backup.require_fresh` | `false` | A stale backup makes `/ready` answer `503`. Needs `backup.max_age_ms`. |
+| `listener.ready_sink_error_window_ms` | `5_000` | `wal: :none` only: a sink whose last publish failed within this many ms makes `/ready` `503` with `"sinks": "failing"` (reason `"publish_failed"`). A sink that publishes again clears its own entry at once, so the window only bounds how long a failure counts when nothing publishes. YAML `health.sink_error_window_ms`. An integer >= 1. Not secret: `/v1/config` shows it. |
+| `listener.ready_min_free_bytes` | `nil` | The free bytes the file system holding `data_dir` must keep. Below it `/ready` is `503` with `"disk": "failing"` (reason `"below_floor"`), before the store hits `ENOSPC`. Measured by `:disksup` (`:os_mon`), which core does not start and the server image does (an embedding app adds `:os_mon` to its `extra_applications`): with a floor and no `:disksup`, or a `df` that takes over 2 s, the reason is `"unmeasured"` and the node is unready. YAML `node.min_free_bytes`. `nil` = no `disk` key. An integer >= 1. Not secret. |
+| `queue.max_oldest_due_ms` | `nil` | `/ready` carries `"backlog": "failing"` (reason `"over_threshold"`) while the oldest due delivery has waited longer than this, read from the same counters as `ankusa_queue_oldest_due_age_seconds`. A label: the answer stays `200`, since taking a node that is behind out of the load balancer only moves the load. `nil` = no `backlog` key. An integer >= 1. Not secret. |
 | `admin.enabled` | `false` | Start the admin API and `Ankusa.Metrics` on this instance. Off for embedded use; the `jamescarr/ankusa` image turns it on. |
 | `admin.port` | `4002` | The admin API's Bandit port. |
 | `admin.ip` | `"127.0.0.1"` | The address the admin API binds, same rules as `claim_check.ip`. |
@@ -900,9 +932,12 @@ that fill first; the failure counters (`verify_failures`, `weak_hash`,
 #### The admin API
 
 With `admin.enabled: true`, every node serves `GET /health` (the process
-answers), `GET /ready` (this node's store takes a synced write, checked at
-most once a second, and no write failed in the last 5 s; `503` with
-`Retry-After: 1` otherwise — the ingest
+answers), `GET /ready` (every readiness check that applies to this node, each
+listed as `ok`, `failing` or `draining`: the store takes a synced write,
+checked at most once a second, and no write failed in the last 5 s; plus the
+intake log, the sinks, the disk floor, the backlog and the backup where
+configured — see [Running the container](deployment.md#running-the-container); `503` with
+`Retry-After: 1` when one that gates is not `ok` — the ingest
 port serves the same `/ready`), `GET /metrics`
 (Prometheus text), `GET /v1/config` (the effective config; adapter option
 values are hidden unless on an allowlist of non-secret keys such as `region`,
@@ -1392,15 +1427,16 @@ egress:
   reason}}`, like a `401`. Fix the policy or the URL, then replay. A name that
   does not resolve is retried. The reason names the host and the address, never
   the URL, which may carry credentials.
-- **Pinning.** An `http` delivery connects to the address that was checked (the
-  URL is rewritten to it, with the name in the `host` header), so nothing is left
-  to rebind. An `https` delivery keeps the name and the client resolves it again
-  when it connects, so a name rebound to an internal address in that gap still has
-  to present a certificate valid for the name, which the service behind it does
-  not hold: peer verification is what closes the window. A sink with
-  `allow_insecure_tls: true` has no such check, so its connection is pinned too
-  (pinning every `https` URL would cost Req a connection pool per hostname, which
-  tenant-supplied URLs make unbounded).
+- **Pinning.** Every delivery connects to the address that was checked: the URL
+  is rewritten to it, with the name in the `host` header, and for `https` the
+  name is also the TLS `hostname`, so the certificate is still checked against
+  the name (SNI included). The connection pool is keyed by that address and name,
+  so every connection a pool opens goes to the validated address and nothing
+  resolves the name again; a name that moves is checked on its next attempt,
+  before a pool is touched, and one that moves to another public address gets a
+  pool of its own. Tests: `sink/http_test.exs` (`every connection of a pool goes
+  to the pinned address`, `a name that turns private between two deliveries
+  through one pool is denied on the second`), `http_client/egress_test.exs`.
 
 TLS verification is on for every outbound `https` connection (object stores, SQS,
 Pub/Sub, HTTP sinks): the peer's chain and hostname, TLS 1.2 or 1.3, against the
@@ -1414,6 +1450,32 @@ The policy covers `Sink.Http`. The queue sinks (`rabbitmq`, `kafka`, `nats`,
 `redis`, `sqs`, `google_pubsub`) connect to the broker endpoints in their own
 config, and the object stores, SQS credentials and the cloud metadata clients to
 their configured endpoints; none of those URLs comes from a tenant.
+
+#### Outbound connection pools
+
+Every outbound HTTP request that does not name a transport of its own
+(`Sink.Http` deliveries, SQS, Pub/Sub, JWKS and secret-provider fetches) goes
+through `Ankusa.HttpClient.Pools`, not Req's default of one 50-connection pool per
+origin that is never closed. A pool is started on demand for each receiver
+address and TLS profile, per instance, and is bounded by `egress.pools`:
+
+| | |
+| --- | --- |
+| Cap | `egress.pools.pool_size` × `pool_count` connections per pool (32 × 1); `max_pools` live pools per instance (1,024) and `max_pools_per_tenant` per tenant (256), so a tenant with a thousand receivers only ever churns its own pools |
+| Sweep | every 30 s a pool with no request in flight for `pool_max_idle_ms` (60 s) is closed; a connection idle for `conn_max_idle_ms` (30 s) is not reused; a deleted source's idle pools are closed at once |
+| Metric | gauge `ankusa_http_pools`; counters `ankusa_http_pool_closed_total{reason}` (`idle`, `evicted`, `source`) and `ankusa_http_pool_refused_total{scope}` (`tenant`, `instance`) |
+| Refusal | at a ceiling the least recently used idle pool is closed to make room; with every pool in scope serving a request, `{:error, {:unavailable, :pool_limit}}`, retried after the retry policy's backoff. A request that cannot check a connection out within `pool_timeout` fails that attempt as a transport error, also retried |
+
+Connections negotiate HTTP/2 where the receiver offers it (ALPN, `protocols`). Size
+`pool_size` for the concurrency that can reach one receiver: several sinks posting
+to one endpoint share a pool, up to `dispatch.concurrency` attempts at once, and a
+pool of 8 against a 100 ms receiver tops out at 80 requests a second. Boot warns
+when `pool_size * pool_count` is below `dispatch.concurrency`, or when `max_pools *
+pool_size * pool_count` is more than `ulimit -n`. A sink can set its own
+`pool: [pool_size:, pool_count:, pool_timeout:, protocols:]`; a request with its own
+`req_options: [finch: [name: …]]` (the object stores' `Ankusa.BlobStore.Pool`) or
+`plug:` keeps that transport. Tests: `http_client_test.exs` (`pool reaped`,
+`http2`, the two ceilings, the refusal), `bench/pools_bench.exs` (10⁵ origins).
 
 ### Configuring a source
 
@@ -1443,12 +1505,20 @@ config :ankusa,
 | `sinks` | `[{Ankusa.Sink.Log, []}]` | `[{module, opts}]` implementing `Ankusa.Sink`: one delivery per sink, each retried independently. |
 | `dedupe` | `nil` | Collapse provider retries at ingest: `:github \| :standard_webhooks \| :svix \| :shopify \| :stripe`, or `%{header: "X-Event-Id"}` / `%{json: "data.id"}`, each with an optional `ttl_ms` (default `259_200_000`). |
 | `forward_headers` | `:default` | `:default` (every header except the never-forwarded set; see [Sources](#sources)) or a list of header names. |
+| `max_headers` | `64` | The most forwarded headers one sink message carries; a name past it is dropped (`ankusa_sink_headers_dropped_total{reason="count"}`). A positive integer. |
+| `forward_headers_max_bytes` | `16_384` | The most bytes of forwarded header names and values one sink message carries; a header that would pass it is dropped whole (`reason="bytes"`). A positive integer. |
 | `store_headers` | `nil` | `nil` (the instance's `store_headers`) or `%{drop: [..], hash: [..]}` overriding it per key; an absent `drop`/`hash` inherits the instance's list. |
+| `retry` | `nil` | `nil` (the instance's `dispatch.retry` as it is) or a keyword list of `base_ms`, `max_ms`, `max_attempts`, `jitter`, `max_elapsed_ms` laid over it: how long this source's deliveries retry (`max_elapsed_ms`, default 24 h) and how they back off. |
 
-A source cannot override the dispatch-wide retry policy: there is no per-source
-retry policy. `Sink.Http`/`Sink.RabbitMQ`/`Sink.Kafka`/`Sink.NATS`/`Sink.Redis`
-retries are all driven by `config.dispatch.retry`, applied uniformly per source
-by `Ankusa.Dispatch.Pipeline`.
+A source can lay options over the instance's retry policy with `retry:`; it
+cannot swap the policy module. `Sink.Http`/`Sink.RabbitMQ`/`Sink.Kafka`/
+`Sink.NATS`/`Sink.Redis` retries are all driven by `config.dispatch.retry`, with
+the source's `retry:` laid over it, by `Ankusa.Dispatch.Pipeline`. The options
+are `base_ms`, `max_ms`, `max_attempts`, `jitter` and `max_elapsed_ms`, with the
+ranges of `dispatch.retry`; an unknown key or a value out of range fails boot
+(or is a `400 invalid_source` through the admin API). A claim-checking source
+whose `max_elapsed_ms` would outlast `claim_check.bucket_expiry_days` is refused
+(see that key).
 
 ### Every behaviour, at a glance
 

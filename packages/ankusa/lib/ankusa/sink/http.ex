@@ -30,6 +30,10 @@ defmodule Ankusa.Sink.Http do
     * `:req_options` — transport options for the HTTP client (custom Finch pool,
                        proxy, or `plug:` for `Req.Test` in tests). See
                        `Ankusa.HttpClient` for the accepted keys
+    * `:pool`       — this sink's connection pool, over the instance's
+                       `egress.pools`: `:pool_size`, `:pool_count`,
+                       `:pool_timeout` (ms to wait for a free connection) and
+                       `:protocols`. See "Connection pools"
     * `:cacertfile` — a PEM CA bundle to verify the receiver's certificate
                        against (a private CA); default: the system's trust store
     * `:allow_insecure_tls` — `true` skips certificate verification for this
@@ -56,9 +60,15 @@ defmodule Ankusa.Sink.Http do
   | Status | Result | What dispatch does |
   | --- | --- | --- |
   | `2xx` | `:ok` | delivered |
-  | `400`, `401`, `403`, `404`, `410`, `413`, `422` | `{:error, {:permanent, {:status, s}}}` | dead-letter now |
+  | `400`, `401`, `403`, `404`, `410`, `413`, `422`, `451` | `{:error, {:permanent, {:status, s}}}` | dead-letter now |
   | `408`, `429`, `5xx` with a `Retry-After` | `{:error, {:retry_after, ms, {:status, s}}}` | retry no sooner than that |
+  | `425` | `{:error, {:retry_after, ms, {:status, 425}}}`, `ms` the `Retry-After` or else a full-jitter pause | retry no sooner than that |
+  | `409` | `{:error, {:status, 409}}` | the retry policy: the receiver's state usually moves; bounded by `retry.max_elapsed_ms` |
   | anything else | `{:error, {:status, s}}` | the retry policy |
+
+  `451 Unavailable For Legal Reasons` is permanent with the other refusals in
+  the first row: the receiver will not take the hook from this sender, and no
+  amount of retrying changes that.
 
   `401` and `403` are permanent because a credential (or `:secret`) fix is
   followed by a DLQ replay, not by hours of retries against a receiver that
@@ -107,27 +117,37 @@ defmodule Ankusa.Sink.Http do
   private network, and the signing rule is applied to the resolved secret (an
   empty one is `{:permanent, :unsigned_sink}` unless `allow_unsigned: true`).
 
-  Computed URLs connect through the instance's bounded pool,
-  `Ankusa.Sink.Http.Pool`, instead of Req's default of one pool per origin kept
-  for the life of the VM (one per tenant receiver, without bound). That pool
-  verifies peers against the system trust store, so a computed `:url` cannot be
-  combined with `:cacertfile` or `:allow_insecure_tls` (`validate_opts!/1`
-  refuses it); name a pool of your own with `req_options: [finch: [name:
-  MyFinch]]` for those. A new origin is refused as `{:error,
-  :pool_origins_exhausted}` (retried) while the pool is at its origin ceiling,
-  and a plain `http` URL whose host has only IPv6 addresses cannot be pinned:
-  `{:permanent, {:computed, :url, :unpinnable}}`.
+  ## Connection pools
+
+  Every delivery goes through the node's owned pools
+  (`Ankusa.HttpClient.Pools`), never Req's default of one pool per origin kept
+  for the life of the VM: one pool per receiver address and TLS profile, sized
+  by the instance's `egress.pools` (`pool_size` connections, 32 by default, so
+  several sinks posting to one receiver are not capped below
+  `dispatch.concurrency`) or this sink's `:pool`, closed after `pool_max_idle_ms`
+  idle and when the source is deleted, at most `max_pools` live per instance and
+  `max_pools_per_tenant` per tenant. A request that cannot check a connection out
+  within `pool_timeout` fails that attempt as a transport error; one that would
+  open a pool past a ceiling with nothing idle to close is `{:error, {:unavailable,
+  :pool_limit}}`; both are retried.
+
+  The pool is keyed by the address the egress check validated: its connections go
+  to that address and verify the peer against the original name, so a name that
+  later resolves somewhere else is checked again on its next attempt and never
+  reaches a pool opened for the old answer. `:cacertfile` and
+  `:allow_insecure_tls` are part of the pool's connection options, so a computed
+  `:url` may use them too.
   """
 
   @behaviour Ankusa.Sink
 
   alias Ankusa.{Envelope, HttpClient}
-  alias Ankusa.HttpClient.Egress
+  alias Ankusa.HttpClient.{Egress, Pools}
   alias Ankusa.Sink.Description
-  alias Ankusa.Sink.Http.{Pool, Signer}
+  alias Ankusa.Sink.Http.Signer
   alias Ankusa.Sink.Message
 
-  @permanent [400, 401, 403, 404, 410, 413, 422]
+  @permanent [400, 401, 403, 404, 410, 413, 422, 451]
   @default_max_response_bytes 65_536
   @computed_keys [:url, :headers, :secret]
 
@@ -135,9 +155,8 @@ defmodule Ankusa.Sink.Http do
   def deliver(env, ctx, opts) do
     with {:ok, resolved} <- resolve(opts, env),
          {:ok, pinned} <- egress(ctx, resolved),
-         {:ok, pool} <- pool(ctx, opts, pinned),
          {:ok, signature} <- signature(env, resolved) do
-      send_hook(env, ctx, resolved, signature, pinned, pool)
+      send_hook(env, ctx, resolved, signature, pinned)
     end
   end
 
@@ -232,6 +251,7 @@ defmodule Ankusa.Sink.Http do
   def validate_opts!(opts) do
     validate_computed!(opts)
     validate_signing!(opts)
+    Pools.validate_override!(Keyword.get(opts, :pool, []))
 
     insecure? = Keyword.get(opts, :allow_insecure_tls, false)
 
@@ -267,13 +287,6 @@ defmodule Ankusa.Sink.Http do
         {:ok, spec} <- [Keyword.fetch(opts, key)],
         do: validate_spec!(key, spec)
 
-    if tls_exception?(opts) do
-      raise ArgumentError,
-            "Sink.Http cannot combine a computed :url with cacertfile or allow_insecure_tls: " <>
-              "computed URLs use the instance's pool, which verifies against the system " <>
-              "trust store. Name a pool of your own with req_options: [finch: [name: ...]]"
-    end
-
     :ok
   end
 
@@ -298,19 +311,6 @@ defmodule Ankusa.Sink.Http do
   end
 
   defp validate_spec!(_key, _static), do: :ok
-
-  # A computed URL on the shared pool, with a TLS setting the pool cannot honour
-  # per destination, and no pool of the sink's own to put it on.
-  defp tls_exception?(opts) do
-    computed?(Keyword.get(opts, :url)) and
-      (Keyword.get(opts, :allow_insecure_tls, false) == true or
-         Keyword.get(opts, :cacertfile) != nil) and not own_transport?(opts)
-  end
-
-  defp own_transport?(opts) do
-    req_options = Keyword.get(opts, :req_options, [])
-    Keyword.has_key?(req_options, :finch) or Keyword.has_key?(req_options, :connect_options)
-  end
 
   defp validate_signing!(opts) do
     unsigned? = Keyword.get(opts, :allow_unsigned, false)
@@ -345,7 +345,7 @@ defmodule Ankusa.Sink.Http do
   # (the same URL is denied until the policy changes); a failed lookup is not.
   defp egress(ctx, opts) do
     pin_opts =
-      [timeout: Keyword.get(opts, :timeout_ms, 5000), pin_https: insecure_tls?(opts)] ++
+      [timeout: Keyword.get(opts, :timeout_ms, 5000)] ++
         resolver_option(ctx)
 
     case Egress.pin(Keyword.fetch!(opts, :url), policy(ctx), pin_opts) do
@@ -355,17 +355,16 @@ defmodule Ankusa.Sink.Http do
     end
   end
 
-  # Where a delivery's connection comes from: `nil` is Req's own pool (a static
-  # URL, a sink with a transport of its own, or no instance pool to use);
-  # otherwise the instance's bounded pool. See `Ankusa.Sink.Http.Pool`.
-  defp pool(ctx, opts, pinned) do
-    cond do
-      not computed?(Keyword.get(opts, :url)) or own_transport?(opts) -> {:ok, nil}
-      tls_exception?(opts) -> {:error, {:permanent, {:computed, :url, :tls_override}}}
-      not Pool.started?(ctx[:instance]) -> {:ok, nil}
-      pinned.connect_options != [] -> {:error, {:permanent, {:computed, :url, :unpinnable}}}
-      true -> with :ok <- Pool.admit(ctx.instance, pinned.url), do: {:ok, Pool.name(ctx.instance)}
-    end
+  # Whose pool a delivery is: the instance's `egress.pools` apply, the tenant's
+  # ceiling counts it and the source's deletion closes it. `:pool` is the sink's
+  # own override of the instance's sizes.
+  defp pool_context(env, ctx, opts) do
+    [
+      instance: ctx[:instance],
+      tenant: env.tenant_id,
+      source: {env.tenant_id, env.source_id},
+      pool: Keyword.get(opts, :pool, [])
+    ]
   end
 
   defp policy(ctx) do
@@ -406,7 +405,7 @@ defmodule Ankusa.Sink.Http do
     end
   end
 
-  defp send_hook(env, ctx, opts, signature, pinned, pool) do
+  defp send_hook(env, ctx, opts, signature, pinned) do
     timeout = Keyword.get(opts, :timeout_ms, 5000)
 
     opts_headers =
@@ -426,7 +425,7 @@ defmodule Ankusa.Sink.Http do
         signature
 
     forwarded =
-      Message.forwarded_headers(env, ctx[:forward_headers] || :default)
+      Message.forwarded_headers(env, ctx)
       |> Enum.reject(fn {name, _value} -> owned?(name, own) or owned?(name, opts_headers) end)
 
     headers = forwarded ++ own ++ pin_headers(pinned, opts_headers) ++ opts_headers
@@ -441,7 +440,7 @@ defmodule Ankusa.Sink.Http do
       )
       |> Keyword.put(:allow_insecure_tls, insecure_tls?(opts))
       |> put_cacertfile(Keyword.get(opts, :cacertfile))
-      |> put_pool(pool)
+      |> Keyword.merge(pool_context(env, ctx, opts))
 
     case HttpClient.request_with_headers(
            Keyword.get(opts, :method, :post),
@@ -456,6 +455,19 @@ defmodule Ankusa.Sink.Http do
 
       {:ok, status, _headers, _body} when status in @permanent ->
         {:error, {:permanent, {:status, status}}}
+
+      # 425 Too Early: the receiver refused to process the request yet (replay
+      # protection while a handshake completes); it will take it shortly, so it is
+      # a pause (its `Retry-After`, else a jittered one), not a failure to back off.
+      {:ok, 425, headers, _body} ->
+        ms = retry_after_ms(headers) || Ankusa.Sink.throttle_after_ms(Map.get(ctx, :attempt, 1))
+        {:error, {:retry_after, ms, {:status, 425}}}
+
+      # 409 Conflict is transient on purpose: the receiver's state (a lock, a
+      # not-yet-created parent resource) usually moves, and a conflict that does
+      # not is bounded by the retry horizon like any other failure.
+      {:ok, 409, _headers, _body} ->
+        {:error, {:status, 409}}
 
       {:ok, status, headers, _body} when status in [408, 429] or status in 500..599 ->
         case retry_after_ms(headers) do
@@ -489,9 +501,6 @@ defmodule Ankusa.Sink.Http do
 
   defp put_cacertfile(client_opts, nil), do: client_opts
   defp put_cacertfile(client_opts, path), do: Keyword.put(client_opts, :cacertfile, path)
-
-  defp put_pool(client_opts, nil), do: client_opts
-  defp put_pool(client_opts, pool), do: Keyword.put(client_opts, :finch, name: pool)
 
   @doc false
   # `Retry-After` as milliseconds from now: delay-seconds, or an IMF-fixdate

@@ -31,6 +31,24 @@ defmodule Ankusa.Sink.SQSTest do
         String.contains?(request["QueueUrl"], "missing") ->
           error(conn, 400, "QueueDoesNotExist", "The specified queue does not exist.")
 
+        String.contains?(request["QueueUrl"], "denied") ->
+          error(conn, 403, "AccessDenied", "User is not authorized.")
+
+        String.contains?(request["QueueUrl"], "badkey") ->
+          error(conn, 400, "InvalidClientTokenId", "The security token is invalid.")
+
+        String.contains?(request["QueueUrl"], "throttled") ->
+          error(conn, 400, "ThrottlingException", "Rate exceeded")
+
+        String.contains?(request["QueueUrl"], "unavailable") ->
+          error(conn, 503, "ServiceUnavailable", "Try again")
+
+        String.contains?(request["QueueUrl"], "toomany") ->
+          error(conn, 429, "SomethingNew", "Too many requests")
+
+        String.contains?(request["QueueUrl"], "overloaded") ->
+          Plug.Conn.send_resp(conn, 503, "slow down")
+
         String.contains?(request["QueueUrl"], "bad") ->
           error(conn, 400, "InvalidMessageContents", "Invalid characters found.")
 
@@ -194,17 +212,56 @@ defmodule Ankusa.Sink.SQSTest do
     assert h["authorization"] =~ ~r/SignedHeaders=[^,]*x-amz-security-token/
   end
 
-  test "SQS errors keep their code; only a refused message is permanent" do
-    assert {:error, {:sqs, 400, "QueueDoesNotExist", "The specified queue does not exist."} = r} =
+  test "SQS errors keep their code; a refused message is permanent, a refused credential or queue a config error" do
+    assert {:error,
+            {:permanent,
+             {:config, {:sqs, 400, "QueueDoesNotExist", "The specified queue does not exist."}}} =
+              r} =
              SQS.deliver(envelope(), %{attempt: 1}, opts("missing.fifo"))
 
-    assert {:transient, _} = Sink.classify(r)
+    assert {:permanent, {:config, _}} = Sink.classify(r)
+
+    assert {:error, {:permanent, {:config, {:sqs, 403, "AccessDenied", _}}}} =
+             SQS.deliver(envelope(), %{attempt: 1}, opts("denied.fifo"))
+
+    assert {:error, {:permanent, {:config, {:sqs, 400, "InvalidClientTokenId", _}}}} =
+             SQS.deliver(envelope(), %{attempt: 1}, opts("badkey.fifo"))
 
     assert {:error, {:permanent, {:sqs, 400, "InvalidMessageContents", _}}} =
              SQS.deliver(envelope(), %{attempt: 1}, opts("bad.fifo"))
 
     assert {:error, {:status, 500, "kaboom"}} =
              SQS.deliver(envelope(), %{attempt: 1}, opts("boom.fifo"))
+  end
+
+  test "throttling and 429/503 are a jittered retry-after, never a permanent error" do
+    for queue <- ["throttled.fifo", "unavailable.fifo", "toomany.fifo", "overloaded.fifo"] do
+      assert {:error, {:retry_after, ms, reason} = failure} =
+               SQS.deliver(envelope(), %{attempt: 1}, opts(queue))
+
+      # full jitter: 1..500 ms on the first attempt
+      assert ms in 1..500
+      assert {:retry_after, ^ms, ^reason} = Sink.classify(failure)
+    end
+
+    assert {:error, {:retry_after, _ms, {:sqs, 400, "ThrottlingException", _}}} =
+             SQS.deliver(envelope(), %{attempt: 1}, opts("throttled.fifo"))
+
+    assert {:error, {:retry_after, _ms, {:status, 503, "slow down"}}} =
+             SQS.deliver(envelope(), %{attempt: 1}, opts("overloaded.fifo"))
+
+    # the ceiling doubles per attempt, to 30 s, so a long throttle spreads out
+    draws =
+      for _ <- 1..200 do
+        {:error, {:retry_after, ms, _}} =
+          SQS.deliver(envelope(), %{attempt: 7}, opts("throttled.fifo"))
+
+        ms
+      end
+
+    assert Enum.all?(draws, &(&1 in 1..30_000))
+    assert Enum.max(draws) > 500
+    assert length(Enum.uniq(draws)) > 20
   end
 
   test "a 200 whose MD5OfMessageBody doesn't match the body sent is an error" do
@@ -221,6 +278,40 @@ defmodule Ankusa.Sink.SQSTest do
     assert size > 100
     assert Agent.get(capture, & &1) == []
   end
+
+  test "a 1 MiB forwarded header is dropped and counted: the message stays under SQS's limit",
+       %{capture: capture} do
+    handler = "sqs-headers-dropped-#{System.unique_integer([:positive])}"
+    test = self()
+
+    :telemetry.attach(
+      handler,
+      [:ankusa, :sink, :headers_dropped],
+      &__MODULE__.report/4,
+      test
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    env =
+      envelope(%{
+        headers: [{"x-ok", "yes"}, {"x-huge", String.duplicate("h", 1_048_576)}]
+      })
+
+    ctx = %{attempt: 1, instance: :sqs_header_cap}
+    assert :ok = SQS.deliver(env, ctx, opts())
+
+    {_method, _host, _path, _h, body, request} = sent(capture)
+    message = JSON.decode!(request["MessageBody"])
+
+    assert message["headers"] == %{"x-ok" => "yes"}
+    assert byte_size(body) < 1_048_576
+
+    assert_receive {:dropped, %{count: 1}, %{instance: :sqs_header_cap, reason: :bytes}}
+  end
+
+  @doc false
+  def report(_event, measurements, meta, pid), do: send(pid, {:dropped, measurements, meta})
 
   test "describe/2: the queue as the channel, with the sqs binding" do
     assert %Sink.Description{
@@ -451,7 +542,9 @@ defmodule Ankusa.Sink.SQSTest do
       assert results ==
                List.duplicate(
                  {:error,
-                  {:sqs, 400, "QueueDoesNotExist", "The specified queue does not exist."}},
+                  {:permanent,
+                   {:config,
+                    {:sqs, 400, "QueueDoesNotExist", "The specified queue does not exist."}}}},
                  3
                )
     end
@@ -538,6 +631,24 @@ defmodule Ankusa.Sink.SQSTest do
       refute SQS.batched?(queue_url: "x", batch: false)
       assert Sink.batched?(SQS, queue_url: "x")
       refute Sink.batched?(Sink.Log, [])
+    end
+
+    test "a batch option out of range fails validate_opts!/1 and dead-letters a delivery as a config error",
+         %{instance: instance} do
+      assert :ok = SQS.validate_opts!(batch_opts(batch_max_entries: 10))
+
+      assert_raise ArgumentError, ~r/:batch_max_entries must be an integer from 1 to 10/, fn ->
+        SQS.validate_opts!(batch_opts(batch_max_entries: 11))
+      end
+
+      assert_raise ArgumentError, ~r/:batch must be true or false/, fn ->
+        SQS.validate_opts!(batch_opts(batch: "yes"))
+      end
+
+      assert {:error, {:permanent, {:config, {:batch_options, message}}}} =
+               SQS.deliver(envelope(), ctx(instance), batch_opts(batch_max_entries: 11))
+
+      assert message =~ ":batch_max_entries"
     end
   end
 

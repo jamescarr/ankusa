@@ -1,7 +1,8 @@
 defmodule Ankusa.Sink.RabbitMQ.Application do
   @moduledoc """
-  Boots a bare `DynamicSupervisor` that owns one `Ankusa.Sink.RabbitMQ.Connection`
-  per instance, started on demand by `Ankusa.Sink.RabbitMQ`'s `deliver/3`.
+  Starts the connection tree (`Ankusa.Sink.Connections`) for the
+  `Ankusa.Sink.RabbitMQ.Connection`s `Ankusa.Sink.RabbitMQ` opens on demand
+  from `publish/4`, one per instance and `{url, exchange}`.
 
   Self-contained: `ankusa` core has no idea this package exists, no changes to
   `Ankusa.Instance` were needed. Connections register through the same
@@ -23,13 +24,6 @@ defmodule Ankusa.Sink.RabbitMQ.Application do
       :ok = :credentials_obfuscation.set_secret(:crypto.strong_rand_bytes(32))
     end
 
-    children = [
-      {DynamicSupervisor, name: Ankusa.Sink.RabbitMQ.Supervisor, strategy: :one_for_one},
-      # Stops a connection no delivery has used for its `:idle_timeout_ms`.
-      {Ankusa.Sink.Reaper,
-       name: Ankusa.Sink.RabbitMQ.Reaper, supervisor: Ankusa.Sink.RabbitMQ.Supervisor}
-    ]
-
-    Supervisor.start_link(children, strategy: :one_for_one, name: Ankusa.Sink.RabbitMQ.TopSup)
+    Ankusa.Sink.Connections.start_link(Ankusa.Sink.RabbitMQ)
   end
 end

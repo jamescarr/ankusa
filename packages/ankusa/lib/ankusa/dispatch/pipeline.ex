@@ -60,8 +60,10 @@ defmodule Ankusa.Dispatch.Pipeline do
   attempt runs as a probe (rows claimed meanwhile are parked for
   `breaker_open_ms`): success closes the breaker, failure opens it again for
   longer. Breakers live in this process's memory; a restart closes them all.
-  Parked rows spend no attempts, so while a breaker stays open a row's retry
-  horizon is not bounded by wall-clock time.
+  Parked rows spend no attempts, but not forever: a row's retry horizon
+  (`retry.max_elapsed_ms`, default 24 h, from its first attempt) also ends a
+  park. A parked row comes due no later than its horizon, and one that is parked
+  again at or past it is dead-lettered as `{:retry_horizon, module}`.
 
   ## Batching sinks
 
@@ -103,15 +105,13 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   require Logger
 
-  alias Ankusa.{ClaimCheck, Envelope, Sink, SourceStore, Store, Telemetry}
+  alias Ankusa.{ClaimCheck, Envelope, RetryPolicy, Sink, SourceStore, Store, Telemetry}
   alias Ankusa.Queue.{Deliveries, Reclaim, Syncer, Tenants}
   alias Ankusa.Sink.Message
   alias Ankusa.Store.Keys
   alias Ankusa.Tenant.Gate
 
   @housekeeping_ms 1_000
-  # The longest pause a sink's `{:retry_after, ms, _}` can impose.
-  @max_retry_after_ms 3_600_000
   # Housekeeping ticks between `Reclaim.sweep/1` runs.
   @sweep_every 60
   # Outcome writes are buffered and written as one batch: one store write and one
@@ -240,9 +240,41 @@ defmodule Ankusa.Dispatch.Pipeline do
               "(#{inspect(open)}), got #{inspect(max_open)}"
     end
 
+    validate_retry!(Map.get(dispatch, :retry))
+
+    max_after = Map.get(dispatch, :max_retry_after_ms, 3_600_000)
+
+    unless is_integer(max_after) and max_after in 1_000..86_400_000 do
+      raise ArgumentError,
+            "dispatch.max_retry_after_ms must be an integer from 1000 to 86400000, " <>
+              "got #{inspect(max_after)}"
+    end
+
     validate_tenants!(Map.get(dispatch, :tenants))
 
     :ok
+  end
+
+  @retry_keys [:base_ms, :max_ms, :max_attempts, :jitter, :max_elapsed_ms]
+
+  # `{module, opts}`; the options the shipped keys name are range-checked (a
+  # custom policy may carry others), `max_elapsed_ms` among them: the horizon
+  # every policy is held to.
+  defp validate_retry!({mod, opts} = retry) when is_atom(mod) and is_list(opts) do
+    unless Keyword.keyword?(opts) do
+      raise ArgumentError,
+            "dispatch.retry must be {module, keyword_opts}, got #{inspect(retry)}"
+    end
+
+    for key <- @retry_keys, Keyword.has_key?(opts, key) do
+      Ankusa.RetryPolicy.validate_opt!(key, Keyword.fetch!(opts, key), "dispatch.retry")
+    end
+
+    :ok
+  end
+
+  defp validate_retry!(other) do
+    raise ArgumentError, "dispatch.retry must be {module, keyword_opts}, got #{inspect(other)}"
   end
 
   @tenant_limit_keys [:max_inflight, :max_inflight_bytes, :concurrency]
@@ -1033,13 +1065,29 @@ defmodule Ankusa.Dispatch.Pipeline do
         expand(item, source, {state, ops, pairs, jobs, sources}, now)
 
       true ->
+        # The first time a row is seen is when its retry horizon starts; the
+        # stamp is written with whatever the row is rewritten as (a retry, a park,
+        # the dead letter), so it survives a restart.
+        item = %{item | row: Map.put_new(item.row, :first_attempt_at, now)}
+        policy = RetryPolicy.for_source(state.config.dispatch.retry, source.retry)
+
         key =
           {Tenants.normalize(item.env.tenant_id), item.env.source_id, item.sink, item.row.module}
 
         case admit(state, key) do
           {:park, at, state} ->
-            state = bump_replay(state, item.row, :parked)
-            {state, park_ops(item, at) ++ ops, pairs, jobs, sources}
+            deadline = RetryPolicy.deadline(item.row.first_attempt_at, policy)
+
+            # Parked rows spend no attempts, so the clock is what ends them: a row
+            # whose horizon passed behind an open breaker is dead-lettered, not
+            # parked again.
+            if now >= deadline do
+              reason = {:retry_horizon, item.row.module}
+              dead(item, reason, {state, ops, pairs, jobs, sources}, now)
+            else
+              state = bump_replay(state, item.row, :parked)
+              {state, park_ops(item, min(at, deadline)) ++ ops, pairs, jobs, sources}
+            end
 
           {:pass, state} ->
             case bind(source.sinks, item.sink, item.row.module) do
@@ -1054,8 +1102,11 @@ defmodule Ankusa.Dispatch.Pipeline do
                   env: item.env,
                   spec: spec,
                   batched?: Sink.batched?(elem(spec, 0), elem(spec, 1)),
+                  policy: policy,
                   claim: item.claim,
-                  forward_headers: source.forward_headers
+                  forward_headers: source.forward_headers,
+                  max_headers: source.max_headers,
+                  forward_headers_max_bytes: source.forward_headers_max_bytes
                 }
 
                 {state, ops, pairs, [job | jobs], sources}
@@ -1432,6 +1483,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   defp park(state, job, at) do
     state = %{state | claimed: state.claimed - 1, claimed_bytes: state.claimed_bytes - job.size}
     state = tenant_sub(state, job.ord, job.size)
+    at = min(at, RetryPolicy.deadline(job.row.first_attempt_at, job.policy))
     state |> bump_replay(job.row, :parked) |> append(park_ops(job, at))
   end
 
@@ -1748,7 +1800,9 @@ defmodule Ankusa.Dispatch.Pipeline do
       source_id: env.source_id,
       tenant_id: env.tenant_id,
       attempt: row.attempts + 1,
-      forward_headers: job.forward_headers
+      forward_headers: job.forward_headers,
+      max_headers: job.max_headers,
+      forward_headers_max_bytes: job.forward_headers_max_bytes
     }
 
     ctx =
@@ -1859,32 +1913,28 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   defp failed(state, job, reason, attempts, now) do
-    {rmod, ropts} = state.config.dispatch.retry
     row = %{job.row | attempts: attempts}
+    class = Sink.classify(reason)
+    max_after = state.config.dispatch.max_retry_after_ms
 
-    decision =
-      case Sink.classify(reason) do
-        {:permanent, _term} ->
-          :give_up
-
-        {:retry_after, ms, _term} ->
-          case rmod.backoff(attempts, ropts) do
-            {:retry, delay} -> {:retry, max(delay, min(ms, @max_retry_after_ms))}
-            :give_up -> :give_up
-          end
-
-        {:transient, _reason} ->
-          rmod.backoff(attempts, ropts)
-      end
-
-    case decision do
-      {:retry, delay} ->
+    case RetryPolicy.schedule(job.policy, class, row, now, max_after) do
+      {:retry, at} ->
         error = inspect(reason, limit: 50, printable_limit: 4096)
-        {state, Deliveries.retry_ops(job.ord, job.seq, job.sink, row, now + delay, error), []}
+        {state, Deliveries.retry_ops(job.ord, job.seq, job.sink, row, at, error), []}
 
       :give_up ->
         {mod, _opts} = job.spec
         error = inspect({:sink, mod, reason}, limit: 50, printable_limit: 4096)
+
+        with {:permanent, {:config, _}} <- class do
+          Telemetry.emit([:dispatch, :config_error], %{}, %{
+            instance: state.instance,
+            sink: mod,
+            source_id: job.env.source_id,
+            tenant_id: Tenants.normalize(job.env.tenant_id)
+          })
+        end
+
         state = state |> settle_dead(job.env, row, mod, attempts) |> bump_replay(row, :dead)
 
         {state,

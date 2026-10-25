@@ -103,7 +103,7 @@ The always-on tests cover:
   (`reopen backoff`), and starts the backoff over once it opens
   (`metrics_test.exs` scrapes `ankusa_store_write_failures_total`,
   `ankusa_store_reopen_total`, `ankusa_store_unavailable_seconds` and
-  `ankusa_store_wal_replay_seconds`, and `health_test.exs` the `reason`); the database opens with the recovery, blob and buffer
+  `ankusa_store_wal_replay_seconds`, and `health_test.exs` the `reasons.store`); the database opens with the recovery, blob and buffer
   settings asked for (read back from the `OPTIONS` file RocksDB writes, since
   RocksDB keeps its default for a value it cannot parse). The queue writer
   assigns dense, strictly
@@ -339,6 +339,26 @@ The always-on tests cover:
   current secret in the pen, releases it once the secret is rotated (past the
   timestamp tolerance: the window is judged at receive time) with its original
   id and the job's `replay_id`, and finds nothing left on a second run.
+- **Dispatch, retry horizon and error classes (DEL-2)** (`dispatch_test.exs`,
+  `retry_policy_exponential_test.exs`, `retry_policy_test.exs`,
+  `sink/{sqs,google_pubsub,http}_test.exs`): a row 7 h in with 200 attempts
+  keeps retrying while one past `max_elapsed_ms` is dead-lettered by its next
+  failure; no retry is scheduled past the horizon (a property test over
+  generated policies and failure sequences); a real outage with
+  `max_elapsed_ms: 1500` and no attempt limit dead-letters at the horizon, not
+  at an attempt count; a `Retry-After` is capped by `dispatch.max_retry_after_ms`
+  and the horizon; a per-source `retry:` is honoured across a restart of a
+  persistent source store, and the row's `first_attempt_at` survives one; a row
+  parked behind an open breaker is due by its horizon and dead-lettered past it;
+  a `{:permanent, {:config, _}}` failure emits
+  `[:ankusa, :dispatch, :config_error]` (and `metrics_test.exs` counts it); SQS
+  and Pub/Sub auth/queue/topic errors are config errors, throttles a jittered
+  `{:retry_after, ms, _}`; HTTP `409` is transient, `425` a pause, `451`
+  permanent. `claim_check_test.exs`, `admin/router_test.exs` and
+  `source_store_persistent_test.exs` hold the horizon against
+  `claim_check.bucket_expiry_days`: boot refuses a configured or stored source
+  that outlasts it, and an admin write of one is `422
+  retry_exceeds_claim_expiry`.
 - **Dispatch, per tenant** (`dispatch/isolation_test.exs`, `describe "per-tenant
   scheduling"`): `tenant fairness` runs a tenant at 99 times another's load
   behind a slow sink and asserts the light tenant's p99 delivery lag is within
@@ -416,7 +436,12 @@ The always-on tests cover:
   sends no digest, `x-ankusa-sha256` on `200`/`206` only, 100 concurrent
   `HEAD`s of one claim cause one store read and 100 `GET`s three — index,
   manifest, claim — and the manifest's digests in `pack_test.exs`); and the
-  `LocalFS` retention sweeper deleting whole `dt=` day partitions. The gateway,
+  `LocalFS` retention sweeper deleting whole `dt=` day partitions (`sweeper_test.exs`,
+  "bounded sweep": 10 000 partitions over 100 tenants, one tenant per tick, a
+  restart resuming after the persisted cursor, a tenant the budget cut short
+  staying the next tick's); a claim batch where an upload process dies or a store
+  raises answering `unavailable` for that pack's items only, and the pack limits
+  in `split/3` (`batch_test.exs`, "batch exit handled"). The gateway,
   sweep and archive series are in `metrics_test.exs` ("gateway metrics",
   "archive metrics") and the compactor's failure and age events in
   `storage_test.exs`.
@@ -556,6 +581,29 @@ managed identity and OCI instance principal tokens refreshed on a `401`),
 `pool_timeout` against a real slow endpoint, option ranges) and the "conditional
 pack writes" cases of `claim_check_test.exs` (a collision gets a fresh id with the
 original intact; `Retry-After: 3600` returns inside the deadline).
+
+The outbound connection pools (`Ankusa.HttpClient.Pools`) are tested against real
+listeners in `http_client_test.exs`: `pool reaped` (an idle pool is closed by the
+sweep, with its connections; one serving a request is not), `http2` (ALPN against
+a private-CA TLS listener, and `protocols: [:http1]` and a sink's `pool:` override
+forcing HTTP/1.1), the two ceilings (`max_pools` closes the least recently used
+idle pool; `max_pools_per_tenant` closes only the tenant's own), the refusal
+(`{:unavailable, :pool_limit}` with every pool serving a request, retryable), a
+deleted source's pools, the sizes and ranges, and the boot warnings.
+`sink/http_test.exs` proves the pinning on pooled connections: every connection a
+pool opens goes to the address the egress check validated (a name that resolves
+nowhere else still connects, verified against the name), and a name that turns
+private between two deliveries through one pool is denied on the second, before
+the pool is touched. `bench/pools_bench.exs` (`MIX_ENV=test mix run
+bench/pools_bench.exs`, under a minute; raise `ulimit -n` first, as it holds
+about 2 100 descriptors at its peak) sends one request to each of 10⁵ origins at
+the dispatch concurrency and checks that live pools never pass `max_pools`,
+nothing is refused, and no pool or socket is left after the sweep (it prints the
+peak pools, client sockets, file descriptors and RSS, and the same after the
+sweep). It also compares the owned pool with Req's default at one origin
+(median of five alternating rounds): the 100 ms sink must keep 90 % of the
+default's requests per second; the zero-latency sink's ratio is printed and not
+gated, since there it measures the pool's per-request bookkeeping alone.
 
 The `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
 `blob_store_gcs_test.exs`, `blob_store_azure_integration_test.exs`,
@@ -933,7 +981,7 @@ mise run test:crash
   missing start of fragmented record`), and the node never resumed; with it,
   eight consecutive runs passed.
 - **What the drills assert about the store's failure reporting.** While the
-  fault is on, `/ready` answers `503` with a `reason` (`no_space` for the
+  fault is on, `/ready` answers `503` with a `reasons.store` (`no_space` for the
   tmpfs, `io_error`/`read_only` for the device), and after the node resumed the
   metrics listener (`METRICS_PORT`, 4001 in the drill) must show
   `ankusa_store_write_failures_total{class}` and `ankusa_store_reopen_total{result}`;
@@ -991,7 +1039,17 @@ sink's deliveries, the log's records):
   runs) twice and with `--dry-run`, a clean stop leaving the offset at the log
   head, and the offset staying below a record only the log holds.
 - `config_test.exs` (every `intake.*` range and the cross-key rules, the
-  `/v1/config` redaction), `health_test.exs` (`intake` up, down, recovering).
+  `/v1/config` redaction), `health_test.exs` (`intake` ok, failing as `down`, failing as `recovering`).
+- `health_test.exs` (OPS-5): the readiness checks and their gating. A
+  direct-mode (`wal: :none`) instance whose sink fails is `503` with `sinks:
+  failing` and ready again once the sink publishes (or after
+  `listener.ready_sink_error_window_ms`); a data dir under `listener.ready_min_free_bytes` is
+  `503` with `disk: failing` (`unmeasured` without `:os_mon`); a backlog over
+  `queue.max_oldest_due_ms` is `backlog: failing` with a `200`; a check that
+  reports `draining` gates, and one that raises is `failing` (reason `error`)
+  without crashing the probe. `backup_test.exs` covers `backup` ok/failing and
+  `require_fresh`; `edge_test.exs` the `/ready` body over HTTP;
+  `admin/router_test.exs` that `/v1/config` shows the new keys.
 
 `bench/intake_bench.exs` (`MIX_ENV=test mix run bench/intake_bench.exs`, also run
 by `mise run bench:gate`) compares `wal: :dual` with `wal: :disk` in one VM:

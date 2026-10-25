@@ -114,6 +114,9 @@ defmodule AnkusaServer.ConfigTest do
            } = config.dispatch
 
     assert config.batcher.max_queue_bytes == 268_435_456
+    assert config.listener.ready_sink_error_window_ms == 5_000
+    assert config.listener.ready_min_free_bytes == nil
+    assert config.queue.max_oldest_due_ms == nil
     assert config.storage.key_prefix == ""
 
     assert %{
@@ -1538,6 +1541,147 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message =~ "a list of header names"
   end
 
+  test "max_headers and forward_headers_max_bytes parse, reach the Source, and must be positive" do
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          sources:
+            a: {verify: {type: none}, max_headers: 8, forward_headers_max_bytes: 2048, sinks: [{type: log}]}
+            b: {verify: {type: none}, sinks: [{type: log}]}
+          """),
+        env: %{}
+      ).config
+
+    sources = config.source_store |> elem(1) |> Keyword.fetch!(:sources)
+
+    assert sources["a"][:max_headers] == 8
+    assert sources["a"][:forward_headers_max_bytes] == 2048
+    refute Keyword.has_key?(sources["b"], :max_headers)
+    refute Keyword.has_key?(sources["b"], :forward_headers_max_bytes)
+
+    a = Ankusa.Source.new("a", sources["a"])
+    assert {a.max_headers, a.forward_headers_max_bytes} == {8, 2048}
+    b = Ankusa.Source.new("b", sources["b"])
+    assert {b.max_headers, b.forward_headers_max_bytes} == {64, 16_384}
+
+    for {key, value} <- [max_headers: 0, forward_headers_max_bytes: -5] do
+      path =
+        tmp_config("""
+        sources:
+          demo: {verify: {type: none}, #{key}: #{value}, sinks: [{type: log}]}
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ "sources.demo.#{key}"
+      assert error.message =~ "must be > 0"
+    end
+  end
+
+  test "rabbitmq, nats and redis sinks take max_message_bytes, and it must be positive" do
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          sources:
+            demo:
+              verify: {type: none}
+              sinks:
+                - {type: rabbitmq, exchange: ex, max_message_bytes: 2048}
+                - {type: nats, servers: ["h:4222"], subject: s, max_message_bytes: 4096}
+                - {type: redis, url: "redis://h", channel: c, max_message_bytes: 8192}
+          """),
+        env: %{}
+      ).config
+
+    sources = config.source_store |> elem(1) |> Keyword.fetch!(:sources)
+
+    assert [
+             {Ankusa.Sink.RabbitMQ, rabbitmq},
+             {Ankusa.Sink.NATS, nats},
+             {Ankusa.Sink.Redis, redis}
+           ] = sources["demo"][:sinks]
+
+    assert {rabbitmq[:max_message_bytes], nats[:max_message_bytes], redis[:max_message_bytes]} ==
+             {2048, 4096, 8192}
+
+    path =
+      tmp_config("""
+      sources:
+        demo:
+          verify: {type: none}
+          sinks:
+            - {type: nats, servers: ["h:4222"], subject: s, max_message_bytes: 0}
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "sources.demo.sinks"
+    assert error.message =~ "max_message_bytes"
+  end
+
+  test "DEL-2: dispatch.retry.max_elapsed_ms and dispatch.max_retry_after_ms load, with core's ranges" do
+    default = Config.load!(path: tmp_config("{}\n"), env: %{}).config.dispatch
+    assert default.max_retry_after_ms == 3_600_000
+    assert default.retry == {Ankusa.RetryPolicy.Exponential, []}
+
+    path =
+      tmp_config("""
+      dispatch:
+        max_retry_after_ms: 5000
+        retry: {max_elapsed_ms: 7200000, max_attempts: 10, jitter: false}
+      """)
+
+    dispatch = Config.load!(path: path, env: %{}).config.dispatch
+    assert dispatch.max_retry_after_ms == 5_000
+    assert {Ankusa.RetryPolicy.Exponential, opts} = dispatch.retry
+    assert Enum.sort(opts) == [jitter: false, max_attempts: 10, max_elapsed_ms: 7_200_000]
+
+    for {yaml, message} <- [
+          {"dispatch: {retry: {max_elapsed_ms: 10}}",
+           "dispatch.retry.max_elapsed_ms must be an integer from 1000 to 2592000000, got 10"},
+          {"dispatch: {max_retry_after_ms: 5}",
+           "dispatch.max_retry_after_ms must be an integer from 1000 to 86400000, got 5"},
+          {"dispatch: {retry: {max_elapsed_ms: soon}}",
+           ~s(dispatch.retry.max_elapsed_ms: expected an integer, got "soon")}
+        ] do
+      error =
+        assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml <> "\n"), env: %{}) end
+
+      assert error.message == message
+    end
+  end
+
+  test "DEL-2: sources.<id>.retry loads onto the source and fails naming the key" do
+    path =
+      tmp_config("""
+      sources:
+        a: {verify: {type: none}, retry: {max_elapsed_ms: 60000, jitter: false}, sinks: [{type: log}]}
+        b: {verify: {type: none}, sinks: [{type: log}]}
+      """)
+
+    {Ankusa.SourceStore.Static, opts} = Config.load!(path: path, env: %{}).config.source_store
+    sources = opts[:sources]
+    assert Enum.sort(sources["a"][:retry]) == [jitter: false, max_elapsed_ms: 60_000]
+    assert sources["b"][:retry] == nil
+    assert Ankusa.Source.new("a", sources["a"]).retry == sources["a"][:retry]
+
+    for {retry, message} <- [
+          {"{max_elapsed_ms: 10}", "sources.demo.retry.max_elapsed_ms must be an integer from"},
+          {"{max_attempts: 0}", "sources.demo.retry.max_attempts must be an integer from"},
+          {"{attempts: 3}", ~s(unknown key "attempts")},
+          {"{jitter: 1}", "sources.demo.retry.jitter"}
+        ] do
+      bad =
+        tmp_config("""
+        sources:
+          demo: {verify: {type: none}, retry: #{retry}, sinks: [{type: log}]}
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: bad, env: %{}) end
+      assert error.message =~ message
+    end
+  end
+
   test "store_headers: the http lists and a source override parse, lowercase, and reject other shapes" do
     default = Ankusa.Edge.StoredHeaders.default()
     assert Config.load!(path: tmp_config("{}\n"), env: %{}).config.store_headers == default
@@ -2028,6 +2172,43 @@ defmodule AnkusaServer.ConfigTest do
            }
   end
 
+  test "the readiness keys (OPS-5) map to core's listener and queue keys and are range checked" do
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          node: {min_free_bytes: 10737418240}
+          health: {sink_error_window_ms: 2500}
+          queue: {max_oldest_due_ms: 300000}
+          """),
+        env: %{}
+      ).config
+
+    assert config.listener.ready_sink_error_window_ms == 2_500
+    assert config.listener.ready_min_free_bytes == 10_737_418_240
+    # The rest of `listener` and `queue` keeps core's defaults.
+    assert config.listener.max_connections == %Ankusa.Config{}.listener.max_connections
+    assert config.queue.max_oldest_due_ms == 300_000
+    assert config.queue.dlq == %Ankusa.Config{}.queue.dlq
+
+    for {yaml, message} <- [
+          {"node: {min_free_bytes: 0}",
+           "listener.ready_min_free_bytes must be nil or an integer >= 1, got 0"},
+          {"node: {min_free_bytes: lots}",
+           ~s(node.min_free_bytes: expected an integer, got "lots")},
+          {"health: {sink_error_window_ms: 0}",
+           "listener.ready_sink_error_window_ms must be a positive integer, got 0"},
+          {"health: {window: 1}", ~s(health: unknown key "window")},
+          {"queue: {max_oldest_due_ms: -1}",
+           "queue.max_oldest_due_ms must be nil or an integer >= 1, got -1"}
+        ] do
+      error =
+        assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml <> "\n"), env: %{}) end
+
+      assert Exception.message(error) =~ message
+    end
+  end
+
   test "no fleet keys means node scope, as core defaults" do
     config = Config.load!(path: tmp_config("node: {}\n"), env: %{}).config
 
@@ -2265,6 +2446,50 @@ defmodule AnkusaServer.ConfigTest do
              %{burst: 5, rate: 0.5, max_bytes: 1024, retention_days: 14}
   end
 
+  test "an egress.pools section maps to core's egress.pools config" do
+    path =
+      tmp_config("""
+      egress:
+        allow_cidrs: ["10.0.0.0/8"]
+        pools: {pool_size: 4, pool_count: 2, pool_timeout: 1500, max_pools: 10, max_pools_per_tenant: 3, protocols: [http1]}
+      """)
+
+    egress = Config.load!(path: path, env: %{}).config.egress
+    pools = egress.pools
+    assert pools.pool_size == 4
+    assert pools.pool_count == 2
+    assert pools.pool_timeout == 1_500
+    assert {pools.max_pools, pools.max_pools_per_tenant} == {10, 3}
+    assert pools.protocols == [:http1]
+    # What the section leaves out keeps core's default, and the policy beside it is intact.
+    assert pools.pool_max_idle_ms == 60_000
+    assert egress.allow_cidrs == ["10.0.0.0/8"]
+
+    # A policy without `pools` leaves them at the defaults.
+    path = tmp_config("egress: {allow_hosts: [hooks.example]}\n")
+
+    assert %{pool_size: 32, max_pools: 1_024} =
+             Config.load!(path: path, env: %{}).config.egress.pools
+  end
+
+  test "a bad egress.pools key names it, and core's ranges come back as core's message" do
+    for {yaml, message} <- [
+          {"egress: {pools: {pool_sizes: 1}}", ~s(egress.pools: unknown key "pool_sizes")},
+          {"egress: {pools: {pool_size: big}}",
+           ~s(egress.pools.pool_size: expected an integer, got "big")},
+          {"egress: {pools: {pool_size: 0}}",
+           "egress.pools.pool_size must be an integer from 1 to 1024, got 0"},
+          {"egress: {pools: {pool_count: 65}}",
+           "egress.pools.pool_count must be an integer from 1 to 64, got 65"},
+          {"egress: {pools: {protocols: [http3]}}",
+           "egress.pools.protocols: unknown value \"http3\"; expected one of http1, http2"}
+        ] do
+      path = tmp_config(yaml <> "\n")
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message == message
+    end
+  end
+
   test "a bad quarantine key names it, and core's ranges come back as core's message" do
     for {yaml, message} <- [
           {"quarantine: {max_byte: 1}", ~s(quarantine: unknown key "max_byte")},
@@ -2452,6 +2677,48 @@ defmodule AnkusaServer.ConfigTest do
     assert pubsub[:batch] == false
     refute Keyword.has_key?(pubsub, :batch_linger_ms)
     assert pubsub[:token_provider] == {AnkusaServer.GcpToken, :metadata, []}
+  end
+
+  test "a batch option out of range fails at load, naming the sink and the key" do
+    sqs = "type: sqs, queue_url: \"https://sqs.us-east-1.amazonaws.com/1/h\", region: us-east-1"
+    pubsub = "type: google_pubsub, project: p, topic: t, auth: none"
+
+    for {sink, option, message} <- [
+          {sqs, "batch_max_entries: 11", ":batch_max_entries must be an integer from 1 to 10"},
+          {sqs, "batch_max_bytes: 2000000",
+           ":batch_max_bytes must be an integer from 1 to 1048576"},
+          {sqs, "batch_linger_ms: 0", ":batch_linger_ms must be an integer from 1 to 60000"},
+          {sqs, "batch_queue_max: 0", ":batch_queue_max must be an integer from 1 to"},
+          {sqs, "batch_queue_max_bytes: 0",
+           ":batch_queue_max_bytes must be an integer from 1 to"},
+          {sqs, "batch_queue_tenant_max: 0",
+           ":batch_queue_tenant_max must be an integer from 1 to"},
+          {sqs, "batch_max_inflight: 0", ":batch_max_inflight must be an integer from 1 to 1024"},
+          {pubsub, "batch_max_entries: 1001",
+           ":batch_max_entries must be an integer from 1 to 1000"},
+          {pubsub, "batch_max_bytes: 7500001",
+           ":batch_max_bytes must be an integer from 1 to 7500000"}
+        ] do
+      yaml = """
+      sources:
+        a:
+          verify: {type: none}
+          sinks: [{#{sink}, #{option}}]
+      """
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml), env: %{}) end
+      assert error.message =~ "sources.a.sinks[0]: " <> message, error.message
+    end
+
+    yaml = """
+    sources:
+      a:
+        verify: {type: none}
+        sinks: [{type: sqs, queue_url: "https://sqs.us-east-1.amazonaws.com/1/h", region: us-east-1, batch: "no"}]
+    """
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml), env: %{}) end
+    assert error.message =~ "sources.a.sinks[0].batch"
   end
 
   test "an sqs sink requires queue_url and names an unknown key" do

@@ -6,6 +6,21 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-24
+
+### Added
+
+- `:max_message_bytes` (default 128 MiB, RabbitMQ's `max_message_size`; DEL-5):
+  the size preflight of `Ankusa.Sink.Messaging`. Requires an `ankusa` release
+  with the `max_message_bytes` sink callback; publish core first.
+
+### Changed
+
+- Requires `ankusa ~> 0.7` (`Ankusa.Sink.Messaging`, `Ankusa.Sink.Connections`);
+  publish core first.
+- `Ankusa.Sink.RabbitMQ` is built on core's `Ankusa.Sink.Messaging` and
+  `Ankusa.Sink.Connections`. What it publishes is unchanged.
+
 ## [0.6.0] - 2026-10-14
 
 ### Added
@@ -147,7 +162,8 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 - The message is built by `Ankusa.Sink.Message` (in `ankusa`), shared
   with `ankusa_kafka`, so both sinks publish byte-identical messages.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.6.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.7.0...HEAD
+[0.7.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.6.0...ankusa_rabbitmq-v0.7.0
 [0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.4.0...ankusa_rabbitmq-v0.6.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.3.0...ankusa_rabbitmq-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.2.1...ankusa_rabbitmq-v0.3.0

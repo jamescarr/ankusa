@@ -19,8 +19,9 @@ defmodule Ankusa.Sink.GooglePubSub do
   This sink **never creates a topic or a subscription**. Retention, schema,
   encryption and who may subscribe are an operator's contract, not something
   the first hook to arrive should decide. A topic that does not exist is
-  `{:pubsub, 404, "NOT_FOUND", message}`, which is transient: it flows into the
-  source's `Ankusa.RetryPolicy`, then the DLQ. (Compare `Ankusa.Sink.SQS`,
+  `{:error, {:permanent, {:config, {:pubsub, 404, "NOT_FOUND", message}}}}`:
+  dead-lettered at once, since only an operator creating the topic fixes it, and
+  a DLQ replay then re-publishes the hooks. (Compare `Ankusa.Sink.SQS`,
   `Ankusa.Sink.Kafka` and `Ankusa.Sink.NATS`, which likewise never create their
   queue, topic or stream.)
 
@@ -36,15 +37,19 @@ defmodule Ankusa.Sink.GooglePubSub do
       plus ordering key over `:max_message_bytes`, refused before any request.
     * `{:permanent, {:pubsub, status, "INVALID_ARGUMENT", message}}` — Pub/Sub
       refused the message itself. Dead-lettered at once.
-    * `{:retry_after, ms, {:pubsub, status, "RESOURCE_EXHAUSTED", message}}` —
-      Pub/Sub asked for less traffic (a proxy's `429`/`503` is the same): the
-      next attempt waits `ms`, full jitter, or the policy's backoff.
+    * `{:permanent, {:config, {:pubsub, status, google_status, message}}}` —
+      Pub/Sub refused this sink's configuration or credentials: `NOT_FOUND`
+      (topic), `PERMISSION_DENIED`, `UNAUTHENTICATED`. Dead-lettered at once and
+      counted in `ankusa_dispatch_config_errors_total{sink}`; fix the source,
+      then replay the dead letters.
+    * `{:retry_after, ms, {:pubsub, status, google_status, message}}` — Pub/Sub
+      throttled the publish (`RESOURCE_EXHAUSTED`, or any HTTP `429` or `503`).
+      `ms` is a full-jitter draw (`Ankusa.Sink.throttle_after_ms/1`).
     * `{:pubsub, status, google_status, message}` — any other Pub/Sub error
-      (`NOT_FOUND` topic, `PERMISSION_DENIED`, `UNAUTHENTICATED`,
-      `UNAVAILABLE`, ...): an operator can fix these, so they get the retry
-      policy, then the DLQ.
+      (`UNAVAILABLE`, `INTERNAL`, ...): transient, the retry policy.
     * `{:status, status, body}` — a non-200 response that is not a Google error
-      document (a proxy, a load balancer).
+      document (a proxy, a load balancer); a `429` or `503` is a
+      `{:retry_after, ms, {:status, status, body}}`.
     * `{:unexpected_reply, body}`, `:no_credentials` (the `:token_provider`
       answered `:error`; no request is sent) and transport errors — retried.
 
@@ -72,12 +77,14 @@ defmodule Ankusa.Sink.GooglePubSub do
 
   `publish` has no per-message results: the topic accepts the request or refuses
   it as a whole. A transient error or throttle (`RESOURCE_EXHAUSTED`) fails every
-  message of it, each retrying on its own schedule. `INVALID_ARGUMENT` means one
-  message was refused, and dead-lettering them all would lose the good ones, so
-  the request is **bisected** (see `Ankusa.Sink.GooglePubSub.Batcher`): the one
-  bad message is `{:permanent, ...}` and the others are delivered, for
-  `2 * log2(n)` extra requests. The size and attribute checks that make a message
-  invalid run before it joins a batch, so this is the exception.
+  message of it, each retrying on its own schedule; so does a config error
+  (`NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED`), which no message caused.
+  `INVALID_ARGUMENT` means one message was refused, and dead-lettering them all
+  would lose the good ones, so the request is **bisected** (see
+  `Ankusa.Sink.GooglePubSub.Batcher`): the one bad message is `{:permanent, ...}`
+  and the others are delivered, for `2 * log2(n)` extra requests. The size and
+  attribute checks that make a message invalid run before it joins a batch, so
+  this is the exception.
 
   A batch may hold hooks of several tenants; entries are taken round-robin
   across tenants, and a delivery that would pass the queue's ceilings is refused
@@ -106,7 +113,7 @@ defmodule Ankusa.Sink.GooglePubSub do
                              for a regional endpoint
                              (`"https://us-east1-pubsub.googleapis.com"`) or
                              `floci-gcp` (`"http://localhost:4588"`).
-    * `:token_provider`    — `{mod, fun, args}`, applied once per delivery, and
+    * `:token_provider`    — `{mod, fun, args}`, applied once per request, and
                              answering `{:ok, token}` or `:error`. Omit it to
                              send no `authorization` header (an emulator only).
     * `:ordering_key`      — `nil` (default: no key), a string, or
@@ -122,7 +129,8 @@ defmodule Ankusa.Sink.GooglePubSub do
     * `:batch`             — default `true`; `false` publishes every delivery in
                              its own request and counts it against
                              `dispatch.sink_concurrency` as before
-    * `:batch_linger_ms`   — default 20, how long a batch waits to fill
+    * `:batch_linger_ms`   — default 20 (1 to 60,000), how long a batch waits to
+                             fill
     * `:batch_max_entries` — default and maximum 1,000
     * `:batch_max_bytes`   — default and maximum 7,500,000 of data before base64
                              (the REST body is 4/3 of it; Pub/Sub's request limit
@@ -134,56 +142,62 @@ defmodule Ankusa.Sink.GooglePubSub do
                              instance's `dispatch.sink_concurrency` (8)
   """
 
-  @behaviour Ankusa.Sink
+  use Ankusa.Sink.Messaging
 
-  alias Ankusa.Envelope
-  alias Ankusa.Sink.{Batcher, Description, Message}
+  alias Ankusa.{Envelope, HttpClient}
+  alias Ankusa.Sink.{Batcher, Description, Message, Messaging}
+  alias Ankusa.Sink.GooglePubSub.Batcher, as: Codec
 
-  @codec Ankusa.Sink.GooglePubSub.Batcher
   @default_max_message_bytes 10_000_000
   @binding_version "0.2.0"
 
   # Pub/Sub refusing the message itself: no retry changes the answer.
   @permanent_statuses ~w(INVALID_ARGUMENT)
 
-  # Pub/Sub asking for less traffic: the next attempt waits (with full jitter)
-  # as long as the policy's own backoff or longer.
+  @impl Ankusa.Sink.Messaging
+  def max_message_bytes(opts),
+    do: Keyword.get(opts, :max_message_bytes, @default_max_message_bytes)
+
+  # What only the operator can fix: a credential or a role Pub/Sub refuses, a
+  # topic that is not there. Dead-lettered at once, and counted as a config error.
+  @config_statuses ~w(PERMISSION_DENIED NOT_FOUND UNAUTHENTICATED)
+
+  # Pub/Sub asking the sender to slow down.
   @throttle_statuses ~w(RESOURCE_EXHAUSTED)
 
   @impl true
-  def deliver(%Envelope{} = env, ctx, opts) do
-    max = Keyword.get(opts, :max_message_bytes, @default_max_message_bytes)
+  def publish(payload, %Envelope{} = env, ctx, opts) do
+    max = max_message_bytes(opts)
+    attributes = Map.new(Message.attributes(env, ctx))
+    key = Messaging.resolve(Keyword.get(opts, :ordering_key), env)
+    size = size(payload, attributes, key)
 
-    with {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)),
-         attributes = Map.new(Message.attributes(env, ctx)),
-         key = ordering_key(env, opts),
-         {:ok, size} <- fits(payload, attributes, key, max) do
+    # Checked before a message joins a batch: a request is refused as a whole, so
+    # a message over a limit must never be in one.
+    with :ok <- Message.fits(size, max) do
       message = message(payload, attributes, key)
 
       if batch?(ctx, opts) do
         # One message of a `topics.publish` of up to 1 000; the request's reply
         # is mapped back to this one.
-        Batcher.deliver(@codec, ctx.instance, opts, %{
+        Batcher.deliver(Codec, ctx.instance, opts, %{
           tenant: env.tenant_id || "",
           bytes: size,
           group: if(is_binary(key) and key != "", do: key),
-          attempt: ctx[:attempt] || 1,
-          item: %{message: message, attempt: ctx[:attempt] || 1}
+          attempt: ctx.attempt,
+          item: %{message: message, attempt: ctx.attempt}
         })
       else
-        with {:ok, auth_headers} <- @codec.auth(opts) do
+        with {:ok, auth_headers} <- Codec.auth(opts) do
           opts
-          |> @codec.post(auth_headers, [message])
-          |> reply(ctx[:attempt] || 1)
+          |> Codec.post(auth_headers, [message])
+          |> reply(ctx.attempt)
         end
       end
     end
   end
 
-  @impl true
-  def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
-
-  @impl true
+  @impl Ankusa.Sink
   def batched?(opts), do: Keyword.get(opts, :batch, true) == true
 
   @impl true
@@ -192,17 +206,17 @@ defmodule Ankusa.Sink.GooglePubSub do
     topic = Keyword.fetch!(opts, :topic)
 
     message_bindings =
-      case Keyword.get(opts, :ordering_key) do
+      case Messaging.static(Keyword.get(opts, :ordering_key)) do
         key when is_binary(key) ->
           %{"googlepubsub" => %{"orderingKey" => key, "bindingVersion" => @binding_version}}
 
-        _ ->
+        nil ->
           %{}
       end
 
     %Description{
       protocol: "googlepubsub",
-      host: authority(@codec.endpoint(opts)),
+      host: HttpClient.authority(Codec.endpoint(opts)),
       address: "projects/#{project}/topics/#{topic}",
       channel_bindings: %{"googlepubsub" => %{"bindingVersion" => @binding_version}},
       message_bindings: message_bindings,
@@ -214,11 +228,22 @@ defmodule Ankusa.Sink.GooglePubSub do
   end
 
   @doc """
+  Raise `ArgumentError` naming the key unless `opts`' `:batch` is a boolean and
+  its `batch_*` options are in range (see "opts"). The image's config loader
+  calls it, so a bad value fails at load instead of at the first delivery.
+  """
+  @spec validate_opts!(keyword()) :: :ok
+  def validate_opts!(opts), do: Batcher.validate_opts!(Codec, opts)
+
+  @doc """
   The `{:error, reason}` for a Pub/Sub error `google_status` that answered a whole
   request with HTTP `http_status`.
 
     * `INVALID_ARGUMENT`: `{:permanent, {:pubsub, http_status, google_status, message}}`
-    * `RESOURCE_EXHAUSTED`: `{:retry_after, ms, reason}`, `ms` full jitter for `attempt`
+    * `PERMISSION_DENIED`, `NOT_FOUND`, `UNAUTHENTICATED`:
+      `{:permanent, {:config, {:pubsub, http_status, google_status, message}}}`
+    * `RESOURCE_EXHAUSTED`, or any `429`/`503`: `{:retry_after, ms, reason}`, `ms`
+      full jitter for `attempt` (`Ankusa.Sink.throttle_after_ms/1`)
     * anything else: `{:pubsub, http_status, google_status, message}`, transient
   """
   @spec classify_error(integer(), String.t(), String.t() | nil, pos_integer()) ::
@@ -230,8 +255,11 @@ defmodule Ankusa.Sink.GooglePubSub do
       google_status in @permanent_statuses ->
         {:error, {:permanent, reason}}
 
-      google_status in @throttle_statuses ->
-        {:error, {:retry_after, Batcher.jitter_ms(attempt), reason}}
+      google_status in @config_statuses ->
+        {:error, {:permanent, {:config, reason}}}
+
+      google_status in @throttle_statuses or http_status in [429, 503] ->
+        throttled(reason, attempt)
 
       true ->
         {:error, reason}
@@ -249,12 +277,15 @@ defmodule Ankusa.Sink.GooglePubSub do
         classify_error(http_status, status, error["message"], attempt)
 
       _ when http_status in [429, 503] ->
-        {:error, {:retry_after, Batcher.jitter_ms(attempt), {:status, http_status, body}}}
+        throttled({:status, http_status, body}, attempt)
 
       _ ->
         {:error, {:status, http_status, body}}
     end
   end
+
+  defp throttled(reason, attempt),
+    do: {:error, {:retry_after, Ankusa.Sink.throttle_after_ms(attempt), reason}}
 
   # A delivery waits in its topic's batcher only when dispatch says so
   # (`ctx.batch`), the sink has not opted out (`batch: false`), and the instance
@@ -262,27 +293,12 @@ defmodule Ankusa.Sink.GooglePubSub do
   defp batch?(ctx, opts),
     do: ctx[:batch] == true and batched?(opts) and Batcher.available?(ctx[:instance])
 
-  defp ordering_key(env, opts) do
-    case Keyword.get(opts, :ordering_key) do
-      nil -> nil
-      key when is_binary(key) -> key
-      fun when is_function(fun, 1) -> fun.(env)
-    end
-  end
-
   # Pub/Sub counts the data, every attribute's name and value, and the ordering
-  # key toward the message size limit. Checked before a message joins a batch:
-  # a request is refused as a whole, so a message over a limit must never be in
-  # one.
-  defp fits(payload, attributes, key, max) do
-    size =
-      Enum.reduce(attributes, byte_size(payload) + byte_size(key || ""), fn {name, value}, acc ->
-        acc + byte_size(name) + byte_size(value)
-      end)
-
-    if size > max,
-      do: {:error, {:permanent, {:message_too_large, size, max}}},
-      else: {:ok, size}
+  # key toward the message size limit.
+  defp size(payload, attributes, key) do
+    Enum.reduce(attributes, byte_size(payload) + byte_size(key || ""), fn {name, value}, acc ->
+      acc + byte_size(name) + byte_size(value)
+    end)
   end
 
   defp message(payload, attributes, key) do
@@ -306,10 +322,4 @@ defmodule Ankusa.Sink.GooglePubSub do
 
   defp decode(body) when is_binary(body), do: JSON.decode(body)
   defp decode(_body), do: :error
-
-  defp authority(url) do
-    %URI{host: host, port: port, scheme: scheme} = URI.parse(url)
-    default = if scheme == "https", do: 443, else: 80
-    if port == default, do: host, else: "#{host}:#{port}"
-  end
 end

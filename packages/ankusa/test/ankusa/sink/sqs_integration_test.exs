@@ -111,12 +111,12 @@ defmodule Ankusa.Sink.SQSIntegrationTest do
     assert replay["MessageAttributes"]["ankusa_replay_id"]["StringValue"] == "r1"
   end
 
-  test "a queue that was never created is an SQS error, retried rather than dropped", %{
+  test "a queue that was never created is a permanent config error, dead-lettered at once", %{
     fifo: fifo
   } do
     missing = String.replace(fifo, "ankusa-it-", "ankusa-it-never-")
 
-    assert {:error, {:sqs, 400, code, _message}} =
+    assert {:error, {:permanent, {:config, {:sqs, 400, code, _message}}}} =
              SQS.deliver(envelope(), %{attempt: 1}, opts(missing))
 
     assert is_binary(code)
@@ -174,7 +174,7 @@ defmodule Ankusa.Sink.SQSIntegrationTest do
       for n <- 1..9, do: assert(results["good-#{n}"] == :ok)
 
       stored =
-        fifo |> peek() |> Enum.map(&(JSON.decode!(&1["Body"])["id"])) |> Enum.sort()
+        fifo |> peek() |> Enum.map(&JSON.decode!(&1["Body"])["id"]) |> Enum.sort()
 
       assert stored == for(n <- 1..9, do: "good-#{n}") |> Enum.sort()
     end
@@ -192,7 +192,7 @@ defmodule Ankusa.Sink.SQSIntegrationTest do
       end)
       |> Enum.each(fn task -> assert Task.await(task) == :ok end)
 
-      assert fifo |> peek() |> Enum.map(&(JSON.decode!(&1["Body"])["id"])) == ids
+      assert fifo |> peek() |> Enum.map(&JSON.decode!(&1["Body"])["id"]) == ids
     end
 
     test "a standard queue takes a batch with no FIFO fields", %{standard: standard, ctx: ctx} do

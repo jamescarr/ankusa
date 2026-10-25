@@ -221,10 +221,11 @@ defmodule Ankusa.Sink.NATSTest do
     subject: subject
   } do
     # The base64 body in the message is ~1.33 MB, over the server's 1 MiB
-    # `max_payload`. gnat refuses it before sending; the server used to close
-    # the connection instead, cutting off every publish in flight.
+    # `max_payload`. With the sink's own limit raised past it, gnat refuses it
+    # before sending; the server used to close the connection instead, cutting
+    # off every publish in flight.
     body = :binary.copy("a", 1_000_000)
-    o = opts(subject, inline_max_bytes: 2_000_000)
+    o = opts(subject, inline_max_bytes: 2_000_000, max_message_bytes: 2_000_000)
 
     assert :ok = deliver(envelope(), ctx(inst), o)
     conn = Ankusa.whereis(inst, {:nats_conn, :default})
@@ -234,6 +235,38 @@ defmodule Ankusa.Sink.NATSTest do
 
     assert Ankusa.whereis(inst, {:nats_conn, :default}) == conn
     assert :ok = NATS.deliver(envelope(), ctx(inst), o)
+  end
+
+  test "a body over max_message_bytes by itself is permanent without any server call" do
+    inst = :"nats_big_#{System.unique_integer([:positive])}"
+    # Nothing listens here: the answer would be `:not_connected` if it were tried.
+    o = [servers: ["127.0.0.1:1"], subject: "whatever", inline_max_bytes: 2_000_000]
+    body = :binary.copy("a", 1_100_000)
+
+    assert {:error, {:permanent, {:message_too_large, 1_100_000, 1_048_576}}} =
+             NATS.deliver(envelope(%{body: body, size: byte_size(body)}), ctx(inst), o)
+  end
+
+  test "an inline message whose base64 would pass max_message_bytes is published as a claim", %{
+    instance: inst,
+    subject: subject,
+    admin: admin
+  } do
+    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}_#{System.os_time(:microsecond)}")
+    on_exit(fn -> File.rm_rf(dir) end)
+    Ankusa.put_config(Ankusa.Config.new(instance: inst, data_dir: dir))
+    {:ok, _sid} = Gnat.sub(admin, self(), subject)
+
+    # 1 MB fits the 1 MiB limit; its base64 (about 1.33 MB) does not.
+    body = :crypto.strong_rand_bytes(1_000_000)
+    env = envelope(%{body: body, size: byte_size(body)})
+
+    assert :ok = deliver(env, ctx(inst), opts(subject, inline_max_bytes: 2_000_000))
+
+    assert_receive {:msg, %{body: payload}}, 2_000
+    decoded = JSON.decode!(payload)
+    refute Map.has_key?(decoded, "body_base64")
+    assert {:ok, ^body} = ClaimCheck.redeem(inst, decoded["claim"], decoded["sha256"])
   end
 
   test "an unreachable server is :not_connected at once; the handshake never blocks the caller" do

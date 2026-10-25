@@ -107,7 +107,9 @@ defmodule Bench.SQSBatch do
     {:ok, {_ip, port}} = ThousandIsland.listener_info(listener)
     sink = sinks(port) |> Map.fetch!(kind) |> then(& &1.(if batch?, do: [], else: [batch: false]))
 
-    dir = Path.join(System.tmp_dir!(), "ankusa_sqs_batch_bench_#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(System.tmp_dir!(), "ankusa_sqs_batch_bench_#{System.unique_integer([:positive])}")
+
     File.mkdir_p!(dir)
     instance = :"bench_batch_#{System.unique_integer([:positive])}"
 
@@ -164,8 +166,12 @@ defmodule Bench.SQSBatch do
 
   defp wait(counter, n, budget_ms) do
     cond do
-      :counters.get(counter, 1) >= n -> :ok
-      budget_ms <= 0 -> raise "timed out: #{:counters.get(counter, 1)} of #{n} delivered"
+      :counters.get(counter, 1) >= n ->
+        :ok
+
+      budget_ms <= 0 ->
+        raise "timed out: #{:counters.get(counter, 1)} of #{n} delivered"
+
       true ->
         Process.sleep(25)
         wait(counter, n, budget_ms - 25)
@@ -191,19 +197,21 @@ end
 n = String.to_integer(System.get_env("N", "10000"))
 latency_ms = String.to_integer(System.get_env("LATENCY_MS", "20"))
 
-IO.puts("N=#{n} hooks per run, #{latency_ms} ms per request, dispatch defaults (sink_concurrency 8)\n")
+IO.puts(
+  "N=#{n} hooks per run, #{latency_ms} ms per request, dispatch defaults (sink_concurrency 8)\n"
+)
 
 results =
   for kind <- [:sqs, :sqs_fifo, :pubsub], batch? <- [false, true] do
     result = Bench.SQSBatch.run(kind, batch?, n, latency_ms)
 
     IO.puts(
-      :io_lib.format("~-24s ~-9s ~8w requests  ~10.1f per 10k  ~9.0f msgs/s  ~7.1f s~n", [
+      :io_lib.format("~-24s ~-9s ~8w requests  ~10.1f per 10k  ~9w msgs/s  ~7.1f s~n", [
         Bench.SQSBatch.label(kind),
         if(batch?, do: "batched", else: "single"),
         result.requests,
         result.per_10k,
-        result.msgs_per_s,
+        round(result.msgs_per_s),
         result.elapsed_s
       ])
     )
@@ -229,7 +237,10 @@ for {kind, factor} <- [sqs: 5, pubsub: 100] do
   )
 
   if saved < factor do
-    IO.puts("FAIL #{Bench.SQSBatch.label(kind)}: saved #{Float.round(saved, 1)}x, want at least #{factor}x")
+    IO.puts(
+      "FAIL #{Bench.SQSBatch.label(kind)}: saved #{Float.round(saved, 1)}x, want at least #{factor}x"
+    )
+
     System.halt(1)
   end
 end

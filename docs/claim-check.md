@@ -781,15 +781,24 @@ consumer can lag its broker. The sweeper deletes a lease once its grace is over,
 or when its hook no longer names that pack, and the gauge `ankusa_claim_leases`
 counts them.
 
-A tick deletes at most `claim_check.sweep_max_objects` packs (default 10 000) and
-as many lease rows; the names it did not examine in the partition it stopped in are
-`ankusa_claim_check_sweep_backlog`, the expired partitions it did not reach
-`ankusa_claim_check_sweep_partitions_left`, and while either is non-zero the
-next tick follows in 5 s. Listing a partition is one `readdir` of that
-directory, so a single day of one tenant should stay well under a million packs
-(`key_layout: sharded` spreads a tenant over 32 directories). A sweep whose lease
-lookups fail deletes nothing. `ankusa_claim_check_pruned_total` counts packs
-deleted and `ankusa_claim_check_leases_pruned_total` leases.
+A tick sweeps **one tenant**: it lists the tenants' directories once per pass, in
+name order, and each tick takes the next tenant's day partitions (listed by
+name, not globbed), so what a tick costs depends on one tenant's partitions and
+not on how many tenants the node has. The tenant a pass last finished is kept in
+the node's store (`m:claim_sweep_cursor`), so a restart resumes after it; while
+tenants are left in the pass the next tick follows in 100 ms, and
+`ankusa_claim_check_sweep_tenants_left` is how many there are. A pass holds the
+tenant names in memory, one binary each. A tick deletes at most
+`claim_check.sweep_max_objects` packs (default 10 000) and as many lease rows;
+the names it did not examine in the partition it stopped in are
+`ankusa_claim_check_sweep_backlog`, the expired partitions of that tenant it did
+not reach `ankusa_claim_check_sweep_partitions_left`, and while either is
+non-zero the next tick, on the same tenant, follows in 5 s. Listing a partition
+is one `readdir` of that directory, so a single day of one tenant should stay
+well under a million packs (`key_layout: sharded` spreads a tenant over 32
+directories). A sweep whose lease lookups fail deletes nothing.
+`ankusa_claim_check_pruned_total` counts packs deleted and
+`ankusa_claim_check_leases_pruned_total` leases.
 
 Leases live in the node's own store, so they protect the packs of the hooks this
 node holds. A `LocalFS` root shared between nodes is swept by each of them
@@ -798,12 +807,18 @@ give every node its own root.
 
 **Object-store claims have no lease.** A bucket lifecycle rule expires by age and
 cannot see Ankusa's store, so its age is the real cutoff, and it has to outlast
-the longest a claim can be needed. The check assumes a 21-day retry horizon
-(the shipped exponential policy gives up after about 6 hours, so this is
-conservative), plus `queue.dlq.retention_days`, plus
-`claim_check.redeem_grace_ms`. Declare the rule's age in
+the longest a claim can be needed: the retry horizon (the instance's
+`dispatch.retry` `max_elapsed_ms`, 24 hours by default, or the longest
+`retry.max_elapsed_ms` of a source that routes to a claim-checking sink; the
+old 21-day figure assumed the 84-attempt policy that no longer exists), plus
+`queue.dlq.retention_days`, plus `claim_check.redeem_grace_ms`, each rounded up
+to whole days. Declare the rule's age in
 `claim_check.bucket_expiry_days`: boot refuses a value below that sum
-(`21 + 30 + 1 = 52` days by default) and, left undeclared, logs the minimum. (Tagging leased objects so the rule skips them would need a
+(`1 + 30 + 1 = 32` days by default) and, left undeclared, logs the minimum. A
+source written later through the admin API whose horizon would outlast the
+declared rule is refused with `422 retry_exceeds_claim_expiry`, and boot refuses
+a stored one, so a source cannot quietly retry past the point its packs
+expire. (Tagging leased objects so the rule skips them would need a
 tag call in every provider's blob store and a lifecycle filter every provider
 supports; it is not built.)
 

@@ -27,10 +27,20 @@ defmodule Ankusa.Source do
     dedupe: nil,
     # :default | [header names]; provider request headers forwarded to sinks
     forward_headers: :default,
+    # caps on the forwarded headers per message: at most this many names, and
+    # this many bytes of name plus value in all (`Ankusa.Sink.Message.forwarded_headers/2`)
+    max_headers: Ankusa.Sink.Message.default_max_headers(),
+    forward_headers_max_bytes: Ankusa.Sink.Message.default_forward_headers_max_bytes(),
     # nil (the instance's `store_headers` policy), or %{drop: [..] | nil, hash:
     # [..] | nil}: which request headers the stored hook keeps, per key over the
     # instance's policy (see `Ankusa.Edge.StoredHeaders`)
-    store_headers: nil
+    store_headers: nil,
+    # nil (the instance's `dispatch.retry` as is), or a keyword list of
+    # `Ankusa.RetryPolicy` options laid over it: `base_ms`, `max_ms`,
+    # `max_attempts`, `jitter` and `max_elapsed_ms` (the horizon: how long after
+    # its first attempt a failing delivery is dead-lettered; claim-checked
+    # sources are bounded by `claim_check.bucket_expiry_days`)
+    retry: nil
   ]
 
   @type policy :: :reject | :quarantine | :accept_flag
@@ -43,7 +53,10 @@ defmodule Ankusa.Source do
           sinks: [{module(), keyword()}],
           dedupe: Ankusa.Dedupe.t() | nil,
           forward_headers: :default | [String.t()],
-          store_headers: Ankusa.Edge.StoredHeaders.override() | nil
+          max_headers: pos_integer(),
+          forward_headers_max_bytes: pos_integer(),
+          store_headers: Ankusa.Edge.StoredHeaders.override() | nil,
+          retry: keyword() | nil
         }
 
   @doc """
@@ -76,12 +89,36 @@ defmodule Ankusa.Source do
       sinks: Map.get(opts, :sinks, [{Ankusa.Sink.Log, []}]),
       dedupe: Ankusa.Dedupe.new!(Map.get(opts, :dedupe)),
       forward_headers: forward_headers(id, Map.get(opts, :forward_headers, :default)),
+      max_headers:
+        positive_integer!(
+          id,
+          :max_headers,
+          Map.get(opts, :max_headers, Ankusa.Sink.Message.default_max_headers())
+        ),
+      forward_headers_max_bytes:
+        positive_integer!(
+          id,
+          :forward_headers_max_bytes,
+          Map.get(
+            opts,
+            :forward_headers_max_bytes,
+            Ankusa.Sink.Message.default_forward_headers_max_bytes()
+          )
+        ),
       store_headers:
         Ankusa.Edge.StoredHeaders.normalize_override!(
           Map.get(opts, :store_headers),
           "source #{inspect(id)}: store_headers"
-        )
+        ),
+      retry: Ankusa.RetryPolicy.normalize_opts!(Map.get(opts, :retry), "source #{inspect(id)}")
     }
+  end
+
+  defp positive_integer!(_id, _key, value) when is_integer(value) and value > 0, do: value
+
+  defp positive_integer!(id, key, value) do
+    raise ArgumentError,
+          "source #{inspect(id)}: #{key} must be a positive integer, got #{inspect(value)}"
   end
 
   defp forward_headers(_id, :default), do: :default

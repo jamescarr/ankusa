@@ -697,6 +697,26 @@ defmodule Ankusa.Admin.RouterTest do
              "redis://fleet:[REDACTED]@redis.internal:6379"
   end
 
+  test "GET /v1/config shows the readiness keys (OPS-5) as they are: none is a secret" do
+    config =
+      test_config(
+        roles: [:edge],
+        admin: %{enabled: true},
+        listener: %{ready_sink_error_window_ms: 2_500, ready_min_free_bytes: 10_737_418_240},
+        queue: %{max_oldest_due_ms: 300_000}
+      )
+
+    put_config(config)
+
+    conn = call(config.instance, :get, "/v1/config")
+    assert conn.status == 200
+
+    decoded = JSON.decode!(conn.resp_body)
+    assert decoded["listener"]["ready_sink_error_window_ms"] == 2_500
+    assert decoded["listener"]["ready_min_free_bytes"] == 10_737_418_240
+    assert decoded["queue"]["max_oldest_due_ms"] == 300_000
+  end
+
   test "GET /v1/config shows a {module, fun, args} callback without its args" do
     config =
       test_config(
@@ -895,6 +915,78 @@ defmodule Ankusa.Admin.RouterTest do
     conn = call(inst, :delete, "/v1/tenants/acme/sources/billing")
     assert conn.status == 409
     assert %{"error" => "source_store_read_only"} = JSON.decode!(conn.resp_body)
+  end
+
+  describe "a source against the claim bucket's lifecycle rule" do
+    @day_ms 86_400_000
+
+    setup do
+      # 40 days of bucket rule: the 1-day default horizon + 30 days of DLQ + 1 of
+      # grace leaves 8 days of retry a claim-checking source may add
+      config =
+        test_config(
+          roles: [:dispatch],
+          admin: %{enabled: true},
+          storage: %{blob_store: {Ankusa.BlobStore.S3, bucket: "b", region: "us-east-1"}},
+          claim_check: %{bucket_expiry_days: 40},
+          source_store: {Ankusa.SourceStore.Persistent, decoder: &decoder/2}
+        )
+
+      put_config(config)
+      start_supervised!({Ankusa.Store, instance: config.instance})
+      start_supervised!({Ankusa.Audit, instance: config.instance})
+      {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(instance: config.instance)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      %{inst: config.instance}
+    end
+
+    defp sqs_spec(days, extra \\ %{}) do
+      spec(
+        Map.merge(
+          %{"sinks" => [%{"type" => "sqs"}], "retry" => %{"max_elapsed_ms" => days * @day_ms}},
+          extra
+        )
+      )
+    end
+
+    test "a retry horizon past the rule is 422 retry_exceeds_claim_expiry on create, nothing stored",
+         %{inst: inst} do
+      body = JSON.encode!(sqs_spec(10, %{"name" => "billing"}))
+      conn = call(inst, :post, "/v1/tenants/acme/sources", body)
+
+      assert conn.status == 422
+
+      assert %{"error" => "retry_exceeds_claim_expiry", "message" => message} =
+               JSON.decode!(conn.resp_body)
+
+      assert message =~ "claim_check.bucket_expiry_days is 40"
+      assert message =~ "retry.max_elapsed_ms"
+      assert call(inst, :get, "/v1/tenants/acme/sources/billing").status == 404
+    end
+
+    test "within the rule it is stored and shown; an update past it is 422 and changes nothing",
+         %{inst: inst} do
+      ok = JSON.encode!(sqs_spec(5, %{"name" => "billing"}))
+      conn = call(inst, :post, "/v1/tenants/acme/sources", ok)
+      assert conn.status == 201
+      assert JSON.decode!(conn.resp_body)["retry"] == %{"max_elapsed_ms" => 5 * @day_ms}
+
+      conn = call(inst, :put, "/v1/tenants/acme/sources/billing", JSON.encode!(sqs_spec(10)))
+      assert conn.status == 422
+      assert %{"error" => "retry_exceeds_claim_expiry"} = JSON.decode!(conn.resp_body)
+
+      conn = call(inst, :get, "/v1/tenants/acme/sources/billing")
+      assert conn.status == 200
+      assert JSON.decode!(conn.resp_body)["retry"] == %{"max_elapsed_ms" => 5 * @day_ms}
+    end
+
+    test "a source with no claim-checking sink may retry as long as it likes", %{inst: inst} do
+      body =
+        JSON.encode!(spec(%{"name" => "logs", "retry" => %{"max_elapsed_ms" => 20 * @day_ms}}))
+
+      assert call(inst, :post, "/v1/tenants/acme/sources", body).status == 201
+    end
   end
 
   describe "tenant-scoped sources with a writable store" do
@@ -1610,16 +1702,27 @@ defmodule Ankusa.Admin.RouterTest do
   defp decoder(_source_id, spec) do
     case Map.get(spec, "sinks") do
       [_ | _] = sinks ->
-        [sinks: Enum.map(sinks, &sink/1), trust_url_tenant: spec["trust_url_tenant"] || false]
+        [sinks: Enum.map(sinks, &sink/1), trust_url_tenant: spec["trust_url_tenant"] || false] ++
+          retry_opts(spec)
 
       _ ->
         raise ArgumentError, "sinks must be a non-empty list"
     end
   end
 
+  defp retry_opts(%{"retry" => %{} = retry}),
+    do: [retry: for({key, value} <- retry, do: {String.to_atom(key), value})]
+
+  defp retry_opts(_spec), do: []
+
   defp sink(%{"type" => "log"}), do: {Ankusa.Sink.Log, []}
   defp sink(%{"type" => "fail"}), do: {AlwaysFailSink, []}
   defp sink(%{"type" => "http"} = spec), do: {Ankusa.Sink.Http, [url: spec["url"] || "http://x"]}
+
+  defp sink(%{"type" => "sqs"}),
+    do:
+      {Ankusa.Sink.SQS, queue_url: "https://sqs.us-east-1.amazonaws.com/1/q", region: "us-east-1"}
+
   defp sink(other), do: raise(ArgumentError, "unknown sink: #{inspect(other)}")
 
   # ── tenant-scoped reads and writes ─────────────────────────────────────────
