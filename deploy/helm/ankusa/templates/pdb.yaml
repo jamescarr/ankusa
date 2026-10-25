@@ -1,0 +1,29 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# A node drain, an upgrade or the cluster autoscaler may take one pod of a workload
+# at a time; the others keep the load.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "ankusa.fullname" . }}
+  labels:
+    {{- include "ankusa.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "ankusa.selector" (dict "ctx" . "component" "node") | nindent 6 }}
+{{- if .Values.claimCheck.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "ankusa.fullname" . }}-claim-check
+  labels:
+    {{- include "ankusa.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "ankusa.selector" (dict "ctx" . "component" "claim-check") | nindent 6 }}
+{{- end }}
+{{- end }}

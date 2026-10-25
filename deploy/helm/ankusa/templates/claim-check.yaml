@@ -1,0 +1,108 @@
+{{- if .Values.claimCheck.enabled }}
+{{- $fullname := include "ankusa.fullname" . }}
+# The claim-check gateway: the same image and config, one role. It reads the claim
+# bucket, owns no store, and can scale on its own.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-claim-check
+  labels:
+    {{- include "ankusa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: claim-check
+spec:
+  replicas: {{ int .Values.claimCheck.replicas }}
+  minReadySeconds: {{ int .Values.minReadySeconds }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels:
+      {{- include "ankusa.selector" (dict "ctx" . "component" "claim-check") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ankusa.labels" . | nindent 8 }}
+        app.kubernetes.io/component: claim-check
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "ankusa.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ int .Values.claimCheck.terminationGracePeriodSeconds }}
+      {{- with include "ankusa.scheduling" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      {{- with include "ankusa.topologySpread" (dict "ctx" . "component" "claim-check") }}
+      topologySpreadConstraints:
+        {{- . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: claim-check
+          image: {{ include "ankusa.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if gt (int .Values.nofile) 0 }}
+          command: ["/bin/sh", "-c", "ulimit -n {{ int .Values.nofile }} && exec /sbin/tini -- /usr/local/bin/docker-entrypoint start"]
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - {name: claim, containerPort: 4001}
+          env:
+            - {name: ANKUSA_ROLES, value: claim_check}
+            - {name: RELEASE_TMP, value: /tmp}
+            {{- with include "ankusa.tokenEnv" (dict "var" "ANKUSA_CLAIM_CHECK_TOKEN" "ref" .Values.claimCheck.tokenSecret) }}
+            {{- . | trim | nindent 12 }}
+            {{- end }}
+            {{- with include "ankusa.tokenEnv" (dict "var" "ANKUSA_ADMIN_TOKEN" "ref" .Values.admin.tokenSecret) }}
+            {{- . | trim | nindent 12 }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # The gateway has no /ready: /health answers while it can read its store.
+          startupProbe:
+            httpGet: {path: /health, port: claim}
+            {{- toYaml .Values.probes.startup | nindent 12 }}
+          livenessProbe:
+            httpGet: {path: /health, port: claim}
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
+          readinessProbe:
+            httpGet: {path: /health, port: claim}
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
+          resources:
+            {{- toYaml .Values.claimCheck.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/ankusa/ankusa.yml, subPath: ankusa.yml, readOnly: true}
+            - {name: data, mountPath: /var/lib/ankusa}
+            - {name: tmp, mountPath: /tmp}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap: {name: {{ $fullname }}}
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+        - name: data
+          emptyDir: {sizeLimit: 1Gi}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}
