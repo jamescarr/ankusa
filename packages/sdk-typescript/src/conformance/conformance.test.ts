@@ -290,6 +290,12 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
           : sdk.decodeMessage(input.message as string);
       return { trusted: sdk.isTrusted(hook) };
     }
+    case "supported_versions": {
+      return { min: sdk.MIN_SUPPORTED_VERSION, max: sdk.MAX_SUPPORTED_VERSION };
+    }
+    case "decode_lifecycle": {
+      return sdk.decodeLifecycle(input.event as string);
+    }
     case "redeem": {
       const built = await buildClient(gateway, client, requests, makeClaimCheckClient);
       try {

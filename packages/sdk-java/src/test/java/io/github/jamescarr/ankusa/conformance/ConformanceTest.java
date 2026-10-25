@@ -23,6 +23,7 @@ import io.github.jamescarr.ankusa.claimcheck.ClaimRejectedError;
 import io.github.jamescarr.ankusa.claimcheck.InvalidClaimRefError;
 import io.github.jamescarr.ankusa.claimcheck.ParsedClaimRef;
 import io.github.jamescarr.ankusa.message.InvalidMessageError;
+import io.github.jamescarr.ankusa.message.LifecycleEvent;
 import io.github.jamescarr.ankusa.message.Message;
 import io.github.jamescarr.ankusa.routes.DryRunRequest;
 import io.github.jamescarr.ankusa.routes.InvalidRouteIdError;
@@ -217,6 +218,9 @@ public final class ConformanceTest {
       case "decode_message" -> Message.decode(text(vector, "message"));
       case "idempotency_key" -> Map.of("key", idempotencyKey(vector));
       case "trusted" -> Map.of("trusted", trusted(vector));
+      case "supported_versions" ->
+          Map.of("min", Message.MIN_SUPPORTED_VERSION, "max", Message.MAX_SUPPORTED_VERSION);
+      case "decode_lifecycle" -> LifecycleEvent.decode(text(vector, "event"));
       case "redeem" ->
           withClient(
               vector,

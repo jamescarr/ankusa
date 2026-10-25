@@ -17,6 +17,7 @@ use Ankusa\ClaimCheck\ClaimRejectedError;
 use Ankusa\ClaimCheck\InvalidClaimRefError;
 use Ankusa\ClaimCheck\ParsedClaimRef;
 use Ankusa\Message\InvalidMessageError;
+use Ankusa\Message\LifecycleEvent;
 use Ankusa\Message\Message;
 use Ankusa\Routes\InvalidRouteIdError;
 use Ankusa\Routes\RouteNotFoundError;
@@ -268,6 +269,8 @@ final class ConformanceTest extends TestCase
             'decode_message' => self::decodeMessage($inp),
             'idempotency_key' => self::idempotencyKey($inp),
             'trusted' => self::trusted($inp),
+            'supported_versions' => ['min' => Message::MIN_SUPPORTED_VERSION, 'max' => Message::MAX_SUPPORTED_VERSION],
+            'decode_lifecycle' => self::decodeLifecycle($inp),
             default => self::fail("unknown conformance operation {$operation}"),
         };
     }
@@ -424,6 +427,36 @@ final class ConformanceTest extends TestCase
             'verification' => self::verificationArray($message->verification),
             'traceparent' => $message->traceparent,
             'tracestate' => $message->tracestate,
+            'instance' => $message->instance,
+            'region' => $message->region,
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $inp
+     *
+     * @return array<string, mixed>
+     */
+    private static function decodeLifecycle(array $inp): array
+    {
+        $event = LifecycleEvent::decode(self::string($inp, 'event'));
+
+        return [
+            'specversion' => $event->specversion,
+            'id' => $event->id,
+            'source' => $event->source,
+            'type' => $event->type,
+            'subject' => $event->subject,
+            'time' => $event->time,
+            'datacontenttype' => $event->datacontenttype,
+            'data' => $event->data,
+            'revision' => $event->revision,
+            'actor' => $event->actor,
+            'instance' => $event->instance,
+            'sequence' => $event->sequence,
+            'replayid' => $event->replayid,
+            'traceparent' => $event->traceparent,
+            'tracestate' => $event->tracestate,
         ];
     }
 

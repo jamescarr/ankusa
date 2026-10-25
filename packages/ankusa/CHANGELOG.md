@@ -13,6 +13,19 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Wire-format evolution path and producer conformance (CON-2).** Every queue
+  message (`Ankusa.Sink.Message`) carries `instance` (the instance's name) and
+  `region` (`dispatch.region`, `null` for none), and `Ankusa.AsyncApi` documents
+  both in `SinkMessageV1` and publishes the region as the document's
+  `x-ankusa-region` extension. `v` stays `1`: the SDKs now accept
+  `min_supported <= v <= max_supported` (1 to 2, `v: 2` being `v: 1` plus
+  additive fields), so a later additive `v: 2` does not break a deployed
+  consumer; a field that changes meaning needs `v: 3`. New task
+  `mix ankusa.conformance.gen` writes `conformance/cases/producer.json` from
+  `Sink.Message.encode/3`, and `mise run check:conformance` fails when the
+  checked-in file differs, so a field added to the encoder fails the gate until
+  the vectors (and so every SDK) follow.
+
 - **Config reload (OPS-6).** `Ankusa.Reload`: the seam a loader reloads an
   instance through. `register/2` / `run/2` hold the instance's reload function;
   `apply_config/3` takes the reloadable fields of a validated `%Ankusa.Config{}`

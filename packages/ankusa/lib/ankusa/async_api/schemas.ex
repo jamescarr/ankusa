@@ -13,8 +13,10 @@ defmodule Ankusa.AsyncApi.SinkMessage do
         "One delivered hook. A body of at most `inline_max_bytes` (default 64 KiB) rides " <>
           "inline as `body_base64`; a larger one is stored in the claim check and the message " <>
           "carries its reference as `claim` plus the lowercase hex `sha256` to check the " <>
-          "redeemed bytes against. `v` changes only when an existing field changes meaning or " <>
-          "disappears: adding a field keeps `v: 1`, so consumers must ignore keys they do not know.",
+          "redeemed bytes against. `v` is the wire format's major version: the producer writes " <>
+          "`v: 1`, every SDK accepts 1 through 2 (`v: 2` is `v: 1` plus additive fields), and a " <>
+          "field that changes meaning or disappears needs a new `v`. Adding a field keeps `v`, " <>
+          "so consumers must ignore keys they do not know.",
       "required" => [
         "v",
         "id",
@@ -90,6 +92,17 @@ defmodule Ankusa.AsyncApi.SinkMessage do
         "tracestate" => %{
           "type" => ["string", "null"],
           "description" => "The W3C `tracestate` that travels with `traceparent`, else `null`."
+        },
+        "instance" => %{
+          "type" => ["string", "null"],
+          "description" =>
+            "The name of the Ankusa instance that published the message, else `null`."
+        },
+        "region" => %{
+          "type" => ["string", "null"],
+          "description" =>
+            "The region the publishing instance is configured with (`region`, YAML " <>
+              "`node.region`), else `null`."
         },
         "headers" => %{
           "type" => "object",

@@ -248,6 +248,29 @@ field doesn't break an older consumer.
 Kafka/NATS headers and the RabbitMQ routing key are not read: the JSON body
 carries everything.
 
+The message's `v` is the wire format's major version: `decode/1` accepts every
+`v` from `Message.min_supported_version/0` to `Message.max_supported_version/0`
+(1 and 2) into the one `Message` struct, with `v` as the wire said it. A `v: 2`
+message is a `v: 1` message plus additive fields, so nothing else changes for a
+consumer when the producer moves to it; a `v` outside the range is
+`unsupported_version` (permanent: dead-letter it). `message.instance` and
+`message.region` are the Ankusa instance that published the message and the
+region it is configured with (`nil` for none).
+
+### Lifecycle events
+
+A message from the instance's lifecycle sinks carries a CloudEvents 1.0
+event as its body (a source or route was created, updated or deleted, a tenant
+was erased, the instance was restored from a backup).
+`Ankusa.SDK.LifecycleEvent.decode/1` parses it from `hook.body`, with the same
+`InvalidMessageError` codes (`"unsupported_version"` is a `specversion` other
+than `"1.0"`), ignoring the keys and the event types it does not know:
+
+```elixir
+{:ok, event} = Ankusa.SDK.LifecycleEvent.decode(hook.body)
+# event.type, event.subject, event.revision, event.sequence, event.data
+```
+
 ## Consuming queue messages
 
 A queue consumer is at-least-once end to end, so the handler must make its

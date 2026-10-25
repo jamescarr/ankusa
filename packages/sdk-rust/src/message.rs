@@ -1,4 +1,4 @@
-//! Decoding the `v: 1` queue message Ankusa publishes to every sink.
+//! Decoding the queue message Ankusa publishes to every sink.
 //!
 //! A consumer receives the message JSON, decodes it with [`decode_message`],
 //! and deduplicates on [`Message::idempotency_key`]. The message carries the
@@ -17,10 +17,23 @@ use sha2::{Digest, Sha256};
 use crate::claim_ref::parse_claim_ref;
 use crate::webhook::Verification;
 
-/// A decoded `v: 1` queue message.
+/// The lowest message `v` [`decode_message`] accepts.
+///
+/// `v` is the wire format's major version: a `v: 2` message is a `v: 1`
+/// message plus additive fields, decoded exactly like it (the keys this
+/// decoder does not know are ignored) into the one [`Message`] type, with `v`
+/// as the wire said it. Raising [`MAX_SUPPORTED_VERSION`] is the whole change
+/// an SDK needs for a producer that starts writing the next additive version.
+pub const MIN_SUPPORTED_VERSION: u64 = 1;
+
+/// The highest message `v` [`decode_message`] accepts.
+pub const MAX_SUPPORTED_VERSION: u64 = 2;
+
+/// A decoded queue message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
-    /// The format version. Always `1`.
+    /// The format version the message carried, from [`MIN_SUPPORTED_VERSION`]
+    /// to [`MAX_SUPPORTED_VERSION`].
     pub v: u64,
     /// The envelope id, a `UUIDv7`.
     pub id: String,
@@ -59,6 +72,12 @@ pub struct Message {
     pub traceparent: Option<String>,
     /// The W3C `tracestate` that goes with `traceparent`, verbatim.
     pub tracestate: Option<String>,
+    /// The name of the Ankusa instance that published the message; `None` when
+    /// it says `null` or comes from a node older than the field.
+    pub instance: Option<String>,
+    /// The region that instance is configured with; `None` when it has none or
+    /// comes from a node older than the field.
+    pub region: Option<String>,
 }
 
 impl Message {
@@ -148,7 +167,7 @@ pub struct InvalidMessageError {
 }
 
 impl InvalidMessageError {
-    fn new(code: &'static str, field: Option<&'static str>) -> Self {
+    pub(crate) fn new(code: &'static str, field: Option<&'static str>) -> Self {
         Self { code, field }
     }
 
@@ -159,7 +178,8 @@ impl InvalidMessageError {
     }
 }
 
-/// Decodes a `v: 1` queue message.
+/// Decodes a queue message of any supported `v` ([`MIN_SUPPORTED_VERSION`] to
+/// [`MAX_SUPPORTED_VERSION`]).
 ///
 /// Unknown keys are ignored. An absent `dedupe_key`, `replay_id`,
 /// `idempotency_key` or `sha256` decodes to `None`; an absent `headers`
@@ -178,9 +198,11 @@ pub fn decode_message(data: &[u8]) -> Result<Message, InvalidMessageError> {
         return Err(invalid("not_an_object", None));
     };
 
-    if map.get("v").and_then(Value::as_u64) != Some(1) {
-        return Err(invalid("unsupported_version", None));
-    }
+    let version = map
+        .get("v")
+        .and_then(Value::as_u64)
+        .filter(|version| (MIN_SUPPORTED_VERSION..=MAX_SUPPORTED_VERSION).contains(version))
+        .ok_or_else(|| invalid("unsupported_version", None))?;
 
     // Field types, in the contract's order.
     let id = required_string(&map, "id")?;
@@ -203,6 +225,8 @@ pub fn decode_message(data: &[u8]) -> Result<Message, InvalidMessageError> {
     let idempotency_key = optional_string(&map, "idempotency_key")?;
     let traceparent = optional_string(&map, "traceparent")?;
     let tracestate = optional_string(&map, "tracestate")?;
+    let instance = optional_string(&map, "instance")?;
+    let region = optional_string(&map, "region")?;
     let headers = headers_field(&map)?;
     let sha256 = sha256_field(&map)?;
     let verification = verification_field(&map)?;
@@ -255,7 +279,7 @@ pub fn decode_message(data: &[u8]) -> Result<Message, InvalidMessageError> {
     }
 
     Ok(Message {
-        v: 1,
+        v: version,
         id,
         source_id,
         tenant_id,
@@ -272,6 +296,8 @@ pub fn decode_message(data: &[u8]) -> Result<Message, InvalidMessageError> {
         verification,
         traceparent,
         tracestate,
+        instance,
+        region,
     })
 }
 
@@ -375,6 +401,36 @@ mod tests {
     }
 
     #[test]
+    fn accepts_every_supported_version_and_reports_the_wire_one() {
+        for v in super::MIN_SUPPORTED_VERSION..=super::MAX_SUPPORTED_VERSION {
+            let data = format!(
+                r#"{{"v":{v},"id":"01a0","source_id":"s","received_at":1,"size":5,
+                    "body_base64":"aGVsbG8=","priority":"high"}}"#
+            );
+            let message = decode_message(data.as_bytes()).expect("valid message");
+            assert_eq!(message.v, v);
+            assert_eq!(message.body.as_deref(), Some(b"hello".as_slice()));
+        }
+    }
+
+    #[test]
+    fn instance_and_region_are_optional_strings() {
+        let message = decode_message(
+            br#"{"v":2,"id":"01a0","source_id":"s","received_at":1,"size":5,
+                 "body_base64":"aGVsbG8=","instance":"ankusa-eu-1","region":"eu-west-1"}"#,
+        )
+        .expect("valid message");
+        assert_eq!(message.instance.as_deref(), Some("ankusa-eu-1"));
+        assert_eq!(message.region.as_deref(), Some("eu-west-1"));
+
+        let bad = err(
+            r#"{"v":1,"id":"01a0","source_id":"s","received_at":1,"size":5,
+                "body_base64":"aGVsbG8=","instance":7,"region":1}"#,
+        );
+        assert_eq!((bad.code, bad.field), ("invalid_field", Some("instance")));
+    }
+
+    #[test]
     fn decodes_an_inline_body_and_computes_the_key() {
         let message = decode_message(
             br#"{"v":1,"id":"01a0","source_id":"stripe","received_at":1,"size":5,
@@ -439,7 +495,9 @@ mod tests {
     fn the_first_failure_wins() {
         assert_eq!(err("not json").code, "invalid_json");
         assert_eq!(err("[1,2,3]").code, "not_an_object");
-        assert_eq!(err(r#"{"v":2}"#).code, "unsupported_version");
+        assert_eq!(err(r#"{"v":3}"#).code, "unsupported_version");
+        assert_eq!(err(r#"{"v":0}"#).code, "unsupported_version");
+        assert_eq!(err(r#"{"v":"1"}"#).code, "unsupported_version");
         let missing_id = err(r#"{"v":1,"source_id":"s","received_at":1,"size":0}"#);
         assert_eq!(missing_id.code, "invalid_field");
         assert_eq!(missing_id.field, Some("id"));

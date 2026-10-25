@@ -248,6 +248,12 @@ func dispatch(t *testing.T, c conformanceCase, recorder *recorder) (any, error) 
 		}
 		return map[string]any{"trusted": hook.Trusted()}, nil
 
+	case "supported_versions":
+		return map[string]any{"min": ankusa.MinSupportedVersion, "max": ankusa.MaxSupportedVersion}, nil
+
+	case "decode_lifecycle":
+		return ankusa.DecodeLifecycle([]byte(decode[string](t, c.Input["event"])))
+
 	case "redeem":
 		g := startGateway(t, gateway, client, recorder)
 		defer g.close()

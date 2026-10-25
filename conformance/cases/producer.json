@@ -1,0 +1,145 @@
+{
+  "cases": [
+    {
+      "id": "producer.inline_full",
+      "feature": "message.producer",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"body_base64\":\"eyJpZCI6ImV2dF8xIn0=\",\"content_type\":\"application/json\",\"dedupe_key\":\"evt_1\",\"headers\":{\"x-github-event\":\"push\",\"x-multi\":\"a, b\"},\"id\":\"01931e8a-7c2e-7000-8000-000000000001\",\"idempotency_key\":\"acme:stripe:evt_1\",\"instance\":\"conformance_eu\",\"received_at\":1737500000000,\"region\":\"eu-west-1\",\"replay_id\":null,\"sha256\":\"40993c639ffb5f13a0a2ef5c93c965f10b405f2b87a379272381da2dbc158dfa\",\"size\":14,\"source_id\":\"stripe\",\"tenant_id\":\"acme\",\"traceparent\":\"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\",\"tracestate\":\"vendor=1\",\"v\":1,\"verification\":{\"flagged\":false,\"status\":\"ok\"}}"
+      },
+      "expect": {
+        "ok": {
+          "v": 1,
+          "id": "01931e8a-7c2e-7000-8000-000000000001",
+          "source_id": "stripe",
+          "tenant_id": "acme",
+          "received_at": 1737500000000,
+          "content_type": "application/json",
+          "size": 14,
+          "body_base64": "eyJpZCI6ImV2dF8xIn0=",
+          "claim": null,
+          "sha256": "40993c639ffb5f13a0a2ef5c93c965f10b405f2b87a379272381da2dbc158dfa",
+          "dedupe_key": "evt_1",
+          "replay_id": null,
+          "idempotency_key": "acme:stripe:evt_1",
+          "headers": {
+            "x-github-event": "push",
+            "x-multi": "a, b"
+          },
+          "verification": {
+            "flagged": false,
+            "status": "ok"
+          },
+          "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+          "tracestate": "vendor=1",
+          "instance": "conformance_eu",
+          "region": "eu-west-1"
+        }
+      }
+    },
+    {
+      "id": "producer.claim",
+      "feature": "message.producer",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"claim\":\"urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002\",\"content_type\":\"application/octet-stream\",\"dedupe_key\":\"evt_2\",\"headers\":{\"x-github-event\":\"push\"},\"id\":\"01931e8a-7c2e-7000-8000-000000000002\",\"idempotency_key\":\"acme:stripe:evt_2\",\"instance\":\"conformance_eu\",\"received_at\":1737500000000,\"region\":\"eu-west-1\",\"replay_id\":null,\"sha256\":\"09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8\",\"size\":100,\"source_id\":\"stripe\",\"tenant_id\":\"acme\",\"traceparent\":null,\"tracestate\":null,\"v\":1,\"verification\":{\"flagged\":false,\"status\":\"ok\"}}"
+      },
+      "expect": {
+        "ok": {
+          "v": 1,
+          "id": "01931e8a-7c2e-7000-8000-000000000002",
+          "source_id": "stripe",
+          "tenant_id": "acme",
+          "received_at": 1737500000000,
+          "content_type": "application/octet-stream",
+          "size": 100,
+          "body_base64": null,
+          "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+          "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8",
+          "dedupe_key": "evt_2",
+          "replay_id": null,
+          "idempotency_key": "acme:stripe:evt_2",
+          "headers": {
+            "x-github-event": "push"
+          },
+          "verification": {
+            "flagged": false,
+            "status": "ok"
+          },
+          "traceparent": null,
+          "tracestate": null,
+          "instance": "conformance_eu",
+          "region": "eu-west-1"
+        }
+      }
+    },
+    {
+      "id": "producer.replay_ordered",
+      "feature": "message.producer",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"body_base64\":\"aGVsbG8=\",\"content_type\":\"text/plain\",\"dedupe_key\":null,\"headers\":{},\"id\":\"01931e8a-7c2e-7000-8000-000000000003\",\"idempotency_key\":\"01931e8a-7c2e-7000-8000-000000000003\",\"instance\":\"conformance\",\"ordering_key\":\"cus_1\",\"received_at\":1737500000001,\"region\":null,\"replay_id\":\"rpl_1\",\"sha256\":\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\",\"size\":5,\"source_id\":\"orders\",\"tenant_id\":null,\"traceparent\":null,\"tracestate\":null,\"v\":1,\"verification\":{\"flagged\":false,\"status\":\"skipped\"}}"
+      },
+      "expect": {
+        "ok": {
+          "v": 1,
+          "id": "01931e8a-7c2e-7000-8000-000000000003",
+          "source_id": "orders",
+          "tenant_id": null,
+          "received_at": 1737500000001,
+          "content_type": "text/plain",
+          "size": 5,
+          "body_base64": "aGVsbG8=",
+          "claim": null,
+          "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "dedupe_key": null,
+          "replay_id": "rpl_1",
+          "idempotency_key": "01931e8a-7c2e-7000-8000-000000000003",
+          "headers": {},
+          "verification": {
+            "flagged": false,
+            "status": "skipped"
+          },
+          "traceparent": null,
+          "tracestate": null,
+          "instance": "conformance",
+          "region": null
+        }
+      }
+    },
+    {
+      "id": "producer.flagged",
+      "feature": "message.producer",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"body_base64\":\"AAEC/w==\",\"content_type\":null,\"dedupe_key\":\"d-1\",\"headers\":{},\"id\":\"01931e8a-7c2e-7000-8000-000000000004\",\"idempotency_key\":\"globex:github:d-1\",\"instance\":\"conformance\",\"received_at\":1737500000002,\"region\":null,\"replay_id\":null,\"sha256\":\"3d1f57c984978ef98a18378c8166c1cb8ede02c03eeb6aee7e2f121dfeee3e56\",\"size\":4,\"source_id\":\"github\",\"tenant_id\":\"globex\",\"traceparent\":null,\"tracestate\":null,\"v\":1,\"verification\":{\"flagged\":true,\"status\":\"failed\"}}"
+      },
+      "expect": {
+        "ok": {
+          "v": 1,
+          "id": "01931e8a-7c2e-7000-8000-000000000004",
+          "source_id": "github",
+          "tenant_id": "globex",
+          "received_at": 1737500000002,
+          "content_type": null,
+          "size": 4,
+          "body_base64": "AAEC/w==",
+          "claim": null,
+          "sha256": "3d1f57c984978ef98a18378c8166c1cb8ede02c03eeb6aee7e2f121dfeee3e56",
+          "dedupe_key": "d-1",
+          "replay_id": null,
+          "idempotency_key": "globex:github:d-1",
+          "headers": {},
+          "verification": {
+            "flagged": true,
+            "status": "failed"
+          },
+          "traceparent": null,
+          "tracestate": null,
+          "instance": "conformance",
+          "region": null
+        }
+      }
+    }
+  ]
+}

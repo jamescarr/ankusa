@@ -1,5 +1,5 @@
 (ns ankusa.sdk.message
-  "Decode and verify a v1 queue message: the JSON payload Ankusa's broker sinks
+  "Decode and verify a queue message: the JSON payload Ankusa's broker sinks
   (RabbitMQ, Kafka, NATS) publish.
 
   ```clojure
@@ -114,26 +114,42 @@
               (check-field! (string? (get raw "sha256")) "sha256")
               {:claim claim :claim-tenant tenant}))))
 
+(def min-supported-version
+  "The lowest message `v` `decode` accepts. `v` is the wire format's major
+  version: a `v: 2` message is a `v: 1` message plus additive fields, decoded
+  exactly like it (the keys this decoder does not know are ignored) into the
+  one message map, with `:v` as the wire said it. Raising
+  `max-supported-version` is the whole change an SDK needs for a producer that
+  starts writing the next additive version."
+  1)
+
+(def max-supported-version
+  "The highest message `v` `decode` accepts."
+  2)
+
 (defn decode
-  "Decode and verify a v1 message from `data`, a string or a `byte[]` of UTF-8
-  JSON. Returns
+  "Decode and verify a message of any supported `v` (`min-supported-version` to
+  `max-supported-version`) from `data`, a string or a `byte[]` of UTF-8 JSON.
+  Returns
 
   `{:v :id :source-id :tenant-id :received-at :content-type :size :body :claim
   :sha256 :dedupe-key :replay-id :idempotency-key :headers :verification
-  :traceparent :tracestate}`
+  :traceparent :tracestate :instance :region}`
 
   where `:body` is a `byte[]` for an inline message and `nil` for a claim, and
   `:claim` the claim ref for a claim and `nil` otherwise. `:headers` keeps its
-  string keys. Unknown keys are ignored.
+  string keys. `:instance` and `:region` are the name of the Ankusa instance
+  that published the message and the region it is configured with (`nil` when
+  the message says `null` or predates the fields). Unknown keys are ignored.
 
   The rules run in order and the first failure wins: valid JSON, an object,
-  `v` = 1, the typed fields, the body form, then (inline) size and digest or
-  (claim) tenant. Anything but a string or `byte[]` throws
+  a supported `v`, the typed fields, the body form, then (inline) size and
+  digest or (claim) tenant. Anything but a string or `byte[]` throws
   `IllegalArgumentException`."
   [data]
   (let [raw (parse-json data)
         v (get raw "v")
-        _ (when-not (and (integer? v) (== v 1))
+        _ (when-not (and (integer? v) (<= min-supported-version v max-supported-version))
             (fail "unsupported_version" nil))
         id (get raw "id")
         _ (check-field! (and (string? id) (not= "" id)) "id")
@@ -150,6 +166,8 @@
         idempotency-key (optional-string! raw "idempotency_key")
         traceparent (optional-string! raw "traceparent")
         tracestate (optional-string! raw "tracestate")
+        instance (optional-string! raw "instance")
+        region (optional-string! raw "region")
         headers (if (contains? raw "headers") (get raw "headers") {})
         _ (check-field! (and (map? headers) (every? string? (vals headers))) "headers")
         sha256 (get raw "sha256")
@@ -164,7 +182,7 @@
             (fail "integrity" nil)))
       (when (and tenant-id (not= tenant-id claim-tenant))
         (fail "tenant_mismatch" nil)))
-    {:v 1
+    {:v v
      :id id
      :source-id source-id
      :tenant-id tenant-id
@@ -180,7 +198,9 @@
      :headers headers
      :verification verification
      :traceparent traceparent
-     :tracestate tracestate}))
+     :tracestate tracestate
+     :instance instance
+     :region region}))
 
 (defn ->hook
   "Turn a decoded `message` into the hook a handler takes:

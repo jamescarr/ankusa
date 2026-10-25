@@ -6,6 +6,7 @@ mod admin;
 mod claim_check;
 mod claim_ref;
 mod client;
+mod lifecycle;
 mod message;
 mod receive;
 mod routes;
@@ -26,7 +27,10 @@ pub use crate::admin::{
 pub use crate::claim_check::{ClaimCheckClient, ClaimCheckError, ClaimCheckHealth};
 pub use crate::claim_ref::{InvalidClaimRefError, ParsedClaimRef, parse_claim_ref};
 pub use crate::client::{ClientBuilder, ConfigError, UnavailableReason};
-pub use crate::message::{InvalidMessageError, Message, decode_message};
+pub use crate::lifecycle::{LifecycleEvent, decode_lifecycle};
+pub use crate::message::{
+    InvalidMessageError, MAX_SUPPORTED_VERSION, MIN_SUPPORTED_VERSION, Message, decode_message,
+};
 pub use crate::receive::{ReceiveError, ReceiveOptions, ReceivedDelivery, receive_delivery};
 pub use crate::routes::{
     Access, DryRunIpRule, DryRunReason, DryRunRequest, DryRunResult, IpRule, IpRuleScope, IpRules,
