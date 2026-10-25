@@ -74,7 +74,8 @@ defmodule Ankusa.Edge.Publish do
 
             {:ok, {{:error, reason}, ms}} ->
               Logger.warning(
-                "[ankusa] sink #{inspect(mod)} refused hook #{env.id}: #{inspect(reason)}"
+                "[ankusa] sink #{inspect(mod)} refused hook #{env.id}: #{inspect(reason)}",
+                sink: mod
               )
 
               {mod, :error, ms}
@@ -83,14 +84,16 @@ defmodule Ankusa.Edge.Publish do
               Logger.warning(
                 "[ankusa] sink #{inspect(mod)} did not confirm hook #{env.id} within " <>
                   "#{timeout}ms; answered 503 (the sink may still store it; " <>
-                  "consumers dedupe on the idempotency key)"
+                  "consumers dedupe on the idempotency key)",
+                sink: mod
               )
 
               {mod, :timeout, timeout / 1}
 
             {:exit, reason} ->
               Logger.warning(
-                "[ankusa] sink #{inspect(mod)} crashed on hook #{env.id}: #{inspect(reason)}"
+                "[ankusa] sink #{inspect(mod)} crashed on hook #{env.id}: #{inspect(reason)}",
+                sink: mod
               )
 
               {mod, :error, nil}

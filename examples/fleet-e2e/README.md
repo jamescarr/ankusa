@@ -58,7 +58,7 @@ stack up, and runs four phases. Only `18080` (the load balancer), `14001` and
 | --- | --- | --- |
 | steady | `RATE`/s for `DURATION` s through the load balancer | `loadgen.verify`: every acked id processed, sha256 equal |
 | fat hooks | a 20 KB body POSTed to each node directly | each arrives with `via = claim:<id>`, redeemed through the gateway, sha256 equal |
-| chaos | the same load while `ankusa-a` is killed (+10 s) and started (+20 s), event *E* is delivered to node b and then **retried on node a**, and the consumer is killed (+30 s) | `loadgen.verify` again; both retry POSTs answer `201`, the second with the first's hook id; *E* is one row with one hook id |
+| chaos | the same load while `ankusa-a` is killed (+10 s) and started (+20 s), event *E* is delivered to node b and then **retried on node a**, the consumer is killed (+30 s), and **RabbitMQ is restarted** (+36 s) with the load still being acked, the consumer starting afresh once the broker accepts connections (DEL-7: the nodes' publishes in flight fail, wait out the retry policy and arrive on the broker's durable queue) | `loadgen.verify` again; both retry POSTs answer `201`, the second with the first's hook id; *E* is one row with one hook id |
 | burst | `CONCURRENCY` closed-loop workers for `BURST_SECONDS` | `loadgen.verify` |
 
 Before the phases it also asserts that a path nobody defined is a `404` on both
@@ -78,7 +78,7 @@ components, and only one of them is Ankusa's to remove:
   idempotency key, minus one, read from the consumer table's `hook_ids`) and
   **fails** when it is not 0.
 * **broker redeliveries**: RabbitMQ delivering a hook again after the consumer
-  was killed mid-handling. That is the at-least-once contract, ingest cannot
+  was killed mid-handling (or the broker restarted under it). That is the at-least-once contract, ingest cannot
   prevent it, and the chaos phase deliberately provokes it. It stays in
   `extra_deliveries`, which is reported and not asserted to be zero.
 
@@ -123,7 +123,7 @@ and its replacement delivers again from the backup and the log (same hook id, sa
 | --- | --- | --- |
 | `RATE` | `200` | paced requests per second (steady, chaos) |
 | `HOSTLOSS_RATE` | `1000` | paced requests per second of the `--kill-node` host-loss phases (the plan's per-node rate) |
-| `DURATION` | `45` | seconds per paced phase; at least 40, the chaos timeline runs to +35 s |
+| `DURATION` | `45` | seconds per paced phase; at least 40, the chaos timeline runs to +36 s |
 | `BURST_SECONDS`, `CONCURRENCY` | `10`, `32` | the closed-loop burst |
 | `BUILD_ANKUSA` | `1` | `0` skips `docker build` and uses `ANKUSA_IMAGE` |
 | `ANKUSA_IMAGE` | `ankusa-fleet-e2e:local` | the server image the nodes run |

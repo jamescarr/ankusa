@@ -36,9 +36,16 @@ health:
   sink_error_window_ms: 5000
 
 log:
-  # [env ANKUSA_LOG_LEVEL] debug | info | warning | error
+  # [env ANKUSA_LOG_LEVEL] debug | info | warning | error. The level the node starts at;
+  # `PUT /v1/log-level` (scope config:write + tenant:*, audited) changes it while it runs.
   level: info
-  # [env ANKUSA_BANNER] the ASCII-art banner printed to stdout on start
+  # [env ANKUSA_LOG_FORMAT] text | json. `json` writes one JSON object per line to stdout:
+  # time, level, msg, instance, hook_id, tenant_id, source_id, sink, trace_id (when the
+  # line has them) and any other log metadata, with the value of every key named
+  # secret, token, password, authorization or cookie replaced by "[REDACTED]".
+  # See docs/configuration.md#logs.
+  format: text
+  # [env ANKUSA_BANNER] the ASCII-art banner printed to stdout on start (never with `format: json`)
   banner: true
 
 tracing:

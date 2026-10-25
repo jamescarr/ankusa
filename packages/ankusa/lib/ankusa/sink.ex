@@ -258,10 +258,26 @@ defmodule Ankusa.Sink do
   A failure marks the span with its class (`permanent`, `retry_after`,
   `transient`), never the reason. With no OpenTelemetry SDK running this is
   `fun.()`.
+
+  The attempt's process gets the hook's correlation as `Logger` metadata
+  (`hook_id`, `source_id`, `tenant_id`, `sink`, `attempt`, `trace_id`, and
+  `replay_id` for a replayed row), so whatever the sink logs while it delivers
+  names the hook. Every caller runs it in a process of its own (a task per
+  attempt).
   """
   @spec attempt(module(), Envelope.t(), pos_integer(), String.t() | nil, (-> result)) :: result
         when result: :ok | {:error, term()} | {:ok | {:error, term()}, term()}
   def attempt(mod, %Envelope{} = env, number, replay_id, fun) when is_function(fun, 0) do
+    Logger.metadata(
+      hook_id: env.id,
+      source_id: env.source_id,
+      tenant_id: env.tenant_id,
+      sink: mod,
+      attempt: number,
+      trace_id: Trace.trace_id(env.trace),
+      replay_id: replay_id
+    )
+
     Trace.span(
       "ankusa.dispatch.attempt",
       [

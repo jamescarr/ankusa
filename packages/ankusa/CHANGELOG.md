@@ -26,6 +26,21 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   (`check_in`, `redeem`; from `[:ankusa, :claim_check, :failure]`, only for a
   claim store's fault) and `ankusa_backup_failures_total`. The SLO table is in
   [`architecture.md`](../../docs/architecture.md#slis-and-slos).
+- **Log correlation and a runtime log level (OPS-2).** The process that handles a
+  hook carries its correlation as `Logger` metadata: `Ankusa.Edge.Router` clears
+  it per request and sets `instance`; `Ankusa.Edge.Ingest` sets `source_id`,
+  `tenant_id`, `trace_id` (`Ankusa.Trace.trace_id/1`) and `hook_id`;
+  `Ankusa.Sink.attempt/5` sets them, with `sink`, `attempt` and `replay_id`, for
+  every delivery attempt (dispatch, lifecycle events, `wal.type: none`
+  publishes); a replay step sets `replay_id`; the breaker, `wal.type: none` sink
+  refusal and lifecycle give-up lines name their source, tenant and sink. The
+  console format is unchanged; the server image's `log.format: json` prints them.
+  `Ankusa.LogLevel` (`levels/0`, `get/0`, `parse/1`, `set/1`) and
+  `PUT /v1/log-level` (`{"level": "debug"}`; scope `config:write` plus `tenant:*`)
+  change the VM's log level at once, without a restart, with an audit row
+  (`log_level.put`, written first: a node whose store cannot take the row keeps
+  its level). `config:write`, reserved until now, is the scope of that route.
+
 - **`Sink.SQS` and `Sink.GooglePubSub` batch (DEL-4).** Dispatch's deliveries to
   one queue or topic wait in an `Ankusa.Sink.Batcher` (one per destination and set
   of credentials, under `Ankusa.Instance`) and go out as one `SendMessageBatch`

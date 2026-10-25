@@ -42,6 +42,20 @@ provider's trace id, the attempt links to the ingest span, the delivered
 the queue message and `Sink.Http` unchanged. It tears the SDK down, and the
 tracers it parked in `:persistent_term`, so no other test sees it.
 
+`test/ankusa/admin/router_test.exs` (OPS-2) has `runtime level`: `PUT /v1/log-level`
+is `401` with no credential and `403` without `config:write` + `tenant:*`, `400`
+for a body that is not `{"level": <level>}`, changes `Logger.level()` at once and
+answers the old level, leaves an audit row (`log_level.put`, the caller as the
+actor), and changes nothing when the row cannot be written. The VM's log level is
+global, so the test restores it. `ankusa_server`'s `test/ankusa_server/log_test.exs`
+is the proof of the JSON log: `json line` boots a `wal.type: none` edge whose sink
+refuses every hook, sends a request with a `traceparent`, and parses the line the
+refusal wrote with `AnkusaServer.LogFormatter` (`source_id`, `tenant_id`, `hook_id`,
+`sink`, `trace_id`, `instance`, one line, a timestamp); it also covers the ids of
+one request not leaking onto the next on the same connection process, a delivery
+attempt's correlation, the fixed key order, and the redaction of
+`secret|token|password|authorization|cookie` keys in metadata and reports.
+
 The always-on tests cover:
 
 - **Stored-header policy** (`stored_headers_test.exs`, `edge_test.exs`,
@@ -836,6 +850,67 @@ failing fast (`:econnrefused`, not a hang). Every publish in the suite goes to
 a per-test unique channel and instance, so tests never see each other's
 messages.
 
+## Broker fault injection: toxiproxy (`*_faults_test.exs`)
+
+Each broker adapter's suite has a fault suite beside its happy-path one
+(`ankusa_rabbitmq/test/ankusa/sink/rabbitmq_faults_test.exs`,
+`ankusa_kafka/…/kafka_faults_test.exs`, `ankusa_nats/…/nats_faults_test.exs`,
+`ankusa_redis/…/redis_faults_test.exs`). The adapter's `docker-compose.yml` runs
+a [toxiproxy](https://github.com/Shopify/toxiproxy) service beside the broker,
+the sink under test is pointed at the proxy instead of the broker, and the test
+adds latency, drops or a cut connection to the proxy through its HTTP API, or
+`docker compose kill`s the broker itself and starts it again. The test's own
+reads (what did the broker retain?) go straight to the broker.
+
+| Package | Proxy listens on | Toxiproxy API | Broker killed (`docker compose kill`) |
+| --- | --- | --- | --- |
+| `ankusa_rabbitmq` | `:5674` → `rabbitmq:5672` | `:8475` | `rabbitmq` |
+| `ankusa_kafka` | `:19093` → `redpanda:9093` (a `proxied` listener that advertises the proxy, so a client bootstrapped through it stays on it) | `:8476` | `redpanda` |
+| `ankusa_nats` | `:4224` → `nats:4222` | `:8477` | `nats` (streams in the suite use file storage so they outlive it) |
+| `ankusa_redis` | `:6400` → `redis:6379` | `:8478` | `redis` |
+
+`TOXIPROXY_URL` and the adapter's `*_PROXY_*` variable (named in each suite's
+`@moduledoc`) point a suite at another toxiproxy. The shared harness
+(`Ankusa.Toxiproxy`, `Ankusa.BrokerFaults`) is
+`packages/ankusa/test/support/broker_faults.exs`; each adapter's
+`test_helper.exs` loads it and core's suite never does.
+
+The contract every suite asserts: **`deliver/3` answers `:ok` only for a message
+the broker retained, every other answer is a transient error (never
+`{:permanent, _}`), and a row dispatch retries lands once the broker is back.**
+An error does not mean "not stored" (a confirm that was lost, or arrived after
+the caller's deadline, is a stored message: delivery is at-least-once), so each
+suite also reads the broker to show that the message of a failed attempt is
+there, and what the retry added. Four scenarios, each in every suite:
+
+- **the broker killed with a publish in flight.** RabbitMQ: `max_inflight`
+  publishes (4) wait on their confirms, a fifth is `{:error, :busy}`, the broker
+  is killed; every answer is `:ok` (only for what the broker had kept across the
+  kill) or a retryable error, and the retries arrive. Kafka and NATS: the
+  acknowledgement is held in the proxy while the broker is killed; the delivery
+  fails retryably, the retry lands (NATS: the stream holds the message once,
+  `Nats-Msg-Id`). Redis: the `PUBLISH` is held in the proxy when the server
+  dies, so no subscriber ever receives it; the delivery fails retryably and the
+  retry reaches a fresh subscriber.
+- **the per-publish timeout expiring mid-flight** (`confirm_timeout_ms`,
+  `produce_timeout_ms`, `publish_timeout_ms`): the reply is delayed past the
+  timeout, the answer is that timeout's error, and the broker holds the message
+  anyway.
+- **an acknowledgement lost with its connection** (RabbitMQ's confirm, Kafka's
+  produce ack, JetStream's publish ack, Redis's `PUBLISH` reply): the broker
+  stores the message, the proxy drops the reply and cuts the connection; the
+  answer is a retryable error, the broker holds the message, and the retry is
+  answered `:ok`.
+- **latency above the attempt deadline.** The sink runs inside a real dispatch
+  pipeline (`dispatch.attempt_timeout_ms` 1 s) against a reply delayed to 3 s:
+  the attempt is killed and counted as failed, the row is **not** dead-lettered
+  and stays due, and once the latency is gone dispatch delivers it (NATS: the
+  stream holds it once).
+
+`examples/fleet-e2e/run.sh`'s chaos phase adds the whole-fleet version: RabbitMQ
+restarts at +36 s under the paced load, and the run still ends `missing=0`
+(below).
+
 ## SDK conformance: one harness across the SDKs
 
 `packages/sdk-python`, `packages/sdk-typescript`, `packages/sdk-rust`,
@@ -1331,7 +1406,10 @@ Phases: **steady** (paced, through the load balancer); **fat hooks** (a 20 KB
 body POSTed to each node directly must reach the consumer through a claim, with
 its sha256 intact: `claim_redeemed_cross_node`); **chaos** (the same load, with
 `ankusa-a` killed at +10 s and started at +20 s, one event delivered to node b
-and then *retried on node a*, and the consumer killed at +30 s); **burst**
+and then *retried on node a*, the consumer killed at +30 s, and RabbitMQ
+restarted at +36 s with the load still being acked, DEL-7: the nodes' publishes
+in flight fail and are retried, and the consumer starts afresh once the broker
+accepts connections); **burst**
 (closed loop). Each phase is verified; the run fails on any `missing`,
 `sha_mismatches` or `duplicate_hooks`.
 

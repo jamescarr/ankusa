@@ -72,7 +72,7 @@ is the [key reference](#ankusa-config) below.
 | Section | Keys (default) |
 | --- | --- |
 | `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`), `min_free_bytes` (unset = no check; the free bytes `data_dir`'s file system must keep, or `/ready` answers `503` with `disk: failing`; see [`/ready`](deployment.md#running-the-container)) |
-| `log` | `level` (`info`), `banner` (`true`; the ASCII-art banner on start) |
+| `log` | `level` (`info`), `format` (`text` \| `json`; `text`), `banner` (`true`; the ASCII-art banner on start, never printed with `format: json`). See [Logs](#logs) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`), `store_headers` (`drop`: `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`; `hash`: none). See [Stored headers](#stored-headers) |
 | `listener` | Limits for every HTTP listener, and the ingest port's TLS: `max_connections` (20000), `num_acceptors` (null = two per scheduler), `read_timeout_ms` (10000), `body_read_timeout_ms` (15000), `request_deadline_ms` (30000), `max_requests_per_connection` (1000), `max_header_count` (64), `max_header_length` (16384), `http2` (`false`), `tls` (`certfile`, `keyfile`, `cacertfile`, `verify` = `verify_none` \| `verify_peer`, `versions`, `ciphers`). See [Listeners](#listeners-limits-tls-and-mtls) |
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it, and then needs `auth`), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled), `tls` (a TLS block, like `listener.tls`), `auth` (who may call it: `mode` = `none` \| `token` \| `jwt` \| `mtls`, `allow_insecure`, `tokens`, `jwt`, `mtls`; see [Control-plane authentication](#control-plane-authentication)) |
@@ -134,6 +134,58 @@ The SDK's own `OTEL_*` environment variables take precedence over this section.
 The collector's credentials are the standard `OTEL_EXPORTER_OTLP_HEADERS`: no
 secret lives in this file, so the section needs no redaction and is not in
 `GET /v1/config`.
+
+### Logs
+
+`log.format: text` (the default) writes `HH:MM:SS.mmm [level] message`, as before.
+`log.format: json` writes **one JSON object per line** to stdout, for a log
+pipeline that indexes fields instead of parsing text. A line has these keys, in
+this order, and omits the ones it has no value for:
+
+| Key | Value |
+| --- | --- |
+| `time` | RFC 3339, UTC, to the microsecond |
+| `level` | `debug`, `info`, `warning`, `error`, ... |
+| `msg` | the message, one string |
+| `instance` | the instance's name |
+| `hook_id`, `tenant_id`, `source_id` | the hook the line is about, and its tenant and source |
+| `sink` | the sink module a delivery attempt, or the refusal of one, is about |
+| `trace_id` | the 32-hex W3C trace id of the hook's `traceparent` (the same id `ankusa.ingest` and every later span carry, see [Tracing](#tracing)) |
+
+Any other `Logger` metadata the line has follows, sorted by key: `attempt` and
+`replay_id` on a delivery attempt of a replayed row. The correlation is set where
+the work happens: `Ankusa.Edge.Router` clears it per request and
+`Ankusa.Edge.Ingest` sets the hook's (so a sink that refuses a hook under
+`wal.type: none`, or any line logged while one is ingested, names its source,
+tenant and trace), `Ankusa.Sink.attempt/5` sets it for each delivery attempt
+(dispatch, lifecycle events, `wal.type: none` publishes), and a replay step sets
+`replay_id`. A line from a process that handles no hook (the store, a
+supervisor) has `time`, `level`, `msg` and `instance` only.
+
+The value of any key whose name contains `secret`, `token`, `password`,
+`authorization` or `cookie` (any case) is printed as `"[REDACTED]"`, in the
+metadata and inside a structured report's maps, keyword lists, `{key, value}`
+pairs and structs, however deep. The text of a message is not scanned: Ankusa
+never interpolates a secret into one.
+
+`log.level` is the level the node **starts** at. It changes while the node runs,
+without a restart, with the admin API:
+
+```sh
+curl -X PUT http://127.0.0.1:4002/v1/log-level \
+  -H "authorization: Bearer $ADMIN_TOKEN" -d '{"level": "debug"}'
+# {"level":"debug","previous":"info"}
+```
+
+The body is `{"level": ...}`, one of `debug`, `info`, `warning`, `error` (anything
+else is `400 invalid_log_level`). The caller needs `config:write` and `tenant:*`
+(the level is the node's, for every tenant): `401` without a credential, `403`
+without them. The change takes effect at once and is node-local (call each node);
+a restarted node logs at `log.level` again. It is audited like every
+control-plane change: `action: log_level.put`, with the new `level` and the
+`previous` one in `detail`. The row is committed first and the level changes once
+it is durable, so a node whose store cannot take the row answers
+`503 store_unavailable` (or `503 audit_backlog`) and keeps its level.
 
 ### Sources
 
@@ -383,6 +435,7 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`) |
 | `ANKUSA_DATA_DIR` | `node.data_dir` |
 | `ANKUSA_LOG_LEVEL` | `log.level` |
+| `ANKUSA_LOG_FORMAT` | `log.format` (`text` or `json`) |
 | `ANKUSA_BANNER` | `log.banner` |
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
@@ -1034,9 +1087,10 @@ Scopes (`Ankusa.Principal`): `metrics:read` (`/metrics`, `/v1/wal`),
 `tenants:write` (`DELETE /v1/tenants/{tenant}` and `GET /v1/tenants/{tenant}/erase`,
 a [tenant erase](multi-tenancy.md#erasing-a-tenant); it also needs `tenant:*`), and
 `dlq:write`, which starting a `dlq` replay also needs (`quarantine:write` for a
-`quarantine` replay). `config:write` is reserved: no route uses it yet.
+`quarantine` replay). `config:write` (with `tenant:*`) changes the node's
+[log level](#logs): `PUT /v1/log-level`.
 `audit:read` reads `GET /v1/audit`: every change to a source, route, IP rule,
-rate-limit override, quarantine purge or replay job, newest first, with
+rate-limit override, quarantine purge, replay job or log-level change, newest first, with
 `since`, `until` (ms), `actor`, `action`, `tenant`, `limit` and `cursor`
 filters. The trail spans tenants, so a reader without `tenant:*` sees only its
 own tenants' rows (none of the rows that belong to no tenant), and naming
