@@ -126,7 +126,7 @@ defmodule Ankusa.Queue.Writer do
         syncer: syncer,
         # after a failed fsync the writer refuses work until it has deleted the
         # rows of the groups that were never acked (`fence/1`); `unsynced` holds
-        # what it would delete, newest group first
+        # every group no fsync has covered yet, newest group first
         fenced: nil,
         unsynced: []
       }
@@ -1492,20 +1492,34 @@ defmodule Ankusa.Queue.Writer do
   # `undo` of a group is the ops it was built from; the group stays in `unsynced`
   # until an fsync covers it.
   defp track(state, upto, undo) do
-    durable = Syncer.durable(state.marks)
-    kept = Enum.take_while(state.unsynced, &(&1.upto > durable))
+    kept = unsynced_above(state.unsynced, Syncer.durable(state.marks))
     %{state | unsynced: [%{upto: upto, undo: undo} | kept]}
   end
 
-  # Every group applied since the last fsync has been answered with an error (the
-  # syncer refuses them all while fenced), so none of its rows may survive: they
-  # were never acked and dispatch never saw them (`Syncer.visible/2`). They are
+  # The groups in `unsynced` that no fsync has covered yet: everything above the
+  # durable mark, newest first. A group at or below it was answered `:ok` (the
+  # syncer raises the mark before it answers) or was made durable by a synced
+  # write of its own, so its rows are on disk and it is never undone.
+  defp unsynced_above(unsynced, durable), do: Enum.take_while(unsynced, &(&1.upto > durable))
+
+  # Every group no fsync covered has been answered with an error (the syncer
+  # refuses them all while fenced), so none of its rows may survive: they were
+  # never acked and dispatch never saw them (`Syncer.visible/2`). They are
   # deleted in one synced write, and only then does the syncer resume, with the
   # watermark where the writer stands. A write that fails (the disk is still
   # failing, the store is reopening) is tried again; until it lands the writer
   # refuses every call.
+  #
+  # The trim matters: `track/3` prunes `unsynced` as it applies each group, so a
+  # group whose fsync returned `:ok` stays listed while the next group is in the
+  # pipeline, and that group was answered `201`, so its rows are durable and a
+  # fence that deleted them would lose an acked hook. Deleting down to the
+  # durable mark keeps the fence to the groups the syncer answered with the
+  # error.
   defp fence(state) do
-    case Store.write(state.instance, undo_ops(state.unsynced), sync: true) do
+    unsynced = unsynced_above(state.unsynced, Syncer.durable(state.marks))
+
+    case Store.write(state.instance, undo_ops(unsynced), sync: true) do
       :ok ->
         Syncer.resume(state.syncer, Syncer.applied(state.marks), state.last_at)
         %{state | fenced: nil, unsynced: []}
