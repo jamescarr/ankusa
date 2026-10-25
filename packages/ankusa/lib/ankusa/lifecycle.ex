@@ -71,6 +71,11 @@ defmodule Ankusa.Lifecycle do
     * `sequence` — the audit `seq`, a decimal string: events of one instance
       are totally ordered by it
     * `replayid` — only on an event a replay job re-emitted
+    * `traceparent`, `tracestate` — the CloudEvents distributed-tracing
+      extension, only when an OpenTelemetry SDK runs: the context of the
+      `ankusa.lifecycle.event` span that built the event (`traced_envelope/4`).
+      Not part of the event's identity: a re-emitted event keeps its `id` and
+      gets the trace of the emission
 
   A route event's envelope carries the route's tenant (`tenant_id`; `"default"`
   for a route that belongs to none), so a replay filtered by `tenant` and a
@@ -101,7 +106,7 @@ defmodule Ankusa.Lifecycle do
   """
 
   alias Ankusa.Admin.Redact
-  alias Ankusa.{Audit, Config, Envelope, Routes, Source, SourceStore}
+  alias Ankusa.{Audit, Config, Envelope, Routes, Source, SourceStore, Trace}
   alias Ankusa.Routes.Route
 
   @source_id "ankusa:lifecycle"
@@ -192,14 +197,17 @@ defmodule Ankusa.Lifecycle do
   @doc """
   The event of an audit row flagged for publication, as the `Ankusa.Envelope` a
   lifecycle sink delivers. `entity` is what `Ankusa.Audit.entity/2` returned for
-  the row; `replay_id` is set only by a replay job.
+  the row; `replay_id` is set only by a replay job; `trace` is the
+  `Ankusa.Trace` the event travels under (the CloudEvents `traceparent` and
+  `tracestate` extensions, and `Ankusa.Envelope.trace`).
 
-  Pure in the row: the same row gives the same event `id`, `time` and body
+  Pure in its arguments: the same row gives the same event `id`, `time` and body
   however often, and wherever on the instance, it is built.
   """
-  @spec envelope(atom(), Audit.row(), map(), String.t() | nil) ::
+  @spec envelope(atom(), Audit.row(), map(), String.t() | nil, Ankusa.Trace.t() | nil) ::
           {:ok, Envelope.t()} | {:error, :no_audit_key}
-  def envelope(instance, %{seq: seq} = row, entity, replay_id \\ nil) when is_map(entity) do
+  def envelope(instance, %{seq: seq} = row, entity, replay_id \\ nil, trace \\ nil)
+      when is_map(entity) do
     with {:ok, id} <- event_id(instance, seq) do
       body =
         %{
@@ -217,6 +225,7 @@ defmodule Ankusa.Lifecycle do
         }
         |> put_present("revision", Map.get(row, :revision))
         |> put_present("replayid", replay_id)
+        |> put_trace(trace)
         |> JSON.encode!()
 
       {:ok,
@@ -231,10 +240,39 @@ defmodule Ankusa.Lifecycle do
          content_type: @content_type,
          dedupe_key: id,
          body: body,
-         size: byte_size(body)
+         size: byte_size(body),
+         trace: trace
        }}
     end
   end
+
+  @doc """
+  `envelope/5` for the publisher and replay jobs: the event is built inside an
+  `ankusa.lifecycle.event` span, and travels under that span's context. With no
+  OpenTelemetry SDK running it is `envelope/5` with no trace.
+  """
+  @spec traced_envelope(atom(), Audit.row(), map(), String.t() | nil) ::
+          {:ok, Envelope.t()} | {:error, :no_audit_key}
+  def traced_envelope(instance, row, entity, replay_id \\ nil) do
+    Trace.span(
+      "ankusa.lifecycle.event",
+      [
+        kind: :producer,
+        attributes: fn ->
+          %{"ankusa.event.type" => type(row), "ankusa.instance" => to_string(instance)}
+        end
+      ],
+      fn -> envelope(instance, row, entity, replay_id, Trace.current(nil)) end
+    )
+  end
+
+  defp put_trace(map, %{traceparent: traceparent} = trace) do
+    map
+    |> Map.put("traceparent", traceparent)
+    |> put_present("tracestate", Map.get(trace, :tracestate))
+  end
+
+  defp put_trace(map, nil), do: map
 
   defp put_present(map, _key, nil), do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)

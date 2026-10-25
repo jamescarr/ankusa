@@ -380,20 +380,24 @@ jobs:
         run: |
           set -euo pipefail
           src="packages/ankusa/lib packages/ankusa/priv packages/ankusa/config"
+          deps="packages/ankusa/mix.exs packages/ankusa/mix.lock"
           if [ -z "$BASE_SHA" ] || [ -z "${BASE_SHA//0/}" ] || ! git fetch --depth=1 --quiet origin "$BASE_SHA"; then
             echo "::notice::no base commit to measure: comparing with the checked-in baseline"
             exit 0
           fi
-          if ! git diff --quiet "$BASE_SHA" HEAD -- packages/ankusa/mix.exs packages/ankusa/mix.lock; then
-            echo "::notice::mix.exs or mix.lock changed: comparing with the checked-in baseline"
-            exit 0
-          fi
-          # The base's sources under this change's bench scripts.
+          # The base's sources *and* its dependency set, under this change's
+          # bench scripts. The base's `mix.exs`/`mix.lock` come along when they
+          # differ: a base compiled against this branch's lock is not the base
+          # (a bumped dependency, a new one), and the alternative — judging the
+          # change against the checked-in baseline recorded on another runner of
+          # a class that varies by 2x — turns a dependency-only diff into a coin
+          # flip (see docs/testing.md "Perf gate").
           # shellcheck disable=SC2086
-          rm -rf $src && git checkout "$BASE_SHA" -- $src
+          rm -rf $src && git checkout "$BASE_SHA" -- $src $deps
+          ( cd packages/ankusa && mix deps.get )
           BENCH_REBASELINE=1 BENCH_BASELINE="$RUNNER_TEMP/base-baseline.json" mise run bench:gate
           # shellcheck disable=SC2086
-          rm -rf $src && git checkout HEAD -- $src
+          rm -rf $src && git checkout HEAD -- $src $deps
           echo "BENCH_BASELINE=$RUNNER_TEMP/base-baseline.json" >> "$GITHUB_ENV"
       - if: steps.scope.outputs.run == 'true'
         run: mise run bench:gate

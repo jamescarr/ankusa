@@ -784,6 +784,8 @@ fn message_json(message: &Message) -> Value {
         "idempotency_key": message.idempotency_key,
         "headers": message.headers,
         "verification": verification_json(message.verification.as_ref()),
+        "traceparent": message.traceparent,
+        "tracestate": message.tracestate,
     })
 }
 

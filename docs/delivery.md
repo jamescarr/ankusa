@@ -447,6 +447,16 @@ and `x-ankusa-replay-id`; a message carries `id`, `source_id`, `tenant_id`,
 `received_at`, `content_type`, `size`, `sha256`, `dedupe_key`, `replay_id`,
 `idempotency_key`, `verification`, `headers` and the body (or claim).
 
+**Trace context travels with the hook.** A request's W3C `traceparent` (and
+`tracestate`) is stored on the hook and delivered by every sink: the
+`traceparent`/`tracestate` headers on `Sink.Http` (a provider's own header is
+replaced, not forwarded beside it), the `traceparent`/`tracestate` fields of the
+queue message (`null` for a hook with none) and the same pair as the broker's
+headers or attributes, and the CloudEvents `traceparent` extension on lifecycle
+events. A consumer continues the trace from them (the SDKs decode both fields).
+Retries, replays and claim-checked bodies carry the same context. See
+[Tracing](configuration.md#tracing).
+
 **Forwarded headers are capped** so a provider with large headers cannot push a
 small body over a transport limit: per source, `max_headers` (64) names and
 `forward_headers_max_bytes` (16 KiB) of names plus values

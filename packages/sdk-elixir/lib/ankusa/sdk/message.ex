@@ -66,6 +66,8 @@ defmodule Ankusa.SDK.Message do
           replay_id: String.t() | nil,
           idempotency_key: String.t() | nil,
           verification: %{status: String.t(), flagged: boolean()} | nil,
+          traceparent: String.t() | nil,
+          tracestate: String.t() | nil,
           headers: %{String.t() => String.t()}
         }
 
@@ -84,6 +86,8 @@ defmodule Ankusa.SDK.Message do
     :replay_id,
     :idempotency_key,
     :verification,
+    :traceparent,
+    :tracestate,
     headers: %{}
   ]
 
@@ -174,6 +178,8 @@ defmodule Ankusa.SDK.Message do
          {:ok, dedupe_key} <- optional_string(raw, "dedupe_key"),
          {:ok, replay_id} <- optional_string(raw, "replay_id"),
          {:ok, idempotency_key} <- optional_string(raw, "idempotency_key"),
+         {:ok, traceparent} <- optional_string(raw, "traceparent"),
+         {:ok, tracestate} <- optional_string(raw, "tracestate"),
          {:ok, headers} <- headers(raw),
          {:ok, sha256} <- sha256(raw),
          {:ok, verification} <- verification(raw) do
@@ -191,7 +197,9 @@ defmodule Ankusa.SDK.Message do
          idempotency_key: idempotency_key,
          headers: headers,
          sha256: sha256,
-         verification: verification
+         verification: verification,
+         traceparent: traceparent,
+         tracestate: tracestate
        }}
     end
   end

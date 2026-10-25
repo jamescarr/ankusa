@@ -37,6 +37,7 @@ defmodule Ankusa.Dispatch.Replayer do
     SourceStore,
     Store,
     Telemetry,
+    Trace,
     UUIDv7,
     Verification,
     Verifier
@@ -379,7 +380,7 @@ defmodule Ankusa.Dispatch.Replayer do
             n = min(trunc(tokens), @max_items_per_tick)
 
             if n >= 1 do
-              case step(state, job, n) do
+              case traced_step(state, job, n) do
                 {:ok, state, job, moved, _finished?} ->
                   # The step wrote the job's cursor/counters to the store; the
                   # in-memory copy follows it, so the next tick resumes from
@@ -415,6 +416,35 @@ defmodule Ankusa.Dispatch.Replayer do
         end
       end
     end)
+  end
+
+  # One `ankusa.replay` span per step of a job: the page of rows it moved.
+  defp traced_step(state, job, n) do
+    Trace.span(
+      "ankusa.replay",
+      [
+        attributes: fn ->
+          %{
+            "ankusa.replay_id" => to_string(job.id),
+            "ankusa.replay.kind" => to_string(job.kind),
+            "ankusa.replay.limit" => n
+          }
+        end
+      ],
+      fn ->
+        result = step(state, job, n)
+
+        case result do
+          {:ok, _state, _job, moved, _finished?} ->
+            Trace.set_attributes(%{"ankusa.replay.moved" => moved})
+
+          {:error, _state, _job, _reason} ->
+            Trace.error(:step_failed)
+        end
+
+        result
+      end
+    )
   end
 
   defp throttle_reason(:unavailable, _job), do: :unavailable

@@ -421,6 +421,8 @@ final class ConformanceTest extends TestCase
             'idempotency_key' => $message->idempotencyKey,
             'headers' => $message->headers,
             'verification' => self::verificationArray($message->verification),
+            'traceparent' => $message->traceparent,
+            'tracestate' => $message->tracestate,
         ];
     }
 

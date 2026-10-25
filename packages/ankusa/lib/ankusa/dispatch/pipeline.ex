@@ -1817,15 +1817,19 @@ defmodule Ankusa.Dispatch.Pipeline do
   # Runs in the task. Returns `{result, fresh_claim}` and never raises or
   # touches the store — the pipeline process owns every row transition.
   defp run_job(%{env: env, spec: {mod, opts}} = job, instance) do
-    case ensure_claim(job, instance) do
-      {:ok, claim, fresh} ->
-        result = Sink.safe_deliver(mod, env, ctx(job, instance, claim), opts)
+    # One `ankusa.dispatch.attempt` span per attempt, a child of the hook's stored
+    # trace and linked to it; the claim-check write (`ensure_claim/2`) is inside.
+    Sink.attempt(mod, env, job.row.attempts + 1, Map.get(job.row, :replay), fn ->
+      case ensure_claim(job, instance) do
+        {:ok, claim, fresh} ->
+          result = Sink.safe_deliver(mod, env, ctx(job, instance, claim), opts)
 
-        {result, fresh}
+          {result, fresh}
 
-      {:error, reason} ->
-        {{:error, reason}, nil}
-    end
+        {:error, reason} ->
+          {{:error, reason}, nil}
+      end
+    end)
   end
 
   # A job that has no ref yet but needs one (its pack failed) checks its body in

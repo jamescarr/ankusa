@@ -119,7 +119,8 @@
   JSON. Returns
 
   `{:v :id :source-id :tenant-id :received-at :content-type :size :body :claim
-  :sha256 :dedupe-key :replay-id :idempotency-key :headers :verification}`
+  :sha256 :dedupe-key :replay-id :idempotency-key :headers :verification
+  :traceparent :tracestate}`
 
   where `:body` is a `byte[]` for an inline message and `nil` for a claim, and
   `:claim` the claim ref for a claim and `nil` otherwise. `:headers` keeps its
@@ -147,6 +148,8 @@
         dedupe-key (optional-string! raw "dedupe_key")
         replay-id (optional-string! raw "replay_id")
         idempotency-key (optional-string! raw "idempotency_key")
+        traceparent (optional-string! raw "traceparent")
+        tracestate (optional-string! raw "tracestate")
         headers (if (contains? raw "headers") (get raw "headers") {})
         _ (check-field! (and (map? headers) (every? string? (vals headers))) "headers")
         sha256 (get raw "sha256")
@@ -175,7 +178,9 @@
      :replay-id replay-id
      :idempotency-key idempotency-key
      :headers headers
-     :verification verification}))
+     :verification verification
+     :traceparent traceparent
+     :tracestate tracestate}))
 
 (defn ->hook
   "Turn a decoded `message` into the hook a handler takes:

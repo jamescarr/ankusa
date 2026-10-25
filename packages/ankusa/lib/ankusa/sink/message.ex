@@ -14,13 +14,17 @@ defmodule Ankusa.Sink.Message do
   verified at ingest: `status` is `"ok"`, `"failed"` or `"skipped"`, and
   `flagged` is `true` when a failed check was let through by the source's
   `on_verify_failure: accept_flag`, so a consumer treats that hook as
-  unverified) and the forwarded provider `headers`:
+  unverified), the forwarded provider `headers` and the W3C trace context
+  `traceparent` / `tracestate` (`Ankusa.Trace`: strings, or `null` for a hook
+  that carries none; a consumer continues the trace from them):
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 245,
        "dedupe_key": "evt_1", "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
        "verification": {"status": "ok", "flagged": false},
        "headers": {"x-github-event": "push"},
+       "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+       "tracestate": null,
        "sha256": "2cf24dba...", "body_base64": "eyJpZCI6..."}
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
@@ -135,7 +139,9 @@ defmodule Ankusa.Sink.Message do
         replay_id: Map.get(ctx, :replay_id),
         idempotency_key: Envelope.idempotency_key(env),
         verification: verification(env.verification),
-        headers: forwarded_headers(env, ctx)
+        headers: forwarded_headers(env, ctx),
+        traceparent: trace_value(env.trace, :traceparent),
+        tracestate: trace_value(env.trace, :tracestate)
       }
       |> put_ordering_key(ctx)
 
@@ -188,7 +194,8 @@ defmodule Ankusa.Sink.Message do
   ("application/json"), `ankusa_dedupe_key`, `ankusa_replay_id`,
   `ankusa_ordering_key` (the lane's key, of a hook of an ordered sink). A pair
   whose value is `nil` or `""` is left out (no tenant, no dedupe key, not a
-  replay, not ordered).
+  replay, not ordered). A hook that carries a trace context (`Ankusa.Trace`)
+  adds `traceparent` and, when it has one, `tracestate`, last.
   """
   @spec attributes(Envelope.t(), Ankusa.Sink.ctx()) :: [{String.t(), String.t()}]
   def attributes(%Envelope{} = env, ctx) do
@@ -204,6 +211,7 @@ defmodule Ankusa.Sink.Message do
       {"ankusa_ordering_key", ctx[:ordering_key]}
     ]
     |> Enum.filter(fn {_name, value} -> is_binary(value) and value != "" end)
+    |> Kernel.++(trace_pairs(env.trace))
   end
 
   @doc """
@@ -212,10 +220,11 @@ defmodule Ankusa.Sink.Message do
   order: `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
   `ankusa_message_version` ("1"), `ankusa_idempotency_key`, `content_type`
   ("application/json"), then `ankusa_dedupe_key` and `ankusa_replay_id` when
-  the hook carries them. Unlike `attributes/2`, `ankusa_tenant_id` is always
-  present — `""` without a tenant — because such a sink's description promises
-  the header set (`ankusa_headers: true`) and the AsyncAPI header schema
-  requires it.
+  the hook carries them, then `traceparent` and `tracestate` when it carries a
+  trace context (`Ankusa.Trace`). Unlike `attributes/2`, `ankusa_tenant_id` is
+  always present — `""` without a tenant — because such a sink's description
+  promises the header set (`ankusa_headers: true`) and the AsyncAPI header
+  schema requires it.
   """
   @spec headers(Envelope.t(), Ankusa.Sink.ctx()) :: [{String.t(), String.t()}]
   def headers(%Envelope{} = env, ctx) do
@@ -227,19 +236,37 @@ defmodule Ankusa.Sink.Message do
       {"ankusa_idempotency_key", Envelope.idempotency_key(env)},
       {"content_type", "application/json"}
     ] ++
-      for {name, value} <- [
-            {"ankusa_dedupe_key", env.dedupe_key},
-            {"ankusa_replay_id", ctx[:replay_id]},
-            {"ankusa_ordering_key", ctx[:ordering_key]}
-          ],
-          is_binary(value),
-          do: {name, value}
+      for(
+        {name, value} <- [
+          {"ankusa_dedupe_key", env.dedupe_key},
+          {"ankusa_replay_id", ctx[:replay_id]},
+          {"ankusa_ordering_key", ctx[:ordering_key]}
+        ],
+        is_binary(value),
+        do: {name, value}
+      ) ++ trace_pairs(env.trace)
   end
 
   defp put_ordering_key(base, %{ordering_key: key}) when is_binary(key),
     do: Map.put(base, :ordering_key, key)
 
   defp put_ordering_key(base, _ctx), do: base
+
+  # The W3C trace context of the hook, as the pairs a broker carries natively
+  # (Kafka and NATS headers, SQS and Pub/Sub attributes): `traceparent`, and
+  # `tracestate` when there is one. None for a hook with no trace.
+  defp trace_pairs(%{traceparent: traceparent} = trace) do
+    [{"traceparent", traceparent}] ++
+      case Map.get(trace, :tracestate) do
+        state when is_binary(state) and state != "" -> [{"tracestate", state}]
+        _ -> []
+      end
+  end
+
+  defp trace_pairs(_no_trace), do: []
+
+  defp trace_value(%{} = trace, key), do: Map.get(trace, key)
+  defp trace_value(_no_trace, _key), do: nil
 
   @doc """
   The id a broker dedupes one delivery on: the hook's `id`, or
