@@ -650,7 +650,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/verifier/hmac.ex:74-93,240-250`, `envelope.ex:51-57`, `dedupe.ex:125-134`, `edge/rate_limiter.ex:45-46,105-114`.
   *Evidence:* —
 
-- [ ] **PERF-2 — Bounded sweeper and claim batch error handling** · P2 · Deps: DUR-2
+- [x] **PERF-2 — Bounded sweeper and claim batch error handling** · P2 · Deps: DUR-2
   *Why:* the LocalFS claim sweeper globs every `tenant=*/dt=*` directory per tick inside a GenServer (`claim_check/sweeper.ex:122-130`); `check_in_batch` matches only `{:ok, _}` from `Task.async_stream`, so an `{:exit, _}` raises in the dispatch packing task, and `Pack.build` raises above its limits unguarded (`claim_check.ex:142`, `pack.ex:70-75`).
   *Change:* paginated sweep with a persisted cursor (one tenant prefix per tick); handle `{:exit, reason}` as per-item `{:error, {:unavailable, reason}}`; move the entry/size limits into `split/2` so `Pack.build` cannot raise.
   *Done when:* 10 k partitions sweep in bounded ticks and resume; a raising store or an over-limit item yields per-item errors without a crash.

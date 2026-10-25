@@ -9,6 +9,9 @@ defmodule Ankusa.Test.CountingBlobStore do
     * `:pid` — receives `{:blob_put, key}` per put
     * `:fail_tenant` — every put under that tenant's claims partition fails
     * `:failures` — an `Agent` holding how many upcoming puts to fail
+    * `:kill_tenant` — a put under that tenant's claims partition kills the
+      process that made it (an upload task that dies, past every `rescue`)
+    * `:raise_tenant` — a put under that tenant's claims partition raises
     * `:put_delay_ms` — sleep before each put, to hold a pack upload open
     * `:get_error` — every `get/3` answers `{:error, value}`, an unreachable store
     * `:range_error` — every `get_range/5` answers `{:error, value}`
@@ -38,6 +41,8 @@ defmodule Ankusa.Test.CountingBlobStore do
   defp write(instance, key, data, opts, writer) do
     if pid = Keyword.get(opts, :pid), do: send(pid, {:blob_put, key})
     if delay = Keyword.get(opts, :put_delay_ms), do: Process.sleep(delay)
+    if in_tenant?(key, opts[:kill_tenant]), do: Process.exit(self(), :kill)
+    if in_tenant?(key, opts[:raise_tenant]), do: raise("injected raise")
 
     cond do
       fail?(key, opts) ->
@@ -62,6 +67,9 @@ defmodule Ankusa.Test.CountingBlobStore do
       _ -> false
     end
   end
+
+  defp in_tenant?(_key, nil), do: false
+  defp in_tenant?(key, tenant), do: String.contains?(key, "tenant=#{tenant}/")
 
   defp fail?(key, opts) do
     tenant = Keyword.get(opts, :fail_tenant)

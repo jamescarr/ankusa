@@ -781,15 +781,24 @@ consumer can lag its broker. The sweeper deletes a lease once its grace is over,
 or when its hook no longer names that pack, and the gauge `ankusa_claim_leases`
 counts them.
 
-A tick deletes at most `claim_check.sweep_max_objects` packs (default 10 000) and
-as many lease rows; the names it did not examine in the partition it stopped in are
-`ankusa_claim_check_sweep_backlog`, the expired partitions it did not reach
-`ankusa_claim_check_sweep_partitions_left`, and while either is non-zero the
-next tick follows in 5 s. Listing a partition is one `readdir` of that
-directory, so a single day of one tenant should stay well under a million packs
-(`key_layout: sharded` spreads a tenant over 32 directories). A sweep whose lease
-lookups fail deletes nothing. `ankusa_claim_check_pruned_total` counts packs
-deleted and `ankusa_claim_check_leases_pruned_total` leases.
+A tick sweeps **one tenant**: it lists the tenants' directories once per pass, in
+name order, and each tick takes the next tenant's day partitions (listed by
+name, not globbed), so what a tick costs depends on one tenant's partitions and
+not on how many tenants the node has. The tenant a pass last finished is kept in
+the node's store (`m:claim_sweep_cursor`), so a restart resumes after it; while
+tenants are left in the pass the next tick follows in 100 ms, and
+`ankusa_claim_check_sweep_tenants_left` is how many there are. A pass holds the
+tenant names in memory, one binary each. A tick deletes at most
+`claim_check.sweep_max_objects` packs (default 10 000) and as many lease rows;
+the names it did not examine in the partition it stopped in are
+`ankusa_claim_check_sweep_backlog`, the expired partitions of that tenant it did
+not reach `ankusa_claim_check_sweep_partitions_left`, and while either is
+non-zero the next tick, on the same tenant, follows in 5 s. Listing a partition
+is one `readdir` of that directory, so a single day of one tenant should stay
+well under a million packs (`key_layout: sharded` spreads a tenant over 32
+directories). A sweep whose lease lookups fail deletes nothing.
+`ankusa_claim_check_pruned_total` counts packs deleted and
+`ankusa_claim_check_leases_pruned_total` leases.
 
 Leases live in the node's own store, so they protect the packs of the hooks this
 node holds. A `LocalFS` root shared between nodes is swept by each of them

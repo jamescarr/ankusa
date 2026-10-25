@@ -451,6 +451,7 @@ defmodule Ankusa.MetricsTest do
           leases_pruned: 6,
           backlog: 9,
           partitions_left: 2,
+          tenants_left: 4,
           duration: 1
         },
         %{instance: inst, deleted: true}
@@ -462,6 +463,7 @@ defmodule Ankusa.MetricsTest do
       assert gauge(scrape, "ankusa_claim_leases", inst) == 0.0
       assert gauge(scrape, "ankusa_claim_check_sweep_backlog", inst) == 9.0
       assert gauge(scrape, "ankusa_claim_check_sweep_partitions_left", inst) == 2.0
+      assert gauge(scrape, "ankusa_claim_check_sweep_tenants_left", inst) == 4.0
       assert scrape =~ ~r/^ankusa_claim_check_pruned_total\{instance="#{inst}"\} 4(\.0)?$/m
       assert scrape =~ ~r/^ankusa_claim_check_leases_pruned_total\{instance="#{inst}"\} 6(\.0)?$/m
     end
@@ -489,6 +491,7 @@ defmodule Ankusa.MetricsTest do
             leases_pruned: 0,
             backlog: 0,
             partitions_left: 0,
+            tenants_left: 0,
             duration: 1
           },
           %{instance: inst, deleted: deleted}

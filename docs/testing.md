@@ -436,7 +436,12 @@ The always-on tests cover:
   sends no digest, `x-ankusa-sha256` on `200`/`206` only, 100 concurrent
   `HEAD`s of one claim cause one store read and 100 `GET`s three — index,
   manifest, claim — and the manifest's digests in `pack_test.exs`); and the
-  `LocalFS` retention sweeper deleting whole `dt=` day partitions. The gateway,
+  `LocalFS` retention sweeper deleting whole `dt=` day partitions (`sweeper_test.exs`,
+  "bounded sweep": 10 000 partitions over 100 tenants, one tenant per tick, a
+  restart resuming after the persisted cursor, a tenant the budget cut short
+  staying the next tick's); a claim batch where an upload process dies or a store
+  raises answering `unavailable` for that pack's items only, and the pack limits
+  in `split/3` (`batch_test.exs`, "batch exit handled"). The gateway,
   sweep and archive series are in `metrics_test.exs` ("gateway metrics",
   "archive metrics") and the compactor's failure and age events in
   `storage_test.exs`.

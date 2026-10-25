@@ -626,6 +626,8 @@ defmodule Ankusa.Metrics do
           {"ankusa.claim_check.sweep.backlog", [:ankusa, :claim_check, :sweep], :backlog, :unit},
           {"ankusa.claim_check.sweep.partitions_left", [:ankusa, :claim_check, :sweep],
            :partitions_left, :unit},
+          {"ankusa.claim_check.sweep.tenants_left", [:ankusa, :claim_check, :sweep],
+           :tenants_left, :unit},
           {"ankusa.audit.rows", [:ankusa, :audit, :state], :rows, :unit},
           {"ankusa.audit.bytes", [:ankusa, :audit, :state], :bytes, :byte},
           {"ankusa.audit.outbox_backlog", [:ankusa, :audit, :state], :outbox_backlog, :unit},
