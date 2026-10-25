@@ -23,6 +23,11 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `AnkusaServer.Config.load!/1` also answers the substituted document as `doc`.
   `log.format` changes back to `text` at a reload now restore the text formatter.
 
+- **`dedupe: salesforce` (CON-3).** A source's `dedupe` accepts the preset
+  `salesforce` (`json: id`; see `configuration.md` for why it is a convention and
+  not a Salesforce-documented delivery id). A source with no `dedupe` logs one
+  boot warning and counts in `ankusa_sources_without_dedupe`. See the `ankusa`
+  changelog.
 - **SLI metrics (OPS-3).** `/metrics` gains `ankusa_delivery_latency_seconds{sink,result}`
   (a delivery's age when it settled, buckets to 60 s), `ankusa_dispatch_attempt_duration_seconds{sink,result}`,
   `ankusa_compact_failures_total{stage}`, `ankusa_claim_check_failures_total{op}` and
