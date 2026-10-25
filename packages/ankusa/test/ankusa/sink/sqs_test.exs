@@ -407,6 +407,26 @@ defmodule Ankusa.Sink.SQSTest do
       |> Map.new(&Task.await/1)
     end
 
+    # Waits until the destination's batcher holds `queued` entries. An entry is
+    # admitted when its call is handled — the order the requests must follow —
+    # and the counters `stats/1` reads are published by that same call.
+    defp await_queued(instance, queued, deadline \\ nil) do
+      deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+
+      case Ankusa.Sink.Batcher.stats(instance) do
+        %{queued: ^queued} ->
+          :ok
+
+        stats ->
+          if System.monotonic_time(:millisecond) > deadline do
+            flunk("the batcher never held #{queued} entries, saw #{inspect(stats)}")
+          else
+            Process.sleep(1)
+            await_queued(instance, queued, deadline)
+          end
+      end
+    end
+
     test "ten deliveries are one SendMessageBatch, each entry what a SendMessage carries",
          %{capture: capture, instance: instance} do
       stub_batches(capture, &batch_reply/2)
@@ -615,32 +635,46 @@ defmodule Ankusa.Sink.SQSTest do
       test = self()
 
       stub_batches(capture, fn conn, request ->
-        send(test, {:request, Enum.map(request["Entries"], & &1["MessageDeduplicationId"])})
-        batch_reply(conn, request)
+        send(
+          test,
+          {:request, Enum.map(request["Entries"], & &1["MessageDeduplicationId"]), self()}
+        )
+
+        receive do
+          :release -> batch_reply(conn, request)
+        after
+          5_000 -> batch_reply(conn, request)
+        end
       end)
 
-      opts = batch_opts(batch_linger_ms: 20, batch_max_inflight: 4)
+      # a batch leaves when it is full, never on the linger: what goes out is
+      # decided by what was admitted, not by the clock
+      opts = batch_opts(batch_max_entries: 3, batch_max_inflight: 4, batch_linger_ms: 30_000)
 
-      for n <- 1..6 do
-        Task.async(fn -> SQS.deliver(envelope(%{id: "m#{n}"}), ctx(instance), opts) end)
-        |> tap(fn _ -> Process.sleep(5) end)
-      end
-      |> Enum.each(&Task.await/1)
+      # Admission order is the order the calls reach the batcher, so each
+      # delivery starts only once the one before it is in its queue. The third
+      # fills the batch (`queued` drops to 0 when it leaves); the last three
+      # wait behind the group's request in flight.
+      tasks =
+        for {n, queued} <- Enum.zip(1..6, [1, 2, 0, 1, 2, 3]) do
+          task = Task.async(fn -> SQS.deliver(envelope(%{id: "m#{n}"}), ctx(instance), opts) end)
+          await_queued(instance, queued)
+          task
+        end
 
       # one group (`acme/stripe`), so whatever the batching, the receiver's
       # order is the admission order
-      sent_order =
-        Stream.repeatedly(fn ->
-          receive do
-            {:request, ids} -> ids
-          after
-            300 -> nil
-          end
-        end)
-        |> Enum.take_while(& &1)
-        |> List.flatten()
+      assert_receive {:request, ["m1", "m2", "m3"], first}, 1_000
 
-      assert sent_order == ["m1", "m2", "m3", "m4", "m5", "m6"]
+      # the group's next entries do not go out beside its request in flight
+      refute_receive {:request, _, _}, 200
+
+      send(first, :release)
+      assert_receive {:request, ["m4", "m5", "m6"], second}, 1_000
+      send(second, :release)
+
+      assert Enum.map(tasks, &Task.await/1) == List.duplicate(:ok, 6)
+      assert length(Agent.get(capture, & &1)) == 2
     end
 
     test "batched?/1 follows the batch option" do

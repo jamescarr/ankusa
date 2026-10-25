@@ -11,7 +11,10 @@ defmodule Ankusa.Sink.Batcher do
   the dispatch attempt, so a delivery is answered only after its batch's
   response, its row stays claimed until then, and a batcher that dies (or an
   attempt that is killed) loses nothing: the call exits, the attempt fails, the
-  row is retried, and the idempotency key travels as it always did.
+  row is retried, and the idempotency key travels as it always did. A delivery
+  that reaches a destination whose batcher has just died (or stopped idle) starts
+  its replacement: it waits for the dead batcher's registered name to be reaped
+  (at most `250 ms`) instead of failing on `:noproc`.
 
   ## One batcher per destination
 
@@ -120,6 +123,10 @@ defmodule Ankusa.Sink.Batcher do
   @default_linger_ms 20
   @default_max_inflight 8
   @idle_ms 60_000
+  # How long a delivery waits for a dead batcher's registry name to be reaped
+  # before its replacement can start (see `call/3`).
+  @restart_wait_ms 250
+  @restart_poll_ms 2
   # A batch scans at most this many times `max_entries` queued entries of one
   # tenant looking for one whose group is free.
   @scan_factor 4
@@ -230,31 +237,62 @@ defmodule Ankusa.Sink.Batcher do
       end
 
     with {:ok, config} <- config do
-      key = {:sink_batcher, codec, digest(codec.batch_identity(opts), config)}
+      target = %{
+        instance: instance,
+        codec: codec,
+        opts: opts,
+        config: config,
+        key: {:sink_batcher, codec, digest(codec.batch_identity(opts), config)},
+        deadline: now() + @restart_wait_ms
+      }
+
       message = {:enqueue, Map.put(entry, :callers, [self() | Process.get(:"$callers", [])])}
 
-      call(instance, codec, opts, config, key, message, entry.attempt, 1)
+      call(target, message, entry.attempt)
     end
   end
 
-  defp call(instance, codec, opts, config, key, message, attempt, retries) do
-    with {:ok, pid} <- ensure(instance, codec, opts, config, key) do
-      case GenServer.call(pid, message, :infinity) do
-        {:refused, reason} ->
-          {:error,
-           {:retry_after, Ankusa.Sink.throttle_after_ms(attempt), {:batch_queue_full, reason}}}
+  # A batcher that stopped (idle) or was killed is gone from its supervisor at
+  # once, but the registry name it held is not: the partition that owns the key
+  # reaps it when it handles the monitor, a moment later. Until it does,
+  # `Ankusa.whereis/2` still names the dead pid and starting its replacement
+  # fails on the name being taken. A delivery that lands in that window is a
+  # delivery to a healthy destination, so it waits for the name and starts a new
+  # batcher (`@restart_wait_ms` bounds the wait; nothing else in a delivery ever
+  # waits). The one call a dead batcher was holding is answered by its death and
+  # retried by the dispatch attempt, as before.
+  defp call(target, message, attempt) do
+    case ensure(target) do
+      {:ok, pid} -> ask(target, message, attempt, pid)
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-        result ->
-          result
-      end
+  defp ask(target, message, attempt, pid) do
+    case GenServer.call(pid, message, :infinity) do
+      {:refused, reason} ->
+        {:error,
+         {:retry_after, Ankusa.Sink.throttle_after_ms(attempt), {:batch_queue_full, reason}}}
+
+      result ->
+        result
     end
   catch
-    # The batcher stopped (idle, or killed) between the lookup and the call.
-    :exit, {reason, {GenServer, :call, _}} when reason in [:noproc, :normal] and retries > 0 ->
-      call(instance, codec, opts, config, key, message, attempt, retries - 1)
+    # The batcher stopped between the lookup and the call.
+    :exit, {reason, {GenServer, :call, _}} when reason in [:noproc, :normal] ->
+      restart(target, message, attempt, reason)
 
     :exit, {reason, {GenServer, :call, _}} ->
       {:error, {:batcher_down, reason}}
+  end
+
+  defp restart(target, message, attempt, reason) do
+    if now() + @restart_poll_ms > target.deadline do
+      {:error, {:batcher_down, reason}}
+    else
+      Process.sleep(@restart_poll_ms)
+      call(target, message, attempt)
+    end
   end
 
   # A digest, so no credential is part of a registered name or a crash report.
@@ -264,29 +302,54 @@ defmodule Ankusa.Sink.Batcher do
     |> Base.encode16(case: :lower)
   end
 
-  defp ensure(instance, codec, opts, config, key) do
-    case Ankusa.whereis(instance, key) do
-      pid when is_pid(pid) -> {:ok, pid}
-      nil -> start(instance, codec, opts, config, key)
+  defp ensure(target) do
+    case Ankusa.whereis(target.instance, target.key) do
+      nil ->
+        start(target)
+
+      pid ->
+        if Process.alive?(pid),
+          do: {:ok, pid},
+          else: wait_name(target)
+    end
+  end
+
+  # The name is held by a dead pid: wait for the registry to reap it, then start
+  # its replacement.
+  defp wait_name(target) do
+    if now() + @restart_poll_ms > target.deadline do
+      {:error, {:batcher_down, :noproc}}
+    else
+      Process.sleep(@restart_poll_ms)
+      ensure(target)
     end
   end
 
   # The settings carry credentials: the child spec and the batcher's state hold
   # them only inside closures, which `inspect` prints without their captured
   # values.
-  defp start(instance, codec, opts, config, key) do
-    boot = fn -> {instance, codec, fn -> opts end, config, key} end
+  defp start(target) do
+    boot = fn ->
+      {target.instance, target.codec, fn -> target.opts end, target.config, target.key}
+    end
 
     child = %{
-      id: key,
+      id: target.key,
       start: {__MODULE__, :start_link, [boot]},
       restart: :temporary
     }
 
-    case DynamicSupervisor.start_child(Ankusa.via(instance, :sink_batchers), child) do
-      {:ok, pid} -> {:ok, pid}
-      {:error, {:already_started, pid}} -> {:ok, pid}
-      {:error, reason} -> {:error, {:batcher_start, reason}}
+    case DynamicSupervisor.start_child(Ankusa.via(target.instance, :sink_batchers), child) do
+      {:ok, pid} ->
+        {:ok, pid}
+
+      {:error, {:already_started, pid}} ->
+        # another delivery started it first, or a dead batcher still holds the
+        # name (see `call/3`)
+        if Process.alive?(pid), do: {:ok, pid}, else: wait_name(target)
+
+      {:error, reason} ->
+        {:error, {:batcher_start, reason}}
     end
   catch
     :exit, reason -> {:error, {:batcher_start, reason}}
