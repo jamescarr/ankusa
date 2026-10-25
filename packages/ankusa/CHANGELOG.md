@@ -47,6 +47,22 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Bounded claim sweeper and claim batch error handling (PERF-2).**
+  `Ankusa.ClaimCheck.Sweeper` sweeps one tenant per tick instead of globbing every
+  `claims/tenant=*/dt=*` directory: a pass lists the tenant directories once, in name
+  order, and each tick takes the next tenant's day partitions (by name, never a glob).
+  The tenant a pass last finished is persisted (`m:claim_sweep_cursor`, additive: a
+  build that does not know the row ignores it, so a rollback needs no step), so a
+  restart resumes after it. While tenants are left the next step follows in 100 ms;
+  `scanned` and `partitions_left` of `[:ankusa, :claim_check, :sweep]` now count the
+  one tenant swept, and `tenants_left` (gauge `ankusa_claim_check_sweep_tenants_left`)
+  is new. `Ankusa.ClaimCheck.check_in_batch/2` uploads its packs unlinked: an upload
+  process that dies is `{:error, {:unavailable, reason}}` for that pack's items and no
+  longer takes the dispatch packing task down, and an item no pack can hold is
+  `{:error, :too_large}`; the claim-count and size limits now live in `split/3`, and
+  `check_in/4` answers `{:error, :too_large}` for more than 65 000 claims or about
+  4 GiB instead of raising from `Pack.build/1`. See
+  [`claim-check.md`](../../docs/claim-check.md#claim-leases).
 - **Message size preflight and forwarded-header caps (DEL-5).** A queue sink
   that `use`s `Ankusa.Sink.Messaging` now checks every message against its
   `c:Ankusa.Sink.Messaging.max_message_bytes/1` (implemented for you: the

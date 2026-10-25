@@ -28,7 +28,7 @@ defmodule Ankusa.ClaimCheck do
 
   Permanent errors (`:not_found`, `:integrity_mismatch`, `:invalid_ref`,
   `:invalid_tenant`, `:invalid_id`, `:unsigned_ref`, `:bad_signature`,
-  `:ref_expired`) mean retrying won't help — callers should dead-letter.
+  `:ref_expired`, `:too_large`) mean retrying won't help — callers should dead-letter.
   `{:unavailable, reason}` is transient, and so is `:forbidden` (the object
   store refused this node's credential: a configuration fault to fix, not a
   reason to drop the claim).
@@ -67,6 +67,7 @@ defmodule Ankusa.ClaimCheck do
           | :bad_signature
           | :ref_expired
           | :forbidden
+          | :too_large
           | {:unavailable, term()}
 
   @typedoc "A checked-in claim: its ref, and the lowercase hex sha256 of its bytes."
@@ -106,7 +107,10 @@ defmodule Ankusa.ClaimCheck do
   claim store `op_deadline_ms`): past it the call returns an error rather than
   keep a dispatch task and its connections busy. A store that throttles with a
   `Retry-After` that does not fit is `{:error, {:unavailable, {:throttled,
-  seconds}}}` at once, for dispatch's own backoff to schedule. opts:
+  seconds}}}` at once, for dispatch's own backoff to schedule. Items that no
+  single pack can hold (more than 65 000 claims, or about 4 GiB of them) are
+  `{:error, :too_large}` before anything is built; `check_in_batch/2` splits
+  its packs inside both limits. opts:
 
     * `:pack_id` — the first pack id tried (`Ankusa.ClaimCheck.Ref.pack_id/2`);
       default a freshly minted one (`Ref.new_pack_id/0`: now plus 64 random bits).
@@ -119,7 +123,8 @@ defmodule Ankusa.ClaimCheck do
 
     {result, pack_id} =
       with :ok <- Ref.validate_tenant(tenant_id),
-           :ok <- Ref.validate_pack_id(first_id) do
+           :ok <- Ref.validate_pack_id(first_id),
+           :ok <- fits(items) do
         config = Ankusa.config(instance)
         deadline = Stores.write_deadline(config)
         write_pack(instance, config, tenant_id, items, first_id, deadline, @max_pack_attempts)
@@ -203,7 +208,10 @@ defmodule Ankusa.ClaimCheck do
   group into packs of at most `claim_check.pack_max_bytes`, and upload the
   packs concurrently. A body larger than the cap gets a pack of its own.
 
-  Returns a result per item id. A failed pack fails only its own items.
+  Returns a result per item id. A failed pack fails only its own items: a store
+  that raises, or an upload process that dies, is `{:error, {:unavailable,
+  reason}}` for that pack's items and never takes the caller down. An item no
+  pack can hold (over ZIP's 4 GiB) is `{:error, :too_large}`.
   """
   @spec check_in_batch(atom(), [item()]) :: %{String.t() => {:ok, claim()} | {:error, reason()}}
   def check_in_batch(_instance, []), do: %{}
@@ -211,21 +219,52 @@ defmodule Ankusa.ClaimCheck do
   def check_in_batch(instance, items) do
     %Config{claim_check: %{pack_max_bytes: cap}} = Ankusa.config(instance)
 
-    items
-    |> Enum.group_by(& &1.tenant_id)
-    |> Enum.flat_map(fn {tenant_id, group} ->
-      group |> split(cap) |> Enum.map(&{tenant_id, &1})
-    end)
-    |> Task.async_stream(
-      fn {tenant_id, pack} -> {pack, check_in(instance, tenant_id, pack)} end,
-      max_concurrency: @upload_concurrency,
-      timeout: :infinity
-    )
-    |> Enum.reduce(%{}, fn {:ok, {pack, result}}, acc ->
+    splits =
+      items
+      |> Enum.group_by(& &1.tenant_id)
+      |> Enum.map(fn {tenant_id, group} -> {tenant_id, split(group, cap)} end)
+
+    packs = for {tenant_id, {chunks, _over}} <- splits, chunk <- chunks, do: {tenant_id, chunk}
+    refused = for {_tenant_id, {_chunks, over}} <- splits, item <- over, do: item
+
+    results = Map.new(refused, &{&1.id, {:error, :too_large}})
+
+    packs
+    |> upload(instance)
+    |> Enum.reduce(results, fn {pack, result}, acc ->
       Enum.reduce(pack, acc, fn item, acc ->
         Map.put(acc, item.id, item_result(result, item.id))
       end)
     end)
+  end
+
+  # Every pack's `{items, check_in/3's result}`. The uploads run unlinked under a
+  # supervisor of this call's own, so one that dies (killed, or a crash past
+  # `check_in/4`'s own guards) is that pack's `:unavailable` and not the
+  # caller's exit: the caller is the dispatch packing task.
+  defp upload([], _instance), do: []
+
+  defp upload(packs, instance) do
+    {:ok, sup} = Task.Supervisor.start_link()
+
+    try do
+      sup
+      |> Task.Supervisor.async_stream_nolink(
+        packs,
+        fn {tenant_id, pack} -> check_in(instance, tenant_id, pack) end,
+        max_concurrency: @upload_concurrency,
+        timeout: :infinity
+      )
+      |> Enum.zip(packs)
+      |> Enum.map(fn
+        {{:ok, result}, {_tenant_id, pack}} -> {pack, result}
+        {{:exit, reason}, {_tenant_id, pack}} -> {pack, {:error, {:unavailable, reason}}}
+      end)
+    after
+      # Unlinked first: stopping it must not signal a caller that traps exits.
+      Process.unlink(sup)
+      Supervisor.stop(sup)
+    end
   end
 
   @doc """
@@ -981,14 +1020,21 @@ defmodule Ankusa.ClaimCheck do
     div(System.system_time(:millisecond) + ttl_ms + 999, 1000)
   end
 
+  @doc false
   # Greedy, order-preserving: start a new pack when the next item would push
-  # this one past the cap (or past what a ZIP can hold). A single oversized
-  # item still gets a pack of its own.
-  defp split(items, cap) do
-    cap = min(cap, @max_pack_bytes)
+  # this one past `cap` (or past what a ZIP can hold: `max_bytes`) or past the
+  # claims a ZIP index holds. A single item bigger than `cap` still gets a
+  # pack of its own; one that no pack `Pack.build/1` can write (its cost alone
+  # is over `max_bytes`) is returned apart, for the caller to refuse. So every
+  # pack this returns builds: the limits live here, and `Pack.build/1` raises
+  # only for a caller that skipped them.
+  @spec split([item()], pos_integer(), pos_integer()) :: {[[item()]], [item()]}
+  def split(items, cap, max_bytes \\ @max_pack_bytes) do
+    cap = min(cap, max_bytes)
+    {fit, too_large} = Enum.split_with(items, &(cost(&1) <= max_bytes))
 
     {packs, current, _size, _count} =
-      Enum.reduce(items, {[], [], 0, 0}, fn item, {packs, current, size, count} ->
+      Enum.reduce(fit, {[], [], 0, 0}, fn item, {packs, current, size, count} ->
         cost = cost(item)
 
         if current != [] and (size + cost > cap or count == @max_pack_claims) do
@@ -998,7 +1044,17 @@ defmodule Ankusa.ClaimCheck do
         end
       end)
 
-    Enum.reverse([Enum.reverse(current) | packs])
+    packs = if current == [], do: packs, else: [Enum.reverse(current) | packs]
+    {Enum.reverse(packs), too_large}
+  end
+
+  # Whether `items` are one pack `Pack.build/1` can write: the claim count and
+  # byte limits `split/3` keeps every batch pack inside.
+  defp fits(items) do
+    if length(items) <= @max_pack_claims and
+         Enum.reduce(items, 0, &(cost(&1) + &2)) <= @max_pack_bytes,
+       do: :ok,
+       else: {:error, :too_large}
   end
 
   defp cost(item) do
