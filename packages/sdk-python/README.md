@@ -169,6 +169,9 @@ except MissingHookIdError:
 how the *node* verified the hook at ingest, `None` from a node older than the
 field. `hook.verification.flagged is True` means the node accepted a failed
 check (`on_verify_failure: accept_flag`) — treat it as unverified.
+`ankusa.is_trusted(hook)` is that decision in one call: `True` only for
+`status == "ok"` with `flagged` false, so a flagged, `failed` or `skipped`
+hook, or one from a node older than the field, is untrusted.
 
 ## Consuming queue messages
 

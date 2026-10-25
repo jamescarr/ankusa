@@ -201,7 +201,10 @@ receivers built on something else.
 results) says how the *node* verified the hook at ingest, `nil` from a node
 older than the field. `hook.verification.flagged == true` means the node
 accepted a failed check (`on_verify_failure: accept_flag`) — treat it as
-unverified.
+unverified. `Ankusa.SDK.Hook.trusted?/1` is that decision in one call: `true`
+only for `status: "ok"` with `flagged: false`, so a flagged, `"failed"` or
+`"skipped"` hook, or one from a node older than the field, is untrusted. It
+takes a `Hook`, a decoded `Message` or the parsed `Webhook.Headers`.
 
 ## Queue messages
 

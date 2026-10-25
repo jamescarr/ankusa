@@ -5,7 +5,14 @@ module Ankusa
   # `skipped`, but other values pass through untouched (forward-compatible).
   # `flagged` is true when a failed check was accepted
   # (`on_verify_failure: accept_flag`): treat the delivery as unverified.
-  Verification = Data.define(:status, :flagged)
+  Verification = Data.define(:status, :flagged) do
+    # Whether the node verified the hook and nothing flags it: true only for
+    # status "ok" with `flagged` false. A flagged hook, a "failed" or "skipped"
+    # one, and any other status are untrusted.
+    def trusted?
+      status == "ok" && flagged == false
+    end
+  end
 
   # The identity of one HTTP-sink delivery: the headers Ankusa's HTTP sink
   # attaches to every delivery.
@@ -39,6 +46,13 @@ module Ankusa
         shipped: shipped_idempotency_key, tenant: tenant, source: source,
         dedupe_key: dedupe_key, id: id, replay_id: replay_id, include_replay: include_replay
       )
+    end
+
+    # Whether the node verified this delivery at ingest and nothing flags it
+    # (see `Verification#trusted?`). A delivery with no `x-ankusa-verification`
+    # header (a node older than the field) is untrusted.
+    def trusted?
+      verification&.trusted? == true
     end
   end
 

@@ -207,6 +207,15 @@ then runs every registered SDK's native runner.
 
   A web receiver maps `InvalidSignatureError` to `401`, `MissingHookIdError`
   to `400`.
+- `trusted`: `{"message": string}` or `{"headers": {string: string}}` → `ok` is
+  `{"trusted": bool}`. The runner decodes the message with `decode_message`
+  or parses the headers with `parse_headers`, then calls the SDK's trust
+  helper on the result (a message's or a delivery's `verification`).
+  `trusted` is `true` only when `verification` is non-null, its `status` is
+  `"ok"` and `flagged` is `false`. A flagged hook (accepted despite a failed
+  check, `on_verify_failure: accept_flag`), a `failed` or `skipped` one, any
+  other `status`, and a hook with no `verification` (a node older than the
+  field) are all untrusted: the SDK fails closed.
 
 ### Helpers
 

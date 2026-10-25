@@ -608,13 +608,13 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
 
 ### Phase 6 — Consumer contract
 
-- [ ] **CON-1 — SDKs expose the verification signal** · P0 · Deps: —
+- [x] **CON-1 — SDKs expose the verification signal** · P0 · Deps: —
   *Why:* every queue message and HTTP delivery carries `verification`/`flagged`, but the Elixir SDK drops it (`sdk-elixir/lib/ankusa/sdk/message.ex:164-175`, `hook.ex:24-45`, `webhook.ex:46-56`) and no conformance case covers it; a hook accepted after a failed signature is indistinguishable from a verified one.
   *Change:* `verification: %{status, flagged}` on `Message`, `Hook` and `Webhook.Headers` (parse `x-ankusa-verification`/`-flagged`), `Hook.trusted?/1`; conformance features `message.verification` and `webhook.verification`; every SDK (check each `packages/sdk-*`) updated.
   *Done when:* a `flagged: true` message decodes as untrusted in all nine SDKs.
   *Proof:* `mise run check:conformance` → all SDKs pass the two features.
   *Anchors:* `packages/sdk-elixir/lib/ankusa/sdk/{message,hook,webhook}.ex`, `packages/ankusa/lib/ankusa/sink/message.ex:84-85,205-221`, `conformance/features.json`.
-  *Evidence:* —
+  *Evidence:* 2026-10-25 · PR #186 · `mise run check:conformance` (the Proof), `mise run check:package sdk-{java,elixir,python,typescript,go,rust,ruby,php,clojure}`, `mise run check:links` · Proof → `232 cases` (13 new: `verification.{message,headers}.trusted.*`), `sdk-clojure pass`, `sdk-elixir pass`, `sdk-go pass`, `sdk-java pass`, `sdk-php pass`, `sdk-python pass`, `sdk-ruby pass`, `sdk-rust pass`, `sdk-typescript pass`; a first Java run failed the new `trusted` cases' neighbours because `isTrusted()` on a record made Jackson add a `trusted` property to `Message`/`HookHeaders` JSON, so the Java helper is `trusted()` · Notes: `verification` was already decoded by the nine SDKs' message and header parsers (CON-1's *Why* predates it); the conformance feature `delivery.verification` is split into `message.verification` and `webhook.verification` and gains the `trusted` operation (true only for `status: "ok"` with `flagged: false`; flagged, failed, skipped, unknown status and absent are untrusted). The two real drops fixed: the Elixir `Receiver` never set `Hook.verification`, Clojure `->hook` dropped `:verification`. Trust helpers: Elixir `Hook.trusted?/1`, Python `is_trusted`, TypeScript `isTrusted`, Go `Trusted()`, Rust `is_trusted()`, Ruby `trusted?`, PHP `isTrusted()`, Java `trusted()`, Clojure `ankusa.sdk.verification/trusted?`.
 
 - [ ] **CON-2 — Wire-format evolution path and producer-side conformance** · P1 · Deps: OPS-1 (after: 55, 63)
   *Why:* decoders accept `v == 1` only, vectors are decoder-only, and nothing proves core's encoder matches the vectors (`sdk-elixir message.ex:158-160`, `conformance/features.json:2-30`); a `v: 2` would break all nine SDKs at once.

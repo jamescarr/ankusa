@@ -238,6 +238,16 @@ defmodule Ankusa.SDK.ConformanceTest do
     %{"key" => key}
   end
 
+  defp run("trusted", _case, _params_by_id, input, _base_url, _recorder) do
+    hook =
+      case input do
+        %{"message" => message} -> unwrap!(Message.decode(message))
+        %{"headers" => headers} -> unwrap!(Webhook.parse_headers(headers))
+      end
+
+    %{"trusted" => Ankusa.SDK.Hook.trusted?(hook)}
+  end
+
   defp run("redeem", _case, _params_by_id, input, base_url, recorder) do
     with_client(input, base_url, recorder, fn opts ->
       client = ClaimCheck.new(opts[:base_url], Keyword.drop(opts, [:base_url]))

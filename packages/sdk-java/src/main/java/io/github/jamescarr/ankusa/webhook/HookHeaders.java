@@ -94,6 +94,17 @@ public record HookHeaders(
         idempotencyKey, tenant, source, dedupeKey, id, replayId, includeReplay);
   }
 
+  /**
+   * Whether the node verified this delivery at ingest and nothing flags it (see {@link
+   * Verification#trusted()}). A delivery with no {@code x-ankusa-verification} header (a node older
+   * than the field) is untrusted.
+   *
+   * @return true when the delivery may be treated as verified
+   */
+  public boolean trusted() {
+    return verification != null && verification.trusted();
+  }
+
   /** Maps an absent or empty header value to null, per the contract. */
   private static @Nullable String nonEmpty(@Nullable String value) {
     return value == null || value.isEmpty() ? null : value;

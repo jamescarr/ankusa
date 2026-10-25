@@ -138,21 +138,26 @@ Every parsed-headers, decoded-message, and received-delivery result also
 carries how the node verified the hook at ingest: `{status, flagged}`, or
 `null` from a node older than the field. `flagged` is `true` only when the
 node accepted a failed check (`on_verify_failure: accept_flag`) — treat that
-delivery as unverified.
+delivery as unverified. Each SDK answers that in one call, failing closed: the
+hook is trusted only for `status: "ok"` with `flagged: false`, so a flagged,
+`failed` or `skipped` hook, a status it does not know, and a hook from a node
+older than the field are all untrusted.
 
-| SDK | Verification accessor |
-| --- | --- |
-| TypeScript (`ankusa`) | `parsed.verification` / `message.verification` / `received.verification` |
-| Python (`ankusa`) | `parsed.verification` / `message.verification` / `received.verification` |
-| Go | `parsed.Verification` / `message.Verification` / `received.Verification` |
-| Rust | `parsed.verification` / `message.verification` / `received.verification` |
-| Ruby (`ankusa-sdk`) | `parsed.verification` / `message.verification` / `received.verification` |
-| PHP | `$parsed->verification` / `$message->verification` / `$received->verification` |
-| Java | `parsed.verification()` / `message.verification()` / `received.verification()` |
-| Elixir (`ankusa_sdk`) | `hook.verification` / `message.verification` / `received.verification` |
-| Clojure (`ankusa-clj`) | `(:verification parsed)` / `(:verification message)` / `(:verification received)` |
+| SDK | Verification accessor | Trust check |
+| --- | --- | --- |
+| TypeScript (`ankusa`) | `parsed.verification` / `message.verification` / `received.verification` | `isTrusted(hook)` |
+| Python (`ankusa`) | `parsed.verification` / `message.verification` / `received.verification` | `is_trusted(hook)` |
+| Go | `parsed.Verification` / `message.Verification` / `received.Verification` | `hook.Trusted()` |
+| Rust | `parsed.verification` / `message.verification` / `received.verification` | `hook.is_trusted()` |
+| Ruby (`ankusa-sdk`) | `parsed.verification` / `message.verification` / `received.verification` | `hook.trusted?` |
+| PHP | `$parsed->verification` / `$message->verification` / `$received->verification` | `$hook->isTrusted()` |
+| Java | `parsed.verification()` / `message.verification()` / `received.verification()` | `hook.trusted()` |
+| Elixir (`ankusa_sdk`) | `hook.verification` / `message.verification` / `received.verification` | `Ankusa.SDK.Hook.trusted?(hook)` |
+| Clojure (`ankusa-clj`) | `(:verification parsed)` / `(:verification message)` / `(:verification received)` | `(ankusa.sdk.verification/trusted? hook)` |
 
-The shared vectors are `conformance/cases/verification.json`.
+The shared vectors are `conformance/cases/verification.json`: the
+`message.verification` and `webhook.verification` features, including the
+`trusted` operation (a `flagged: true` message is untrusted in every SDK).
 
 Elixir consumers get this contract as a `Plug`: `Ankusa.SDK.Receiver` (Hex
 package

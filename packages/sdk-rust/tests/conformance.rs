@@ -342,6 +342,17 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
             };
             Ok(json!({ "key": key }))
         }
+        "trusted" => {
+            let trusted = match case.input.get("message").and_then(Value::as_str) {
+                Some(message) => decode_message(message.as_bytes())
+                    .map_err(OpError::Message)?
+                    .is_trusted(),
+                None => parse_headers(&input_headers(case))
+                    .map_err(OpError::Hook)?
+                    .is_trusted(),
+            };
+            Ok(json!({ "trusted": trusted }))
+        }
         "redeem" => {
             let client = claim_check(builder);
             let bytes = client

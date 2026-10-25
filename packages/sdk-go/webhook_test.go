@@ -42,3 +42,30 @@ func TestParseHeadersVerificationFlaggedTrue(t *testing.T) {
 		t.Fatalf("got %+v, want {failed true}", hook.Verification)
 	}
 }
+
+func TestVerificationTrusted(t *testing.T) {
+	var absent *ankusa.Verification
+	cases := []struct {
+		name string
+		v    *ankusa.Verification
+		want bool
+	}{
+		{"ok", &ankusa.Verification{Status: "ok"}, true},
+		{"flagged", &ankusa.Verification{Status: "failed", Flagged: true}, false},
+		{"ok but flagged", &ankusa.Verification{Status: "ok", Flagged: true}, false},
+		{"skipped", &ankusa.Verification{Status: "skipped"}, false},
+		{"unknown status", &ankusa.Verification{Status: "attested"}, false},
+		{"absent", absent, false},
+	}
+	for _, tc := range cases {
+		if got := tc.v.Trusted(); got != tc.want {
+			t.Errorf("%s: Trusted() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if (ankusa.HookHeaders{}).Trusted() {
+		t.Errorf("HookHeaders without verification must be untrusted")
+	}
+	if (ankusa.Message{}).Trusted() {
+		t.Errorf("Message without verification must be untrusted")
+	}
+}

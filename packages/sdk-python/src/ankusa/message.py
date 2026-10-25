@@ -32,7 +32,7 @@ from .claim_check.errors import InvalidClaimRefError
 from .claim_check.ref import parse_claim_ref
 from .webhook import HookHeaders, Verification
 
-__all__ = ["InvalidMessageError", "Message", "decode_message", "idempotency_key"]
+__all__ = ["InvalidMessageError", "Message", "decode_message", "idempotency_key", "is_trusted"]
 
 # The message JSON version this decoder understands. Every field since v1 was
 # added without bumping it (see "Versioning" in docs/delivery.md), so a v1
@@ -291,3 +291,19 @@ def idempotency_key(hook: Message | HookHeaders, *, include_replay: bool = False
     if include_replay and replay_id:
         key = f"{key}#replay:{replay_id}"
     return key
+
+
+def is_trusted(hook: Message | HookHeaders) -> bool:
+    """Whether the node verified the hook at ingest and nothing flags it.
+
+    ``True`` only for ``verification.status == "ok"`` with ``flagged`` false. A
+    flagged hook (accepted despite a failed check, ``on_verify_failure:
+    accept_flag``), a ``failed`` or ``skipped`` one, any other status, and a hook
+    with no ``verification`` (a node older than the field) are untrusted: the
+    answer fails closed. ``hook`` may be a decoded ``Message`` or the
+    ``HookHeaders`` of an HTTP-sink delivery.
+    """
+    if not isinstance(hook, (Message, HookHeaders)):
+        raise TypeError(f"hook must be a Message or HookHeaders, got {type(hook).__name__}")
+    verification = hook.verification
+    return verification is not None and verification.status == "ok" and not verification.flagged
