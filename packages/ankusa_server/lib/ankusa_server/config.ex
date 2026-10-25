@@ -37,6 +37,7 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_ROLES` | `node.roles` (comma-separated) |
   | `ANKUSA_DATA_DIR` | `node.data_dir` |
   | `ANKUSA_LOG_LEVEL` | `log.level` |
+  | `ANKUSA_LOG_FORMAT` | `log.format` (`text` or `json`) |
   | `ANKUSA_BANNER` | `log.banner` |
   | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
   | `ANKUSA_ADMIN_PORT` | `admin.port` |
@@ -75,7 +76,7 @@ defmodule AnkusaServer.Config do
   @root_keys ~w(node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive health)
   @node_keys ~w(roles data_dir min_free_bytes)
   @health_keys ~w(sink_error_window_ms)
-  @log_keys ~w(level banner)
+  @log_keys ~w(level banner format)
   @tracing_keys ~w(enabled otlp_endpoint sample_ratio)
   @default_otlp_endpoint "http://localhost:4318"
   @http_keys ~w(port max_body_bytes routing prefix store_headers)
@@ -192,8 +193,11 @@ defmodule AnkusaServer.Config do
   @nats_sink_keys ~w(type servers subject inline_max_bytes max_message_bytes publish_timeout_ms tls auth idle_timeout_ms ordered ordering_key)
   @nats_auth_keys ~w(username password token nkey_seed jwt)
   @redis_sink_keys ~w(type url channel inline_max_bytes max_message_bytes publish_timeout_ms idle_timeout_ms ordered ordering_key)
-  @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token ordered ordering_key)
-  @google_pubsub_sink_keys ~w(type project topic endpoint ordering_key inline_max_bytes max_message_bytes timeout_ms auth token ordered)
+  @batch_sink_keys ~w(batch batch_linger_ms batch_max_entries batch_max_bytes batch_queue_max batch_queue_max_bytes batch_queue_tenant_max batch_max_inflight)
+  @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token ordered ordering_key) ++
+                   @batch_sink_keys
+  @google_pubsub_sink_keys ~w(type project topic endpoint ordering_key inline_max_bytes max_message_bytes timeout_ms auth token ordered) ++
+                             @batch_sink_keys
 
   @roles ~w(edge dispatch storage claim_check)
   @routes_store_types ~w(ets redis)
@@ -209,6 +213,7 @@ defmodule AnkusaServer.Config do
   @policies ~w(reject quarantine accept_flag)
   @routings ~w(path tenant_path)
   @log_levels ~w(debug info warning error)
+  @log_formats ~w(text json)
   @exchange_types ~w(topic direct fanout headers)
 
   @typedoc """
@@ -217,7 +222,7 @@ defmodule AnkusaServer.Config do
   """
   @type loaded :: %{
           config: Ankusa.Config.t(),
-          log_level: Logger.level(),
+          log: %{format: :text | :json, level: Logger.level()},
           banner: boolean(),
           tracing: tracing(),
           secrets: AnkusaServer.Secrets.t()
@@ -264,7 +269,7 @@ defmodule AnkusaServer.Config do
 
     %{
       config: config!(doc),
-      log_level: log_level!(doc),
+      log: log!(doc),
       banner: banner?(doc),
       tracing: tracing!(doc),
       secrets: secrets
@@ -459,6 +464,7 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_ROLES", ["node", "roles"]},
     {"ANKUSA_DATA_DIR", ["node", "data_dir"]},
     {"ANKUSA_LOG_LEVEL", ["log", "level"]},
+    {"ANKUSA_LOG_FORMAT", ["log", "format"]},
     {"ANKUSA_BANNER", ["log", "banner"]},
     {"ANKUSA_ADMIN_PORT", ["admin", "port"]},
     {"ANKUSA_ADMIN_IP", ["admin", "ip"]},
@@ -541,10 +547,17 @@ defmodule AnkusaServer.Config do
 
   # ── 4. validate + translate ─────────────────────────────────────────────────
 
-  defp log_level!(doc) do
+  # The log section: the level the node starts at (`Ankusa.LogLevel`, also
+  # changeable at runtime) and the format of every line (`AnkusaServer.LogFormatter`).
+  defp log!(doc) do
     log = section!(doc, "log", @log_keys, [])
     level = enum!(log["level"] || "info", @log_levels, ["log", "level"])
-    String.to_existing_atom(level)
+    format = enum!(log["format"] || "text", @log_formats, ["log", "format"])
+
+    %{
+      format: if(format == "json", do: :json, else: :text),
+      level: String.to_existing_atom(level)
+    }
   end
 
   defp banner?(doc) do
@@ -2774,34 +2787,42 @@ defmodule AnkusaServer.Config do
       "sqs" ->
         check_keys!(sink, @sqs_sink_keys, path)
 
-        {Ankusa.Sink.SQS,
-         [
-           queue_url: required_string!(sink, "queue_url", path),
-           region: required_string!(sink, "region", path)
-         ]
-         |> put_opt(:endpoint, string_opt(sink, "endpoint", path))
-         |> put_opt(:message_group_id, string_opt(sink, "message_group_id", path))
-         |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
-         |> put_opt(:max_message_bytes, int_opt(sink, "max_message_bytes", path))
-         |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))
-         |> put_opt(:access_key_id, string_opt(sink, "access_key_id", path))
-         |> put_opt(:secret_access_key, string_opt(sink, "secret_access_key", path))
-         |> put_opt(:session_token, string_opt(sink, "session_token", path))
-         |> ordering(sink, path)}
+        opts =
+          [
+            queue_url: required_string!(sink, "queue_url", path),
+            region: required_string!(sink, "region", path)
+          ]
+          |> put_opt(:endpoint, string_opt(sink, "endpoint", path))
+          |> put_opt(:message_group_id, string_opt(sink, "message_group_id", path))
+          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+          |> put_opt(:max_message_bytes, int_opt(sink, "max_message_bytes", path))
+          |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))
+          |> put_opt(:access_key_id, string_opt(sink, "access_key_id", path))
+          |> put_opt(:secret_access_key, string_opt(sink, "secret_access_key", path))
+          |> put_opt(:session_token, string_opt(sink, "session_token", path))
+          |> ordering(sink, path)
+          |> Kernel.++(batch_opts(sink, path))
+
+        validate_batch_sink!(Ankusa.Sink.SQS, opts, path)
+        {Ankusa.Sink.SQS, opts}
 
       "google_pubsub" ->
         check_keys!(sink, @google_pubsub_sink_keys, path)
 
-        {Ankusa.Sink.GooglePubSub,
-         ([
-            project: required_string!(sink, "project", path),
-            topic: required_string!(sink, "topic", path)
-          ]
-          |> put_opt(:endpoint, string_opt(sink, "endpoint", path))
-          |> ordering(sink, path)
-          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
-          |> put_opt(:max_message_bytes, int_opt(sink, "max_message_bytes", path))
-          |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))) ++ gcp_auth!(sink, path)}
+        opts =
+          ([
+             project: required_string!(sink, "project", path),
+             topic: required_string!(sink, "topic", path)
+           ]
+           |> put_opt(:endpoint, string_opt(sink, "endpoint", path))
+           |> ordering(sink, path)
+           |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+           |> put_opt(:max_message_bytes, int_opt(sink, "max_message_bytes", path))
+           |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))) ++
+            batch_opts(sink, path) ++ gcp_auth!(sink, path)
+
+        validate_batch_sink!(Ankusa.Sink.GooglePubSub, opts, path)
+        {Ankusa.Sink.GooglePubSub, opts}
     end
   end
 
@@ -2828,6 +2849,32 @@ defmodule AnkusaServer.Config do
   end
 
   defp ordering_key(key, path), do: expect_string(key, path)
+
+  # The batching options of `Ankusa.Sink.SQS` and `Ankusa.Sink.GooglePubSub`
+  # (`Ankusa.Sink.Batcher`). Types only here; the ranges are the sink's, checked
+  # by `validate_batch_sink!/3`.
+  defp batch_opts(sink, path) do
+    [
+      batch: bool_opt(sink, "batch", path),
+      batch_linger_ms: int_opt(sink, "batch_linger_ms", path),
+      batch_max_entries: int_opt(sink, "batch_max_entries", path),
+      batch_max_bytes: int_opt(sink, "batch_max_bytes", path),
+      batch_queue_max: int_opt(sink, "batch_queue_max", path),
+      batch_queue_max_bytes: int_opt(sink, "batch_queue_max_bytes", path),
+      batch_queue_tenant_max: int_opt(sink, "batch_queue_tenant_max", path),
+      batch_max_inflight: int_opt(sink, "batch_max_inflight", path)
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  # A batch option out of range fails at load, naming the sink, like a bad
+  # `Sink.Http` (`validate_http_sink!/2`), not at the first delivery.
+  defp validate_batch_sink!(mod, opts, path) do
+    mod.validate_opts!(opts)
+  rescue
+    error in ArgumentError ->
+      reraise ConfigError, [message: "#{render_path(path)}: #{error.message}"], __STACKTRACE__
+  end
 
   defp headers(nil, _path), do: nil
 

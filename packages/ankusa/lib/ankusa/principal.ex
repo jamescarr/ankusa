@@ -17,7 +17,7 @@ defmodule Ankusa.Principal do
   | --- | --- |
   | `metrics:read` | `GET /metrics`, `GET /v1/wal` |
   | `config:read` | `GET /v1/config`, `GET /asyncapi.json` |
-  | `config:write` | reserved for config mutation; no route yet |
+  | `config:write` | `PUT /v1/log-level` (with `tenant:*`: the level is the node's, for every tenant) |
   | `sources:read`, `sources:write` | a tenant's sources |
   | `dlq:read` | `GET /v1/dlq`; `dlq:write`: starting a `dlq` replay |
   | `replays:read`, `replays:write` | replay jobs (`dlq:write` / `quarantine:write` as well for those kinds) |

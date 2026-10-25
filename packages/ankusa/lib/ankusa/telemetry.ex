@@ -44,6 +44,9 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :http, :state]` | `:pools` (outbound HTTP connection pools open in `Ankusa.HttpClient.Pools`) | `:instance` |
   | `[:ankusa, :http_pool, :closed]` | `:count` (pools stopped) | `:instance`, `:reason` (`:idle`, `:evicted`, `:source`) |
   | `[:ankusa, :http_pool, :refused]` | `:count` | `:instance`, `:scope` (`:tenant`, `:instance`: the ceiling that was full with no idle pool to close) |
+  | `[:ankusa, :sink_batch, :flush]` | `:entries`, `:bytes`, `:requests` (HTTP requests the batch took), `:bisections` (extra requests spent isolating a message Pub/Sub refused), `:duration_ms` | `:instance`, `:sink` (`Ankusa.Sink.SQS`, `Ankusa.Sink.GooglePubSub`). One per batch a `Ankusa.Sink.Batcher` sent |
+  | `[:ankusa, :sink_batch, :refused]` | — | `:instance`, `:sink`, `:reason` (`:entries`, `:bytes`, `:tenant`: the batcher's queue ceiling the delivery would pass) |
+  | `[:ankusa, :sink_batch, :state]` | `:batchers`, `:queued`, `:queued_bytes` | `:instance` |
   | `[:ankusa, :compact, :stop]` | `:records`, `:bytes`, `:duration` | `:instance` |
   | `[:ankusa, :backup, :stop]` | `:duration`, `:files`, `:bytes` | `:instance`, `:result` (`:ok`, `:error`), `:reason` (on `:error`) |
   | `[:ankusa, :backup, :state]` | `:age_seconds` (since the last successful backup, or since the uploader started) | `:instance` |

@@ -3,8 +3,8 @@
 # consumer -> Postgres, with Redis route/source stores, a shared S3 bucket and
 # a claim-check gateway. Drives tools/loadgen through a steady phase, a chaos
 # phase (a node killed and restarted, the consumer killed, a provider retry
-# sent to the other node) and a burst phase, and fails on any acked hook the
-# consumer never recorded.
+# sent to the other node, RabbitMQ restarted with publishes in flight) and a
+# burst phase, and fails on any acked hook the consumer never recorded.
 #
 #   examples/fleet-e2e/run.sh                          # wal.type: disk, the default drill
 #   examples/fleet-e2e/run.sh --wal dual               # wal.type: dual (a three-broker Kafka intake log)
@@ -79,7 +79,7 @@ for tool in docker mix curl jq; do
 done
 
 if [ "$DURATION" -lt 40 ]; then
-  echo "error: DURATION must be at least 40 (the chaos timeline runs to +35s)" >&2
+  echo "error: DURATION must be at least 40 (the chaos timeline runs to +36s)" >&2
   exit 2
 fi
 
@@ -105,6 +105,9 @@ rand_id() { od -An -N8 -tx1 /dev/urandom | tr -d ' \n'; }
 sha256() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
+
+# RabbitMQ is accepting connections (not only answering `ping`).
+rabbitmq_up() { compose exec -T rabbitmq rabbitmq-diagnostics -q check_port_connectivity; }
 
 # post_hook URL BODY_FILE -> "<status> <hook id>"
 post_hook() {
@@ -274,7 +277,7 @@ for pair in "a $NODE_A" "b $NODE_B"; do
 done
 [ "$CLAIM_OK" = "true" ] || FAILED=1
 
-phase "chaos (kill node a, retry on the other node, kill the consumer)"
+phase "chaos (kill node a, retry on the other node, kill the consumer, restart RabbitMQ)"
 run_loadgen chaos --rate "$RATE" --duration "$DURATION" --concurrency 64 &
 LOADGEN_PID=$!
 
@@ -308,6 +311,18 @@ echo "    +30s  killing the consumer"
 compose kill consumer
 sleep 3
 compose start consumer
+
+# The broker restarts while the load is still being acked: the nodes' publishes
+# in flight fail and wait out the retry policy, `rabbitmq_up` is the broker
+# accepting connections again (its healthcheck's `ping` is green before that),
+# and the consumer, which holds a connection to the old broker, starts afresh on
+# the durable queue the broker kept. Every acked hook must still reach it.
+sleep 3
+echo "    +36s  restarting RabbitMQ"
+compose restart rabbitmq
+wait_for 180 "RabbitMQ to accept connections after the restart" rabbitmq_up
+compose restart consumer
+wait_for 180 "the consumer to be consuming after the broker restart" consumer_consuming
 
 wait "$LOADGEN_PID" || FAILED=1
 LOADGEN_PID=""

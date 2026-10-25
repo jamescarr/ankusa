@@ -101,6 +101,54 @@ defmodule Ankusa.Dispatch.IsolationTest do
     end
   end
 
+  # A batching sink that holds each attempt until the test says go, and tells it
+  # whether dispatch said it may batch.
+  defmodule BatchedHoldSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def batched?(_opts), do: true
+
+    @impl true
+    def deliver(env, ctx, opts) do
+      send(Keyword.fetch!(opts, :pid), {:held, env.id, ctx[:batch], self()})
+      id = env.id
+
+      receive do
+        {:go, ^id} -> :ok
+      after
+        10_000 -> {:error, :gate_timeout}
+      end
+    end
+  end
+
+  # Fails for the tenant `bad`, delivers for everyone else, as a batching sink.
+  defmodule BatchedTenantSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def batched?(_opts), do: true
+
+    @impl true
+    def deliver(%{tenant_id: "bad"}, _ctx, _opts), do: {:error, :down}
+
+    def deliver(env, _ctx, opts) do
+      send(Keyword.fetch!(opts, :pid), {:delivered, env.tenant_id, env.id})
+      :ok
+    end
+  end
+
+  # Reports the ctx it was given.
+  defmodule CtxSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(_env, ctx, opts) do
+      send(Keyword.fetch!(opts, :pid), {:ctx, ctx})
+      :ok
+    end
+  end
+
   # Fails for the tenant `bad`, delivers for everyone else.
   defmodule TenantSink do
     @behaviour Ankusa.Sink
@@ -256,6 +304,82 @@ defmodule Ankusa.Dispatch.IsolationTest do
       %{id: id} = enqueue!(inst, build_env("fast"))
 
       assert_receive {:delivered, :fast, ^id, 1}, 1_000
+    end
+  end
+
+  # What dispatch does for a sink that batches (`c:Ankusa.Sink.batched?/1`): its
+  # attempts wait for a batch's response, so they are not counted against the
+  # concurrency limits, and each still settles its own row.
+  describe "batching sinks" do
+    defp dispatch_state(inst), do: :sys.get_state(Ankusa.whereis(inst, :dispatch))
+
+    test "attempts are not capped by sink_concurrency, a tenant's concurrency or concurrency" do
+      inst =
+        start(
+          %{"b" => %{sinks: [{BatchedHoldSink, pid: self()}]}},
+          %{concurrency: 2, sink_concurrency: 1, tenants: %{default: %{concurrency: 1}}}
+        )
+
+      ids = for _ <- 1..6, do: enqueue!(inst, build_env("b")).id
+
+      # all six are in flight at once with every limit at 1 or 2, and each
+      # was told it may wait in a batcher
+      held =
+        for _ <- 1..6 do
+          assert_receive {:held, id, true, task}, 5_000
+          {id, task}
+        end
+
+      assert Enum.sort(Enum.map(held, &elem(&1, 0))) == Enum.sort(ids)
+      assert map_size(dispatch_state(inst).running) == 6
+
+      for {id, task} <- held, do: send(task, {:go, id})
+      assert {:ok, _} = Pipeline.tick(inst)
+      assert map_size(dispatch_state(inst).running) == 0
+    end
+
+    test "an attempt that waits too long times out alone, and frees only its own row" do
+      inst =
+        start(
+          %{"b" => %{sinks: [{BatchedHoldSink, pid: self()}]}},
+          %{concurrency: 1, attempt_timeout_ms: 100, retry: retry(max_attempts: 1)}
+        )
+
+      %{seq: seq} = enqueue!(inst, build_env("b"))
+      assert_receive {:held, _id, true, _task}, 5_000
+
+      assert {:ok, 1} = Pipeline.tick(inst)
+      assert [%{state: :dead, attempts: 1}] = rows(inst, [seq])
+      assert map_size(dispatch_state(inst).running) == 0
+    end
+
+    test "a plain sink beside it is still capped, and gets no batch flag" do
+      inst =
+        start(
+          %{"p" => %{sinks: [{CtxSink, pid: self()}]}},
+          %{concurrency: 4, sink_concurrency: 1}
+        )
+
+      enqueue!(inst, build_env("p"))
+      assert_receive {:ctx, ctx}, 5_000
+      refute Map.has_key?(ctx, :batch)
+    end
+
+    test "one tenant's open breaker leaves the other tenant's entries alone" do
+      inst =
+        start(
+          %{"b" => %{sinks: [{BatchedTenantSink, pid: self()}]}},
+          %{breaker_failures: 2, breaker_open_ms: 60_000, retry: retry(max_attempts: 10)}
+        )
+
+      for _ <- 1..3, do: enqueue!(inst, build_env("b", "bad"))
+      Pipeline.tick(inst)
+
+      assert map_size(dispatch_state(inst).breakers) == 1
+
+      %{id: id} = enqueue!(inst, build_env("b", "good"))
+      Pipeline.tick(inst)
+      assert_receive {:delivered, "good", ^id}, 5_000
     end
   end
 

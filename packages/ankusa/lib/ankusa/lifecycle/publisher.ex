@@ -524,7 +524,11 @@ defmodule Ankusa.Lifecycle.Publisher do
       :give_up ->
         Logger.error(
           "[ankusa] lifecycle event #{job.type} for #{job.subject} to #{inspect(mod)} " <>
-            "dropped after #{job.attempt} attempts: #{inspect(reason)}"
+            "dropped after #{job.attempt} attempts: #{inspect(reason)}",
+          source_id: job.env.source_id,
+          tenant_id: job.env.tenant_id,
+          sink: mod,
+          replay_id: job.replay
         )
 
         dropped(state.instance, job.type, inspect(mod), :gave_up)

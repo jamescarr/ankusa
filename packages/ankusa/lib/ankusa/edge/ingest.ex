@@ -54,6 +54,11 @@ defmodule Ankusa.Edge.Ingest do
   `ankusa.commit` inside it, and the hook stores the ingest span's context
   instead. Without one, the request's context is stored verbatim and no span
   exists.
+
+  The request process's `Logger` metadata carries `source_id`, `tenant_id`,
+  `hook_id` and `trace_id` while a hook is ingested (and `Ankusa.Edge.Router`
+  clears them per request), so any line logged for it correlates; the server
+  image's JSON log formatter prints them.
   """
 
   alias Ankusa.Edge.{
@@ -282,6 +287,11 @@ defmodule Ankusa.Edge.Ingest do
 
     trace = Map.get_lazy(req, :trace, fn -> Trace.from_headers(req.headers) end)
 
+    # Every log line from here to the answer (a sink that refused the hook, a
+    # store that would not take it) names the hook's source and tenant, and the
+    # trace it belongs to. `hook_id` follows once the envelope exists.
+    Logger.metadata(source_id: source.id, tenant_id: tenant_id, trace_id: Trace.trace_id(trace))
+
     # `ankusa.ingest` is a child of the provider's span when the request carried
     # a `traceparent`; with no SDK this is the telemetry span alone.
     Trace.span(
@@ -312,6 +322,7 @@ defmodule Ankusa.Edge.Ingest do
   # removed from the hook (0 for a hook that was not stored).
   defp accept(instance, source, tenant_id, req, trace) do
     env = build_envelope(source, tenant_id, req, trace)
+    Logger.metadata(hook_id: env.id)
 
     case verify(instance, source, env, req) do
       {:accept, env} ->

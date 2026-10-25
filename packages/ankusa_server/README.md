@@ -110,6 +110,7 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`) |
 | `ANKUSA_DATA_DIR` | `node.data_dir` |
 | `ANKUSA_LOG_LEVEL` | `log.level` |
+| `ANKUSA_LOG_FORMAT` | `log.format` (`text` or `json`: one JSON object per line) |
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |

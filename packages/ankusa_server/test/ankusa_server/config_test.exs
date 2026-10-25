@@ -244,7 +244,7 @@ defmodule AnkusaServer.ConfigTest do
 
     loaded = Config.load!(path: fallback, env: %{})
     assert loaded.config.port == 4711
-    assert loaded.log_level == :debug
+    assert loaded.log.level == :debug
 
     loaded = Config.load!(path: fallback, env: %{"PORT_THAT_IS_NOT_SET" => "5000"})
     assert loaded.config.port == 5000
@@ -745,6 +745,29 @@ defmodule AnkusaServer.ConfigTest do
       end
 
     assert error.message == ~s(log.banner: expected a boolean, got "maybe")
+  end
+
+  test "log.format is text by default, the file or ANKUSA_LOG_FORMAT picks json, anything else is named" do
+    demo = "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+
+    log = fn yaml, env -> Config.load!(path: tmp_config(yaml), env: env).log end
+
+    assert log.(demo, %{}) == %{format: :text, level: :info}
+
+    assert log.("log: {format: json, level: warning}\n" <> demo, %{}) ==
+             %{format: :json, level: :warning}
+
+    assert log.(demo, %{"ANKUSA_LOG_FORMAT" => "json"}).format == :json
+    assert log.("log: {format: json}\n" <> demo, %{"ANKUSA_LOG_FORMAT" => "text"}).format == :text
+    assert log.(demo, %{"ANKUSA_LOG_LEVEL" => "error"}).level == :error
+
+    reference = Config.load!(path: "config-examples/reference.yml", env: @fixture_env).log
+    assert reference == %{format: :text, level: :info}
+
+    for {yaml, env} <- [{"log: {format: xml}\n", %{}}, {demo, %{"ANKUSA_LOG_FORMAT" => "xml"}}] do
+      error = assert_raise ConfigError, fn -> log.(yaml, env) end
+      assert error.message == ~s(log.format: unknown value "xml"; expected one of text, json)
+    end
   end
 
   # ── env overrides ───────────────────────────────────────────────────────────
@@ -2646,9 +2669,12 @@ defmodule AnkusaServer.ConfigTest do
             - {type: redis, url: "redis://redis:6379", channel: ankusa.full,
                inline_max_bytes: 2048, publish_timeout_ms: 300, idle_timeout_ms: "60000"}
             - {type: sqs, queue_url: "https://sqs.us-east-1.amazonaws.com/1/h.fifo",
-               region: us-east-1, message_group_id: g, max_message_bytes: 262144}
+               region: us-east-1, message_group_id: g, max_message_bytes: 262144,
+               batch_linger_ms: 5, batch_max_entries: 4, batch_max_bytes: 100000,
+               batch_queue_max: 100, batch_queue_max_bytes: 1000000,
+               batch_queue_tenant_max: 10, batch_max_inflight: "2"}
             - {type: google_pubsub, project: p, topic: t, ordering_key: k,
-               max_message_bytes: 1000}
+               max_message_bytes: 1000, batch: false}
       """)
 
     env = %{"NATS_SERVERS" => "n1:4222,n2:4222"}
@@ -2705,11 +2731,21 @@ defmodule AnkusaServer.ConfigTest do
     assert sqs[:region] == "us-east-1"
     assert sqs[:message_group_id] == "g"
     assert sqs[:max_message_bytes] == 262_144
+    assert sqs[:batch_linger_ms] == 5
+    assert sqs[:batch_max_entries] == 4
+    assert sqs[:batch_max_bytes] == 100_000
+    assert sqs[:batch_queue_max] == 100
+    assert sqs[:batch_queue_max_bytes] == 1_000_000
+    assert sqs[:batch_queue_tenant_max] == 10
+    assert sqs[:batch_max_inflight] == 2
+    refute Keyword.has_key?(sqs, :batch)
 
     assert pubsub[:project] == "p"
     assert pubsub[:topic] == "t"
     assert pubsub[:ordering_key] == "k"
     assert pubsub[:max_message_bytes] == 1000
+    assert pubsub[:batch] == false
+    refute Keyword.has_key?(pubsub, :batch_linger_ms)
     assert pubsub[:token_provider] == {AnkusaServer.GcpToken, :metadata, []}
   end
 
@@ -2795,6 +2831,48 @@ defmodule AnkusaServer.ConfigTest do
     assert source.ordering == nil
     assert [{Ankusa.Sink.GooglePubSub, opts}] = source.sinks
     assert opts[:ordering_key] == "stripe"
+  end
+
+  test "a batch option out of range fails at load, naming the sink and the key" do
+    sqs = "type: sqs, queue_url: \"https://sqs.us-east-1.amazonaws.com/1/h\", region: us-east-1"
+    pubsub = "type: google_pubsub, project: p, topic: t, auth: none"
+
+    for {sink, option, message} <- [
+          {sqs, "batch_max_entries: 11", ":batch_max_entries must be an integer from 1 to 10"},
+          {sqs, "batch_max_bytes: 2000000",
+           ":batch_max_bytes must be an integer from 1 to 1048576"},
+          {sqs, "batch_linger_ms: 0", ":batch_linger_ms must be an integer from 1 to 60000"},
+          {sqs, "batch_queue_max: 0", ":batch_queue_max must be an integer from 1 to"},
+          {sqs, "batch_queue_max_bytes: 0",
+           ":batch_queue_max_bytes must be an integer from 1 to"},
+          {sqs, "batch_queue_tenant_max: 0",
+           ":batch_queue_tenant_max must be an integer from 1 to"},
+          {sqs, "batch_max_inflight: 0", ":batch_max_inflight must be an integer from 1 to 1024"},
+          {pubsub, "batch_max_entries: 1001",
+           ":batch_max_entries must be an integer from 1 to 1000"},
+          {pubsub, "batch_max_bytes: 7500001",
+           ":batch_max_bytes must be an integer from 1 to 7500000"}
+        ] do
+      yaml = """
+      sources:
+        a:
+          verify: {type: none}
+          sinks: [{#{sink}, #{option}}]
+      """
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml), env: %{}) end
+      assert error.message =~ "sources.a.sinks[0]: " <> message, error.message
+    end
+
+    yaml = """
+    sources:
+      a:
+        verify: {type: none}
+        sinks: [{type: sqs, queue_url: "https://sqs.us-east-1.amazonaws.com/1/h", region: us-east-1, batch: "no"}]
+    """
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml), env: %{}) end
+    assert error.message =~ "sources.a.sinks[0].batch"
   end
 
   test "an sqs sink requires queue_url and names an unknown key" do
