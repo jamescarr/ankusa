@@ -76,10 +76,8 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive health)
   @node_keys ~w(roles data_dir min_free_bytes region)
   @root_keys ~w(config_version node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive health)
-  @node_keys ~w(roles data_dir min_free_bytes)
   @health_keys ~w(sink_error_window_ms)
   @log_keys ~w(level banner format)
   @tracing_keys ~w(enabled otlp_endpoint sample_ratio)
@@ -144,7 +142,7 @@ defmodule AnkusaServer.Config do
   @routes_seed_keys ~w(id tenant_id source_id path methods enabled ip_rules metadata)
   @rate_limits_keys ~w(default tenants per_ip node sources scope)
   @scopes ~w(node fleet)
-  @dedupe_scope_keys ~w(scope max_entries max_entries_per_tenant)
+  @dedupe_scope_keys ~w(scope max_entries max_entries_per_tenant max_json_bytes)
   @fleet_keys ~w(store timeout_ms pending_ttl_ms breaker_window_ms breaker_min_calls breaker_failure_rate breaker_open_ms)
   @fleet_store_keys ~w(type url namespace pool_size)
   @fleet_store_types ~w(redis)
@@ -1758,7 +1756,7 @@ defmodule AnkusaServer.Config do
     ]
   end
 
-  # `dedupe.{scope, max_entries, max_entries_per_tenant}` and the `fleet` block behind both fleet scopes
+  # `dedupe.{scope, max_entries, max_entries_per_tenant, max_json_bytes}` and the `fleet` block behind both fleet scopes
   # (`Ankusa.Edge.Fleet`). A store with a `url` and no `type` is Redis, the one
   # fleet store there is.
   defp fleet_section(doc) do
@@ -1771,7 +1769,8 @@ defmodule AnkusaServer.Config do
         []
         |> put_opt(:scope, atom_enum_opt(dedupe, "scope", @scopes, ["dedupe"]))
         |> put_opt(:max_entries, int_opt(dedupe, "max_entries", ["dedupe"]))
-        |> put_opt(:max_entries_per_tenant, int_opt(dedupe, "max_entries_per_tenant", ["dedupe"])),
+        |> put_opt(:max_entries_per_tenant, int_opt(dedupe, "max_entries_per_tenant", ["dedupe"]))
+        |> put_opt(:max_json_bytes, int_opt(dedupe, "max_json_bytes", ["dedupe"])),
       fleet:
         []
         |> put_opt(:store, fleet_store(fleet, path))

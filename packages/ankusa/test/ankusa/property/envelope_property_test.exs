@@ -55,6 +55,42 @@ defmodule Ankusa.Property.EnvelopeTest do
     end
   end
 
+  property "header_downcased/2 is header/2 for a name that is already lowercase" do
+    check all headers <- list_of(G.raw_header(), max_length: 8),
+              name <- one_of([G.token(), G.bytes(16)]) do
+      env = %Envelope{
+        id: "i",
+        source_id: "s",
+        received_at: 0,
+        method: "POST",
+        path: "/",
+        headers: headers,
+        body: ""
+      }
+
+      lowered = String.downcase(name)
+      assert Envelope.header_downcased(env, lowered) == Envelope.header(env, name)
+    end
+  end
+
+  test "header/2 matches a mixed-case header name without regard to Unicode folds" do
+    env = %Envelope{
+      id: "i",
+      source_id: "s",
+      received_at: 0,
+      method: "POST",
+      path: "/",
+      headers: [{"X-Mixed-CASE", "a"}, {"x-kelvin-\u212A", "b"}, {"x-other", "c"}],
+      body: ""
+    }
+
+    assert Envelope.header(env, "x-mixed-case") == "a"
+    assert Envelope.header(env, "X-MIXED-case") == "a"
+    assert Envelope.header(env, "x-kelvin-k") == "b"
+    assert Envelope.header(env, "x-missing") == nil
+    assert Envelope.header_downcased(env, "x-other") == "c"
+  end
+
   property "idempotency_key/1 is a binary for every envelope, and the id without a dedupe key" do
     check all env <- G.envelope() do
       key = Envelope.idempotency_key(env)

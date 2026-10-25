@@ -84,16 +84,15 @@ defmodule Ankusa.Verifier.Hmac do
   @impl true
   @spec verify(Envelope.t(), keyword()) :: :ok | {:error, term()}
   def verify(%Envelope{} = env, opts) do
-    with {:ok, scheme} <- resolve_scheme(opts),
+    with {:ok, scheme, template} <- resolve_scheme(opts),
          :ok <- Verifier.check_tolerance(opts),
          {:ok, candidates, sig_ts} <- Template.candidates(env, scheme),
          {:ok, ts} <- Template.timestamp(env, scheme, sig_ts, opts),
-         {:ok, signed} <- Template.signed_bytes(env, scheme, ts),
+         {:ok, signed} <- Template.signed_iodata(env, template, ts),
          {:ok, keys} <- secret_keys(opts, scheme) do
       matched? =
         Enum.any?(keys, fn key ->
-          expected =
-            encode(:crypto.mac(:hmac, crypto_hash(scheme.hash), key, signed), scheme.encoding)
+          expected = encode(mac(scheme.hash, key, signed), scheme.encoding)
 
           Enum.any?(candidates, &Verifier.secure_compare(&1, expected))
         end)
@@ -128,7 +127,7 @@ defmodule Ankusa.Verifier.Hmac do
   @impl true
   @spec validate_opts(keyword()) :: :ok | {:error, :bad_secret | :bad_scheme | :bad_tolerance}
   def validate_opts(opts) do
-    with {:ok, scheme} <- resolve_scheme(opts),
+    with {:ok, scheme, _template} <- resolve_scheme(opts),
          :ok <- Verifier.check_tolerance(opts),
          {:ok, _keys} <- secret_keys(opts, scheme) do
       :ok
@@ -146,20 +145,23 @@ defmodule Ankusa.Verifier.Hmac do
   @spec weak_hash?(keyword()) :: boolean()
   def weak_hash?(opts), do: match?(%Scheme{hash: :sha1}, opts[:scheme])
 
+  # The scheme and its `signed` template compiled: a preset's was compiled when
+  # `Ankusa.Verifier.Schemes` was built, an inline scheme's is compiled here.
   defp resolve_scheme(opts) do
     case opts[:scheme] do
       nil ->
         {:error, :bad_scheme}
 
       atom when is_atom(atom) ->
-        case Ankusa.Verifier.Schemes.fetch(atom) do
-          {:ok, scheme} -> {:ok, scheme}
+        case Ankusa.Verifier.Schemes.fetch_compiled(atom) do
+          {:ok, scheme, template} -> {:ok, scheme, template}
           :error -> {:error, :bad_scheme}
         end
 
       %Scheme{} = scheme ->
         try do
-          {:ok, Ankusa.Verifier.Schemes.validate!(scheme)}
+          scheme = Ankusa.Verifier.Schemes.validate!(scheme)
+          {:ok, scheme, Template.compile(scheme.signed)}
         rescue
           ArgumentError -> {:error, :bad_scheme}
         end
@@ -206,6 +208,17 @@ defmodule Ankusa.Verifier.Hmac do
   # `:crypto.mac/4` knows SHA-1 as `:sha` and raises `:badarg` on `:sha1`.
   defp crypto_hash(:sha1), do: :sha
   defp crypto_hash(hash), do: hash
+
+  # The message is fed to the MAC piece by piece: `:crypto.mac/4` on an iolist
+  # flattens it into one copy of the whole message first, and the body is
+  # megabytes. A binary piece goes in by reference.
+  defp mac(hash, key, parts) do
+    parts
+    |> Enum.reduce(:crypto.mac_init(:hmac, crypto_hash(hash), key), fn part, state ->
+      :crypto.mac_update(state, part)
+    end)
+    |> :crypto.mac_final()
+  end
 
   defp encode(mac, :hex), do: Base.encode16(mac, case: :lower)
   defp encode(mac, :base64), do: Base.encode64(mac)

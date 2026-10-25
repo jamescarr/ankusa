@@ -1028,7 +1028,11 @@ defmodule Ankusa.Dispatch.Replayer do
 
             {:ok,
              %{
-               envelope: %{env | dedupe_key: Dedupe.key(source.dedupe, env)},
+               envelope: %{
+                 env
+                 | dedupe_key:
+                     Dedupe.key(source.dedupe, env, :skip, Dedupe.max_json_bytes(instance))
+               },
                sinks: source.sinks,
                lanes: Ordering.lanes(instance, source, env),
                dedupe_ttl_ms: source.dedupe && source.dedupe.ttl_ms

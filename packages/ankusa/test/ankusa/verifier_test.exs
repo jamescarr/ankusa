@@ -1204,4 +1204,98 @@ defmodule Ankusa.VerifierTest do
       assert :ok = Ankusa.Verifier.validate_config!(verified_config(pinned, mtls))
     end
   end
+
+  describe "allocations per verify (PERF-1)" do
+    # The refc binary bytes a verify call leaves in its process beyond what the
+    # process held before it: the heap is sized so no collection runs, so a
+    # second copy of the body shows up as its size.
+    defp new_binary_bytes(fun) do
+      parent = self()
+
+      {_pid, ref} =
+        :erlang.spawn_opt(
+          fn ->
+            held = fn -> elem(Process.info(self(), :binary), 1) end
+            before = MapSet.new(held.(), fn {id, _size, _refc} -> id end)
+            result = fun.()
+
+            fresh = for {id, size, _refc} <- held.(), not MapSet.member?(before, id), do: size
+            send(parent, {:measured, result, Enum.sum(fresh)})
+          end,
+          [:monitor, min_heap_size: 2_000_000, min_bin_vheap_size: 200_000_000]
+        )
+
+      measured =
+        receive do
+          {:measured, result, bytes} -> {result, bytes}
+        after
+          30_000 -> flunk("the measurement did not finish")
+        end
+
+      assert_receive {:DOWN, ^ref, :process, _pid, _reason}, 5_000
+      measured
+    end
+
+    test "verifying an 8 MB body does not copy the body" do
+      secret = "whsec_" <> Base.encode16(:crypto.strong_rand_bytes(16))
+      body = :crypto.strong_rand_bytes(8 * 1024 * 1024)
+      t = System.system_time(:second)
+      header = stripe_sign(secret, t, body)
+      request = env([{"Stripe-Signature", header}], body)
+
+      {result, bytes} =
+        new_binary_bytes(fn -> Hmac.verify(request, scheme: :stripe, secret: secret) end)
+
+      assert result == :ok
+      assert bytes < div(byte_size(body), 2)
+    end
+
+    test "a header token and a literal in the template are filled without a flattened copy" do
+      key = :crypto.strong_rand_bytes(24)
+      secret = "whsec_" <> Base.encode64(key)
+      body = :crypto.strong_rand_bytes(8 * 1024 * 1024)
+      ts = System.system_time(:second)
+      sig = "v1," <> Base.encode64(:crypto.mac(:hmac, :sha256, key, "msg_1.#{ts}." <> body))
+      request = swh_env("msg_1", ts, sig, body)
+
+      {result, bytes} =
+        new_binary_bytes(fn ->
+          Hmac.verify(request, scheme: :standard_webhooks, secret: secret)
+        end)
+
+      assert result == :ok
+      assert bytes < div(byte_size(body), 2)
+    end
+
+    test "an inline scheme with a header token compiles its template per verify and still verifies" do
+      scheme = %Scheme{
+        signature_header: "x-sig",
+        signed: "{header:X-Req-Id}|{body}|{header:x-req-id}",
+        encoding: :hex
+      }
+
+      sig = Base.encode16(:crypto.mac(:hmac, :sha256, "k", "r1|payload|r1"), case: :lower)
+
+      assert Hmac.verify(env([{"X-Sig", sig}, {"x-REQ-id", "r1"}], "payload"),
+               scheme: scheme,
+               secret: "k"
+             ) == :ok
+
+      assert {:error, :missing_signature} =
+               Hmac.verify(env([{"X-Sig", sig}], "payload"), scheme: scheme, secret: "k")
+    end
+
+    test "a template compiles to literals, body, ts and lowercased header tokens" do
+      assert Ankusa.Verifier.Template.compile("{header:Webhook-Id}.{ts}.{body}") ==
+               [{:header, "webhook-id"}, ".", :ts, ".", :body]
+
+      assert Ankusa.Verifier.Template.compile("{body}") == [:body]
+      assert Ankusa.Verifier.Template.compile("v0:{ts}:{body}") == ["v0:", :ts, ":", :body]
+      assert Ankusa.Verifier.Template.compile("{body}{ts}") == [:body, :ts]
+
+      # Text that only looks like a token is a literal, as `Regex.replace` left it.
+      assert Ankusa.Verifier.Template.compile("a{header:x") == ["a{header:x"]
+      assert Ankusa.Verifier.Template.compile("{foo}{body}") == ["{foo}", :body]
+    end
+  end
 end
