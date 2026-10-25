@@ -42,6 +42,20 @@ provider's trace id, the attempt links to the ingest span, the delivered
 the queue message and `Sink.Http` unchanged. It tears the SDK down, and the
 tracers it parked in `:persistent_term`, so no other test sees it.
 
+`test/ankusa/admin/router_test.exs` (OPS-2) has `runtime level`: `PUT /v1/log-level`
+is `401` with no credential and `403` without `config:write` + `tenant:*`, `400`
+for a body that is not `{"level": <level>}`, changes `Logger.level()` at once and
+answers the old level, leaves an audit row (`log_level.put`, the caller as the
+actor), and changes nothing when the row cannot be written. The VM's log level is
+global, so the test restores it. `ankusa_server`'s `test/ankusa_server/log_test.exs`
+is the proof of the JSON log: `json line` boots a `wal.type: none` edge whose sink
+refuses every hook, sends a request with a `traceparent`, and parses the line the
+refusal wrote with `AnkusaServer.LogFormatter` (`source_id`, `tenant_id`, `hook_id`,
+`sink`, `trace_id`, `instance`, one line, a timestamp); it also covers the ids of
+one request not leaking onto the next on the same connection process, a delivery
+attempt's correlation, the fixed key order, and the redaction of
+`secret|token|password|authorization|cookie` keys in metadata and reports.
+
 The always-on tests cover:
 
 - **Stored-header policy** (`stored_headers_test.exs`, `edge_test.exs`,

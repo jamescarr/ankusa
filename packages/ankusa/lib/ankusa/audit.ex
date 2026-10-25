@@ -24,6 +24,7 @@ defmodule Ankusa.Audit do
   | `route.create`, `route.update`, `route.delete` | a route definition |
   | `tenant.delete` | a tenant erase (`Ankusa.Tenant`): one row, with what each stage removed as its `detail`; the erase's own source, route and rate-limit deletions are rows of their own |
   | `ip_rules.put` | the global IP rules |
+  | `log_level.put` | the node's log level (`PUT /v1/log-level`): `detail` has the new `level` and the `previous` one |
 
   A request that changes nothing (a validation error, a missing subject) writes
   no row; one that is refused by the store writes none either.

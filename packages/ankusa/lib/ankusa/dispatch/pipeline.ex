@@ -1548,7 +1548,10 @@ defmodule Ankusa.Dispatch.Pipeline do
 
     Logger.warning(
       "[ankusa] sink #{inspect(mod)} of source #{inspect(job.env.source_id)} failed " <>
-        "#{breaker.failures} time(s) in a row; its deliveries pause for #{period} ms"
+        "#{breaker.failures} time(s) in a row; its deliveries pause for #{period} ms",
+      source_id: job.env.source_id,
+      tenant_id: job.env.tenant_id,
+      sink: mod
     )
 
     state =

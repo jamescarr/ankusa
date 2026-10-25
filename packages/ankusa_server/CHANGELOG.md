@@ -8,6 +8,17 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **Structured JSON logs (OPS-2).** `log.format: json` (`ANKUSA_LOG_FORMAT`;
+  default `text`, the output as before) writes one JSON object per line:
+  `time`, `level`, `msg`, `instance`, `hook_id`, `tenant_id`, `source_id`,
+  `sink`, `trace_id` (the keys a line has) and any other log metadata, with the
+  value of every key named `secret`, `token`, `password`, `authorization` or
+  `cookie` replaced by `"[REDACTED]"` (`AnkusaServer.LogFormatter`). The ASCII
+  banner is not printed under `json`. `log.level` is the level the node starts
+  at; `PUT /v1/log-level` (scope `config:write` + `tenant:*`, audited) changes
+  it while the node runs. `AnkusaServer.Config.load!/1` now answers
+  `log: %{format, level}` where it answered `log_level`.
+
 - **OpenTelemetry tracing (OPS-1).** `tracing: {enabled, otlp_endpoint,
   sample_ratio}` (off by default; `http://localhost:4318`; `1.0`) starts the
   OpenTelemetry SDK and the OTLP/HTTP exporter before the instance, with a

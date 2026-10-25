@@ -244,7 +244,7 @@ defmodule AnkusaServer.ConfigTest do
 
     loaded = Config.load!(path: fallback, env: %{})
     assert loaded.config.port == 4711
-    assert loaded.log_level == :debug
+    assert loaded.log.level == :debug
 
     loaded = Config.load!(path: fallback, env: %{"PORT_THAT_IS_NOT_SET" => "5000"})
     assert loaded.config.port == 5000
@@ -745,6 +745,29 @@ defmodule AnkusaServer.ConfigTest do
       end
 
     assert error.message == ~s(log.banner: expected a boolean, got "maybe")
+  end
+
+  test "log.format is text by default, the file or ANKUSA_LOG_FORMAT picks json, anything else is named" do
+    demo = "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+
+    log = fn yaml, env -> Config.load!(path: tmp_config(yaml), env: env).log end
+
+    assert log.(demo, %{}) == %{format: :text, level: :info}
+
+    assert log.("log: {format: json, level: warning}\n" <> demo, %{}) ==
+             %{format: :json, level: :warning}
+
+    assert log.(demo, %{"ANKUSA_LOG_FORMAT" => "json"}).format == :json
+    assert log.("log: {format: json}\n" <> demo, %{"ANKUSA_LOG_FORMAT" => "text"}).format == :text
+    assert log.(demo, %{"ANKUSA_LOG_LEVEL" => "error"}).level == :error
+
+    reference = Config.load!(path: "config-examples/reference.yml", env: @fixture_env).log
+    assert reference == %{format: :text, level: :info}
+
+    for {yaml, env} <- [{"log: {format: xml}\n", %{}}, {demo, %{"ANKUSA_LOG_FORMAT" => "xml"}}] do
+      error = assert_raise ConfigError, fn -> log.(yaml, env) end
+      assert error.message == ~s(log.format: unknown value "xml"; expected one of text, json)
+    end
   end
 
   # ── env overrides ───────────────────────────────────────────────────────────
