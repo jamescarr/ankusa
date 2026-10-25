@@ -28,7 +28,7 @@ defmodule Ankusa.ClaimCheck do
 
   Permanent errors (`:not_found`, `:integrity_mismatch`, `:invalid_ref`,
   `:invalid_tenant`, `:invalid_id`, `:unsigned_ref`, `:bad_signature`,
-  `:ref_expired`) mean retrying won't help — callers should dead-letter.
+  `:ref_expired`, `:too_large`) mean retrying won't help — callers should dead-letter.
   `{:unavailable, reason}` is transient, and so is `:forbidden` (the object
   store refused this node's credential: a configuration fault to fix, not a
   reason to drop the claim).
