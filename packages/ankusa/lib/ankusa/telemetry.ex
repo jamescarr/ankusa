@@ -94,6 +94,14 @@ defmodule Ankusa.Telemetry do
 
   `Ankusa.Metrics` is the built-in Prometheus mapping of these events, served by
   the admin API's `GET /metrics`.
+
+  ## Tracing
+
+  These events are the metrics contract. Traces are separate: `Ankusa.Trace`
+  opens OpenTelemetry spans (`ankusa.ingest`, `ankusa.verify`, `ankusa.commit`,
+  `ankusa.dispatch.attempt`, `ankusa.claim_check`, `ankusa.replay`,
+  `ankusa.lifecycle.event`) beside the `:ingest`, `:verify` and `:commit` spans
+  above, and does nothing without an OpenTelemetry SDK.
   """
 
   @doc "Emit a telemetry event."

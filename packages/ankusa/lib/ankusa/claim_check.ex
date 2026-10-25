@@ -37,7 +37,7 @@ defmodule Ankusa.ClaimCheck do
   require Logger
 
   alias Ankusa.ClaimCheck.{Cache, Pack, Reader, Ref, Stores}
-  alias Ankusa.{Config, RetryPolicy, Sink, Telemetry}
+  alias Ankusa.{Config, RetryPolicy, Sink, Telemetry, Trace}
 
   # ZIP without ZIP64 caps an archive at 65,534 entries (two are the index and
   # the manifest) and 4 GiB; a claim id's 16 position bits cap it at 65,536.
@@ -118,6 +118,34 @@ defmodule Ankusa.ClaimCheck do
   @spec check_in(atom(), String.t(), [item()], keyword()) ::
           {:ok, %{String.t() => claim()}} | {:error, reason()}
   def check_in(instance, tenant_id, [_ | _] = items, opts \\ []) do
+    Trace.span(
+      "ankusa.claim_check",
+      [
+        kind: :client,
+        attributes: fn ->
+          %{
+            "ankusa.tenant_id" => to_string(tenant_id),
+            "ankusa.claims" => length(items),
+            "ankusa.bytes" => Enum.reduce(items, 0, &(byte_size(&1.body) + &2))
+          }
+        end
+      ],
+      fn ->
+        result = write_claims(instance, tenant_id, items, opts)
+        with {:error, reason} <- result, do: Trace.error(error_label(reason))
+        result
+      end
+    )
+  end
+
+  defp error_label(reason) when is_atom(reason), do: Atom.to_string(reason)
+
+  defp error_label(reason) when is_tuple(reason) and is_atom(elem(reason, 0)),
+    do: Atom.to_string(elem(reason, 0))
+
+  defp error_label(_reason), do: "error"
+
+  defp write_claims(instance, tenant_id, items, opts) do
     first_id = Keyword.get_lazy(opts, :pack_id, &Ref.new_pack_id/0)
     started = System.monotonic_time()
 

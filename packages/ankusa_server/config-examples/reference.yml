@@ -41,6 +41,23 @@ log:
   # [env ANKUSA_BANNER] the ASCII-art banner printed to stdout on start
   banner: true
 
+tracing:
+  # OpenTelemetry tracing of every hook, from the provider's request to the
+  # consumer: spans ankusa.ingest, ankusa.verify, ankusa.commit,
+  # ankusa.dispatch.attempt, ankusa.claim_check, ankusa.replay. Off by default,
+  # and then the image runs only the no-op OpenTelemetry API: a hook's
+  # `traceparent`/`tracestate` still reach the consumer unchanged, no span is
+  # recorded. See docs/configuration.md#tracing.
+  enabled: false
+  # OTLP/HTTP collector (spans go to <otlp_endpoint>/v1/traces). http:// or
+  # https:// with a host and no user:password: the collector's credentials are
+  # the standard OTEL_EXPORTER_OTLP_HEADERS environment variable, and any other
+  # OTEL_* variable the SDK reads wins over this file.
+  otlp_endpoint: http://localhost:4318
+  # 0..1. The share of root traces kept; a request that carries a sampled
+  # `traceparent` is always traced (parent-based).
+  sample_ratio: 1.0
+
 http:
   # [env ANKUSA_HTTP_PORT, else PORT] the ingest listener.
   port: 4000

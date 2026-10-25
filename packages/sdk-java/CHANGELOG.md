@@ -7,6 +7,12 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Message.traceparent()` and `Message.tracestate()`: the hook's W3C trace
+  context from the message, verbatim (`null` when none); a non-string value is
+  `invalid_field`.
+
 ## [0.1.0] - 2026-10-22
 
 ### Added

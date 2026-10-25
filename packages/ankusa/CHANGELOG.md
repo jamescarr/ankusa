@@ -49,6 +49,19 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   (those would cap a batch at 8); the claimed-row windows bound the attempts and
   `sink_concurrency` counts the batcher's requests. `batch: false` restores the
   old one-request-per-message behaviour for a sink.
+- **OpenTelemetry tracing end to end (OPS-1).** `Ankusa.Trace` reads the
+  request's W3C `traceparent`/`tracestate` into the new `Envelope.trace` field
+  (additive: a node that predates it ignores it) and every sink carries it to
+  the consumer: the `traceparent` (and `tracestate`) header on `Sink.Http`, the
+  `traceparent`/`tracestate` fields of `Sink.Message` (`null` for a hook with no
+  trace) plus the same pair in `Message.headers/2` and `attributes/2`, and the
+  CloudEvents `traceparent` extension on lifecycle events. Core depends on
+  `opentelemetry_api` only: with no SDK started the request's context reaches
+  the consumer byte for byte and no span exists. With an SDK, spans
+  `ankusa.ingest` (a child of the provider's), `ankusa.verify`, `ankusa.commit`,
+  `ankusa.dispatch.attempt` (a child of, and linked to, the stored context),
+  `ankusa.claim_check`, `ankusa.replay` and `ankusa.lifecycle.event` make a
+  hook one trace. New `Ankusa.Sink.attempt/5` and `Ankusa.Lifecycle.traced_envelope/4`.
 
 - **Readiness thresholds (OPS-5).** `listener.ready_sink_error_window_ms` (5000):
   under `wal: :none`, a sink whose last publish failed within this long ago makes

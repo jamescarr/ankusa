@@ -52,7 +52,9 @@ defmodule Ankusa.Edge.Publish do
 
       tasks =
         Enum.map(source.sinks, fn {mod, opts} ->
-          Task.async(fn -> Sink.safe_deliver(mod, env, ctx, opts) end)
+          Task.async(fn ->
+            Sink.attempt(mod, env, 1, nil, fn -> Sink.safe_deliver(mod, env, ctx, opts) end)
+          end)
         end)
 
       results = Task.yield_many(tasks, timeout: timeout, on_timeout: :kill_task)

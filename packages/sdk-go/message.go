@@ -43,6 +43,11 @@ type Message struct {
 	// Verification is how Ankusa verified the hook at ingest; nil from a
 	// node older than the field.
 	Verification *Verification `json:"verification"`
+	// Traceparent and Tracestate are the hook's W3C trace context, verbatim:
+	// continue the trace from them. nil when the message carries none (or comes
+	// from a node older than the fields).
+	Traceparent *string `json:"traceparent"`
+	Tracestate  *string `json:"tracestate"`
 
 	// Body is the decoded inline body. It is nil for a claim message.
 	Body []byte `json:"-"`
@@ -133,6 +138,18 @@ func DecodeMessage(data []byte) (Message, error) {
 		return Message{}, invalidField("idempotency_key")
 	}
 	msg.ShippedIdempotencyKey = shipped
+
+	traceparent, ok := optionalString(obj, "traceparent")
+	if !ok {
+		return Message{}, invalidField("traceparent")
+	}
+	msg.Traceparent = traceparent
+
+	tracestate, ok := optionalString(obj, "tracestate")
+	if !ok {
+		return Message{}, invalidField("tracestate")
+	}
+	msg.Tracestate = tracestate
 
 	if headers, ok := headersValue(obj["headers"]); ok {
 		msg.Headers = headers

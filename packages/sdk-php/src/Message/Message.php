@@ -77,6 +77,10 @@ final readonly class Message
         public array $headers,
         /** How Ankusa verified the hook at ingest; `null` from a node older than the field. */
         public ?Verification $verification = null,
+        /** The hook's W3C `traceparent`, verbatim; continue the trace from it. `null` when the message carries none. */
+        public ?string $traceparent = null,
+        /** The W3C `tracestate` that goes with `traceparent`, verbatim; `null` when none. */
+        public ?string $tracestate = null,
     ) {}
 
     /**
@@ -124,6 +128,8 @@ final readonly class Message
         $dedupeKey = self::optionalString($raw, 'dedupe_key');
         $replayId = self::optionalString($raw, 'replay_id');
         $idempotencyKey = self::optionalString($raw, 'idempotency_key');
+        $traceparent = self::optionalString($raw, 'traceparent');
+        $tracestate = self::optionalString($raw, 'tracestate');
 
         $headers = self::headers($raw);
 
@@ -172,6 +178,8 @@ final readonly class Message
                 idempotencyKey: $idempotencyKey,
                 headers: $headers,
                 verification: $verification,
+                traceparent: $traceparent,
+                tracestate: $tracestate,
             );
         }
 
@@ -206,6 +214,8 @@ final readonly class Message
             idempotencyKey: $idempotencyKey,
             headers: $headers,
             verification: $verification,
+            traceparent: $traceparent,
+            tracestate: $tracestate,
         );
     }
 
