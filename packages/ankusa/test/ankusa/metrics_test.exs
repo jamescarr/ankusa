@@ -515,6 +515,68 @@ defmodule Ankusa.MetricsTest do
     end
   end
 
+  test "a subtree outage is counted per domain, and never carries its reason" do
+    inst = start_instance().instance
+
+    for domain <- [:dispatch, :dispatch, :edge] do
+      Ankusa.Telemetry.emit([:instance, :subtree_down], %{delay_ms: 1_000}, %{
+        instance: inst,
+        domain: domain,
+        reason: {:shutdown, {:failed_to_start_child, :worker, :eacces}}
+      })
+    end
+
+    scrape = Ankusa.Metrics.scrape(inst)
+
+    assert scrape =~
+             ~r/^ankusa_instance_subtree_down_total\{[^}]*domain="dispatch"[^}]*\} 2$/m
+
+    assert scrape =~ ~r/^ankusa_instance_subtree_down_total\{[^}]*domain="edge"[^}]*\} 1$/m
+
+    for line <- series(scrape, "ankusa_instance_subtree_down_total") do
+      assert label(line, "reason") == nil
+    end
+  end
+
+  # What a metric definition puts on a scrape, and how a rule or a panel may
+  # name it: a histogram is the family's name and three series.
+  defp exposed_names(%Telemetry.Metrics.Distribution{name: name}) do
+    base = Enum.join(name, "_")
+    [base, base <> "_bucket", base <> "_sum", base <> "_count"]
+  end
+
+  defp exposed_names(%{name: name}), do: [Enum.join(name, "_")]
+
+  test "the alert rules, their unit tests and the dashboard name only series /metrics can serve" do
+    inst = start_instance().instance
+
+    defined =
+      inst
+      |> Ankusa.Metrics.metrics()
+      |> Enum.flat_map(&exposed_names/1)
+      |> MapSet.new()
+
+    monitoring = Path.expand("../../../../deploy/monitoring", __DIR__)
+    files = ["prometheus-rules.yaml", "prometheus-rules.test.yaml", "grafana/ankusa.json"]
+
+    for file <- files do
+      used =
+        monitoring
+        |> Path.join(file)
+        |> File.read!()
+        |> then(&Regex.scan(~r/\bankusa_[a-z0-9_]+/, &1))
+        |> List.flatten()
+        |> Enum.uniq()
+
+      assert used != [], "#{file} names no ankusa_ series"
+
+      for name <- used do
+        assert MapSet.member?(defined, name),
+               "#{file} uses #{name}, which Ankusa.Metrics does not define"
+      end
+    end
+  end
+
   test "slo series present: every metric the SLO table names is on /metrics" do
     sources = %{"q" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{OkSink, []}]]}
     config = start_instance(roles: [:edge, :dispatch], source_store: {Static, sources: sources})
@@ -585,6 +647,17 @@ defmodule Ankusa.MetricsTest do
       assert gauge(scrape, "ankusa_http_pools", inst) == 0.0
       # `demo` and `strict` both declare no `dedupe`.
       assert gauge(scrape, "ankusa_sources_without_dedupe", inst) == 2.0
+    end
+
+    test "the VM memory gauge reports what the Erlang VM holds" do
+      inst = start_instance().instance
+
+      :ok = Ankusa.Metrics.Gauges.measure(inst)
+      scrape = Ankusa.Metrics.scrape(inst)
+
+      assert bytes = gauge(scrape, "ankusa_vm_memory_bytes", inst)
+      assert bytes > 0.0
+      assert bytes <= :erlang.memory(:total) * 2
     end
 
     test "config errors are counted per sink, and carry no tenant or source label" do

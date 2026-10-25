@@ -27,7 +27,9 @@ flowchart LR
 | `examples/*` | Runnable Docker-composed demos, one per delivery transport; see [`examples/README.md`](examples/README.md). |
 | `deploy/helm/ankusa` | The production Helm chart: StatefulSet (`wal.type: disk \| dual`) or Deployment (`none`), restricted pod spec, probes, PDB, HPA, NetworkPolicy, claim-check gateway. Guide: [`deployment.md`](docs/deployment.md#kubernetes-the-helm-chart). `ci/*-values.yaml` is what `check:examples` renders. |
 | `tools/loadgen` | Load generator used by the `oban-consumer` and `fleet-e2e` examples. |
+| `deploy/monitoring` | Prometheus alert rules (`prometheus-rules.yaml`, with `promtool` unit tests beside it) and the Grafana dashboard (`grafana/ankusa.json`); `mise run check:monitoring`. |
 | `docs/*` | Prose docs, see table below. Index: [`docs/README.md`](docs/README.md). |
+| `docs/runbooks/*` | One page per alert family (symptom, metric, action, verification); every alert's `runbook_url` names one. |
 | `.mise/tasks/*` | Every CI/dev task, one file each (see Commands below). |
 
 Why the package split (and when a new adapter earns its own package):
@@ -71,6 +73,7 @@ Why the package split (and when a new adapter earns its own package):
 | [`critical-review.md`](docs/critical-review.md) | the 2026-10 end-to-end review: findings by root cause, and which are fixed |
 | [`releasing.md`](docs/releasing.md) | releasing any package: Hex (core, adapters, and the Elixir SDK), the server image, npm, PyPI, crates.io, RubyGems, Go, Packagist, Maven Central, or Clojars |
 | [`adr/`](docs/adr/README.md) | the design records ground rule 14 requires before a change to the ack path, the store key layout, a wire format, the isolation model or the durability mode |
+| [`runbooks/`](docs/runbooks/README.md) | an alert fired: what to look at and what to do |
 
 Exact callback signatures and options: module docs on [HexDocs](https://hexdocs.pm/ankusa).
 
@@ -88,6 +91,7 @@ one; CI runs the same tasks this table does.
 | `mise run check:package <pkg>` | one package: format, warnings-as-errors, `credo --strict`, dialyzer, sobelow (core, `ankusa_server`), tests with a coverage floor (core 85 %, others 80 %), docs; starts/stops that package's own `docker-compose.yml` |
 | `mise run check:examples` | `examples/*`, and `deploy/helm/*` (`helm lint`, `helm template` for every mode, `kubeconform -strict`) |
 | `mise run check:tools` | `tools/*` |
+| `mise run check:monitoring` | `promtool check rules` and `test rules` on `deploy/monitoring/`, an existing runbook behind every alert's `runbook_url`, an alert for every row of the SLO table, the dashboard; also part of `mise run check` |
 | `mise run lint:pins` | every GitHub action is a commit SHA and every release-image input (Dockerfile `FROM`/`# syntax=`, the BuildKit and SBOM-scanner images) a digest; bump procedure in the task header ([`releasing.md`](docs/releasing.md#supply-chain-pins-sbom-provenance-signature)) |
 | `mise run check:conformance` | validate `conformance/`, regenerate the producer vectors from core's `Sink.Message.encode/3` (`mix ankusa.conformance.gen`; fails when `conformance/cases/producer.json` is stale), and run every `packages/sdk-*` against its vectors |
 | `mise run test:integration` | `ankusa` core's object-store adapters vs. the floci emulators |
@@ -115,6 +119,7 @@ until they pass too.
 | a package under `packages/` | `mise run check:package <pkg>` for every touched package (all of them for a core change) |
 | `examples/*`, `deploy/helm/*` | `mise run check:examples` (the chart: also `mise run e2e fleet` when the pod spec, probes or values change) |
 | `tools/*` | `mise run check:tools` |
+| `deploy/monitoring/*`, `docs/runbooks/*`, or a metric an alert reads (`metrics.ex`) | `mise run check:monitoring` (and `mix test test/ankusa/metrics_test.exs` in core: the rules and the dashboard may name only series `Ankusa.Metrics` defines) |
 | an SDK (`packages/sdk-*`) or `conformance/` | `mise run check:conformance` (also part of `mise run check`) |
 | core's object-store adapters | `mise run test:integration` |
 | a hot-path file (`edge/`, `queue/`, `store/`, `dispatch/`, `verifier/`, `routes/`, `store.ex`, `queue.ex`, `dedupe.ex`, `envelope.ex`, `http.ex`, `route_resolver.ex`, `sink/message.ex`, `sink/http.ex` under `packages/ankusa/lib/ankusa/`) | `mise run bench:gate`; put before/after numbers in the PR |

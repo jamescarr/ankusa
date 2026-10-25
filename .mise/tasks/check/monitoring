@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+#MISE description="deploy/monitoring: promtool check and unit tests of the alert rules, every alert's runbook, every SLO row's alert, the Grafana dashboard"
+#
+# OPS-7. What fails this task:
+#   - `promtool check rules` rejects deploy/monitoring/prometheus-rules.yaml;
+#   - `promtool test rules` fails a case of prometheus-rules.test.yaml;
+#   - an alert without a severity (critical | warning), a summary or a
+#     `runbook_url` that points at a file in docs/runbooks/ (the URL is the
+#     repository's main-branch path, so the file must exist in this checkout);
+#   - a runbook (docs/runbooks/*.md but README.md) without its title, an
+#     `Alerts:` line and the sections Symptom, Metric, Action and Verification,
+#     that no alert points at, or whose `Alerts:` line and the rules'
+#     `runbook_url`s disagree in either direction;
+#   - a row of the SLI table in docs/architecture.md#slis-and-slos that no
+#     alert names in its `slo` annotation (the annotation repeats the row's
+#     first cell);
+#   - a dashboard that is not JSON, or has no panel with a query.
+# That the series the rules and the dashboard name exist is
+# packages/ankusa/test/ankusa/metrics_test.exs (it needs Ankusa.Metrics).
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+rules=deploy/monitoring/prometheus-rules.yaml
+rule_tests=prometheus-rules.test.yaml
+dashboard=deploy/monitoring/grafana/ankusa.json
+runbooks=docs/runbooks
+url_prefix="https://github.com/$GITHUB_REPO/blob/main/$runbooks/"
+
+command -v promtool >/dev/null 2>&1 || fail "promtool is not installed (mise install promtool)"
+command -v jq >/dev/null 2>&1 || fail "jq is not installed"
+
+promtool check rules "$rules"
+(cd deploy/monitoring && promtool test rules "$rule_tests")
+
+problems=()
+
+# One line per alert: name|severity|has-summary|runbook_url|slo
+alerts=$(awk '
+  function flush() {
+    if (name != "") printf "%s|%s|%s|%s|%s\n", name, sev, sum, url, slo
+    name = ""; sev = ""; sum = ""; url = ""; slo = ""
+  }
+  /^[[:space:]]*- alert:/ { flush(); name = $3; next }
+  /^[[:space:]]*- name:/ { flush() }
+  name != "" && /^[[:space:]]*severity:/ { sev = $2 }
+  name != "" && /^[[:space:]]*summary:/ { sum = "yes" }
+  name != "" && /^[[:space:]]*runbook_url:/ { url = $2 }
+  name != "" && /^[[:space:]]*slo:/ {
+    s = $0
+    sub(/^[[:space:]]*slo:[[:space:]]*"/, "", s)
+    sub(/"[[:space:]]*$/, "", s)
+    slo = s
+  }
+  END { flush() }
+' "$rules")
+
+[ -n "$alerts" ] || fail "no alert found in $rules"
+
+alert_count=0
+while IFS='|' read -r name sev sum url slo; do
+  alert_count=$((alert_count + 1))
+  case "$sev" in
+    critical | warning) ;;
+    *) problems+=("$name: severity must be critical or warning (got '${sev}')") ;;
+  esac
+  [ "$sum" = yes ] || problems+=("$name: no summary annotation")
+  case "$url" in
+    "$url_prefix"*.md)
+      file="$runbooks/${url#"$url_prefix"}"
+      if [ "${file##*/}" = README.md ] || [ ! -f "$file" ]; then
+        problems+=("$name: runbook_url $url does not resolve to a runbook ($file)")
+      fi
+      ;;
+    *) problems+=("$name: runbook_url must start with $url_prefix (got '${url}')") ;;
+  esac
+done <<EOF
+$alerts
+EOF
+
+# Every runbook: its shape, an alert that points at it, and the same set of
+# alerts on both sides.
+for file in "$runbooks"/*.md; do
+  base=${file##*/}
+  [ "$base" = README.md ] && continue
+  grep -q '^# ' "$file" || problems+=("$file: no '# title' line")
+  for heading in Symptom Metric Action Verification; do
+    grep -q "^## $heading\$" "$file" || problems+=("$file: no '## $heading' section")
+  done
+  alerts_line=$(grep -m1 '^Alerts: ' "$file" || true)
+  if [ -z "$alerts_line" ]; then
+    problems+=("$file: no 'Alerts:' line")
+    continue
+  fi
+  named=$(printf '%s\n' "$alerts_line" | grep -o '`[A-Za-z]*`' | tr -d '`' | LC_ALL=C sort -u)
+  pointing=$(printf '%s\n' "$alerts" | awk -F'|' -v u="$url_prefix$base" '$4 == u { print $1 }' | LC_ALL=C sort -u)
+  [ -n "$pointing" ] || problems+=("$file: no alert's runbook_url points at it")
+  if [ "$named" != "$pointing" ]; then
+    problems+=("$file: its Alerts line names [$(echo $named)] but the rules point [$(echo $pointing)] at it")
+  fi
+done
+
+# Every SLI row of the architecture doc has an alert that names it.
+slo_rows=$(awk '
+  /^### SLIs and SLOs/ { in_section = 1; next }
+  in_section && /^#/ { exit }
+  in_section && /^\| / && !/^\| SLI / && !/^\| ---/ {
+    cell = $0
+    sub(/^\| /, "", cell)
+    sub(/ \|.*$/, "", cell)
+    print cell
+  }
+' docs/architecture.md)
+[ -n "$slo_rows" ] || fail "no SLI table found under '### SLIs and SLOs' in docs/architecture.md"
+slo_count=0
+while IFS= read -r row; do
+  slo_count=$((slo_count + 1))
+  printf '%s\n' "$alerts" | awk -F'|' '{ print $5 }' | grep -qxF -- "$row" ||
+    problems+=("SLO row '$row' has no alert with slo: \"$row\"")
+done <<EOF
+$slo_rows
+EOF
+
+# The dashboard parses and every panel that is not a row queries something.
+jq -e '.uid and .title and (.panels | length > 0)' "$dashboard" >/dev/null ||
+  problems+=("$dashboard: not a dashboard (needs uid, title and panels)")
+jq -e '[.panels[] | select(.type != "row") | select((.targets // []) | map(.expr // "") | all(. != "") | not)] | length == 0' \
+  "$dashboard" >/dev/null ||
+  problems+=("$dashboard: a panel has no query")
+
+if [ "${#problems[@]}" -gt 0 ]; then
+  printf '%s\n' "${problems[@]}" >&2
+  fail "${#problems[@]} monitoring problem(s) (see the header of .mise/tasks/check/monitoring)"
+fi
+
+echo "dashboard: OK ($(jq '[.panels[] | select(.type != "row")] | length' "$dashboard") panels)"
+echo "alerts: $alert_count, SLO rows covered: $slo_count"
+echo "rules: OK runbooks: OK"

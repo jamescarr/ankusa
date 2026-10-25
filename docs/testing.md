@@ -1461,6 +1461,35 @@ runs it (and `workflow_dispatch` takes a shorter `duration`); locally,
 `DURATION=600 mise run bench:soak` is a ten-minute check, and
 `DURATION=120 MAX_RSS_GROWTH=1 mise run bench:soak` a smoke of the script.
 
+## Monitoring rules: `mise run check:monitoring`
+
+The alert rules, their runbooks and the dashboard
+([`deploy/monitoring/`](https://github.com/jamescarr/ankusa/tree/main/deploy/monitoring),
+[`docs/runbooks/`](https://github.com/jamescarr/ankusa/tree/main/docs/runbooks))
+are code the CI gate runs, in the `lint` job and in `mise run check`. The task
+(`promtool` is pinned in `.mise.toml`) runs:
+
+- `promtool check rules` on `prometheus-rules.yaml`: a rule that does not parse
+  fails;
+- `promtool test rules` on `prometheus-rules.test.yaml`: every alert fires on a
+  series shaped like its failure (including the first event of a counter that
+  has no earlier sample) and stays quiet on a normal one, with its annotations
+  as rendered;
+- the checks `promtool` cannot make: an alert has a severity, a summary and a
+  `runbook_url` that names a file in `docs/runbooks/`; each runbook has its
+  title, an `Alerts:` line and the sections Symptom, Metric, Action and
+  Verification, and the rules and its `Alerts:` line agree on which alerts it
+  covers; every row of the SLO table in
+  [`architecture.md`](architecture.md#slis-and-slos) has an alert whose `slo`
+  annotation repeats the row; the dashboard is JSON whose panels all query.
+
+Prints `rules: OK runbooks: OK`. That the rules and the dashboard name only
+series `/metrics` serves is a core test, since it needs the metric definitions:
+`mix test test/ankusa/metrics_test.exs` (`the alert rules, their unit tests and
+the dashboard name only series /metrics can serve`). A new alert is a rule, a
+unit-test case (`AnkusaMetricsSeriesOverBudget` is the one exception: it counts
+10 000 series) and a line in a runbook's `Alerts:`.
+
 ## Fleet end to end (compose, nightly)
 
 [`examples/fleet-e2e/run.sh`](https://github.com/jamescarr/ankusa/blob/main/examples/fleet-e2e/run.sh)

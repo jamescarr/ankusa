@@ -43,6 +43,7 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :quarantine, :state]` | `:bytes`, `:entries` | `:instance` |
   | `[:ankusa, :disk, :state]` | `:free_bytes`, `:total_bytes` | `:instance` |
   | `[:ankusa, :http, :state]` | `:pools` (outbound HTTP connection pools open in `Ankusa.HttpClient.Pools`) | `:instance` |
+  | `[:ankusa, :vm, :state]` | `:memory_bytes` (`:erlang.memory(:total)`; the VM is the node's, every instance in it reports the same value) | `:instance`. `ankusa_vm_memory_bytes` |
   | `[:ankusa, :sources, :state]` | `:without_dedupe` (configured sources with no `dedupe`) | `:instance` |
   | `[:ankusa, :http_pool, :closed]` | `:count` (pools stopped) | `:instance`, `:reason` (`:idle`, `:evicted`, `:source`) |
   | `[:ankusa, :http_pool, :refused]` | `:count` | `:instance`, `:scope` (`:tenant`, `:instance`: the ceiling that was full with no idle pool to close) |
@@ -69,7 +70,7 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :blob_store, :breaker]` | — | `:instance`, `:endpoint`, `:bucket`, `:state` (`:open`, `:closed`), `:reason` (`{:failures, n}` or `{:slow, p99_ms}` on `:open`, `nil` on `:closed`) |
   | `[:ankusa, :lifecycle, :delivered]` | — | `:instance`, `:type`, `:sink` |
   | `[:ankusa, :lifecycle, :dropped]` | — | `:instance`, `:type`, `:sink`, `:reason` (`:gave_up`, `:unreadable`) |
-  | `[:ankusa, :instance, :subtree_down]` | `:delay_ms` | `:instance`, `:domain`, `:reason` |
+  | `[:ankusa, :instance, :subtree_down]` | `:delay_ms` | `:instance`, `:domain`, `:reason` (never a label). One per outage; `ankusa_instance_subtree_down_total{domain}` |
   | `[:ankusa, :instance, :subtree_up]` | — | `:instance`, `:domain` |
   | `[:ankusa, :replay, :moved]` | `:count` | `:instance`, `:replay_id`, `:kind` |
   | `[:ankusa, :replay, :throttled]` | — | `:instance`, `:replay_id`, `:reason` (`:unavailable`, `:lag`, `:window_full`) |
