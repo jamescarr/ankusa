@@ -8,6 +8,23 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **Helm chart (OPS-8).** `deploy/helm/ankusa` runs the image on Kubernetes in all
+  three durability modes: a StatefulSet with a PVC per pod for `wal.type: disk` and
+  `dual` (`intake.node_id` = the pod name), a Deployment behind an HPA for `none`.
+  The pod spec is the `restricted` Pod Security Standard (uid 100/gid 101, read-only
+  root file system with `RELEASE_TMP=/tmp`, `drop: [ALL]`, seccomp `RuntimeDefault`);
+  `/health` is the startup and liveness probe and `/ready` the readiness probe;
+  `terminationGracePeriodSeconds` is `(listener.drain_delay_ms + drain_timeout_ms) /
+  1000 + 10` (plus `backup.final_timeout_ms` when backing up); PodDisruptionBudget
+  (`maxUnavailable: 1`), zone and node topology spread, a NetworkPolicy that opens
+  4000 and limits 4001-4004 to the operator namespaces, an optional claim-check
+  gateway. `mise run check:examples` lints and renders every mode and validates the
+  manifests with `kubeconform`; `mise run e2e fleet` runs the fleet drill from the
+  chart on kind. The guide, the PVC sizing table and the multi-region topology are in
+  `docs/deployment.md`. The example manifests' `terminationGracePeriodSeconds: 30`
+  (the Oban example and the jetstream-k8s chart's ankusa pods) are now 60, to cover the
+  drain, and the Oban example's readiness probe is `/ready`.
+
 - **`dedupe: salesforce` (CON-3).** A source's `dedupe` accepts the preset
   `salesforce` (`json: id`; see `configuration.md` for why it is a convention and
   not a Salesforce-documented delivery id). A source with no `dedupe` logs one

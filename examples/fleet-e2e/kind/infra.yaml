@@ -1,0 +1,166 @@
+# What the fleet runs against, for `examples/fleet-e2e/kind.sh`: the same pieces as
+# docker-compose.yml (Redis route/source/fleet store, MinIO for segments and claims,
+# RabbitMQ, the consumer, Postgres), in a namespace of their own. They are not
+# hardened: only the Ankusa chart is (its namespace enforces the `restricted` Pod
+# Security Standard). Applied with `kubectl apply -n ankusa-fleet-infra`.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: redis}
+spec:
+  selector: {matchLabels: {app: redis}}
+  template:
+    metadata: {labels: {app: redis}}
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports: [{containerPort: 6379}]
+          readinessProbe: {exec: {command: ["redis-cli", "ping"]}, periodSeconds: 2}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: redis}
+spec:
+  selector: {app: redis}
+  ports: [{port: 6379}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: minio}
+spec:
+  selector: {matchLabels: {app: minio}}
+  template:
+    metadata: {labels: {app: minio}}
+    spec:
+      containers:
+        - name: minio
+          image: cgr.dev/chainguard/minio:latest
+          args: ["server", "/data"]
+          env:
+            - {name: MINIO_ROOT_USER, value: minioadmin}
+            - {name: MINIO_ROOT_PASSWORD, value: minioadmin}
+          ports: [{containerPort: 9000}]
+          readinessProbe: {tcpSocket: {port: 9000}, periodSeconds: 2}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: minio}
+spec:
+  selector: {app: minio}
+  ports: [{port: 9000}]
+---
+# `ankusa-fleet` holds the segments and the claims.
+apiVersion: batch/v1
+kind: Job
+metadata: {name: minio-bootstrap}
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: aws
+          image: amazon/aws-cli:2.38.1
+          env:
+            - {name: AWS_ACCESS_KEY_ID, value: minioadmin}
+            - {name: AWS_SECRET_ACCESS_KEY, value: minioadmin}
+            - {name: AWS_DEFAULT_REGION, value: us-east-1}
+            - {name: AWS_ENDPOINT_URL, value: "http://minio:9000"}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              until aws s3 ls >/dev/null 2>&1; do echo "waiting for minio..."; sleep 1; done
+              aws s3 mb s3://ankusa-fleet || true
+              echo "bucket ankusa-fleet ready"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: rabbitmq}
+spec:
+  selector: {matchLabels: {app: rabbitmq}}
+  template:
+    metadata: {labels: {app: rabbitmq}}
+    spec:
+      # As the image's own `rabbitmq` user from the start: the probes below `exec` into
+      # the container, and as root they would create `.erlang.cookie` owned by root
+      # before the server (which drops to `rabbitmq`) can read it.
+      securityContext: {runAsUser: 100, runAsGroup: 101, fsGroup: 101}
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:4-alpine
+          # A kind node hands pods a limit of 10^9 open files, which the BEAM sizes its
+          # tables from: capped, as the chart's `nofile` does for the Ankusa pods.
+          command: ["/bin/sh", "-c", "ulimit -n 65536 && exec docker-entrypoint.sh rabbitmq-server"]
+          ports: [{containerPort: 5672}]
+          volumeMounts: [{name: data, mountPath: /var/lib/rabbitmq}]
+          # `ping` is green before the AMQP listener is up; the port check says a
+          # client can connect.
+          readinessProbe:
+            exec: {command: ["/bin/sh", "-c", "rabbitmq-diagnostics -q ping && rabbitmq-diagnostics -q check_port_connectivity"]}
+            periodSeconds: 3
+            timeoutSeconds: 10
+      volumes:
+        - {name: data, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: rabbitmq}
+spec:
+  selector: {app: rabbitmq}
+  ports: [{port: 5672}]
+---
+# The consumer's table (`consumer/schema.sql`, put in the ConfigMap `postgres-schema`
+# by kind.sh).
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: postgres}
+spec:
+  selector: {matchLabels: {app: postgres}}
+  template:
+    metadata: {labels: {app: postgres}}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - {name: POSTGRES_USER, value: ankusa}
+            - {name: POSTGRES_PASSWORD, value: ankusa}
+            - {name: POSTGRES_DB, value: consumer}
+          ports: [{containerPort: 5432}]
+          volumeMounts:
+            - {name: schema, mountPath: /docker-entrypoint-initdb.d, readOnly: true}
+          readinessProbe: {exec: {command: ["pg_isready", "-U", "ankusa", "-d", "consumer"]}, periodSeconds: 2}
+      volumes:
+        - name: schema
+          configMap: {name: postgres-schema}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: postgres}
+spec:
+  type: NodePort
+  selector: {app: postgres}
+  ports: [{port: 5432, nodePort: 30433}]
+---
+# The `rabbitmq-consumer` worker with the print replaced by an upsert. It owns its
+# queue and holds no storage credentials: bodies over 8 KiB are redeemed at the
+# claim-check Service of the chart's namespace.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: consumer}
+spec:
+  selector: {matchLabels: {app: consumer}}
+  template:
+    metadata: {labels: {app: consumer}}
+    spec:
+      containers:
+        - name: consumer
+          image: ankusa-fleet-e2e-consumer:kind
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: RABBITMQ_URL, value: "amqp://guest:guest@rabbitmq:5672"}
+            - {name: RABBITMQ_EXCHANGE, value: ankusa.events}
+            - {name: ROUTING_PATTERN, value: "ankusa.#"}
+            - {name: QUEUE_NAME, value: ankusa-fleet-consumer}
+            - {name: CLAIM_CHECK_URL, value: "http://ankusa-claim-check.ankusa-fleet.svc:4001"}
+            - {name: DATABASE_URL, value: "postgres://ankusa:ankusa@postgres:5432/consumer"}

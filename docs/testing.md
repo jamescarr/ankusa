@@ -1471,10 +1471,26 @@ bounded by the delivery contract, not asserted to be zero.
 
 CI: [`.github/workflows/e2e.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/e2e.yml)
 runs it nightly, on `workflow_dispatch`, on every release tag, and on a pull
-request that touches the example, beside `mise run e2e` (the kind drill below).
+request that touches the example, beside `mise run e2e` (the kind drills below).
 The load generator's reports are uploaded as the `fleet-e2e-reports` artifact.
 `RATE`, `DURATION` (at least 40), `BURST_SECONDS`, `CONCURRENCY`, `KEEP=1` and
 `BUILD_ANKUSA=0` (use the image named by `ANKUSA_IMAGE`) tune a run.
+
+### The same fleet from the Helm chart, on kind
+
+[`examples/fleet-e2e/kind.sh`](https://github.com/jamescarr/ankusa/blob/main/examples/fleet-e2e/kind.sh)
+(`mise run e2e fleet`) runs the compose fleet's `disk` drill from
+[`deploy/helm/ankusa`](https://github.com/jamescarr/ankusa/tree/main/deploy/helm/ankusa)
+on a `kind` cluster: two StatefulSet pods (a PVC each) and a claim-check gateway in a
+namespace that **enforces the `restricted` Pod Security Standard**, and Redis, MinIO,
+RabbitMQ, the consumer and Postgres in another. It asserts that the pods run as uid 100
+on a read-only root file system, that a path nobody defined is a `404`, then drives
+steady load, six 20 KB hooks redeemed at the gateway, a chaos phase (`ankusa-0` deleted
+with the drain, `ankusa-1` `SIGKILL`ed with grace period 0, the consumer deleted) and a
+burst, and prints `verify: missing=0 sha_mismatches=0 extra_deliveries=<n>
+claim_redeemed=true duplicate_hooks=0`. Knobs: the compose run's (`RATE`, `DURATION`,
+`BURST_SECONDS`, `CONCURRENCY`, `KEEP=1`, `BUILD_ANKUSA=0` with `ANKUSA_IMAGE`).
+`mise run check:examples` renders the same values with `kubeconform`.
 
 ## Load and end-to-end (kind + Oban)
 
@@ -1499,9 +1515,10 @@ written by the idempotent `WebhookWorker.perform/1` upsert) until every acked
 id shows up or its timeout expires, and fails the run on any `missing > 0` or
 `sha_mismatches > 0`.
 
-Run it yourself: `mise run e2e` (needs `docker`; `kind`, `kubectl`, and
-Elixir come from `.mise.toml`). `RATE` defaults to 300; `KEEP=1` keeps the
-cluster.
+Run it yourself: `mise run e2e oban` (needs `docker`; `kind`, `kubectl`, and
+Elixir come from `.mise.toml`; plain `mise run e2e` also runs the
+[fleet from the Helm chart](#the-same-fleet-from-the-helm-chart-on-kind) after it).
+`RATE` defaults to 300; `KEEP=1` keeps the cluster.
 
 Results from `RATE=60` and `RATE=300` verification runs, `kind` cluster
 otherwise idle (`RATE=60` is the same load the pre-fix numbers below used, so

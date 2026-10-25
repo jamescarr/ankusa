@@ -1,0 +1,59 @@
+{{- $wal := include "ankusa.wal" . -}}
+{{- $fullname := include "ankusa.fullname" . -}}
+# Providers post here (port 4000 on the ingest listener).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "ankusa.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "ankusa.selector" (dict "ctx" . "component" "node") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ int .Values.service.port }}
+      targetPort: http
+      {{- if and .Values.service.nodePort (ne .Values.service.type "ClusterIP") }}
+      nodePort: {{ int .Values.service.nodePort }}
+      {{- end }}
+{{- if ne $wal "none" }}
+---
+# The StatefulSet's governing Service: a stable DNS name per pod
+# (<release>-0.<release>-headless), for scraping and for a replacement to keep its identity.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-headless
+  labels:
+    {{- include "ankusa.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "ankusa.selector" (dict "ctx" . "component" "node") | nindent 4 }}
+  ports:
+    - {name: http, port: 4000, targetPort: http}
+    {{- if .Values.admin.expose }}
+    - {name: admin, port: 4002, targetPort: admin}
+    {{- end }}
+{{- end }}
+{{- if .Values.claimCheck.enabled }}
+---
+# What a consumer redeems a claim at: http://<release>-claim-check:4001.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-claim-check
+  labels:
+    {{- include "ankusa.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "ankusa.selector" (dict "ctx" . "component" "claim-check") | nindent 4 }}
+  ports:
+    - {name: claim, port: 4001, targetPort: claim}
+{{- end }}
