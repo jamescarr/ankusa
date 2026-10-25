@@ -74,6 +74,11 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
   # keys must still be inside their window.
   @dedupe_ttl_ms 20 * 365 * 24 * 3_600_000
 
+  # The same twenty years, for the same reason: a lane head waiting out a retry
+  # is pinned that far out (see `seed_waiting/2`), so a lane holding a blocked
+  # head is still blocked whenever the fixture is booted.
+  @pinned_retry_ms 20 * 365 * 24 * 3_600_000
+
   @impl Mix.Task
   def run(args) do
     path =
@@ -267,6 +272,43 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
 
     head = Enum.find(dues, &(&1.kind == 2)) || Mix.raise("no lane head was promoted")
     :ok = Ankusa.Queue.Deliveries.claim(inst, [head])
+
+    # The queue never schedules a retry past the delivery's horizon
+    # (`retry.max_elapsed_ms`, 24 h by default), so the retries the `k1` and
+    # keyless heads took in their first life come due before the next boot of the
+    # fixture and those lanes would drain. Pin the two retrying heads (the only
+    # kind 3 rows) a lifetime out: the due time is the only thing that moves;
+    # `?H`, the members behind it and `lanes_blocked` stay as the retry left them.
+    {:ok, retried} =
+      Ankusa.Queue.Deliveries.due_for_tenant(
+        inst,
+        default_ord,
+        now + @pinned_retry_ms,
+        0,
+        100,
+        1_000_000
+      )
+
+    pinned =
+      for %{kind: 3} = retry <- retried do
+        [
+          {:delete, :index, retry.key}
+          | Ankusa.Queue.Deliveries.due_ops(
+              retry.ord,
+              now + @pinned_retry_ms,
+              retry.seq,
+              retry.sink,
+              retry.size,
+              3
+            )
+        ]
+      end
+
+    length(pinned) == 2 or
+      Mix.raise("expected the two retrying lane heads, pinned #{length(pinned)}")
+
+    :ok =
+      Store.write(inst, Ankusa.Queue.Deliveries.coalesce(List.flatten(pinned)), sync: true)
 
     {:ok, version} = Store.get(inst, :default, Keys.format_version())
     {:ok, hooks} = Queue.hooks(inst, 0, 100_000)

@@ -180,20 +180,18 @@ defmodule Ankusa.StoreUpgradeTest do
     start_supervised!({Ankusa.Instance, config})
     inst = config.instance
 
-    # Whatever the instance delivers, each lane's hooks arrive in order and the
-    # busy lane (`k2`: a claimed head, a member) drains completely.
+    # The busy lane (`k2`: a claimed head, a member) drains: the recovered head
+    # first (a duplicate, in order) and then its member.
     delivered = receive_deliveries(k2, [])
-    Process.sleep(300)
-    delivered = delivered ++ drain_deliveries([])
+    assert delivered == k2
 
-    for ids <- [k1, keyless, k2] do
-      seen = Enum.filter(delivered, &(&1 in ids))
-      assert seen == Enum.take(ids, length(seen))
-    end
+    # k1 and the keyless lane: heads waiting out a retry, members behind them.
+    # Nothing behind a blocked head, and not the head before its due time, may
+    # be delivered.
+    refute_receive {:delivered, _id}, 300
 
-    assert Enum.filter(delivered, &(&1 in k2)) == k2
     assert length(k1) == 3 and length(keyless) == 2
-    assert {:ok, _counters} = lane_counters(inst)
+    assert {:ok, %{lanes: 2, lanes_blocked: 2, lane_members: 3}} = lane_counters(inst)
     assert stored_counters(inst) == folded_counters(inst)
   end
 
@@ -206,14 +204,6 @@ defmodule Ankusa.StoreUpgradeTest do
       after
         15_000 -> flunk("the busy lane did not drain")
       end
-    end
-  end
-
-  defp drain_deliveries(acc) do
-    receive do
-      {:delivered, id} -> drain_deliveries([id | acc])
-    after
-      0 -> Enum.reverse(acc)
     end
   end
 
