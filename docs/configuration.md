@@ -71,6 +71,7 @@ is the [key reference](#ankusa-config) below.
 
 | Section | Keys (default) |
 | --- | --- |
+| `config_version` | `1`: the version of the file format. Optional; an older file is migrated on load, a newer one is refused. See [Reloading the config](#reloading-the-config) |
 | `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`), `min_free_bytes` (unset = no check; the free bytes `data_dir`'s file system must keep, or `/ready` answers `503` with `disk: failing`; see [`/ready`](deployment.md#running-the-container)) |
 | `log` | `level` (`info`), `format` (`text` \| `json`; `text`), `banner` (`true`; the ASCII-art banner on start, never printed with `format: json`). See [Logs](#logs) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`), `store_headers` (`drop`: `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`; `hash`: none). See [Stored headers](#stored-headers) |
@@ -536,11 +537,10 @@ an API client submits cannot use them.
 
 #### Rotating without a redeploy
 
-`AnkusaServer.Secrets.reload/2` (run from `remote`:
-`AnkusaServer.Secrets.reload(:default)`) re-reads the file, resolves every
-reference again and republishes the sources the file declares
-(`source_store.type: static`): a rotated secret takes effect without a restart.
-Nothing triggers it on a signal or over HTTP yet. Rotation is two reloads and a
+A [config reload](#reloading-the-config) (`SIGHUP`, or `POST /v1/config/reload`)
+re-reads the file, resolves every reference again and republishes the sources the
+file declares (`source_store.type: static`): a rotated secret takes effect
+without a restart. Rotation is two reloads and a
 list: put the new secret first and keep the old one second (`secret: [new,
 old]`, or `secret_file: [/new, /old]`) until the provider has switched, reload,
 then drop the old one and reload again. A hook that verifies with either secret
@@ -548,15 +548,66 @@ is accepted in between.
 
 A reference that fails *on a reload* does not take verification down: it keeps
 the value of the last good load, and the reload logs a warning naming the key
-and the reference and returns it under `:kept`. A reference that has no
+and the reference and returns it under `kept`. A reference that has no
 previous value (a path you just added) is an error and nothing is applied, as
 is a file that no longer parses or a source the instance would refuse to boot
 with. `cache_ttl_ms` above `0` makes a reload reuse a `${sm:}` value fetched
-within that many milliseconds (a manager with an API quota); `refresh: true`
-ignores it. With `source_store.type: persistent` or `redis` the file's sources
-are seeds, which a reload does not republish. A reload republishes `sources`
+within that many milliseconds (a manager with an API quota). With
+`source_store.type: persistent` or `redis` the file's sources are seeds, which a
+reload does not republish (it logs that it did not). A reload applies `sources`
 only: a secret under `lifecycle`, `storage` or any other key is read at boot
-and changes with a restart.
+and changes with a restart: the reload that finds one changed is refused.
+
+### Reloading the config
+
+`config_version` is the version of the file format (`1`; a file without the key
+is version 1). An image reads every version up to its own: a file written for an
+older format is migrated as it loads (the loader's migration map, applied before
+`${…}` is substituted), and a file that says a version newer than the image reads
+is refused at boot with `config_version` named, so an older image never guesses
+at a newer file.
+
+A running node re-reads its file on `SIGHUP` (`kill -HUP 1` in the container,
+`kubectl exec … -- kill -HUP 1`) or on
+
+```sh
+curl -X POST http://127.0.0.1:4002/v1/config/reload \
+  -H "authorization: Bearer $ADMIN_TOKEN"
+# {"status":"reloaded","keys":["log.level","rate_limits.tenants.acme.rate"],"sources":[],"kept":[]}
+```
+
+and applies the keys that may change while it runs: `log` (`level` and `format`,
+and only when the file's value changed: a level set with `PUT /v1/log-level`
+survives a reload that does not touch `log`), `rate_limits` (all but `scope`),
+static `sources` (a rotated secret, an added or removed source), the `routes`
+seed, `dispatch.concurrency`, `dispatch.sink_concurrency`, `dispatch.tenants`,
+`metrics.detail` (the metric definitions are rebuilt, so their counters restart
+from zero) and `admin.gauge_interval_ms`. The seed is applied as a difference
+through the routes API: a changed or new seed route is replaced, a route that left
+the seed is deleted, a route created through the API is left alone, and every
+seed route needs an `id`. A lowered dispatch limit never drops a delivery that is
+running: it stops the next start until the count is below it.
+
+Any other key that changed (`http.port`, `wal.type`, a listener's `tls`, …) needs
+a restart. The reload is then refused with nothing applied, over HTTP `409`:
+
+```json
+{"error": "not_reloadable", "keys": ["http.port"], "message": "…"}
+```
+
+The file's keys are compared with the document the running config was built from,
+after the environment is substituted: an unchanged `ANKUSA_*` override is not a
+change. Other answers: `422 invalid_config` (the file no longer loads, a
+reference with no previous value cannot be resolved, a source or seed route the
+node would refuse; `message` names the key, never a value), `503 audit_backlog`
+or `503 store_unavailable` (the trail cannot record the reload, so it is not
+made), `409 reload_unavailable` (an instance embedded in your own application
+that never registered a reload with `Ankusa.Reload.register/2`). The caller needs
+`config:write` and `tenant:*`. Each reload writes one audit row
+(`action: config.reload`, the caller or `system` for a signal as the actor,
+`detail.keys` the keys that changed, `result` `ok` or `failed`); a refused reload
+writes none. Reloads on one node run one at a time, and are node-local: signal or
+call every node.
 
 ### Starting points
 
@@ -1098,9 +1149,10 @@ Scopes (`Ankusa.Principal`): `metrics:read` (`/metrics`, `/v1/wal`),
 a [tenant erase](multi-tenancy.md#erasing-a-tenant); it also needs `tenant:*`), and
 `dlq:write`, which starting a `dlq` replay also needs (`quarantine:write` for a
 `quarantine` replay). `config:write` (with `tenant:*`) changes the node's
-[log level](#logs): `PUT /v1/log-level`.
+[log level](#logs) (`PUT /v1/log-level`) and [reloads its config](#reloading-the-config)
+(`POST /v1/config/reload`).
 `audit:read` reads `GET /v1/audit`: every change to a source, route, IP rule,
-rate-limit override, quarantine purge, replay job or log-level change, newest first, with
+rate-limit override, quarantine purge, replay job, log-level change or config reload, newest first, with
 `since`, `until` (ms), `actor`, `action`, `tenant`, `limit` and `cursor`
 filters. The trail spans tenants, so a reader without `tenant:*` sees only its
 own tenants' rows (none of the rows that belong to no tenant), and naming

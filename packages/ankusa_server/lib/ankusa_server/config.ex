@@ -6,7 +6,9 @@ defmodule AnkusaServer.Config do
 
     1. **Locate.** `ANKUSA_CONFIG` (or the `:path` option), else
        `/etc/ankusa/ankusa.yml`, else `./ankusa.yml`. No file at all is legal:
-       the server starts on defaults with no sources and says so.
+       the server starts on defaults with no sources and says so. The file's
+       `config_version` (1 when absent) is then migrated to the version this
+       image reads; a newer one is refused.
     2. **Interpolate.** Every string value is walked and `${NAME}` /
        `${NAME:-default}` replaced from the environment. This is how secrets get
        in: the file holds `${STRIPE_WHSEC}`, not the secret. An unset variable
@@ -16,7 +18,7 @@ defmodule AnkusaServer.Config do
        `secrets.providers`) are resolved by `AnkusaServer.Secrets` once the
        environment overrides are in, and a source's `secret_file:` is
        `secret:` read from a file; see that module for the outage rule and
-       `reload/2`.
+       `AnkusaServer.Reload` for what a reload does with them.
     3. **Env overrides.** A fixed set of `ANKUSA_*` variables (below) override
        the file — env wins, because that is how containers get reconfigured
        without a new image.
@@ -73,7 +75,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive health)
+  @root_keys ~w(config_version node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive health)
   @node_keys ~w(roles data_dir min_free_bytes)
   @health_keys ~w(sink_error_window_ms)
   @log_keys ~w(level banner format)
@@ -216,12 +218,25 @@ defmodule AnkusaServer.Config do
   @log_formats ~w(text json)
   @exchange_types ~w(topic direct fanout headers)
 
+  # The version of the file format this image reads (`config_version`). A file
+  # without the key is version 1: every file written before it existed.
+  @config_version 1
+
+  # `from => fun`: rewrites a document of version `from` into one of `from + 1`,
+  # on the YAML map as written (before `${…}` is substituted). A format change
+  # that renames or moves a key adds its step here and bumps `@config_version`;
+  # the files of the older version keep loading. Empty until one does.
+  @migrations %{}
+
   @typedoc """
   A loaded config plus the log level and banner switch the file asked for, and
   what its `${file:}` / `${sm:}` references resolved to (`AnkusaServer.Secrets`).
+  `doc` is the document the config was built from, with every substitution made:
+  `AnkusaServer.Reload` compares two of them to find the keys a reload changes.
   """
   @type loaded :: %{
           config: Ankusa.Config.t(),
+          doc: map(),
           log: %{format: :text | :json, level: Logger.level()},
           banner: boolean(),
           tracing: tracing(),
@@ -250,13 +265,13 @@ defmodule AnkusaServer.Config do
   Options: `:env` (an environment map, default `System.get_env/0`), `:path`
   (overrides `ANKUSA_CONFIG`, used by tests and `--config`-style callers),
   `:secrets` (the `AnkusaServer.Secrets` of the load this one follows: a
-  reference that fails keeps its value from there, see `AnkusaServer.Secrets.reload/2`)
+  reference that fails keeps its value from there, see `AnkusaServer.Reload`)
   and `refresh: true` (ignore `secrets.cache_ttl_ms`).
   """
   @spec load!(keyword()) :: loaded()
   def load!(opts \\ []) do
     env = Keyword.get(opts, :env, System.get_env())
-    raw = read!(Keyword.get(opts, :path), env)
+    raw = opts |> Keyword.get(:path) |> read!(env) |> migrate!()
 
     {doc, secrets} =
       raw
@@ -269,11 +284,53 @@ defmodule AnkusaServer.Config do
 
     %{
       config: config!(doc),
+      doc: doc,
       log: log!(doc),
       banner: banner?(doc),
       tracing: tracing!(doc),
       secrets: secrets
     }
+  end
+
+  @doc false
+  # The document at `current`: `config_version` (1 when absent) and every step
+  # of `migrations` from there up. A version this image does not know, in either
+  # direction, is an error: an older image must not guess at a newer file.
+  @spec migrate!(map(), pos_integer(), %{pos_integer() => (map() -> map())}) :: map()
+  def migrate!(doc, current \\ @config_version, migrations \\ @migrations) do
+    path = ["config_version"]
+
+    version =
+      case Map.get(doc, "config_version") do
+        nil -> 1
+        version when is_integer(version) and version >= 1 -> version
+        other -> raise ConfigError, message: type_error(path, "a positive integer", other)
+      end
+
+    if version > current do
+      raise ConfigError,
+        message:
+          "config_version: #{version} is newer than this image reads (up to #{current}); " <>
+            "run an image that reads it, or lower config_version"
+    end
+
+    doc =
+      Enum.reduce(version..current//1, doc, fn
+        ^current, doc ->
+          doc
+
+        from, doc ->
+          case migrations do
+            %{^from => step} ->
+              step.(doc)
+
+            _ ->
+              raise ConfigError,
+                message: "config_version: no migration from version #{from} to #{from + 1}"
+          end
+      end)
+
+    Map.put(doc, "config_version", current)
   end
 
   @doc """

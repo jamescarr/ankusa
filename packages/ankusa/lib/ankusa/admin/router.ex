@@ -23,6 +23,7 @@ defmodule Ankusa.Admin.Router do
   | `GET /metrics`, `GET /v1/wal` | `metrics:read` |
   | `GET /v1/config`, `GET /asyncapi.json` | `config:read` |
   | `PUT /v1/log-level` | `config:write` + `tenant:*` |
+  | `POST /v1/config/reload` | `config:write` + `tenant:*` |
   | `GET /v1/dlq`, `DELETE /v1/dlq` | `dlq:read` / `dlq:write` + a `tenant` (filtered) |
   | `POST /v1/replays` | `replays:write` + a `tenant` (filtered), and `dlq:write` / `quarantine:write` for those kinds |
   | `GET /v1/replays[/:id]` | `replays:read` + a `tenant` (filtered) |
@@ -132,6 +133,12 @@ defmodule Ankusa.Admin.Router do
   # needs `tenant:*` as well, like a tenant erase. Audited like every change.
   put "/v1/log-level" do
     Auth.authorize_global(conn, "config:write", &log_level_put/1)
+  end
+
+  # Re-read the config file and apply the keys that may change while running
+  # (`Ankusa.Reload`): a node-wide change, like the log level.
+  post "/v1/config/reload" do
+    Auth.authorize_global(conn, "config:write", &config_reload/1)
   end
 
   get "/v1/dlq" do
@@ -357,6 +364,39 @@ defmodule Ankusa.Admin.Router do
       :ok ->
         {:ok, _previous} = Ankusa.LogLevel.set(level)
         send_json(conn, 200, %{level: Atom.to_string(level), previous: Atom.to_string(previous)})
+
+      {:error, :audit_backlog} ->
+        audit_backlog(conn)
+
+      {:error, :store_unavailable} ->
+        send_json(conn, 503, %{error: "store_unavailable"})
+    end
+  end
+
+  # The loader (`ankusa_server`) re-reads, re-resolves secrets and checks; the
+  # change and its one audit row are made in `Ankusa.Reload`.
+  defp config_reload(conn) do
+    case Ankusa.Reload.run(instance(conn), Context.from_conn(conn)) do
+      {:ok, %{keys: keys, sources: sources, kept: kept}} ->
+        send_json(conn, 200, %{status: "reloaded", keys: keys, sources: sources, kept: kept})
+
+      {:error, {:not_reloadable, keys}} ->
+        send_json(conn, 409, %{
+          error: "not_reloadable",
+          keys: keys,
+          message:
+            "these keys changed and cannot be reloaded; restart the node, or revert them: " <>
+              Enum.join(keys, ", ")
+        })
+
+      {:error, :unsupported} ->
+        send_json(conn, 409, %{
+          error: "reload_unavailable",
+          message: "this instance was not started from a config file that can be re-read"
+        })
+
+      {:error, {:invalid_config, message}} ->
+        send_json(conn, 422, %{error: "invalid_config", message: message})
 
       {:error, :audit_backlog} ->
         audit_backlog(conn)
