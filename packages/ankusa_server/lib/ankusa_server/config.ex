@@ -76,10 +76,8 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive health)
   @node_keys ~w(roles data_dir min_free_bytes region)
   @root_keys ~w(config_version node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive health)
-  @node_keys ~w(roles data_dir min_free_bytes)
   @health_keys ~w(sink_error_window_ms)
   @log_keys ~w(level banner format)
   @tracing_keys ~w(enabled otlp_endpoint sample_ratio)
