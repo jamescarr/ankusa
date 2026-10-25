@@ -25,7 +25,21 @@ defmodule Ankusa.Dedupe do
     * `{:json, ["a", "b"]}` — walk `a` → `b` through the decoded JSON body;
       only map keys are followed. A string value is the key; an integer value
       becomes its decimal string. Anything else yields `nil`.
+
+  ## Salesforce
+
+  The `:salesforce` preset is `{:json, ["id"]}`, and that is a convention, not a
+  Salesforce-documented delivery id. Salesforce stamps no delivery-id header on
+  any outbound mechanism. Outbound Messages are SOAP/XML (their per-notification
+  `Notification/Id` is not reachable by a JSON path), and Flow/Apex HTTP callouts
+  and Data 360 webhook targets send a body the org builds. The preset therefore
+  reads the top-level `"id"` of a JSON body, which the callout has to set to a
+  value that is the same on every retry of one event (the record id plus a
+  change stamp, a platform event's `EventUuid`). A body with no `"id"` is never
+  deduplicated: pick `header:` or `json:` for a body shaped otherwise.
   """
+
+  require Logger
 
   @enforce_keys [:from, :ttl_ms]
   defstruct [:from, :ttl_ms]
@@ -42,7 +56,8 @@ defmodule Ankusa.Dedupe do
     standard_webhooks: {:header, "webhook-id"},
     svix: {:header, "svix-id"},
     shopify: {:header, "x-shopify-webhook-id"},
-    stripe: {:json, ["id"]}
+    stripe: {:json, ["id"]},
+    salesforce: {:json, ["id"]}
   }
 
   @max_key_bytes 200
@@ -169,5 +184,44 @@ defmodule Ankusa.Dedupe do
     else
       key
     end
+  end
+
+  @doc """
+  The ids, sorted, of the sources `config.source_store` declares (its `:sources`
+  option, as `Ankusa.SourceStore.Static` reads it) that set no `dedupe`.
+
+  Such a source stores a provider retry as a new hook with a new
+  `idempotency_key`. A walk over the declared specs, no store read: the gauge
+  `ankusa_sources_without_dedupe` reports its length. Sources a writable store
+  holds are not counted: they are not known at boot.
+  """
+  @spec undeduped_sources(Ankusa.Config.t()) :: [String.t()]
+  def undeduped_sources(%Ankusa.Config{source_store: {_mod, opts}}) do
+    opts
+    |> Keyword.get(:sources, %{})
+    |> Enum.filter(fn {_id, spec} -> declared_dedupe(spec) == nil end)
+    |> Enum.map(fn {id, _spec} -> id end)
+    |> Enum.sort()
+  end
+
+  defp declared_dedupe(%Ankusa.Source{dedupe: dedupe}), do: dedupe
+  defp declared_dedupe(spec), do: spec[:dedupe]
+
+  @doc """
+  Log one boot warning per source `undeduped_sources/1` names. Dedupe is opt-in,
+  and a source without it is the one setting where a provider's retry is
+  indistinguishable from a new event, so boot says so.
+  """
+  @spec warn_undeduped(Ankusa.Config.t()) :: :ok
+  def warn_undeduped(%Ankusa.Config{} = config) do
+    for id <- undeduped_sources(config) do
+      Logger.warning(
+        "[ankusa] source #{id} has no dedupe: a provider retry is stored as a new hook " <>
+          "with a new idempotency_key. Set dedupe: to the provider's event id (a preset, " <>
+          "a header or a json path); ankusa_sources_without_dedupe counts these sources."
+      )
+    end
+
+    :ok
   end
 end

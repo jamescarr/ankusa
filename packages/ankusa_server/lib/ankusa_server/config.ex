@@ -177,7 +177,8 @@ defmodule AnkusaServer.Config do
     "standard_webhooks" => :standard_webhooks,
     "svix" => :svix,
     "shopify" => :shopify,
-    "stripe" => :stripe
+    "stripe" => :stripe,
+    "salesforce" => :salesforce
   }
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)

@@ -34,6 +34,9 @@ defmodule Ankusa.Metrics.Gauges do
       from counters each batcher keeps, no queue is scanned.
     * `[:ankusa, :vm, :state]` — `memory_bytes`, `:erlang.memory(:total)`: what
       the Erlang VM holds, the series the memory-growth alert reads.
+    * `[:ankusa, :sources, :state]` — `without_dedupe`, how many sources the
+      configured source store declares with no `dedupe` (a walk of the declared
+      specs, no data read); on an `:edge` node.
 
   Each probe runs on its own: one that fails (the store is reopening) emits
   nothing, so its gauges keep their last value, and logs at `:debug`; the
@@ -81,6 +84,7 @@ defmodule Ankusa.Metrics.Gauges do
     if store?, do: probe(instance, :queue, &queue/1)
     if store?, do: probe(instance, :audit, &audit/1)
     if Config.role?(config, :edge), do: probe(instance, :quarantine, &quarantine/1)
+    if Config.role?(config, :edge), do: probe(instance, :sources, &sources(&1, config))
     probe(instance, :disk, &disk(&1, config))
     probe(instance, :http, &http_pools/1)
     probe(instance, :sink_batch, &sink_batch/1)
@@ -105,6 +109,12 @@ defmodule Ankusa.Metrics.Gauges do
       offset_lag_seconds: (now - flushed_at) / 1000,
       ready: if(Ankusa.Intake.Gate.state(t) == :open, do: 0, else: 1)
     })
+  end
+
+  # The configured sources that set no `dedupe` (`Ankusa.Dedupe.undeduped_sources/1`,
+  # a walk of the declared specs), as `[:ankusa, :sources, :state]`.
+  defp sources(instance, config) do
+    emit(instance, :sources, %{without_dedupe: length(Ankusa.Dedupe.undeduped_sources(config))})
   end
 
   defp probe(instance, name, fun) do

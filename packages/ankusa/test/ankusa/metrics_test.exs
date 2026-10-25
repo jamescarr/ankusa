@@ -645,6 +645,8 @@ defmodule Ankusa.MetricsTest do
       assert gauge(scrape, "ankusa_quarantine_bytes", inst) > 0.0
       assert gauge(scrape, "ankusa_quarantine_pending", inst) == 0.0
       assert gauge(scrape, "ankusa_http_pools", inst) == 0.0
+      # `demo` and `strict` both declare no `dedupe`.
+      assert gauge(scrape, "ankusa_sources_without_dedupe", inst) == 2.0
     end
 
     test "the VM memory gauge reports what the Erlang VM holds" do

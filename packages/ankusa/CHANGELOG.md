@@ -23,6 +23,18 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `deploy/monitoring/` and `docs/runbooks/`, checked by
   `mise run check:monitoring`; see
   [`architecture.md`](../../docs/architecture.md#alerts-dashboard-and-runbooks).
+- **A Salesforce dedupe preset and a boot warning for a source with no dedupe
+  (CON-3).** `dedupe: :salesforce` is `{:json, ["id"]}`: Salesforce stamps no
+  delivery-id header and documents no JSON delivery id on any outbound mechanism
+  (Outbound Messages are SOAP/XML; Flow/Apex callouts and Data 360 webhook
+  targets send a body the org builds), so the preset keys on the top-level `"id"`
+  the callout sets, and `configuration.md` says so. An `:edge` instance logs
+  `source <id> has no dedupe:` once per source it declares without `dedupe`
+  (`Ankusa.Dedupe.warn_undeduped/1`), and the gauge
+  `ankusa_sources_without_dedupe` (`[:ankusa, :sources, :state]`,
+  `:without_dedupe`) counts them. Tests: `salesforce preset`, `warns without
+  dedupe`.
+
 - **SLI metrics (OPS-3).** `[:ankusa, :dispatch, :stop]` now measures `attempt_ms`
   (the final attempt) and `since_received_ms` (the hook's age when the delivery
   settled; absent for a replayed delivery), and a new `[:ankusa, :dispatch,
