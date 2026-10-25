@@ -269,8 +269,11 @@ defmodule Ankusa.TestHelpers do
 
   @doc """
   What the queue counters must be, folded from the index families: `%{ord =>
-  %{pending, scheduled, inflight, dead, bytes, archive_pending, dedupe, dead_bytes, claim_leases}, ordinal 0
-  the sum of the others. Only tenants with a non-zero counter appear.
+  %{pending, scheduled, inflight, dead, bytes, archive_pending, dedupe, dead_bytes,
+  claim_leases, lanes, lanes_blocked, lane_members}, ordinal 0 the sum of the others.
+  Only tenants with a non-zero counter appear. A lane's members are pending rows
+  (and bytes) with no due row; a due row of kind 3 is a lane head waiting out a
+  retry; every `?H` is one busy lane.
   """
   def folded_counters(instance) do
     alias Ankusa.Store
@@ -285,7 +288,10 @@ defmodule Ankusa.TestHelpers do
       archive_pending: 0,
       dedupe: 0,
       dead_bytes: 0,
-      claim_leases: 0
+      claim_leases: 0,
+      lanes: 0,
+      lanes_blocked: 0,
+      lane_members: 0
     }
 
     bump = fn acc, ord, field, n ->
@@ -306,8 +312,25 @@ defmodule Ankusa.TestHelpers do
         {ord, _at, _seq, _sink} = Keys.decode_due(key)
 
         acc
-        |> bump.(ord, if(kind == 0, do: :pending, else: :scheduled), 1)
+        |> bump.(ord, if(kind in [0, 2], do: :pending, else: :scheduled), 1)
         |> bump.(ord, :bytes, size)
+        |> then(&if(kind == 3, do: bump.(&1, ord, :lanes_blocked, 1), else: &1))
+      end)
+
+    acc =
+      fold.(:lane_members, acc, fn key, <<size::32>>, acc ->
+        {ord, _lane, _seq, _sink} = Keys.decode_lane_member(key)
+
+        acc
+        |> bump.(ord, :pending, 1)
+        |> bump.(ord, :bytes, size)
+        |> bump.(ord, :lane_members, 1)
+      end)
+
+    acc =
+      fold.(:lane_heads, acc, fn key, _v, acc ->
+        {ord, _lane} = Keys.decode_lane_head(key)
+        bump.(acc, ord, :lanes, 1)
       end)
 
     acc =
@@ -374,7 +397,10 @@ defmodule Ankusa.TestHelpers do
       archive_pending: 0,
       dedupe: 0,
       dead_bytes: 0,
-      claim_leases: 0
+      claim_leases: 0,
+      lanes: 0,
+      lanes_blocked: 0,
+      lane_members: 0
     }
 
     for ord <- 0..(next - 1), reduce: %{} do

@@ -121,6 +121,22 @@ defmodule Ankusa.Sink.RabbitMQTest do
     refute Map.has_key?(decoded, "claim")
   end
 
+  test "an ordered sink's message carries the lane's key as a header, and a plain one does not",
+       %{instance: inst, exchange: exch, chan: chan, queue: queue} do
+    ordered = Map.merge(ctx(inst), %{ordering_key: "cus_1", lane: "abc"})
+    opts = [exchange: exch, url: @amqp_url]
+
+    assert :ok = deliver_when_connected(envelope(), ordered, opts)
+    {_payload, meta} = get_message(chan, queue)
+
+    assert {"ankusa_ordering_key", :longstr, "cus_1"} =
+             List.keyfind(meta.headers, "ankusa_ordering_key", 0)
+
+    assert :ok = deliver_when_connected(envelope(), ctx(inst), opts)
+    {_payload, meta} = get_message(chan, queue)
+    refute List.keyfind(meta.headers, "ankusa_ordering_key", 0)
+  end
+
   test "a fat payload is checked in through ClaimCheck and the message carries a ticket", %{
     instance: inst,
     exchange: exch,

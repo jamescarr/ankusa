@@ -44,6 +44,17 @@ receives (the provider's own event timestamp or sequence number in the body;
 `received_at` is on every message, but ties are possible within a millisecond)
 and tolerate redelivery.
 
+**Deliveries are not ordered unless a sink entry opts in.** Two hooks for one
+sink may run in either order, and a retry runs after whatever is due before it.
+A Kafka partition key or an AMQP routing key only keeps the order hooks were
+published in, so it does not restore one. A consumer that needs order per key
+(a Stripe customer's events, a Salesforce record's updates) sets
+`ordered: true` and an `ordering_key` on the sink entry: see
+[Ordering lanes](#ordering-lanes). Without it, a consumer has to rebuild order
+from data it receives (the provider's own event timestamp or sequence number in
+the body; `received_at` is on every message, but ties are possible within a
+millisecond) and tolerate redelivery.
+
 Two windows bound memory and keep a stalled destination from walking the
 pipeline into an OOM: `dispatch.max_inflight` (default 4096 claimed,
 unfinished rows) and `dispatch.max_inflight_bytes` (default 128 MiB, the sum
@@ -234,10 +245,12 @@ horizon](#retry-horizon).
 
 `Ankusa.Sink.classify/1` returns the class of a reason.
 
-Deliveries are **not ordered**: hooks for one sink may be delivered in any
-order, and a retry runs after whatever is due before it. A consumer that needs
-order has to rebuild it from data it receives (not from the sink's key, which
-only keeps the order hooks were published in) and tolerate redelivery.
+Deliveries are **not ordered** unless the sink entry says `ordered: true` (see
+[Ordering lanes](#ordering-lanes)): otherwise hooks for one sink may be delivered
+in any order, and a retry runs after whatever is due before it. A consumer that
+needs order without lanes has to rebuild it from data it receives (not from the
+sink's key, which only keeps the order hooks were published in) and tolerate
+redelivery.
 
 Sinks may also implement three optional callbacks: `inline_max_bytes/1`, which
 tells dispatch how large a body this sink sends inline; `durable?/1`,
@@ -731,8 +744,10 @@ parses one set of fields regardless of
 transport. Unlike Kafka, there is no separate record key: NATS has no
 partition-ordering contract to lean on and no partition count to change under
 you. Order within a subject is the order the stream received the messages: the
-order Ankusa published them, not the order the hooks arrived (see
-[Deliveries are not ordered](#the-dispatch-pipeline)); dedupe on
+order Ankusa published them. With `ordered: true` that is the order of a lane
+(see [Ordering lanes](#ordering-lanes)); the key travels as the
+`ankusa_ordering_key` header, and one subject keeps the order of sequential
+publishes (consumer-side, not enforced). Dedupe on
 `idempotency_key`.
 
 **Connection lifecycle**: one `Gnat.ConnectionSupervisor` per `(instance,
@@ -869,12 +884,14 @@ durable for [direct mode](#direct-mode). The other outcomes:
 | a `200` with a mismatched MD5, no credentials, a transport failure | transient |
 
 **FIFO when the queue URL ends `.fifo`** (AWS requires the suffix). Each send
-carries a `MessageGroupId`, `message_group_id` or by default
+carries a `MessageGroupId`: `message_group_id`, or by default
 `"tenant_id/source_id"` (`"/source_id"` without a tenant), the scope of the
-Kafka sink's default key: messages in one group are received in the order
-Ankusa sent them, which is not the order the hooks arrived. See
-[Deliveries are not ordered](#the-dispatch-pipeline); dedupe on
-`idempotency_key`. Its
+Kafka sink's default key. With `ordered: true` the group is the lane's key
+instead (see [Ordering lanes](#ordering-lanes); a standard queue is rejected at
+load), sent one message at a time, so SQS shows the consumer the lane's order;
+the key also travels as the `ankusa_ordering_key` attribute. Without it, messages
+in one group are received in the order Ankusa sent them, which is not the order
+the hooks arrived; dedupe on `idempotency_key`. Its
 `MessageDeduplicationId` is the hook's `id`, or `id:replay:<replay_id>` on a
 replay (the `Nats-Msg-Id` rule), so SQS collapses a retry after a lost
 response while a deliberate replay is stored. SQS's deduplication window is
@@ -1045,11 +1062,68 @@ left out when the hook has no tenant. Pub/Sub counts attributes and the
 ordering key toward the size limit, so `max_message_bytes` checks all three
 with the data.
 
-**Ordering is opt-in.** With `ordering_key` set, the message carries an
+**Ordering is opt-in.** With `ordered: true` (see
+[Ordering lanes](#ordering-lanes)) the message carries the lane's key as its
 `orderingKey`, which orders delivery only on a subscription with message
 ordering enabled, published through one regional endpoint, and caps that key's
-throughput at about 1 MB/s. Ankusa's own deliveries are unordered (see
-[`Ankusa.Sink`](#ankusasink)), so no key is sent by default.
+throughput at about 1 MB/s. The sink's own `ordering_key` (a string or function)
+keeps its meaning on an unordered sink and sends a key on every message, but
+Ankusa's own deliveries are then unordered (see [`Ankusa.Sink`](#ankusasink)).
+No key is sent by default.
+
+## Ordering lanes
+
+Opt-in, per sink entry of a source (ADR
+[0004](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0004-ordering-lanes.md)):
+
+```elixir
+sinks: [{Ankusa.Sink.Http, url: "...", ordered: true, ordering_key: {:header, "x-entity-id"}}]
+```
+
+`ordered: true` and `ordering_key`: `{:header, name}`, `{:json, "data.object.customer"}`
+(a dot path into the JSON body, read up to 1 MiB) or `{mod, fun, args}` (called
+as `apply(mod, fun, [envelope | args])`). In YAML: `ordered: true` and
+`ordering_key: {header: x-entity-id}` or `{json: data.object.customer}`.
+Without a key every hook of the sink is one lane. A hook whose key cannot be
+read goes to the sink's shared keyless lane and counts in
+`ankusa_dispatch_lane_key_missing_total{sink}`; an ordered sink never falls back
+to unordered.
+
+A lane is `{tenant, source, sink, key}`. The key is read at ingest, from the
+complete header list and the body, so a `{:header, name}` key must survive the
+source's `store_headers` policy (a source that drops or hashes it is rejected).
+`ordered: true` needs `wal.type` `disk` or `dual`, and on SQS a `.fifo` queue.
+
+Ankusa hands a lane's hooks to the sink **one at a time, each after the previous
+returned `:ok`**, in the order they were committed on this node (`seq`). Only the
+head of a lane is a due row or a claim; the hooks behind it wait in the store and
+hold no slot, window room or process. A retry or a breaker park blocks its own
+lane and nothing else; when the head is delivered or dead-lettered the next hook
+becomes the head, so a poison hook never holds its key forever (ordering is
+deliberately broken at that point; a replay re-enters the dead hook as a member).
+Lane state is in the store (`?O`, `?H`, `?P`, see [`storage.md`](storage.md)), so
+a restart keeps it: a claimed head is delivered again before any later hook (a
+duplicate, in order).
+
+What the destination guarantees is its own: `Sink.SQS` sends the key as
+`MessageGroupId`, `Sink.GooglePubSub` as `orderingKey`, `Sink.Kafka` as the
+record key, `Sink.Http` adds `x-ankusa-ordering-key`; `Sink.RabbitMQ`,
+`Sink.NATS` and `Sink.Redis` publish sequentially and carry the key as
+`ankusa_ordering_key` (a header, or the `ordering_key` field of the Redis body):
+consumer-side, documented, not enforced.
+
+A batching sink (`Sink.SQS`, `Sink.GooglePubSub`) still batches an ordered sink: the
+head of each lane waits in the destination's batcher like any attempt, so one
+request can carry the heads of many lanes but never two hooks of one lane (a lane
+has one head at a time), and the batcher's own per-group rule (one request in
+flight per `MessageGroupId` / `orderingKey`) holds the key (unverified: no test
+drives an ordered lane through a batcher).
+
+A lane's throughput is one delivery round trip per hook; a lane is blocked for as
+long as its head keeps retrying (up to `retry.max_elapsed_ms`). Order is per node
+and by `seq`: two nodes accepting hooks of one key have no common order, so route
+a key to one node. Metrics: `ankusa_dispatch_lanes`, `ankusa_dispatch_lanes_blocked`.
+
 
 ## `Ankusa.RetryPolicy`
 

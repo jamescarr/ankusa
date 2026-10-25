@@ -6,6 +6,11 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Sink.Redis`: a hook of an `ordered: true` sink carries the lane's key as
+  `ordering_key` in the message JSON (consumer-side ordering, ADR 0004).
+
 ## [0.6.0] - 2026-10-24
 
 ### Added

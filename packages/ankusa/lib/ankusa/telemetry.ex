@@ -26,8 +26,9 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :fleet, :breaker]` | — | `:instance`, `:state` (`:open`, `:closed`) |
   | `[:ankusa, :fleet, :fallback]` | — | `:instance`, `:kind`, `:reason` (`:breaker_open`, `:error`). One per hook a fleet call did not answer |
   | `[:ankusa, :fleet, :settle_dropped]` | `:count` | `:instance`, `:reason` (`:queue_full`, `:error`). Dedupe claim outcomes that were not delivered to the fleet store |
-  | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts`, `:sink`, `:source_id`, `:tenant_id` |
+  | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts`, `:sink`, `:source_id`, `:tenant_id`, `:ordered` (the delivery was a lane head of an `ordered: true` sink) |
   | `[:ankusa, :dispatch, :dlq]` | — | `:instance`, `:source_id`, `:tenant_id`, `:sink` |
+  | `[:ankusa, :dispatch, :lane_key_missing]` | — | `:instance`, `:sink`. One per hook of an `ordered: true` sink whose `ordering_key` yielded nothing (no such header, a body that is not JSON or is over 1 MiB, a missing path, an MFA that raised): the hook went into the sink's keyless lane; `ankusa_dispatch_lane_key_missing_total{sink}` |
   | `[:ankusa, :dispatch, :config_error]` | — | `:instance`, `:sink`, `:source_id`, `:tenant_id`. One per delivery dead-lettered as `{:permanent, {:config, _}}` (a credential or destination the sink's service refuses); `ankusa_dispatch_config_errors_total{sink}` |
   | `[:ankusa, :dispatch, :breaker]` | — | `:instance`, `:sink`, `:source_id`, `:tenant_id`, `:state` (`:open`, `:closed`) |
   | `[:ankusa, :sink, :headers_dropped]` | `:count` | `:instance`, `:source_id`, `:tenant_id`, `:reason` (`:count`: the source's `max_headers` was reached; `:bytes`: `forward_headers_max_bytes` would be passed). One per reason per message a sink built (`Ankusa.Sink.Message.forwarded_headers/2`) |
@@ -36,7 +37,7 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :store, :write_failed]` | `:count` | `:instance`, `:class` (`:no_space`, `:io_error`, `:read_only`, `:corruption`, `:busy`, `:other`; `Ankusa.Store.failure_class/1`), `:reason` (the raw term; never a label). One per failed store write a process reported, and per failed readiness probe |
   | `[:ankusa, :store, :reopened]` | `:duration` (the close plus the open: the WAL replay), `:unavailable_ms` (how long the store has been closed) | `:instance`, `:result` (`:ok`, `:error`, `:deferred`: put off because the disk still refuses a synced write, nothing closed, both measurements `0`), `:class` (why the open failed or was put off, `nil` on `:ok`). One per reopen attempt, whoever asked for it, including the store's own retries (5 s, doubling to 60 s, jittered) |
   | `[:ankusa, :store, :unavailable]` | `:seconds` (how long the store has been closed; `0` at boot and once open again) | `:instance`, `:class` (why the open failed, `:none` once open) |
-  | `[:ankusa, :queue, :state]` | `:pending` (first attempts waiting), `:scheduled` (retries waiting), `:inflight`, `:dead`, `:archive_pending`, `:claim_leases` (claim packs leased to live or just-reclaimed hooks), `:tenants`, `:oldest_due_age_ms` | `:instance` |
+  | `[:ankusa, :queue, :state]` | `:pending` (first attempts waiting), `:scheduled` (retries waiting), `:inflight`, `:dead`, `:archive_pending`, `:claim_leases` (claim packs leased to live or just-reclaimed hooks), `:lanes` (busy ordering lanes: a head due or claimed), `:lanes_blocked` (lane heads waiting out a retry or a breaker park), `:tenants`, `:oldest_due_age_ms` | `:instance` |
   | `[:ankusa, :tenant, :state]` | `:pending` (one event per tenant of the top 100 by pending) | `:instance`, `:tenant` |
   | `[:ankusa, :quarantine, :state]` | `:bytes`, `:entries` | `:instance` |
   | `[:ankusa, :disk, :state]` | `:free_bytes`, `:total_bytes` | `:instance` |

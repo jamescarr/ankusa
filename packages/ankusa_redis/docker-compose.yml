@@ -20,3 +20,17 @@ services:
       interval: 2s
       timeout: 5s
       retries: 30
+
+  # Toxiproxy between the sink and the broker: `test/ankusa/sink/redis_faults_test.exs`
+  # (DEL-7) points the sink at :6400 instead of at the broker, and adds latency,
+  # drops and cut connections through the API on :8478. No other suite uses it.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    ports:
+      - "8478:8474"    # toxiproxy API
+      - "6400:6400"  # proxy to redis:6379 (client port)
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

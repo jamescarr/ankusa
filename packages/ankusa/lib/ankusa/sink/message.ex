@@ -36,7 +36,10 @@ defmodule Ankusa.Sink.Message do
        "sha256": "3bea8a9a07c1e8dc..."}
 
   `v` changes only when an existing field changes meaning or disappears.
-  Adding a field keeps `v: 1`; consumers must ignore keys they don't know.
+  Adding a field keeps `v: 1`; consumers must ignore keys they don't know. A hook of
+  an ordered sink (`Ankusa.Ordering`) also carries `ordering_key`, the key of its
+  lane (`"tenant/source"` for the sink's keyless lane): the only place a sink with
+  no headers, `Sink.Redis`, can show a consumer which lane a message is in.
 
   ## Size budget
 
@@ -123,22 +126,24 @@ defmodule Ankusa.Sink.Message do
   def encode(%Envelope{} = env, ctx, inline_max_bytes, max_bytes \\ @default_max_message_bytes)
       when is_integer(inline_max_bytes) and inline_max_bytes > 0 and is_integer(max_bytes) and
              max_bytes > 0 do
-    base = %{
-      v: 1,
-      id: env.id,
-      source_id: env.source_id,
-      tenant_id: env.tenant_id,
-      received_at: env.received_at,
-      content_type: env.content_type,
-      size: env.size,
-      dedupe_key: env.dedupe_key,
-      replay_id: Map.get(ctx, :replay_id),
-      idempotency_key: Envelope.idempotency_key(env),
-      verification: verification(env.verification),
-      headers: forwarded_headers(env, ctx),
-      traceparent: trace_value(env.trace, :traceparent),
-      tracestate: trace_value(env.trace, :tracestate)
-    }
+    base =
+      %{
+        v: 1,
+        id: env.id,
+        source_id: env.source_id,
+        tenant_id: env.tenant_id,
+        received_at: env.received_at,
+        content_type: env.content_type,
+        size: env.size,
+        dedupe_key: env.dedupe_key,
+        replay_id: Map.get(ctx, :replay_id),
+        idempotency_key: Envelope.idempotency_key(env),
+        verification: verification(env.verification),
+        headers: forwarded_headers(env, ctx),
+        traceparent: trace_value(env.trace, :traceparent),
+        tracestate: trace_value(env.trace, :tracestate)
+      }
+      |> put_ordering_key(ctx)
 
     cond do
       env.size > inline_max_bytes ->
@@ -186,10 +191,11 @@ defmodule Ankusa.Sink.Message do
   The metadata a queue sink carries outside the body, as `{name, value}` pairs in
   this order: `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
   `ankusa_message_version` ("1"), `ankusa_idempotency_key`, `content_type`
-  ("application/json"), `ankusa_dedupe_key`, `ankusa_replay_id`. A pair whose value
-  is `nil` or `""` is left out (no tenant, no dedupe key, not a replay). A hook
-  that carries a trace context (`Ankusa.Trace`) adds `traceparent` and, when it
-  has one, `tracestate`, last.
+  ("application/json"), `ankusa_dedupe_key`, `ankusa_replay_id`,
+  `ankusa_ordering_key` (the lane's key, of a hook of an ordered sink). A pair
+  whose value is `nil` or `""` is left out (no tenant, no dedupe key, not a
+  replay, not ordered). A hook that carries a trace context (`Ankusa.Trace`)
+  adds `traceparent` and, when it has one, `tracestate`, last.
   """
   @spec attributes(Envelope.t(), Ankusa.Sink.ctx()) :: [{String.t(), String.t()}]
   def attributes(%Envelope{} = env, ctx) do
@@ -201,7 +207,8 @@ defmodule Ankusa.Sink.Message do
       {"ankusa_idempotency_key", Envelope.idempotency_key(env)},
       {"content_type", "application/json"},
       {"ankusa_dedupe_key", env.dedupe_key},
-      {"ankusa_replay_id", ctx[:replay_id]}
+      {"ankusa_replay_id", ctx[:replay_id]},
+      {"ankusa_ordering_key", ctx[:ordering_key]}
     ]
     |> Enum.filter(fn {_name, value} -> is_binary(value) and value != "" end)
     |> Kernel.++(trace_pairs(env.trace))
@@ -232,12 +239,18 @@ defmodule Ankusa.Sink.Message do
       for(
         {name, value} <- [
           {"ankusa_dedupe_key", env.dedupe_key},
-          {"ankusa_replay_id", ctx[:replay_id]}
+          {"ankusa_replay_id", ctx[:replay_id]},
+          {"ankusa_ordering_key", ctx[:ordering_key]}
         ],
         is_binary(value),
         do: {name, value}
       ) ++ trace_pairs(env.trace)
   end
+
+  defp put_ordering_key(base, %{ordering_key: key}) when is_binary(key),
+    do: Map.put(base, :ordering_key, key)
+
+  defp put_ordering_key(base, _ctx), do: base
 
   # The W3C trace context of the hook, as the pairs a broker carries natively
   # (Kafka and NATS headers, SQS and Pub/Sub attributes): `traceparent`, and
