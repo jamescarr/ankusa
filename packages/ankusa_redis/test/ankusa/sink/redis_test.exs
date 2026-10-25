@@ -85,6 +85,22 @@ defmodule Ankusa.Sink.RedisTest do
     assert Base.decode64!(decoded["body_base64"]) == env.body
   end
 
+  test "an ordered sink's message carries the lane's key, and a plain one does not", %{
+    instance: inst,
+    channel: channel
+  } do
+    {ps, ref} = subscribe!(channel)
+    ordered = Map.merge(ctx(inst), %{ordering_key: "cus_1", lane: "abc"})
+
+    assert :ok = deliver(envelope(), ordered, url: @url, channel: channel)
+    assert_receive {:redix_pubsub, ^ps, ^ref, :message, %{payload: payload}}, 2_000
+    assert JSON.decode!(payload)["ordering_key"] == "cus_1"
+
+    assert :ok = deliver(envelope(), ctx(inst), url: @url, channel: channel)
+    assert_receive {:redix_pubsub, ^ps, ^ref, :message, %{payload: payload}}, 2_000
+    refute Map.has_key?(JSON.decode!(payload), "ordering_key")
+  end
+
   test "a publish nobody is subscribed to is an error, not a delivered hook", %{
     instance: inst,
     channel: channel
