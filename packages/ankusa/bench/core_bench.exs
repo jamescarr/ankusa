@@ -8,7 +8,16 @@
 # (port 4000) outside `:test`.
 #
 # Env knobs: N (20000), CONCURRENCY (256), SINK_LATENCY_MS (5), BODY_BYTES (512),
-# ORDERED (0; 1 makes the sink an ordered lane sink over 64 keys).
+# ORDERED (0; 1 makes the sink an ordered lane sink over 64 keys),
+# STUB_INGEST (0; 1 answers every request at once instead of calling
+# `Ankusa.Edge.Ingest.ingest/2`: what the harness itself can drive, not a
+# measurement of Ankusa; the drain is skipped).
+#
+# Harness: every request (body included) is built once, before the clock
+# starts, and CONCURRENCY long-lived client processes claim the next one off a
+# shared counter. The timed section is the `ingest/2` call and an atomic
+# counter bump, so at 10 KB the harness does not cap what the code under test
+# can show (a body build and a `Task` per item cost ~60 µs of CPU each).
 #
 # Prints one JSON line (`ingest_per_s`, `p50_ms`, `p99_ms`, `end_to_end_per_s`,
 # ... — `p50_ms`/`p99_ms` are the ingest latency percentiles; `mise run
@@ -26,6 +35,54 @@ defmodule Bench.Sink do
   end
 end
 
+defmodule Bench.Client do
+  @moduledoc false
+  # One long-lived client of the closed loop: waits for `:go`, then claims
+  # request indexes off `counter` until `n` is spent and calls ingest with each,
+  # timing only that call. Requests are the prebuilt tuple in `:persistent_term`
+  # (a read is O(1) and copies nothing).
+
+  def start(parent, counter, n, stub?) do
+    spawn_link(fn ->
+      requests = :persistent_term.get({__MODULE__, :requests})
+
+      receive do
+        :go -> :ok
+      end
+
+      {latencies, acked, ids} = loop(requests, counter, n, stub?, [], 0, [])
+      send(parent, {:done, self(), System.monotonic_time(:microsecond), latencies, acked, ids})
+    end)
+  end
+
+  defp loop(requests, counter, n, stub?, latencies, acked, ids) do
+    case :atomics.add_get(counter, 1, 1) do
+      i when i > n ->
+        {latencies, acked, ids}
+
+      i ->
+        request = elem(requests, i - 1)
+        t0 = System.monotonic_time(:microsecond)
+
+        result =
+          if stub?, do: {:ok, request}, else: Ankusa.Edge.Ingest.ingest(:bench, request)
+
+        latency_us = System.monotonic_time(:microsecond) - t0
+
+        case result do
+          {:ok, _env} when stub? ->
+            loop(requests, counter, n, stub?, [latency_us | latencies], acked + 1, ids)
+
+          {:ok, env} ->
+            loop(requests, counter, n, stub?, [latency_us | latencies], acked + 1, [env.id | ids])
+
+          _other ->
+            loop(requests, counter, n, stub?, [latency_us | latencies], acked, ids)
+        end
+    end
+  end
+end
+
 Logger.configure(level: :warning)
 
 n = String.to_integer(System.get_env("N", "20000"))
@@ -36,6 +93,7 @@ body_bytes = String.to_integer(System.get_env("BODY_BYTES", "512"))
 # `x-entity` header that cycles through 64 keys, so 64 lanes run concurrently.
 ordered? = System.get_env("ORDERED") in ["1", "true"]
 lane_keys = 64
+stub? = System.get_env("STUB_INGEST") in ["1", "true"]
 
 :ets.new(:bench_delivered, [:set, :public, :named_table])
 
@@ -76,50 +134,47 @@ config =
 
 {:ok, instance_sup} = Ankusa.Instance.start_link(config)
 
-# ── ingest ──────────────────────────────────────────────────────────────────
+# ── requests, built before the clock ────────────────────────────────────────
 
-ingest_start_us = System.monotonic_time(:microsecond)
+pad = String.duplicate("x", body_bytes)
 
-results =
-  1..n
-  |> Task.async_stream(
-    fn i ->
-      body =
+requests =
+  for i <- 1..n do
+    %{
+      source_id: "bench",
+      method: "POST",
+      path: "/webhooks/bench",
+      headers: if(ordered?, do: [{"x-entity", "k#{rem(i, lane_keys)}"}], else: []),
+      body:
         Jason.encode!(%{
           "id" => "bench-#{i}-#{:erlang.unique_integer([:positive])}",
-          "pad" => String.duplicate("x", body_bytes)
+          "pad" => pad
         })
+    }
+  end
 
-      t0 = System.monotonic_time(:microsecond)
+:persistent_term.put({Bench.Client, :requests}, List.to_tuple(requests))
+:erlang.garbage_collect()
 
-      result =
-        Ankusa.Edge.Ingest.ingest(:bench, %{
-          source_id: "bench",
-          method: "POST",
-          path: "/webhooks/bench",
-          headers: if(ordered?, do: [{"x-entity", "k#{rem(i, lane_keys)}"}], else: []),
-          body: body
-        })
+# ── ingest ──────────────────────────────────────────────────────────────────
 
-      {System.monotonic_time(:microsecond) - t0, result}
-    end,
-    max_concurrency: concurrency,
-    ordered: false,
-    timeout: :infinity
-  )
-  |> Enum.map(fn {:ok, value} -> value end)
+counter = :atomics.new(1, signed: false)
+clients = for _ <- 1..concurrency, do: Bench.Client.start(self(), counter, n, stub?)
 
-ingest_end_us = System.monotonic_time(:microsecond)
+ingest_start_us = System.monotonic_time(:microsecond)
+Enum.each(clients, &send(&1, :go))
 
-{latencies_us, acked_ids} =
-  Enum.reduce(results, {[], []}, fn {latency_us, result}, {lats, ids} ->
-    case result do
-      {:ok, env} -> {[latency_us | lats], [env.id | ids]}
-      _other -> {[latency_us | lats], ids}
+done =
+  Enum.map(clients, fn pid ->
+    receive do
+      {:done, ^pid, end_us, latencies, acked, ids} -> {end_us, latencies, acked, ids}
     end
   end)
 
-acked = length(acked_ids)
+ingest_end_us = done |> Enum.map(&elem(&1, 0)) |> Enum.max()
+latencies_us = Enum.flat_map(done, &elem(&1, 1))
+acked = done |> Enum.map(&elem(&1, 2)) |> Enum.sum()
+acked_ids = Enum.flat_map(done, &elem(&1, 3))
 ingest_s = (ingest_end_us - ingest_start_us) / 1_000_000
 
 # ── drain ───────────────────────────────────────────────────────────────────
@@ -136,7 +191,8 @@ wait_for_drain = fn wait_for_drain ->
   end
 end
 
-drain_result = wait_for_drain.(wait_for_drain)
+# A stubbed run delivered nothing, so there is nothing to wait for.
+drain_result = if stub?, do: {:ok, ingest_end_us}, else: wait_for_drain.(wait_for_drain)
 
 drain_end_us =
   if drain_result == :timeout,
