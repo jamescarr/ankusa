@@ -6,8 +6,6 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-10-24
-
 ### Added
 
 - **Readiness keys (OPS-5).** `node.min_free_bytes` (unset): `/ready` answers `503`
@@ -18,6 +16,10 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   a label that never makes the node unready. See `config-examples/reference.yml`.
   `/ready`'s body now lists every check with `ok`/`failing`/`draining` and
   `reasons` (see the `ankusa` changelog for the wire change).
+
+## [0.7.0] - 2026-10-24
+
+### Added
 
 - **Forwarded-header caps and sink message limits (DEL-5).** A source takes
   `max_headers` (default 64) and `forward_headers_max_bytes` (default 16384):
