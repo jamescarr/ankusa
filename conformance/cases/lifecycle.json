@@ -464,6 +464,40 @@
           "field": "id"
         }
       }
+    },
+    {
+      "id": "lifecycle.decode.source_deleted_last_state",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a005\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.deleted\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:31:00.456Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"scheme\":\"hmac\",\"secret\":\"[REDACTED]\"}},\"revision\":3,\"actor\":\"admin\",\"instance\":\"default\",\"sequence\":\"45\"}"
+      },
+      "expect": {
+        "ok": {
+          "specversion": "1.0",
+          "id": "0193a2b4-7c2e-7000-8000-00000000a005",
+          "source": "urn:ankusa:instance:default",
+          "type": "io.ankusa.source.deleted",
+          "subject": "acme.stripe",
+          "time": "2026-10-25T09:31:00.456Z",
+          "datacontenttype": "application/json",
+          "data": {
+            "id": "acme.stripe",
+            "tenant_id": "acme",
+            "verifier": {
+              "scheme": "hmac",
+              "secret": "[REDACTED]"
+            }
+          },
+          "revision": 3,
+          "actor": "admin",
+          "instance": "default",
+          "sequence": "45",
+          "replayid": null,
+          "traceparent": null,
+          "tracestate": null
+        }
+      }
     }
   ]
 }

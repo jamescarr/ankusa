@@ -10,7 +10,8 @@ defmodule Ankusa.AsyncApi do
   ## What it is built from
 
   Each source in `Ankusa.SourceStore` contributes one entry per sink that
-  implements `c:Ankusa.Sink.describe/2`: the Kafka, RabbitMQ, NATS, and Redis
+  implements `c:Ankusa.Sink.describe/2`: the Kafka, RabbitMQ, NATS, Redis, SQS,
+  and Google Pub/Sub
   sinks. `Ankusa.Sink.Log` has no channel to advertise, and `Ankusa.Sink.Http`
   describes a destination that carries the provider's raw body (`payload:
   :body`), not the envelope this document describes: both are left out. When
@@ -31,6 +32,27 @@ defmodule Ankusa.AsyncApi do
 
   The document describes the envelope, not the hook: the provider's own body is
   opaque bytes inside `body_base64`.
+
+  ## Headers by transport
+
+  Beside the JSON body every transport carries the same identity in its own
+  metadata, so a consumer can dedupe or route without decoding the body. A
+  message whose sink carries the `ankusa_*` set (`Ankusa.Sink.Description`'s
+  `ankusa_headers`) references `SinkMessageHeadersV1`; the others have no
+  `headers` object.
+
+  | Transport | Metadata | `ankusa_tenant_id` without a tenant |
+  | --- | --- | --- |
+  | Kafka, NATS | record / message headers, `Ankusa.Sink.Message.headers/2` (NATS adds `Nats-Msg-Id`) | `""` |
+  | SQS, Google Pub/Sub | message attributes, `Ankusa.Sink.Message.attributes/2` | absent (both refuse an empty value) |
+  | RabbitMQ | AMQP `message_id` and the `ankusa_idempotency_key`, `ankusa_dedupe_key`, `ankusa_replay_id`, `ankusa_ordering_key` headers; not described by the schema | not sent |
+  | Redis pub/sub | none: the body is all there is | not sent |
+  | HTTP | `x-ankusa-*` request headers (`Ankusa.Sink.Http`); not in this document, the body is the provider's | `x-ankusa-tenant` absent |
+
+  `SinkMessageHeadersV1` requires only the names every described transport
+  sends (`ankusa_id`, `ankusa_source_id`, `ankusa_message_version`,
+  `ankusa_idempotency_key`, `content_type`); `ankusa_tenant_id` is optional, so a
+  consumer reads `tenant_id` from the body when the header is missing or empty.
 
   An instance that sets `region` (YAML `node.region`) says so in the document's
   `x-ankusa-region` extension; each message's `region` and `instance` fields say

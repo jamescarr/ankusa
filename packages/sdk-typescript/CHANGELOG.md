@@ -8,6 +8,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Delivery metadata (CON-4).** `HookHeaders.receivedAt` (when the edge accepted the hook, unix milliseconds, from `x-ankusa-received-at`) and `HookHeaders.bodySha256` (the lowercase hex SHA-256 of the body sent, from `x-ankusa-body-sha256`): `null` when the header is absent, empty or malformed, never an error.
+
 - **Wire-format evolution path (CON-2).** `decodeMessage` accepts every `v`
   from `MIN_SUPPORTED_VERSION` to `MAX_SUPPORTED_VERSION` (1 and 2, both
   exported) into the one `Message`, with `v` as the wire said it (now `number`,

@@ -27,6 +27,18 @@ export type HookHeaders = {
    * when absent or empty (a sender that predates the header).
    */
   idempotencyKey: string | null;
+  /**
+   * When the edge accepted the hook, in unix milliseconds, from
+   * `x-ankusa-received-at`; `null` when absent, empty or not 1 to 15 decimal
+   * digits (advisory: never an error).
+   */
+  receivedAt: number | null;
+  /**
+   * The lowercase hex SHA-256 of the body Ankusa sent, from
+   * `x-ankusa-body-sha256`; `null` when absent or not exactly 64 lowercase hex
+   * characters (advisory: never an error).
+   */
+  bodySha256: string | null;
   /** How Ankusa verified the hook at ingest; `null` when absent or empty. */
   verification: Verification | null;
 };
@@ -87,6 +99,8 @@ export function parseHeaders(headers: HeaderSource): HookHeaders {
     dedupeKey: lowered.get("x-ankusa-dedupe-key") || null,
     replayId: lowered.get("x-ankusa-replay-id") || null,
     idempotencyKey: lowered.get("x-ankusa-idempotency-key") || null,
+    receivedAt: parseReceivedAt(lowered.get("x-ankusa-received-at")),
+    bodySha256: parseBodySha256(lowered.get("x-ankusa-body-sha256")),
     verification: parseVerificationHeaders(lowered),
   };
 }
@@ -95,4 +109,14 @@ function parseVerificationHeaders(lowered: Map<string, string>): Verification | 
   const status = lowered.get("x-ankusa-verification");
   if (!status) return null;
   return { status, flagged: lowered.get("x-ankusa-verification-flagged") === "true" };
+}
+
+// Advisory metadata: a malformed value is `null`, never an error, so a sender
+// that predates the header, or sends something else, still parses.
+function parseReceivedAt(value: string | undefined): number | null {
+  return value !== undefined && /^[0-9]{1,15}$/.test(value) ? Number(value) : null;
+}
+
+function parseBodySha256(value: string | undefined): string | null {
+  return value !== undefined && /^[0-9a-f]{64}$/.test(value) ? value : null;
 }

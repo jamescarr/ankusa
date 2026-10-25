@@ -74,6 +74,29 @@ defmodule Ankusa.Sink.HttpTest do
     refute Map.has_key?(h, "x-ankusa-verification-flagged")
   end
 
+  test "a delivery carries when the edge accepted it and the SHA-256 of the body sent", %{
+    capture: capture
+  } do
+    env =
+      envelope(%{
+        headers: [{"x-ankusa-received-at", "1"}, {"x-ankusa-body-sha256", "forged"}]
+      })
+
+    assert :ok =
+             Sink.Http.deliver(env, %{attempt: 1, forward_headers: :default}, opts("/hooks"))
+
+    assert [{"POST", "/hooks", headers, body}] = Agent.get(capture, & &1)
+
+    assert [{"x-ankusa-received-at", "1737500000000"}] =
+             Enum.filter(headers, &(elem(&1, 0) == "x-ankusa-received-at"))
+
+    assert [{"x-ankusa-body-sha256", sha256}] =
+             Enum.filter(headers, &(elem(&1, 0) == "x-ankusa-body-sha256"))
+
+    assert sha256 == Base.encode16(:crypto.hash(:sha256, body), case: :lower)
+    assert sha256 =~ ~r/\A[0-9a-f]{64}\z/
+  end
+
   test "a hook accepted after a failed check is marked flagged, without the reason", %{
     capture: capture
   } do

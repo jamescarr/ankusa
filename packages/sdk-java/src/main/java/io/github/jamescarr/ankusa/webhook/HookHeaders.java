@@ -21,6 +21,12 @@ import org.jspecify.annotations.Nullable;
  * @param idempotencyKey the tenant-scoped key Ankusa computed for the hook, from {@code
  *     x-ankusa-idempotency-key}, or null when the header is absent or empty; read it through {@link
  *     #idempotencyKey(boolean)}
+ * @param receivedAt when the edge accepted the hook, in unix milliseconds, from {@code
+ *     x-ankusa-received-at}; null when the header is absent, empty or not 1 to 15 decimal digits
+ *     (advisory: never an error)
+ * @param bodySha256 the lowercase hex SHA-256 of the body Ankusa sent, from {@code
+ *     x-ankusa-body-sha256}; null when the header is absent or not exactly 64 lowercase hex
+ *     characters (advisory: never an error)
  * @param verification how Ankusa verified the hook at ingest, from {@code x-ankusa-verification}
  *     and {@code x-ankusa-verification-flagged}, or null when the header is absent or empty
  */
@@ -32,6 +38,8 @@ public record HookHeaders(
     @Nullable String dedupeKey,
     @Nullable String replayId,
     @Nullable String idempotencyKey,
+    @Nullable Long receivedAt,
+    @Nullable String bodySha256,
     @Nullable Verification verification) {
 
   /**
@@ -62,7 +70,37 @@ public record HookHeaders(
         nonEmpty(lookup.apply("x-ankusa-dedupe-key")),
         nonEmpty(lookup.apply("x-ankusa-replay-id")),
         nonEmpty(lookup.apply("x-ankusa-idempotency-key")),
+        parseReceivedAt(lookup.apply("x-ankusa-received-at")),
+        parseBodySha256(lookup.apply("x-ankusa-body-sha256")),
         parseVerification(lookup));
+  }
+
+  /** 1 to 15 ASCII decimal digits as a long, else null. */
+  private static @Nullable Long parseReceivedAt(@Nullable String value) {
+    if (value == null || value.isEmpty() || value.length() > 15) {
+      return null;
+    }
+    for (int i = 0; i < value.length(); i++) {
+      char c = value.charAt(i);
+      if (c < '0' || c > '9') {
+        return null;
+      }
+    }
+    return Long.parseLong(value);
+  }
+
+  /** Exactly 64 lowercase hex characters, else null. */
+  private static @Nullable String parseBodySha256(@Nullable String value) {
+    if (value == null || value.length() != 64) {
+      return null;
+    }
+    for (int i = 0; i < value.length(); i++) {
+      char c = value.charAt(i);
+      if ((c < '0' || c > '9') && (c < 'a' || c > 'f')) {
+        return null;
+      }
+    }
+    return value;
   }
 
   /** Reads {@code x-ankusa-verification}/{@code x-ankusa-verification-flagged}, or null. */

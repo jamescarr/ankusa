@@ -461,7 +461,9 @@ policy dropped at ingest is not in the stored hook at all, so no
 `X-GitHub-Delivery` or `webhook-id` reaches the consumer as a forwarded header,
 and as `dedupe_key` when the source extracts it. `Sink.Http` adds its own
 `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-idempotency-key`,
-`x-ankusa-verification` and (when set) `x-ankusa-tenant`, `x-ankusa-dedupe-key`
+`x-ankusa-verification`, `x-ankusa-received-at` (unix milliseconds, the
+message's `received_at`), `x-ankusa-body-sha256` (the lowercase hex SHA-256 of
+the body sent) and (when set) `x-ankusa-tenant`, `x-ankusa-dedupe-key`
 and `x-ankusa-replay-id`; a message carries `id`, `source_id`, `tenant_id`,
 `received_at`, `content_type`, `size`, `sha256`, `dedupe_key`, `replay_id`,
 `idempotency_key`, `verification`, `headers` and the body (or claim).
@@ -503,6 +505,54 @@ the object and a trust check that is `true` only for `ok` and not flagged
 (`isTrusted`, `is_trusted`, `Trusted()`, `trusted?`; see
 [`integrations.md`](integrations.md#signed-deliveries)); the
 conformance features are `message.verification` and `webhook.verification`.
+
+### Consumer failure policy
+
+Delivery is at-least-once, and so is a consumer's retry: a message a consumer
+requeues comes back unchanged. That is right for a failure that can pass (the
+claim gateway is down, the database is busy) and wrong for input that cannot
+(the same bytes fail the same way every time, and a requeue loop on one of
+them holds a partition or a queue's head). So every failure a consumer meets
+is one of two kinds, and every SDK says which with one bit, `retryable`:
+
+| What the consumer meets | Error (every SDK) | `retryable` | Do |
+| --- | --- | --- | --- |
+| a message or lifecycle event that is not JSON (empty and truncated included), not an object, or has a field of the wrong type | `InvalidMessageError`, `code` `invalid_json`, `not_an_object`, `invalid_field` (with `field`) | `false` | terminal queue, counted |
+| a message with a `v` the SDK does not accept, or a lifecycle event whose `specversion` is not `1.0` | `InvalidMessageError`, `code` `unsupported_version` | `false` | terminal queue, counted; the consumer is older than the producer |
+| a body that contradicts its own metadata: both or neither of `body_base64` and `claim`, bad base64, a `size` or `sha256` that does not match, a claim of another tenant | `InvalidMessageError`, `code` `ambiguous_body`, `missing_body`, `invalid_body_base64`, `size_mismatch`, `integrity`, `tenant_mismatch` | `false` | terminal queue, counted |
+| a claim ref that does not parse, a claim the gateway no longer has (`404`) or refuses (`4xx`), bytes that fail the `sha256` | `InvalidClaimRefError`, `ClaimNotFoundError`, `ClaimRejectedError`, `ClaimIntegrityError` | `false` | terminal queue, counted |
+| an HTTP delivery whose signature does not verify | `InvalidSignatureError` | `false` | answer `401`: the sink dead-letters it at once |
+| an HTTP delivery with no `x-ankusa-id` | `MissingHookIdError` | not an attribute of this error | answer `400`: the sink dead-letters it at once |
+| the claim gateway unreachable, `408`, `429`, `5xx` | `ClaimCheckUnavailableError` | `true` | requeue with a delay |
+| your own handler failing | yours | yours | HTTP: answer `503` and the sink retries; a queue: requeue |
+
+The rule behind the table: **a decode error or a version mismatch is
+permanent.** Retrying cannot change the bytes, so the consumer sends the message
+to its terminal queue (the broker's dead-letter queue, a table, a log
+topic) with the error's `code` and `field`, acks the original, and moves on.
+Never requeue on `retryable: false`, and never drop it silently:
+
+- **Count it.** Count terminal-queue arrivals by `code` (a stable, small set,
+  safe as a metric label). A rate of `unsupported_version` means the consumer
+  is older than the producer: upgrade consumers before moving a producer to a
+  new wire version (additive fields within the versions the SDK accepts never
+  trigger it). Any other `code` means a producer or a transport is writing
+  bytes Ankusa did not.
+- **Keep the bytes.** The terminal queue holds the original message, so a fixed
+  consumer can replay it; the idempotency key (`x-ankusa-idempotency-key`, the
+  message's `idempotency_key`) makes a second pass harmless.
+- **Answer an HTTP poison body with a permanent status, not a `5xx`.**
+  `Sink.Http` dead-letters `400`, `401`, `403`, `404`, `410`, `413`, `422` and
+  `451` at once (see the status table under [`Ankusa.Sink`](#ankusasink)) and
+  retries `408`, `429` and `5xx`. A consumer that answers `500` for a body it
+  can never accept is asking for the same delivery again until `dispatch.retry`
+  gives up.
+
+The conformance vectors pin the permanent half for every SDK: the
+`consumer.failure_policy` feature (`conformance/cases/failure_policy.json`)
+decodes empty, truncated, non-object and future-version input and expects
+`retryable: false`, and `check.mjs` fails any case that expects
+`InvalidMessageError` or `InvalidSignatureError` without it.
 
 ### `Sink.RabbitMQ`: queue delivery
 

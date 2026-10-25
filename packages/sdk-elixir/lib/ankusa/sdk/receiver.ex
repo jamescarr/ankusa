@@ -217,7 +217,7 @@ defmodule Ankusa.SDK.Receiver do
       tenant_id: headers.tenant,
       content_type: headers.content_type,
       body: body,
-      received_at: nil,
+      received_at: headers.received_at,
       size: byte_size(body),
       dedupe_key: headers.dedupe_key,
       replay_id: headers.replay_id,

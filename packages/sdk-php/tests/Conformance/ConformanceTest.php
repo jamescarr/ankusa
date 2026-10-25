@@ -302,6 +302,8 @@ final class ConformanceTest extends TestCase
             'dedupe_key' => $headers->dedupeKey,
             'replay_id' => $headers->replayId,
             'idempotency_key' => $headers->idempotencyKey,
+            'received_at' => $headers->receivedAt,
+            'body_sha256' => $headers->bodySha256,
             'verification' => self::verificationArray($headers->verification),
         ];
     }
@@ -381,7 +383,7 @@ final class ConformanceTest extends TestCase
     /**
      * @param array<string, mixed> $inp
      *
-     * @return array{id: string, source: string, tenant: string|null, content_type: string|null, dedupe_key: string|null, replay_id: string|null, idempotency_key: string|null}
+     * @return array{id: string, source: string, tenant: string|null, content_type: string|null, dedupe_key: string|null, replay_id: string|null, idempotency_key: string|null, received_at: int|null, body_sha256: string|null}
      */
     private static function hookHeaders(array $inp): array
     {
@@ -395,6 +397,8 @@ final class ConformanceTest extends TestCase
             'dedupe_key' => $headers->dedupeKey,
             'replay_id' => $headers->replayId,
             'idempotency_key' => $headers->idempotencyKey,
+            'received_at' => $headers->receivedAt,
+            'body_sha256' => $headers->bodySha256,
             'verification' => self::verificationArray($headers->verification),
         ];
     }

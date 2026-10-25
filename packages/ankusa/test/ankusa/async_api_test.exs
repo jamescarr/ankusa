@@ -159,7 +159,9 @@ defmodule Ankusa.AsyncApiTest do
              }
            }
 
-    refute Map.has_key?(channel["messages"]["stripe"], "headers")
+    assert channel["messages"]["stripe"]["headers"] == %{
+             "$ref" => "#/components/schemas/SinkMessageHeadersV1"
+           }
   end
 
   test "a Google Pub/Sub sink is a googlepubsub server and a topic channel with the ordering key" do
@@ -190,7 +192,67 @@ defmodule Ankusa.AsyncApiTest do
              "googlepubsub" => %{"orderingKey" => "k", "bindingVersion" => "0.2.0"}
            }
 
-    refute Map.has_key?(message, "headers")
+    assert message["headers"] == %{"$ref" => "#/components/schemas/SinkMessageHeadersV1"}
+  end
+
+  describe "SinkMessageHeadersV1" do
+    alias Ankusa.{Envelope, Sink.Message}
+
+    defp header_schema do
+      map =
+        document_map(
+          source_store: static(%{"stripe" => source(address: "ankusa.hooks", headers: true)})
+        )
+
+      map["components"]["schemas"]["SinkMessageHeadersV1"]
+    end
+
+    defp hook(overrides) do
+      struct(
+        %Envelope{
+          id: "01JABC",
+          source_id: "stripe",
+          tenant_id: nil,
+          received_at: 1_737_500_000_000,
+          method: "POST",
+          path: "/hooks/stripe",
+          headers: [],
+          content_type: "application/json",
+          body: "{}",
+          size: 2
+        },
+        overrides
+      )
+    end
+
+    test "ankusa_tenant_id is described but not required" do
+      schema = header_schema()
+
+      refute "ankusa_tenant_id" in schema["required"]
+      assert schema["properties"]["ankusa_tenant_id"]["type"] == "string"
+      assert schema["properties"]["ankusa_ordering_key"]["type"] == "string"
+    end
+
+    test "every header set a described transport sends satisfies the required names" do
+      schema = header_schema()
+
+      for tenant_id <- [nil, "acme"],
+          set <- [&Message.headers/2, &Message.attributes/2] do
+        names = hook(%{tenant_id: tenant_id}) |> set.(%{}) |> Enum.map(&elem(&1, 0))
+
+        assert schema["required"] -- names == [],
+               "#{inspect(set)} with tenant #{inspect(tenant_id)} lacks #{inspect(schema["required"] -- names)}"
+
+        assert names -- Map.keys(schema["properties"]) == []
+      end
+    end
+
+    test "the tenantless attribute set leaves ankusa_tenant_id out, the header set sends it empty" do
+      env = hook(%{})
+
+      refute List.keymember?(Message.attributes(env, %{}), "ankusa_tenant_id", 0)
+      assert {"ankusa_tenant_id", ""} in Message.headers(env, %{})
+    end
   end
 
   test "an address a function computes per hook is a channel of its own, with no address" do

@@ -24,6 +24,14 @@ pub struct HookHeaders<'a> {
     /// the hook. `None` when the header is absent or empty (a sender that
     /// predates it). Read it through [`HookHeaders::idempotency_key`].
     pub idempotency_key: Option<&'a str>,
+    /// `x-ankusa-received-at`: when the edge accepted the hook, unix
+    /// milliseconds. `None` when the header is absent, empty or not 1 to 15
+    /// decimal digits (advisory: never an error).
+    pub received_at: Option<u64>,
+    /// `x-ankusa-body-sha256`: the lowercase hex SHA-256 of the body Ankusa
+    /// sent. `None` when the header is absent or not exactly 64 lowercase hex
+    /// characters (advisory: never an error).
+    pub body_sha256: Option<&'a str>,
     /// How Ankusa verified the hook at ingest; `None` when the
     /// `x-ankusa-verification` header is absent or empty.
     pub verification: Option<Verification>,
@@ -109,6 +117,8 @@ pub fn parse_headers(headers: &http::HeaderMap) -> Result<HookHeaders<'_>, Missi
         replay_id: header(headers, "x-ankusa-replay-id").filter(|value| !value.is_empty()),
         idempotency_key: header(headers, "x-ankusa-idempotency-key")
             .filter(|value| !value.is_empty()),
+        received_at: header(headers, "x-ankusa-received-at").and_then(received_at),
+        body_sha256: header(headers, "x-ankusa-body-sha256").filter(|value| is_sha256_hex(value)),
         verification: header(headers, "x-ankusa-verification")
             .filter(|value| !value.is_empty())
             .map(|status| Verification {
@@ -120,6 +130,21 @@ pub fn parse_headers(headers: &http::HeaderMap) -> Result<HookHeaders<'_>, Missi
 
 fn header<'a>(headers: &'a http::HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name)?.to_str().ok()
+}
+
+fn received_at(value: &str) -> Option<u64> {
+    if (1..=15).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        value.parse().ok()
+    } else {
+        None
+    }
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// A delivery with no (or an empty) `x-ankusa-id` header.
@@ -196,6 +221,28 @@ mod tests {
         assert_eq!(parsed.dedupe_key, None);
         assert_eq!(parsed.replay_id, None);
         assert_eq!(parsed.idempotency_key(true), "01a0");
+    }
+
+    #[test]
+    fn delivery_metadata_is_parsed_and_malformed_is_none() {
+        let sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let map = headers(&[
+            ("x-ankusa-id", "01a0"),
+            ("x-ankusa-received-at", "1720000000000"),
+            ("x-ankusa-body-sha256", sha256),
+        ]);
+        let parsed = parse_headers(&map).expect("id present");
+        assert_eq!(parsed.received_at, Some(1_720_000_000_000));
+        assert_eq!(parsed.body_sha256, Some(sha256));
+
+        let malformed = headers(&[
+            ("x-ankusa-id", "01a0"),
+            ("x-ankusa-received-at", "-1"),
+            ("x-ankusa-body-sha256", "ABC"),
+        ]);
+        let parsed = parse_headers(&malformed).expect("id present");
+        assert_eq!(parsed.received_at, None);
+        assert_eq!(parsed.body_sha256, None);
     }
 
     #[test]

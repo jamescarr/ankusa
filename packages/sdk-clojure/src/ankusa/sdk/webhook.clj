@@ -13,6 +13,8 @@
   | `x-ankusa-dedupe-key` | `:dedupe-key` | `nil` (also when empty) |
   | `x-ankusa-replay-id` | `:replay-id` | `nil` (also when empty) |
   | `x-ankusa-idempotency-key` | `:idempotency-key` | `nil` (also when empty) |
+  | `x-ankusa-received-at` | `:received-at` | `nil` (absent, empty, or not 1 to 15 decimal digits); unix milliseconds the edge accepted the hook |
+  | `x-ankusa-body-sha256` | `:body-sha256` | `nil` (absent, or not exactly 64 lowercase hex characters); the SHA-256 of the body sent |
   | `x-ankusa-verification` / `x-ankusa-verification-flagged` | `:verification` | `nil` (also when the status header is empty) |
 
   The result also carries every request header under `:headers`, lowercased, so
@@ -38,13 +40,29 @@
     (when status
       {:status status :flagged (= "true" (get h "x-ankusa-verification-flagged"))})))
 
+(defn- parse-received-at
+  "The `x-ankusa-received-at` header as a long when it is 1 to 15 decimal
+  digits and nothing else, otherwise `nil` (advisory: never an error)."
+  [h]
+  (when-let [s (get h "x-ankusa-received-at")]
+    (when (re-matches #"[0-9]{1,15}" s)
+      (parse-long s))))
+
+(defn- parse-body-sha256
+  "The `x-ankusa-body-sha256` header when it is exactly 64 lowercase hex
+  characters, otherwise `nil` (advisory: never an error)."
+  [h]
+  (when-let [s (get h "x-ankusa-body-sha256")]
+    (when (re-matches #"[0-9a-f]{64}" s)
+      s)))
+
 (defn parse-headers
   "Parse the Ankusa headers out of `headers`: a map (Ring's `:headers`) or a
   seq of `[name value]` pairs. Names are strings or keywords and are matched
   case-insensitively; values may be strings, numbers, booleans, or keywords.
 
   Returns `{:id :source :tenant :content-type :dedupe-key :replay-id
-  :idempotency-key :verification :headers}`, or throws
+  :idempotency-key :received-at :body-sha256 :verification :headers}`, or throws
   `:ankusa.sdk/MissingHookIdError` when `x-ankusa-id` is absent or empty."
   [headers]
   (let [h (normalize headers)
@@ -58,6 +76,8 @@
      :dedupe-key (non-empty h "x-ankusa-dedupe-key")
      :replay-id (non-empty h "x-ankusa-replay-id")
      :idempotency-key (non-empty h "x-ankusa-idempotency-key")
+     :received-at (parse-received-at h)
+     :body-sha256 (parse-body-sha256 h)
      :verification (parse-verification h)
      :headers h}))
 

@@ -74,6 +74,14 @@ class HookHeaders:
     # The tenant-scoped key to dedupe on, from ``x-ankusa-idempotency-key``;
     # None when absent or empty (a sender that predates the header).
     idempotency_key: str | None
+    # When the edge accepted the hook, unix milliseconds, from
+    # ``x-ankusa-received-at``; None when absent, empty or not 1 to 15 decimal
+    # digits (advisory: never an error).
+    received_at: int | None
+    # The lowercase hex SHA-256 of the body Ankusa sent, from
+    # ``x-ankusa-body-sha256``; None when absent or not exactly 64 lowercase
+    # hex characters (advisory: never an error).
+    body_sha256: str | None
     # How Ankusa verified the hook at ingest; None when absent or empty.
     verification: Verification | None
 
@@ -102,8 +110,18 @@ def parse_headers(headers: Mapping[str, str]) -> HookHeaders:
         dedupe_key=lowered.get("x-ankusa-dedupe-key") or None,
         replay_id=lowered.get("x-ankusa-replay-id") or None,
         idempotency_key=lowered.get("x-ankusa-idempotency-key") or None,
+        received_at=_parse_received_at(lowered.get("x-ankusa-received-at")),
+        body_sha256=_parse_body_sha256(lowered.get("x-ankusa-body-sha256")),
         verification=_parse_verification_headers(lowered),
     )
+
+
+def _parse_received_at(value: str | None) -> int | None:
+    return int(value) if value is not None and re.fullmatch(r"[0-9]{1,15}", value) else None
+
+
+def _parse_body_sha256(value: str | None) -> str | None:
+    return value if value is not None and re.fullmatch(r"[0-9a-f]{64}", value) else None
 
 
 def _parse_verification_headers(lowered: Mapping[str, str]) -> Verification | None:

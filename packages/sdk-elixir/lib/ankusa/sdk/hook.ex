@@ -4,8 +4,8 @@ defmodule Ankusa.SDK.Hook do
   it.
 
   * Over HTTP (`Ankusa.Sink.Http` → `Ankusa.SDK.Receiver`) the body was just
-    read off the request; `received_at` is `nil`, because the HTTP sink does
-    not send it.
+    read off the request; `received_at` is the `x-ankusa-received-at` header
+    (unix milliseconds), or `nil` from a sink that predates it.
   * From a queue (`Ankusa.Sink.RabbitMQ`/`Kafka`/`NATS`/`Redis` →
     `Ankusa.SDK.Message.to_hook/2`) `received_at` is the sink's receive time in
     unix milliseconds.

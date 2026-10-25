@@ -275,7 +275,7 @@ defmodule Ankusa.Sink.GooglePubSubTest do
              address: "projects/p/topics/hooks",
              channel_bindings: %{"googlepubsub" => %{"bindingVersion" => "0.2.0"}},
              message_bindings: %{},
-             ankusa_headers: false
+             ankusa_headers: true
            } = GooglePubSub.describe(%{source_id: "stripe", tenant_id: "acme"}, opts())
 
     assert %Sink.Description{

@@ -156,6 +156,8 @@
                      "dedupe_key" (:dedupe-key result)
                      "replay_id" (:replay-id result)
                      "idempotency_key" (:idempotency-key result)
+                     "received_at" (:received-at result)
+                     "body_sha256" (:body-sha256 result)
                      "verification" (verification-json result)}
     "receive_delivery" {"verified" (:verified result)
                         "id" (:id result)
@@ -165,6 +167,8 @@
                         "dedupe_key" (:dedupe-key result)
                         "replay_id" (:replay-id result)
                         "idempotency_key" (:idempotency-key result)
+                        "received_at" (:received-at result)
+                        "body_sha256" (:body-sha256 result)
                         "verification" (verification-json result)}
     "decode_message" {"v" (:v result)
                       "id" (:id result)

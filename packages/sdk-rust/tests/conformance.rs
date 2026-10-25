@@ -305,6 +305,8 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
                 "dedupe_key": parsed.dedupe_key,
                 "replay_id": parsed.replay_id,
                 "idempotency_key": parsed.idempotency_key,
+                "received_at": parsed.received_at,
+                "body_sha256": parsed.body_sha256,
                 "verification": verification_json(parsed.verification.as_ref()),
             }))
         }
@@ -319,6 +321,8 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
                 "dedupe_key": parsed.dedupe_key,
                 "replay_id": parsed.replay_id,
                 "idempotency_key": parsed.idempotency_key,
+                "received_at": parsed.received_at,
+                "body_sha256": parsed.body_sha256,
                 "verification": verification_json(parsed.verification.as_ref()),
             }))
         }

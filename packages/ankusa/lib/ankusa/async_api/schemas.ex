@@ -136,9 +136,17 @@ end
 
 defmodule Ankusa.AsyncApi.SinkMessageHeaders do
   @moduledoc """
-  The application headers Kafka and NATS carry beside a `SinkMessageV1` body.
-  Redis carries none; RabbitMQ sends `ankusa_idempotency_key` (and the optional
-  dedupe/replay keys) as AMQP headers, which this schema does not describe for it.
+  The application headers a sink with transport headers carries beside a
+  `SinkMessageV1` body: Kafka record headers, NATS headers, and the message
+  attributes of SQS and Google Pub/Sub. They are `Ankusa.Sink.Message.headers/2`
+  (Kafka, NATS) or `Ankusa.Sink.Message.attributes/2` (SQS, Pub/Sub), which
+  differ in one name: `ankusa_tenant_id` is `""` on Kafka and NATS and absent on
+  SQS and Pub/Sub (both refuse an empty value), so it is not required, and a
+  consumer reads the tenant from the message body's `tenant_id` when the
+  header is missing. Redis carries none; RabbitMQ sends only
+  `ankusa_idempotency_key` and the optional dedupe, replay and ordering keys as
+  AMQP headers, which this schema does not describe for it. The document's
+  description of each channel (`Ankusa.AsyncApi`) says which set it carries.
   """
 
   use AsyncApiSpex.Schema,
@@ -148,7 +156,6 @@ defmodule Ankusa.AsyncApi.SinkMessageHeaders do
       "required" => [
         "ankusa_id",
         "ankusa_source_id",
-        "ankusa_tenant_id",
         "ankusa_message_version",
         "ankusa_idempotency_key",
         "content_type"
@@ -158,7 +165,10 @@ defmodule Ankusa.AsyncApi.SinkMessageHeaders do
         "ankusa_source_id" => %{"type" => "string"},
         "ankusa_tenant_id" => %{
           "type" => "string",
-          "description" => "The tenant, or the empty string when there is none."
+          "description" =>
+            "The tenant. Absent when the hook has none on SQS and Pub/Sub (their attributes " <>
+              "cannot be empty); the empty string on Kafka and NATS. The message body's " <>
+              "`tenant_id` is the same value, or null."
         },
         "ankusa_message_version" => %{"const" => "1"},
         "content_type" => %{"const" => "application/json"},
@@ -173,6 +183,10 @@ defmodule Ankusa.AsyncApi.SinkMessageHeaders do
         "ankusa_replay_id" => %{
           "type" => "string",
           "description" => "The replay job id, when this delivery is a replay."
+        },
+        "ankusa_ordering_key" => %{
+          "type" => "string",
+          "description" => "The lane's key, on a hook of an ordered sink (ordering lanes)."
         },
         "traceparent" => %{
           "type" => "string",

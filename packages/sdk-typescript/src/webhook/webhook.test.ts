@@ -16,6 +16,8 @@ describe("parseHeaders", () => {
       dedupeKey: null,
       replayId: null,
       idempotencyKey: null,
+      receivedAt: null,
+      bodySha256: null,
       verification: null,
     });
   });
@@ -35,6 +37,23 @@ describe("parseHeaders", () => {
     assert.equal(parsed.dedupeKey, "evt_9");
     assert.equal(parsed.replayId, null);
     assert.equal(parsed.idempotencyKey, "acme:stripe:evt_9");
+  });
+
+  test("reads when the edge accepted the hook and the body's SHA-256, and ignores a malformed value", () => {
+    const sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    const parsed = parseHeaders(
+      new Headers({ "x-ankusa-id": "01a0", "x-ankusa-received-at": "1720000000000", "x-ankusa-body-sha256": sha256 }),
+    );
+    assert.equal(parsed.receivedAt, 1720000000000);
+    assert.equal(parsed.bodySha256, sha256);
+
+    const malformed = parseHeaders({
+      "x-ankusa-id": "01a0",
+      "x-ankusa-received-at": "-1",
+      "x-ankusa-body-sha256": sha256.toUpperCase(),
+    });
+    assert.equal(malformed.receivedAt, null);
+    assert.equal(malformed.bodySha256, null);
   });
 });
 

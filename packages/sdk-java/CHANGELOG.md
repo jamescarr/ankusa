@@ -9,6 +9,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Delivery metadata (CON-4).** `HookHeaders.receivedAt()` (when the edge accepted the hook, unix milliseconds, from `x-ankusa-received-at`) and `HookHeaders.bodySha256()` (the lowercase hex SHA-256 of the body sent, from `x-ankusa-body-sha256`): null when the header is absent, empty or malformed, never an error. The `HookHeaders` record gained two components.
+
 - **Wire-format evolution path (CON-2).** `Message.decode` accepts every `v`
   from `Message.MIN_SUPPORTED_VERSION` to `Message.MAX_SUPPORTED_VERSION` (1 and
   2) into the one `Message`, with `v()` as the wire said it: a `v: 2` message is
@@ -25,6 +27,12 @@ this project follows [Semantic Versioning](https://semver.org/).
   true only when the node verified the hook at ingest (status `ok`) and did not
   flag it. A flagged, `failed` or `skipped` hook and one with no `verification`
   are untrusted.
+
+### Fixed
+
+- `Message.decode("")` and `LifecycleEvent.decode("")` (empty or blank input)
+  raise `invalid_json`, as every other SDK does; they raised `not_an_object`.
+  Both are `retryable=false` either way (the consumer failure policy, CON-4).
 
 ## [0.1.0] - 2026-10-22
 

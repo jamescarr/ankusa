@@ -183,7 +183,7 @@ The handler sees one value whichever transport delivered the hook:
 | `tenant_id` | `x-ankusa-tenant` | message `tenant_id` |
 | `content_type` | `content-type` | message `content_type` |
 | `body` | the raw request body | inline body, or the redeemed claim |
-| `received_at` | `nil` (the HTTP sink doesn't send it) | message `received_at`, unix ms |
+| `received_at` | `x-ankusa-received-at`, unix ms (`nil` from a sink that predates it) | message `received_at`, unix ms |
 | `size` | `byte_size(body)` | message `size` |
 | `dedupe_key` | `x-ankusa-dedupe-key` | message `dedupe_key` |
 | `replay_id` | `x-ankusa-replay-id` | message `replay_id` |
@@ -244,6 +244,12 @@ end
 length against `size`, its bytes against `sha256`, and a claim's tenant against
 `tenant_id`. Keys it doesn't know are ignored, so a newer producer adding a
 field doesn't break an older consumer.
+
+Every one of those errors is `retryable: false`: the same bytes fail the same
+way on every retry, so send them to your terminal queue, count them by `code`,
+and never requeue them. The full policy (what is permanent, what is worth a
+retry, and what to count) is
+[Consumer failure policy](https://github.com/jamescarr/ankusa/blob/main/docs/delivery.md#consumer-failure-policy).
 
 Kafka/NATS headers and the RabbitMQ routing key are not read: the JSON body
 carries everything.

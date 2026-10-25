@@ -1,4 +1,4 @@
-"""Unit tests for ``ankusa.webhook.parse_headers``' ``verification`` field.
+"""Unit tests for ``ankusa.webhook.parse_headers``' ``verification``, ``received_at`` and ``body_sha256`` fields.
 
 The conformance suite (``test_conformance.py``) covers the full vector set;
 these cover the two cases worth a human-readable name in isolation.
@@ -46,3 +46,22 @@ def test_is_trusted_is_true_only_for_an_unflagged_ok() -> None:
     assert ankusa.is_trusted(flagged) is False
     assert ankusa.is_trusted(skipped) is False
     assert ankusa.is_trusted(legacy) is False
+
+
+def test_parse_headers_delivery_metadata() -> None:
+    sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    headers = {"x-ankusa-id": "01a0", "x-ankusa-received-at": "1720000000000", "x-ankusa-body-sha256": sha256}
+
+    parsed = ankusa.parse_headers(headers)
+
+    assert parsed.received_at == 1720000000000
+    assert parsed.body_sha256 == sha256
+
+
+def test_parse_headers_delivery_metadata_malformed_is_null() -> None:
+    headers = {"x-ankusa-id": "01a0", "x-ankusa-received-at": "-1", "x-ankusa-body-sha256": "ABC"}
+
+    parsed = ankusa.parse_headers(headers)
+
+    assert parsed.received_at is None
+    assert parsed.body_sha256 is None

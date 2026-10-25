@@ -18,6 +18,10 @@ const sdksFile = readJson(new URL("sdks.json", CONFORMANCE));
 const features = featuresFile.features ?? [];
 const operations = new Set(featuresFile.operations ?? []);
 
+// Errors the SDKs raise for input no retry can fix; a case that expects one
+// must say `retryable: false` (the consumer failure policy).
+const PERMANENT_ERRORS = new Set(["InvalidMessageError", "InvalidSignatureError"]);
+
 const errors = [];
 
 const featureIds = new Set();
@@ -59,6 +63,14 @@ for (const file of caseFiles) {
         errors.push(`case "${c.id}" (${file}): expect must have exactly one of "ok" or "error"`);
       } else if (hasError && typeof expect.error?.class !== "string") {
         errors.push(`case "${c.id}" (${file}): expect.error.class must be a string`);
+      } else if (
+        hasError &&
+        PERMANENT_ERRORS.has(expect.error.class) &&
+        expect.error.retryable !== false
+      ) {
+        errors.push(
+          `case "${c.id}" (${file}): ${expect.error.class} is permanent (docs/delivery.md, Consumer failure policy): expect.error.retryable must be false`,
+        );
       }
     }
   });

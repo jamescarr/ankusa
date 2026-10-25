@@ -131,6 +131,11 @@ public record Message(
       throw new InvalidMessageError("invalid_json", null, "message is not valid JSON");
     }
 
+    // Jackson reads empty (or blank) input as a missing node instead of failing.
+    if (root.isMissingNode()) {
+      throw new InvalidMessageError("invalid_json", null, "message is not valid JSON");
+    }
+
     if (!root.isObject()) {
       throw new InvalidMessageError("not_an_object", null, "message is not a JSON object");
     }

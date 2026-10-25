@@ -14,6 +14,8 @@ defmodule Ankusa.SDK.Webhook do
   | `x-ankusa-dedupe-key` | `dedupe_key` | `nil` (also when empty) |
   | `x-ankusa-replay-id` | `replay_id` | `nil` (also when empty) |
   | `x-ankusa-idempotency-key` | `idempotency_key` | `nil` (also when empty) |
+  | `x-ankusa-received-at` | `received_at` | `nil` (absent, empty, or not 1 to 15 decimal digits); unix milliseconds the edge accepted the hook |
+  | `x-ankusa-body-sha256` | `body_sha256` | `nil` (absent, or not exactly 64 lowercase hex characters); the SHA-256 of the body sent |
 
   The parsed struct also carries every request header in `headers`
   (lowercased), so a receiver can read the provider's own headers the sink
@@ -44,6 +46,8 @@ defmodule Ankusa.SDK.Webhook do
             dedupe_key: String.t() | nil,
             replay_id: String.t() | nil,
             idempotency_key: String.t() | nil,
+            received_at: non_neg_integer() | nil,
+            body_sha256: String.t() | nil,
             verification: %{status: String.t(), flagged: boolean()} | nil,
             headers: %{String.t() => String.t()}
           }
@@ -56,6 +60,8 @@ defmodule Ankusa.SDK.Webhook do
       :dedupe_key,
       :replay_id,
       :idempotency_key,
+      :received_at,
+      :body_sha256,
       :verification,
       headers: %{}
     ]
@@ -157,6 +163,8 @@ defmodule Ankusa.SDK.Webhook do
            dedupe_key: non_empty(headers, "x-ankusa-dedupe-key"),
            replay_id: non_empty(headers, "x-ankusa-replay-id"),
            idempotency_key: non_empty(headers, "x-ankusa-idempotency-key"),
+           received_at: received_at(headers),
+           body_sha256: body_sha256(headers),
            verification: verification(headers),
            headers: headers
          }}
@@ -176,6 +184,25 @@ defmodule Ankusa.SDK.Webhook do
 
       status ->
         %{status: status, flagged: fetch(headers, "x-ankusa-verification-flagged") == "true"}
+    end
+  end
+
+  # Advisory metadata: a malformed value is `nil`, never an error, so a sender
+  # that predates the header, or sends something else, still parses.
+  defp received_at(headers) do
+    case fetch(headers, "x-ankusa-received-at") do
+      value when is_binary(value) ->
+        if Regex.match?(~r/\A[0-9]{1,15}\z/, value), do: String.to_integer(value)
+
+      _absent ->
+        nil
+    end
+  end
+
+  defp body_sha256(headers) do
+    case fetch(headers, "x-ankusa-body-sha256") do
+      value when is_binary(value) -> if Regex.match?(~r/\A[0-9a-f]{64}\z/, value), do: value
+      _absent -> nil
     end
   end
 

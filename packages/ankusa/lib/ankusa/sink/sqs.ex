@@ -233,10 +233,10 @@ defmodule Ankusa.Sink.SQS do
         }
       },
       message_bindings: %{},
-      # The `ankusa_*` values travel as message attributes, and
-      # `ankusa_tenant_id` is absent without a tenant, so the document's
-      # header schema (which requires it) would not describe them.
-      ankusa_headers: false
+      # The `ankusa_*` values travel as message attributes: the header schema
+      # describes them, with `ankusa_tenant_id` optional because it is absent
+      # without a tenant.
+      ankusa_headers: true
     }
   end
 
