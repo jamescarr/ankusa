@@ -28,7 +28,9 @@ spec:
       # A Service named `ankusa` would otherwise inject ANKUSA_PORT=tcp://... next to the
       # ANKUSA_* settings the image reads.
       enableServiceLinks: false
-      terminationGracePeriodSeconds: 30
+      # preStop (5 s) + the drain on SIGTERM: drain_delay_ms (5 s) + drain_timeout_ms
+      # (30 s), and a margin (docs/deployment.md, "Draining on SIGTERM").
+      terminationGracePeriodSeconds: 60
       containers:
         - name: ankusa
           image: {{ include "demo.image" .Values.images.ankusa }}

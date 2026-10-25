@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
-#MISE description="kind + Oban end-to-end proof (the pre-tag gate). KEEP=1 to keep the cluster"
+#MISE description="kind end-to-end proofs (the pre-tag gate): the Oban consumer, and the fleet from the Helm chart. `mise run e2e oban|fleet` runs one. KEEP=1 to keep the cluster"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT"
 
-exec examples/oban-consumer/run.sh
+which="${1:-all}"
+case "$which" in
+  all | oban | fleet) ;;
+  *)
+    echo "usage: mise run e2e [oban|fleet]" >&2
+    exit 2
+    ;;
+esac
+
+# Two clusters, one after the other: the Oban drill on its own manifests, then the
+# fleet of examples/fleet-e2e on deploy/helm/ankusa.
+if [ "$which" != fleet ]; then examples/oban-consumer/run.sh; fi
+if [ "$which" != oban ]; then examples/fleet-e2e/kind.sh; fi

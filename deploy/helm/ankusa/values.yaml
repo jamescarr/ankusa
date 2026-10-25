@@ -1,0 +1,189 @@
+# Ankusa chart values. Docs: README.md here, and docs/deployment.md
+# ("Kubernetes: the Helm chart", "Multi-region").
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: jamescarr/ankusa
+  # Empty = the chart's appVersion. A digest, when set, wins over the tag.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# What the node promises before it answers 2xx, and so what it runs as:
+#   disk  a StatefulSet, one RocksDB store on one PVC per pod, the 2xx waits for
+#         this host's fsync. Loses what was acked since the last backup if the
+#         host and its volume are lost together.
+#   dual  the same, and the 2xx also waits for the intake log (Kafka): needs
+#         config.intake, config.backup (enabled, max_age_ms); each pod's
+#         intake.node_id is its pod name (stable across a replacement).
+#   none  a Deployment of interchangeable, stateless edge pods: no queue, no
+#         volume worth keeping, the 2xx waits for every sink's confirm.
+wal:
+  type: disk
+
+replicas: 3
+
+# The server's YAML config (docs/configuration.md), merged over what the chart
+# derives from the values below: node.data_dir, log (json, no banner), wal.type,
+# listener.drain_*, the admin and claim_check listeners. Whatever is set here wins.
+# `${VAR}` references are resolved by the server from the container's
+# environment (extraEnv / extraEnvFrom), so secrets stay out of the ConfigMap.
+# Empty, the node starts with no sources and refuses every hook: define yours
+# (ci/*-values.yaml and examples/fleet-e2e/kind/values.yaml are worked examples).
+config: {}
+
+# A stop (SIGTERM) flips /ready to 503, keeps serving delayMs so the endpoint
+# removal reaches every proxy, then closes the ingest listener and waits for
+# its requests, all within timeoutMs (listener.drain_*, docs/deployment.md).
+# terminationGracePeriodSeconds follows from them, so a pod is never killed
+# mid-drain: (delayMs + timeoutMs) / 1000 + 10, plus backup.final_timeout_ms
+# (default 20 s) when config.backup.enabled.
+drain:
+  delayMs: 5000
+  timeoutMs: 30000
+# Set to override the computed grace period.
+terminationGracePeriodSeconds: null
+
+service:
+  type: ClusterIP
+  port: 4000
+  # With type NodePort or LoadBalancer.
+  nodePort: null
+  annotations: {}
+
+# The admin API and /metrics (port 4002) listen on loopback unless exposed.
+# Exposing them needs either a token Secret (ANKUSA_ADMIN_TOKEN, hashed by the
+# server at load) or allowInsecure: true, which says a mesh or the NetworkPolicy
+# below authenticates every caller.
+admin:
+  expose: false
+  tokenSecret: {name: "", key: token}
+  allowInsecure: false
+
+# The claim-check gateway (port 4001): its own Deployment, role claim_check,
+# no store. Reads the claim bucket in config.storage / config.claim_check.store.
+claimCheck:
+  enabled: false
+  replicas: 2
+  tokenSecret: {name: "", key: token}
+  allowInsecure: false
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 512Mi}
+
+# Where the data volume comes from.
+persistence:
+  # disk | dual: a volumeClaimTemplate per pod. none: an emptyDir of this size.
+  size: 10Gi
+  storageClassName: ""
+  accessModes: [ReadWriteOnce]
+  annotations: {}
+  # A StatefulSet that is deleted or scaled down keeps its volumes: the store
+  # holds hooks nobody has delivered yet.
+  retentionPolicy: {whenDeleted: Retain, whenScaled: Retain}
+
+# Give every pod its own storage.key_prefix (<pod name>/, ANKUSA_STORAGE_KEY_PREFIX)
+# so pods sharing one bucket neither overwrite each other's segments nor trip the
+# backup's "a prefix shared by two stores" refusal. Needs a storage.type that
+# honours it (s3, gcs, azure, oci).
+perPodKeyPrefix: false
+
+# nofile > 0 runs the node behind `ulimit -n <nofile>`: the BEAM sizes its
+# tables from the open-file limit, and a kind node's containerd hands pods a
+# limit of 10^9. Leave 0 on a real cluster.
+nofile: 0
+
+resources:
+  requests: {cpu: 500m, memory: 1Gi}
+  limits: {memory: 1Gi}
+
+# Restricted pod security: non-root (uid/gid of the image's `ankusa` user),
+# read-only root file system (the release's tmp is the /tmp emptyDir, the store
+# is the data volume), no capabilities, the runtime's default seccomp profile.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 100
+  runAsGroup: 101
+  fsGroup: 101
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile: {type: RuntimeDefault}
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities: {drop: [ALL]}
+
+# /health answers while the process does; /ready (503 + Retry-After) while the
+# node cannot take a hook: a full disk, a store that is reopening, an intake log
+# that is down, a drain. The startup probe covers the store's boot migrations,
+# for up to failureThreshold x periodSeconds.
+probes:
+  startup: {periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 120}
+  liveness: {periodSeconds: 10, timeoutSeconds: 3, failureThreshold: 6}
+  readiness: {periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 1}
+
+# Spread a workload's pods over zones (soft) and nodes (hard). Each entry is a
+# topologySpreadConstraint without its labelSelector, which the chart adds;
+# set an entry to null to drop it.
+topologySpread:
+  zone:
+    maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+  node:
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+extraTopologySpreadConstraints: []
+
+# At most one pod of a workload voluntarily disrupted at a time.
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+# wal.type none only (a pod of a store-backed node holds hooks, so it is not
+# scaled away): CPU, and optionally the queue's backlog as a Pods metric, which
+# needs a custom-metrics adapter serving `ankusa_queue_pending` (prometheus-adapter,
+# KEDA's metrics API). A `none` node runs no queue, so CPU is the signal there.
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  cpuUtilization: 60
+  queuePending: {enabled: false, averageValue: 100}
+  behavior:
+    scaleUp:
+      policies: [{type: Pods, value: 2, periodSeconds: 30}]
+    scaleDown:
+      stabilizationWindowSeconds: 300
+
+# Port 4000 is open to every client; 4001-4004 (claim check, admin + metrics,
+# route management, metrics listener) only to pods in `operatorNamespaces` (the
+# release's namespace when empty). extraIngress is appended as-is.
+networkPolicy:
+  enabled: true
+  operatorNamespaces: []
+  extraIngress: []
+
+serviceAccount:
+  create: true
+  # The account to use when create is false (default: the release name).
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+minReadySeconds: 10
+
+extraEnv: []
+extraEnvFrom: []
+extraVolumes: []
+extraVolumeMounts: []

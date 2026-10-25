@@ -1,0 +1,31 @@
+{{- if .Values.networkPolicy.enabled }}
+# Providers reach the ingest port (4000) from anywhere; the control planes (4001
+# claim check, 4002 admin and /metrics, 4003 route management, 4004 the metrics
+# listener) only from the operator namespaces. Egress is left open: sinks, brokers,
+# the object store and the intake log are wherever the config says.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ankusa.fullname" . }}
+  labels:
+    {{- include "ankusa.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ankusa.releaseSelector" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - {protocol: TCP, port: 4000}
+    - from:
+        {{- range (default (list .Release.Namespace) .Values.networkPolicy.operatorNamespaces) }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+        {{- end }}
+      ports:
+        - {protocol: TCP, port: 4001, endPort: 4004}
+    {{- with .Values.networkPolicy.extraIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

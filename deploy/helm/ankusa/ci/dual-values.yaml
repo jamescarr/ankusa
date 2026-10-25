@@ -1,0 +1,27 @@
+# wal.type: dual: the 201 also waits for the intake log (docs/deployment.md,
+# "Host loss and the intake log"). The backup is required, and each pod needs its
+# own key prefix in the shared bucket.
+wal: {type: dual}
+replicas: 3
+perPodKeyPrefix: true
+persistence: {size: 50Gi}
+config:
+  storage:
+    type: s3
+    s3: {bucket: ankusa-segments, region: eu-west-1}
+  intake:
+    type: kafka
+    fleet: eu
+    kafka: {brokers: ["kafka-1:9092", "kafka-2:9092", "kafka-3:9092"]}
+  backup:
+    enabled: true
+    interval_ms: 60000
+    max_age_ms: 300000
+    secondary:
+      type: s3
+      s3: {bucket: ankusa-backups-dr, region: eu-central-1}
+  sources:
+    stripe:
+      verify: {type: none}
+      dedupe: {json: id}
+      sinks: [{type: log}]

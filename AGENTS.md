@@ -25,6 +25,7 @@ flowchart LR
 | `packages/ankusa_server` | The `jamescarr/ankusa` Docker image: core + every adapter, driven entirely by YAML (`config.ex` is the loader). Not published to Hex. |
 | `packages/sdk-typescript`, `sdk-python`, `sdk-rust`, `sdk-ruby`, `sdk-go`, `sdk-php`, `sdk-elixir`, `sdk-java`, `sdk-clojure` | Published client SDKs (npm `ankusa`, PyPI `ankusa`, crates.io `ankusa`, RubyGems `ankusa-sdk`, Go module `github.com/jamescarr/ankusa/packages/sdk-go`, Packagist `jamescarr/ankusa`, Hex `ankusa_sdk`, Maven Central `io.github.jamescarr:ankusa-sdk`, Clojars `io.github.jamescarr/ankusa-clj`) for writing worker consumers. |
 | `examples/*` | Runnable Docker-composed demos, one per delivery transport; see [`examples/README.md`](examples/README.md). |
+| `deploy/helm/ankusa` | The production Helm chart: StatefulSet (`wal.type: disk \| dual`) or Deployment (`none`), restricted pod spec, probes, PDB, HPA, NetworkPolicy, claim-check gateway. Guide: [`deployment.md`](docs/deployment.md#kubernetes-the-helm-chart). `ci/*-values.yaml` is what `check:examples` renders. |
 | `tools/loadgen` | Load generator used by the `oban-consumer` and `fleet-e2e` examples. |
 | `docs/*` | Prose docs, see table below. Index: [`docs/README.md`](docs/README.md). |
 | `.mise/tasks/*` | Every CI/dev task, one file each (see Commands below). |
@@ -85,13 +86,13 @@ one; CI runs the same tasks this table does.
 | --- | --- |
 | `mise run check` | everything CI checks, every package/example/tool |
 | `mise run check:package <pkg>` | one package: format, warnings-as-errors, `credo --strict`, dialyzer, sobelow (core, `ankusa_server`), tests with a coverage floor (core 85 %, others 80 %), docs; starts/stops that package's own `docker-compose.yml` |
-| `mise run check:examples` | `examples/*` |
+| `mise run check:examples` | `examples/*`, and `deploy/helm/*` (`helm lint`, `helm template` for every mode, `kubeconform -strict`) |
 | `mise run check:tools` | `tools/*` |
 | `mise run lint:pins` | every GitHub action is a commit SHA and every release-image input (Dockerfile `FROM`/`# syntax=`, the BuildKit and SBOM-scanner images) a digest; bump procedure in the task header ([`releasing.md`](docs/releasing.md#supply-chain-pins-sbom-provenance-signature)) |
 | `mise run check:conformance` | validate `conformance/` and run every `packages/sdk-*` against its vectors |
 | `mise run test:integration` | `ankusa` core's object-store adapters vs. the floci emulators |
 | `mise run test:crash` | crash-consistency drill (needs `docker`): ENOSPC on a 192 MiB tmpfs, then `kill -9` under load; every acked hook must read back. `scripts/drills/flakey.sh` is the power-loss variant on device-mapper (privileged Docker) |
-| `mise run e2e` | kind + Oban end-to-end gate (needs `docker`; `kind`/`kubectl` from `.mise.toml`). The multi-node compose drill is `examples/fleet-e2e/run.sh` (needs `docker`, `mix`, `jq`; `--wal dual --kill-node` is the host-loss drill of the intake log, `--wal disk --kill-node` its control); `.github/workflows/e2e.yml` runs both nightly, on tags, and the fleet one on PRs that touch it |
+| `mise run e2e` | kind end-to-end gate (needs `docker`; `kind`/`kubectl`/`helm` from `.mise.toml`): the Oban consumer, then the fleet run from the Helm chart (`examples/fleet-e2e/kind.sh`); `mise run e2e oban\|fleet` runs one. The multi-node compose drill is `examples/fleet-e2e/run.sh` (needs `docker`, `mix`, `jq`; `--wal dual --kill-node` is the host-loss drill of the intake log, `--wal disk --kill-node` its control); `.github/workflows/e2e.yml` runs both nightly, on tags, and the fleet one on PRs that touch it |
 | `mise run format` | `mix format`, `gofmt`, google-java-format, and cljfmt across every package — run before pushing, not after CI complains |
 | `mise run deps` | refresh every `mix.lock` after adding/removing a core dependency |
 | `mise run new:adapter <name>` | scaffold `packages/ankusa_<name>/` |
@@ -112,7 +113,7 @@ until they pass too.
 | What changed | Run |
 | --- | --- |
 | a package under `packages/` | `mise run check:package <pkg>` for every touched package (all of them for a core change) |
-| `examples/*` | `mise run check:examples` |
+| `examples/*`, `deploy/helm/*` | `mise run check:examples` (the chart: also `mise run e2e fleet` when the pod spec, probes or values change) |
 | `tools/*` | `mise run check:tools` |
 | an SDK (`packages/sdk-*`) or `conformance/` | `mise run check:conformance` (also part of `mise run check`) |
 | core's object-store adapters | `mise run test:integration` |

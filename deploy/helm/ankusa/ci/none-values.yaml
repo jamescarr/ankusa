@@ -1,0 +1,16 @@
+# wal.type: none: a Deployment of stateless edge pods behind an HPA, the 2xx
+# waiting for every sink's confirm.
+wal: {type: none}
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+  queuePending: {enabled: true, averageValue: 100}
+service: {type: LoadBalancer}
+config:
+  sources:
+    stripe:
+      verify: {type: none}
+      # Under `none` the 2xx waits for a sink's confirm, so a sink must be durable.
+      sinks:
+        - {type: rabbitmq, url: "amqps://rabbitmq.example.com:5671", exchange: ankusa.events, routing_key: ankusa.stripe}
