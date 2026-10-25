@@ -391,6 +391,58 @@ defmodule Ankusa.MetricsTest do
       refute scrape =~ ~r/ankusa_dispatch_config_errors_total\{[^}]*(tenant_id|source_id)/
     end
 
+    test "the sink batch series: counters follow their events, gauges the batchers" do
+      config = start_instance()
+      inst = config.instance
+      sqs = Ankusa.Sink.SQS
+      pubsub = Ankusa.Sink.GooglePubSub
+
+      :telemetry.execute(
+        [:ankusa, :sink_batch, :flush],
+        %{entries: 10, bytes: 4_000, requests: 1, bisections: 0, duration_ms: 3},
+        %{instance: inst, sink: sqs}
+      )
+
+      :telemetry.execute(
+        [:ankusa, :sink_batch, :flush],
+        %{entries: 40, bytes: 4_000, requests: 7, bisections: 6, duration_ms: 90},
+        %{instance: inst, sink: pubsub}
+      )
+
+      :telemetry.execute([:ankusa, :sink_batch, :refused], %{}, %{
+        instance: inst,
+        sink: sqs,
+        reason: :tenant
+      })
+
+      :ok = Ankusa.Metrics.Gauges.measure(inst)
+      scrape = Ankusa.Metrics.scrape(inst)
+
+      assert scrape =~
+               ~r/^ankusa_sink_batch_entries_total\{[^}]*sink="Ankusa.Sink.SQS"[^}]*\} 10$/m
+
+      assert scrape =~
+               ~r/^ankusa_sink_batch_requests_total\{[^}]*sink="Ankusa.Sink.GooglePubSub"[^}]*\} 7$/m
+
+      assert scrape =~
+               ~r/^ankusa_sink_batch_bisections_total\{[^}]*sink="Ankusa.Sink.GooglePubSub"[^}]*\} 6$/m
+
+      assert scrape =~
+               ~r/^ankusa_sink_batch_refused_total\{[^}]*reason="tenant"[^}]*sink="Ankusa.Sink.SQS"[^}]*\} 1$/m
+
+      # the labels are the sink and the refusal, never a tenant or a source
+      for name <- ~w(entries requests bisections refused) do
+        for line <- series(scrape, "ankusa_sink_batch_#{name}_total") do
+          refute line =~ "tenant_id="
+          refute line =~ "source_id="
+        end
+      end
+
+      assert gauge(scrape, "ankusa_sink_batch_batchers", inst) == 0.0
+      assert gauge(scrape, "ankusa_sink_batch_queued", inst) == 0.0
+      assert gauge(scrape, "ankusa_sink_batch_queued_bytes", inst) == 0.0
+    end
+
     test "the dedupe and audit-retention series follow their events" do
       config = start_instance()
       inst = config.instance

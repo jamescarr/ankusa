@@ -625,11 +625,19 @@ a backup and a claim `PUT`, recorded on their way to the emulator, all carry
 delivers through `Sink.SQS` to floci's SQS and reads the queue back: the
 `Ankusa.Sink.Message` body, the message attributes and FIFO group, one stored
 message for a retried FIFO delivery and a second for a replay, a missing queue
-as an `{:sqs, 400, _, _}` error, and a standard queue.
+as an `{:sqs, 400, _, _}` error, and a standard queue. Through the batcher:
+`sqs batch partial failure` (ten FIFO deliveries in one `SendMessageBatch`, the
+emulator refuses the entry without a group, exactly that delivery is permanent
+and the other nine are stored), `sqs batch order` (one group's messages arrive
+in the order they were admitted) and a standard queue's batch.
 `sink/google_pubsub_integration_test.exs` publishes through
 `Sink.GooglePubSub` to floci-gcp's Pub/Sub and pulls the subscription back:
-the `Ankusa.Sink.Message` data and attributes, an ordering key, and a missing
-topic as a transient error. Excluded by default
+the `Ankusa.Sink.Message` data and attributes, an ordering key, a missing
+topic as a transient error, and `pubsub batch`: 50 deliveries are one `publish`
+(one `[:ankusa, :sink_batch, :flush]` event) and all 50 arrive. The unit tests
+(`sink/google_pubsub_test.exs`) hold the bisection: one invalid message among
+999 good ones is one dead entry and 999 delivered, within `1 + 2·⌈log₂ 1000⌉`
+requests. Excluded by default
 (`test_helper.exs`:`ExUnit.start(exclude: [:integration])`) because they
 need live infra:
 

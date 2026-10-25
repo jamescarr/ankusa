@@ -332,6 +332,29 @@ and `public_key`.
 | `sqs` | `queue_url`, `region`, `endpoint` (default: the queue URL's origin; set it for a VPC endpoint or an emulator), `message_group_id` (a static string), `inline_max_bytes` (65536), `max_message_bytes` (1048576, SQS's limit; body plus message attributes, a larger message is dead-lettered at once), `timeout_ms` (5000), `access_key_id` / `secret_access_key` / `session_token` (omit for the `AWS_*` env, IRSA, or the EC2 instance role). FIFO when `queue_url` ends `.fifo`: the group defaults to `tenant/source` and the deduplication id is the hook id (SQS dedupes for 5 minutes). The queue must already exist. See [`delivery.md`](delivery.md#sinksqs-queue-delivery). |
 | `google_pubsub` | `project`, `topic` (the id, not `projects/…/topics/…`), `endpoint` (default `https://pubsub.googleapis.com`; set it for a regional endpoint or an emulator), `ordering_key` (a static string; default none), `inline_max_bytes` (65536), `max_message_bytes` (10000000, Pub/Sub's limit; data plus attributes plus ordering key, a larger message is dead-lettered at once), `timeout_ms` (5000), `auth` = `metadata` \| `token` \| `none` (default `metadata`: the GCE/GKE metadata server; `token` is required when `auth: token`; `none` sends no credential, for an emulator). The topic must already exist, and a topic with no subscription drops the message. See [`delivery.md`](delivery.md#sinkgooglepubsub-google-cloud-pubsub-delivery). |
 
+The `sqs` and `google_pubsub` sinks batch what dispatch hands them: up to 10
+(SQS) or 1 000 (Pub/Sub) deliveries to one queue or topic go out as one request.
+Each takes these keys, all optional and range-checked when the first delivery
+reaches the sink (a bad one fails that delivery with the key's name):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `batch` | `true` | `false` sends every delivery as its own request, counted against `dispatch.sink_concurrency` |
+| `batch_linger_ms` | `20` (1–60000) | how long a batch waits to fill |
+| `batch_max_entries` | `10` (SQS, 1–10) / `1000` (Pub/Sub, 1–1000) | entries per request |
+| `batch_max_bytes` | `262144` (SQS, ≤ 1048576) / `7500000` (Pub/Sub, data before base64) | bytes per request |
+| `batch_queue_max` | `4096` | entries the batcher holds; a delivery past it is refused with a jittered retry |
+| `batch_queue_max_bytes` | `134217728` | bytes the batcher holds |
+| `batch_queue_tenant_max` | `1024` | entries one tenant may hold, so it cannot fill the queue |
+| `batch_max_inflight` | `dispatch.sink_concurrency` (8) | requests in flight per queue or topic |
+
+They are plain numbers and a boolean, so `/v1/config` shows them. A refusal is
+`{:retry_after, ms, {:batch_queue_full, reason}}` and counted in
+`ankusa_sink_batch_refused_total{sink,reason}`; the batchers' depth is the gauges
+`ankusa_sink_batch_batchers`, `ankusa_sink_batch_queued` and
+`ankusa_sink_batch_queued_bytes`. See
+[`delivery.md`](delivery.md#sinksqs-queue-delivery).
+
 Bodies above a sink's `inline_max_bytes` are checked in to the object store and
 the message carries a claim reference. See [`claim-check.md`](claim-check.md).
 
@@ -1537,7 +1560,7 @@ the map.
 | `Ankusa.Queue` | Durable ack and seq assignment over this node's store | `wal: :disk` (one synced commit per batch) | `wal: :dual` (the same commit plus a confirmed intake-log publish), `wal: :none` (no queue: ingest acks on the sinks' confirm, see [`delivery.md`](delivery.md#direct-mode)) |
 | `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `Verifier.Hmac` (configurable HMAC engine; named schemes Stripe, GitHub, Standard Webhooks, Shopify, Slack), `Verifier.Asymmetric` (Ed25519 or RSA over the same wire templates; named scheme `standard_webhooks_asym`), `Verifier.Token` (bearer, basic, header or query credential), `Verifier.ClientCert` (mTLS client certificate pin) |
 | `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | `SourceStore.Persistent` (API-managed sources in this node's store) |
-| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.SQS` (`SendMessage`, in core), `Sink.RabbitMQ` (exchange publish, `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce, `ankusa_kafka` package), `Sink.NATS` (JetStream subject publish, `ankusa_nats` package), `Sink.Redis` (pub/sub channel publish, `ankusa_redis` package) |
+| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.SQS` (`SendMessageBatch`, in core), `Sink.RabbitMQ` (exchange publish, `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce, `ankusa_kafka` package), `Sink.NATS` (JetStream subject publish, `ankusa_nats` package), `Sink.Redis` (pub/sub channel publish, `ankusa_redis` package) |
 | `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | none |
 | `Ankusa.BlobStore` | Segment PUT / range GET / delete | `BlobStore.LocalFS` | `BlobStore.S3` (+R2/MinIO), `BlobStore.GCS` |
 | `Ankusa.ClaimCheck` | Pack claims into the object store, redeem by reference | none (the instance's `BlobStore`) | none |

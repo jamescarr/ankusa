@@ -122,6 +122,94 @@ defmodule Ankusa.Sink.SQSIntegrationTest do
     assert is_binary(code)
   end
 
+  describe "batched (a delivery from dispatch, through an instance's batcher)" do
+    setup do
+      instance = :"sqs_it_batch_#{System.unique_integer([:positive])}"
+      start_supervised!({Ankusa.Sink.Batcher.Workers, instance: instance})
+
+      handler = "sqs-it-batch-#{instance}"
+      test = self()
+
+      :telemetry.attach(
+        handler,
+        [:ankusa, :sink_batch, :flush],
+        fn _event, measurements, %{instance: ^instance}, _ ->
+          send(test, {:flush, measurements})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      %{ctx: %{instance: instance, batch: true, attempt: 1}}
+    end
+
+    defp envelope(id), do: %{envelope() | id: id}
+
+    test "sqs batch partial failure: SQS refuses one entry of ten, exactly that one is permanent",
+         %{fifo: fifo, ctx: ctx} do
+      # Ten hooks, each its own group; the emulator, like SQS, refuses the entry
+      # with no MessageGroupId, and says so for that entry alone.
+      opts =
+        opts(fifo) ++
+          [
+            batch_linger_ms: 2_000,
+            message_group_id: fn env -> if env.id == "bad-hook", do: "", else: "g-" <> env.id end
+          ]
+
+      envs = for n <- 1..9, do: envelope("good-#{n}")
+      envs = envs ++ [envelope("bad-hook")]
+
+      results =
+        envs
+        |> Enum.map(fn env -> Task.async(fn -> {env.id, SQS.deliver(env, ctx, opts)} end) end)
+        |> Map.new(&Task.await/1)
+
+      # one SendMessageBatch of ten
+      assert_receive {:flush, %{entries: 10, requests: 1}}, 5_000
+
+      assert {:error, {:permanent, {:sqs, 400, code, _message}}} = results["bad-hook"]
+      assert code in ["MissingParameter", "InvalidParameterValue"]
+
+      for n <- 1..9, do: assert(results["good-#{n}"] == :ok)
+
+      stored =
+        fifo |> peek() |> Enum.map(&JSON.decode!(&1["Body"])["id"]) |> Enum.sort()
+
+      assert stored == for(n <- 1..9, do: "good-#{n}") |> Enum.sort()
+    end
+
+    test "sqs batch order: one FIFO group arrives in the order its messages were admitted",
+         %{fifo: fifo, ctx: ctx} do
+      opts = opts(fifo) ++ [batch_linger_ms: 10]
+      ids = for n <- 1..25, do: "m#{String.pad_leading(Integer.to_string(n), 2, "0")}"
+
+      ids
+      |> Enum.map(fn id ->
+        task = Task.async(fn -> SQS.deliver(envelope(id), ctx, opts) end)
+        Process.sleep(3)
+        task
+      end)
+      |> Enum.each(fn task -> assert Task.await(task) == :ok end)
+
+      assert fifo |> peek() |> Enum.map(&JSON.decode!(&1["Body"])["id"]) == ids
+    end
+
+    test "a standard queue takes a batch with no FIFO fields", %{standard: standard, ctx: ctx} do
+      opts = opts(standard) ++ [batch_linger_ms: 2_000, batch_max_entries: 5]
+      envs = for n <- 1..5, do: envelope("s-#{n}")
+
+      assert envs
+             |> Enum.map(fn env -> Task.async(fn -> SQS.deliver(env, ctx, opts) end) end)
+             |> Enum.map(&Task.await/1) == List.duplicate(:ok, 5)
+
+      assert_receive {:flush, %{entries: 5, requests: 1}}, 5_000
+      messages = peek(standard)
+      assert length(messages) == 5
+      refute Enum.any?(messages, &Map.has_key?(&1["Attributes"], "MessageGroupId"))
+    end
+  end
+
   test "a standard queue takes a delivery with no FIFO fields", %{standard: standard} do
     assert :ok = SQS.deliver(envelope(), %{attempt: 1}, opts(standard))
 

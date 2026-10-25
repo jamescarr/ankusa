@@ -56,6 +56,9 @@ defmodule Ankusa.Sink do
           # which provider request headers travel into the sink message
           # (`Ankusa.Sink.Message.forwarded_headers/2`); absent means `:default`
           optional(:forward_headers) => :default | [String.t()],
+          # set by dispatch for a sink whose `c:batched?/1` is true: this attempt
+          # may wait in the sink's batcher for its batch's response
+          optional(:batch) => boolean(),
           # the source's caps on those headers (count; name plus value bytes);
           # absent means 64 and 16 KiB
           optional(:max_headers) => pos_integer(),
@@ -138,7 +141,38 @@ defmodule Ankusa.Sink do
               opts :: keyword()
             ) :: Ankusa.Sink.Description.t()
 
-  @optional_callbacks inline_max_bytes: 1, durable?: 1, describe: 2
+  @doc """
+  Does this sink batch deliveries (`Ankusa.Sink.Batcher`)?
+
+  Dispatch runs a batching sink's attempts without counting them against
+  `dispatch.sink_concurrency`, a tenant's `concurrency` or the global
+  `dispatch.concurrency`: an attempt waits in the batcher for its batch's
+  response, so those limits cannot count messages and still let a batch fill.
+  The sink's batcher bounds what it holds (a queue cap, a per-tenant share) and
+  counts *requests* against `sink_concurrency`; the claimed-row windows
+  (`dispatch.max_inflight`, `dispatch.tenants`) bound the attempts.
+
+  Defaults to `false`. A sink that returns `true` must batch only for a delivery
+  whose ctx carries `batch: true`, which dispatch sets and `Ankusa.Edge.Publish`
+  and `Ankusa.Lifecycle.Publisher` do not.
+  """
+  @callback batched?(opts :: keyword()) :: boolean()
+
+  @optional_callbacks inline_max_bytes: 1, durable?: 1, describe: 2, batched?: 1
+
+  @doc """
+  Resolve `c:batched?/1` for `mod` with `opts`; `false` for a sink that doesn't
+  implement it, or whose callback raises or answers anything but `true`.
+  """
+  @spec batched?(module(), keyword()) :: boolean()
+  def batched?(mod, opts) do
+    Code.ensure_loaded?(mod) and function_exported?(mod, :batched?, 1) and
+      mod.batched?(opts) == true
+  rescue
+    _error -> false
+  catch
+    _kind, _reason -> false
+  end
 
   @doc """
   Resolve `c:describe/2` for `mod`; `nil` for a sink that doesn't implement it.

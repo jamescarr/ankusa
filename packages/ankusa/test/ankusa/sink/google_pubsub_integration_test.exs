@@ -109,6 +109,78 @@ defmodule Ankusa.Sink.GooglePubSubIntegrationTest do
     assert message["orderingKey"] == "k"
   end
 
+  # Pulls until `count` distinct messages have arrived (the emulator's pull is
+  # eventually consistent, and returns what it has), acknowledging nothing.
+  defp pull_count(subscription, count, seen \\ %{}, attempts \\ 30) do
+    %{status: 200, body: body} =
+      Req.post!(
+        @endpoint <> "/v1/projects/#{@project}/subscriptions/#{subscription}:pull",
+        json: %{"maxMessages" => 100},
+        decode_body: false
+      )
+
+    seen =
+      case JSON.decode!(body) do
+        %{"receivedMessages" => received} ->
+          Enum.reduce(received, seen, fn %{"message" => message}, acc ->
+            Map.put(acc, message["messageId"], message)
+          end)
+
+        _ ->
+          seen
+      end
+
+    if map_size(seen) >= count or attempts <= 1 do
+      Map.values(seen)
+    else
+      Process.sleep(100)
+      pull_count(subscription, count, seen, attempts - 1)
+    end
+  end
+
+  test "pubsub batch: 50 deliveries are one publish, and all 50 arrive on the subscription", %{
+    topic: topic,
+    subscription: subscription
+  } do
+    instance = :"pubsub_it_batch_#{System.unique_integer([:positive])}"
+    start_supervised!({Ankusa.Sink.Batcher.Workers, instance: instance})
+
+    handler = "pubsub-it-batch-#{instance}"
+    test = self()
+
+    :telemetry.attach(
+      handler,
+      [:ankusa, :sink_batch, :flush],
+      fn _event, measurements, %{instance: ^instance}, _ ->
+        send(test, {:flush, measurements})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    ctx = %{instance: instance, batch: true, attempt: 1}
+    opts = opts(topic, batch_max_entries: 50, batch_linger_ms: 5_000)
+    envs = for n <- 1..50, do: %{envelope() | id: "pubsub-batch-#{n}"}
+
+    results =
+      envs
+      |> Enum.map(fn env -> Task.async(fn -> GooglePubSub.deliver(env, ctx, opts) end) end)
+      |> Enum.map(&Task.await/1)
+
+    assert results == List.duplicate(:ok, 50)
+    assert_receive {:flush, %{entries: 50, requests: 1, bisections: 0}}, 5_000
+
+    messages = pull_count(subscription, 50)
+    assert length(messages) == 50
+
+    assert messages |> Enum.map(& &1["attributes"]["ankusa_id"]) |> Enum.sort() ==
+             envs |> Enum.map(& &1.id) |> Enum.sort()
+
+    data = hd(messages)["data"] |> Base.decode64!() |> JSON.decode!()
+    assert data["source_id"] == "stripe"
+  end
+
   test "a topic that was never created is a permanent config error, dead-lettered at once", %{
     topic: topic
   } do
