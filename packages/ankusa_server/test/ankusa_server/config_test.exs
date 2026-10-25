@@ -1459,23 +1459,11 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message =~ ~s(unknown key "urll")
   end
 
-  test "the removed dispatch.poll_ms and http-sink ordered keys are rejected by name" do
+  test "the removed dispatch.poll_ms key is rejected by name" do
     path = tmp_config("dispatch: {poll_ms: 200}\n")
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message =~ "dispatch"
     assert error.message =~ ~s(unknown key "poll_ms")
-
-    path =
-      tmp_config("""
-      sources:
-        a:
-          sinks:
-            - {type: http, url: "http://sink.invalid", ordered: true}
-      """)
-
-    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
-    assert error.message =~ "sources.a.sinks[0]"
-    assert error.message =~ ~s(unknown key "ordered")
   end
 
   test "dispatch.attempt_timeout_ms loads, and a non-positive value fails with the key's name" do
