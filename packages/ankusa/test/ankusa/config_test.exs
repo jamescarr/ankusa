@@ -1008,28 +1008,6 @@ defmodule Ankusa.ConfigTest do
     end
   end
 
-  describe "dispatch.region (CON-2)" do
-    test "defaults to nil and takes a name of 1 to 64 bytes" do
-      assert Config.new([]).dispatch.region == nil
-      assert Config.new(dispatch: %{region: "eu-west-1"}).dispatch.region == "eu-west-1"
-      assert Config.new(dispatch: %{region: String.duplicate("r", 64)}).dispatch.region
-    end
-
-    test "an empty, over-long or non-string region is refused, naming the key" do
-      message = "dispatch.region must be nil or a non-empty string of at most 64 bytes, got "
-
-      for bad <- ["", String.duplicate("r", 65), 7, :eu] do
-        assert_raise ArgumentError, message <> inspect(bad), fn ->
-          Config.new(dispatch: %{region: bad})
-        end
-      end
-    end
-
-    test "/v1/config shows the region: it is not a secret" do
-      shown =
-        Config.new(dispatch: %{region: "eu-west-1"}) |> Ankusa.Admin.Redact.config()
-
-      assert shown["dispatch"]["region"] == "eu-west-1"
   describe "the drain keys (OPS-4)" do
     test "defaults: five seconds of delay, thirty to drain" do
       config = Config.new([])
@@ -1086,6 +1064,31 @@ defmodule Ankusa.ConfigTest do
       end
 
       assert Config.new(dual(listener: %{drain_timeout_ms: 24_000}))
+    end
+  end
+
+  describe "dispatch.region (CON-2)" do
+    test "defaults to nil and takes a name of 1 to 64 bytes" do
+      assert Config.new([]).dispatch.region == nil
+      assert Config.new(dispatch: %{region: "eu-west-1"}).dispatch.region == "eu-west-1"
+      assert Config.new(dispatch: %{region: String.duplicate("r", 64)}).dispatch.region
+    end
+
+    test "an empty, over-long or non-string region is refused, naming the key" do
+      message = "dispatch.region must be nil or a non-empty string of at most 64 bytes, got "
+
+      for bad <- ["", String.duplicate("r", 65), 7, :eu] do
+        assert_raise ArgumentError, message <> inspect(bad), fn ->
+          Config.new(dispatch: %{region: bad})
+        end
+      end
+    end
+
+    test "/v1/config shows the region: it is not a secret" do
+      shown =
+        Config.new(dispatch: %{region: "eu-west-1"}) |> Ankusa.Admin.Redact.config()
+
+      assert shown["dispatch"]["region"] == "eu-west-1"
     end
   end
 

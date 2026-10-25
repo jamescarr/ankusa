@@ -2332,24 +2332,6 @@ defmodule AnkusaServer.ConfigTest do
     end
   end
 
-  test "node.region maps to core's dispatch.region, ANKUSA_REGION overrides it, both range checked" do
-    path = tmp_config("node: {region: eu-west-1}\ndispatch: {batch: 64}\n")
-
-    config = Config.load!(path: path, env: %{}).config
-    assert config.dispatch.region == "eu-west-1"
-    # The rest of `dispatch` is the file's and core's, not replaced by the region.
-    assert config.dispatch.batch == 64
-    assert config.dispatch.concurrency == %Ankusa.Config{}.dispatch.concurrency
-
-    assert Config.load!(path: path, env: %{"ANKUSA_REGION" => "us-east-1"}).config.dispatch.region ==
-             "us-east-1"
-
-    assert Config.load!(path: tmp_config("node: {}\n"), env: %{}).config.dispatch.region == nil
-
-    for {yaml, message} <- [
-          {"node: {region: 7}", ~s(node.region: expected a string, got 7)},
-          {~s(node: {region: ""}),
-           ~s(dispatch.region must be nil or a non-empty string of at most 64 bytes, got "")}
   test "the drain keys (OPS-4) map to core's listener keys and are range checked" do
     config =
       Config.load!(
@@ -2368,6 +2350,32 @@ defmodule AnkusaServer.ConfigTest do
            "listener.drain_timeout_ms must be a positive integer, got 0"},
           {"listener: {drain_timeout_ms: 5000}",
            "listener.drain_timeout_ms (5000) must be at least the ingress listener's shutdown timeout (22000 ms"}
+        ] do
+      error =
+        assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml <> "\n"), env: %{}) end
+
+      assert Exception.message(error) =~ message
+    end
+  end
+
+  test "node.region maps to core's dispatch.region, ANKUSA_REGION overrides it, both range checked" do
+    path = tmp_config("node: {region: eu-west-1}\ndispatch: {batch: 64}\n")
+
+    config = Config.load!(path: path, env: %{}).config
+    assert config.dispatch.region == "eu-west-1"
+    # The rest of `dispatch` is the file's and core's, not replaced by the region.
+    assert config.dispatch.batch == 64
+    assert config.dispatch.concurrency == %Ankusa.Config{}.dispatch.concurrency
+
+    assert Config.load!(path: path, env: %{"ANKUSA_REGION" => "us-east-1"}).config.dispatch.region ==
+             "us-east-1"
+
+    assert Config.load!(path: tmp_config("node: {}\n"), env: %{}).config.dispatch.region == nil
+
+    for {yaml, message} <- [
+          {"node: {region: 7}", ~s(node.region: expected a string, got 7)},
+          {~s(node: {region: ""}),
+           ~s(dispatch.region must be nil or a non-empty string of at most 64 bytes, got "")}
         ] do
       error =
         assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml <> "\n"), env: %{}) end
