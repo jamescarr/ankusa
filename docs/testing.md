@@ -101,6 +101,19 @@ The always-on tests cover:
   appears on `ankusa_verifier_weak_hash_total`. `mise run lint:pins` is the
   gate for action SHAs and image digests (what runs where:
   [`releasing.md`](releasing.md#supply-chain-pins-sbom-provenance-signature)).
+- **Request-path allocations** (`verifier_test.exs` "allocations per verify",
+  `dedupe_test.exs` "dedupe.max_json_bytes", `edge_rate_limit_test.exs` "the
+  bucket sweep", `property/envelope_property_test.exs`, core and `ankusa_server`
+  `config_test.exs`): verifying an 8 MiB body leaves no refc binary of its own
+  in the verifying process (a heap sized so no GC runs; the same measure on the
+  `Regex.replace` it replaced held a full 8 MiB copy); a template compiles to
+  literals, `:body`, `:ts` and lowercased header tokens; a JSON body past
+  `dedupe.max_json_bytes` has no key and is never decoded, a header source is
+  unaffected, and a retry of such a body is stored again until the cap is
+  raised; a million expired rate-limit rows sweep as 16 ticks of one shard,
+  each under 50 ms, leaving a live bucket alone; `Envelope.header/2` still
+  folds exactly as `String.downcase/1` does, Unicode and invalid UTF-8
+  included.
 - **Verifier breadth** (`verifier_test.exs` "Asymmetric", "Token", "ClientCert"
   and "validate_config!/1 for the asymmetric, token and client-certificate
   verifiers", `edge_test.exs` "verifier breadth", `instance_test.exs` mutual

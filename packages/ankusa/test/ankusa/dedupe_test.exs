@@ -145,6 +145,72 @@ defmodule Ankusa.DedupeTest do
     assert stored_ids(config.instance) == [id1]
   end
 
+  describe "dedupe.max_json_bytes" do
+    @nine_mb 9 * 1024 * 1024
+
+    defp json_env(body) do
+      %Envelope{
+        id: "e1",
+        source_id: "src",
+        received_at: 0,
+        method: "POST",
+        path: "/hook",
+        headers: [{"x-github-delivery", "d1"}],
+        body: body
+      }
+    end
+
+    test "a JSON body past the cap has no key, however well formed; under the cap it keys" do
+      dedupe = Ankusa.Dedupe.new!(:stripe)
+      big = ~s({"id":"evt_1","pad":") <> String.duplicate("x", @nine_mb) <> ~s("})
+
+      assert byte_size(big) > @nine_mb
+      assert Ankusa.Dedupe.key(dedupe, json_env(big)) == nil
+      assert Ankusa.Dedupe.key(dedupe, json_env(big), :skip, 16 * 1024 * 1024) == "evt_1"
+      assert Ankusa.Dedupe.key(dedupe, json_env(~s({"id":"evt_1"}))) == "evt_1"
+      assert Ankusa.Dedupe.key(dedupe, json_env(~s({"id":"evt_1"})), :skip, 8) == nil
+    end
+
+    test "the cap is checked before a decode, and holds for a body the caller decoded" do
+      dedupe = Ankusa.Dedupe.new!(:stripe)
+      body = ~s({"id":"evt_1"})
+
+      assert Ankusa.Dedupe.key(dedupe, json_env(body), {:ok, %{"id" => "evt_1"}}, 1024) ==
+               "evt_1"
+
+      assert Ankusa.Dedupe.key(dedupe, json_env(body), {:ok, %{"id" => "evt_1"}}, 4) == nil
+    end
+
+    test "a header source is not capped by it" do
+      dedupe = Ankusa.Dedupe.new!(:github)
+      assert Ankusa.Dedupe.key(dedupe, json_env(String.duplicate("x", @nine_mb))) == "d1"
+    end
+
+    test "a retry of a body past the default cap is stored again; raising the cap collapses it" do
+      body = ~s({"id":"evt_1","pad":") <> String.duplicate("x", 2 * 1024 * 1024) <> ~s("})
+
+      config = start_edge(%{"stripe" => [dedupe: :stripe]})
+      first = route(config, request("stripe", body))
+      retry = route(config, request("stripe", body))
+      assert first.status == 201 and retry.status == 201
+      refute JSON.decode!(retry.resp_body)["duplicate"]
+      assert length(stored_ids(config.instance)) == 2
+    end
+
+    test "a retry of a body between the default and a raised cap collapses" do
+      body = ~s({"id":"evt_1","pad":") <> String.duplicate("x", 2 * 1024 * 1024) <> ~s("})
+
+      config =
+        start_edge(%{"stripe" => [dedupe: :stripe]}, dedupe: [max_json_bytes: 4 * 1024 * 1024])
+
+      first = route(config, request("stripe", body))
+      retry = route(config, request("stripe", body))
+      assert %{"id" => id1} = JSON.decode!(first.resp_body)
+      assert %{"id" => ^id1, "duplicate" => true} = JSON.decode!(retry.resp_body)
+      assert stored_ids(config.instance) == [id1]
+    end
+  end
+
   test "salesforce preset: a retried callout with the same id collapses to the original hook" do
     assert Ankusa.Dedupe.new!(:salesforce).from == {:json, ["id"]}
 

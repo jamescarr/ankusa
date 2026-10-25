@@ -96,12 +96,15 @@ defmodule Ankusa.Verifier.Asymmetric do
   @impl true
   @spec verify(Envelope.t(), keyword()) :: :ok | {:error, term()}
   def verify(%Envelope{} = env, opts) do
-    with {:ok, scheme} <- resolve_scheme(opts),
+    with {:ok, scheme, template} <- resolve_scheme(opts),
          :ok <- Verifier.check_tolerance(opts),
          {:ok, candidates, sig_ts} <- Template.candidates(env, scheme),
          {:ok, ts} <- Template.timestamp(env, scheme, sig_ts, opts),
-         {:ok, signed} <- Template.signed_bytes(env, scheme, ts),
+         {:ok, signed} <- Template.signed_iodata(env, template, ts),
          {:ok, keys} <- public_keys(opts, scheme) do
+      # One flat message for every key and candidate: the primitive would flatten
+      # an iolist again on each call.
+      signed = Template.to_binary(signed)
       sigs = decode_candidates(candidates, scheme.encoding, Enum.map(keys, &sig_size/1))
 
       matched? =
@@ -131,24 +134,27 @@ defmodule Ankusa.Verifier.Asymmetric do
   @impl true
   @spec validate_opts(keyword()) :: :ok | {:error, :bad_scheme | :bad_tolerance | :bad_key}
   def validate_opts(opts) do
-    with {:ok, scheme} <- resolve_scheme(opts),
+    with {:ok, scheme, _template} <- resolve_scheme(opts),
          :ok <- Verifier.check_tolerance(opts),
          {:ok, _keys} <- public_keys(opts, scheme) do
       :ok
     end
   end
 
+  # The scheme and its `signed` template compiled: a preset's was compiled when
+  # `Ankusa.Verifier.Schemes` was built, an inline scheme's is compiled here.
   defp resolve_scheme(opts) do
     case opts[:scheme] do
       atom when is_atom(atom) and not is_nil(atom) ->
-        case Ankusa.Verifier.Schemes.fetch_asymmetric(atom) do
-          {:ok, scheme} -> {:ok, scheme}
+        case Ankusa.Verifier.Schemes.fetch_asymmetric_compiled(atom) do
+          {:ok, scheme, template} -> {:ok, scheme, template}
           :error -> {:error, :bad_scheme}
         end
 
       %Scheme{} = scheme ->
         try do
-          {:ok, Ankusa.Verifier.Schemes.validate!(scheme)}
+          scheme = Ankusa.Verifier.Schemes.validate!(scheme)
+          {:ok, scheme, Template.compile(scheme.signed)}
         rescue
           ArgumentError -> {:error, :bad_scheme}
         end

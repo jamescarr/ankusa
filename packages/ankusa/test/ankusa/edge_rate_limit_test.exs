@@ -754,4 +754,74 @@ defmodule Ankusa.Edge.RateLimitTest do
                RateLimiter.put_override(inst, "acme", Map.merge(base, extra))
     end
   end
+
+  describe "the bucket sweep (PERF-1)" do
+    # Expired rows (a TAT in the past is a full bucket) in the shard each key
+    # hashes to, as the limiter itself would have left them.
+    defp seed_expired(instance, keys) do
+      expired = System.monotonic_time() - System.convert_time_unit(10, :second, :native)
+
+      for {shard, rows} <- Enum.group_by(keys, &RateLimiter.bucket_shard/1, &{&1, expired}) do
+        :ets.insert(RateLimiter.bucket_table(instance, shard), rows)
+      end
+
+      :ok
+    end
+
+    defp shard_sizes(instance) do
+      for shard <- 0..15, do: :ets.info(RateLimiter.bucket_table(instance, shard), :size)
+    end
+
+    test "a tenant's buckets hash to one shard, and the shards are spread" do
+      assert RateLimiter.bucket_shard("acme") == RateLimiter.bucket_shard("acme")
+
+      shards = for i <- 1..2_000, uniq: true, do: RateLimiter.bucket_shard("tenant-#{i}")
+      assert Enum.sort(shards) == Enum.to_list(0..15)
+    end
+
+    test "a tick sweeps one shard, in turn, and leaves a live bucket alone" do
+      config = start_edge(%{tenants: %{"acme" => %{rate: 0.001, burst: 1}}})
+      inst = config.instance
+      assert :ok = RateLimiter.hit(inst, "acme")
+
+      seed_expired(inst, for(i <- 1..4_000, do: {:ip, i}))
+      before = shard_sizes(inst)
+      assert Enum.sum(before) == 4_000 + 1
+
+      pid = GenServer.whereis(Ankusa.via(inst, :rate_limiter))
+      send(pid, :sweep)
+      _ = :sys.get_state(pid)
+      after_one = shard_sizes(inst)
+
+      live_shard = RateLimiter.bucket_shard("acme")
+      assert hd(after_one) == if(live_shard == 0, do: 1, else: 0)
+      assert tl(after_one) == tl(before)
+
+      send(pid, :sweep)
+      _ = :sys.get_state(pid)
+      assert shard_sizes(inst) |> Enum.take(2) |> Enum.sum() == if(live_shard < 2, do: 1, else: 0)
+
+      for _ <- 3..16, do: send(pid, :sweep)
+      _ = :sys.get_state(pid)
+      assert Enum.sum(shard_sizes(inst)) == 1
+      assert {:error, {:rate_limited, _}} = RateLimiter.hit(inst, "acme")
+    end
+
+    test "a table of a million expired rows sweeps in 16 ticks, each under 50 ms" do
+      config = start_edge(%{})
+      inst = config.instance
+      seed_expired(inst, for(i <- 1..1_000_000, do: {:ip, i}))
+      assert Enum.sum(shard_sizes(inst)) == 1_000_000
+
+      millis =
+        for shard <- 0..15 do
+          {micros, deleted} = :timer.tc(fn -> RateLimiter.sweep(inst, shard) end)
+          assert deleted > 0
+          micros / 1_000
+        end
+
+      assert Enum.max(millis) < 50
+      assert Enum.sum(shard_sizes(inst)) == 0
+    end
+  end
 end
