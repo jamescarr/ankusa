@@ -65,6 +65,15 @@ defmodule Ankusa.Trace do
   @spec from_headers([{String.t(), String.t()}]) :: t() | nil
   def from_headers(headers), do: scan(headers, nil, 0, [])
 
+  @doc """
+  The 32-hex trace id of a trace context, `nil` for `nil`. It is what a log line
+  carries as `trace_id` (`Ankusa.Edge.Ingest`), so a line can be found from the
+  trace and the other way round.
+  """
+  @spec trace_id(t() | nil) :: String.t() | nil
+  def trace_id(%{traceparent: <<"00-", id::binary-size(32), ?-, _rest::binary>>}), do: id
+  def trace_id(_other), do: nil
+
   # A malformed `traceparent` still counts, so `[valid, malformed]` is two
   # headers: no trace.
   defp scan([], nil, _count, _states), do: nil

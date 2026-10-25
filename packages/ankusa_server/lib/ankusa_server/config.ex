@@ -37,6 +37,7 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_ROLES` | `node.roles` (comma-separated) |
   | `ANKUSA_DATA_DIR` | `node.data_dir` |
   | `ANKUSA_LOG_LEVEL` | `log.level` |
+  | `ANKUSA_LOG_FORMAT` | `log.format` (`text` or `json`) |
   | `ANKUSA_BANNER` | `log.banner` |
   | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
   | `ANKUSA_ADMIN_PORT` | `admin.port` |
@@ -75,7 +76,7 @@ defmodule AnkusaServer.Config do
   @root_keys ~w(node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive health)
   @node_keys ~w(roles data_dir min_free_bytes)
   @health_keys ~w(sink_error_window_ms)
-  @log_keys ~w(level banner)
+  @log_keys ~w(level banner format)
   @tracing_keys ~w(enabled otlp_endpoint sample_ratio)
   @default_otlp_endpoint "http://localhost:4318"
   @http_keys ~w(port max_body_bytes routing prefix store_headers)
@@ -212,6 +213,7 @@ defmodule AnkusaServer.Config do
   @policies ~w(reject quarantine accept_flag)
   @routings ~w(path tenant_path)
   @log_levels ~w(debug info warning error)
+  @log_formats ~w(text json)
   @exchange_types ~w(topic direct fanout headers)
 
   @typedoc """
@@ -220,7 +222,7 @@ defmodule AnkusaServer.Config do
   """
   @type loaded :: %{
           config: Ankusa.Config.t(),
-          log_level: Logger.level(),
+          log: %{format: :text | :json, level: Logger.level()},
           banner: boolean(),
           tracing: tracing(),
           secrets: AnkusaServer.Secrets.t()
@@ -267,7 +269,7 @@ defmodule AnkusaServer.Config do
 
     %{
       config: config!(doc),
-      log_level: log_level!(doc),
+      log: log!(doc),
       banner: banner?(doc),
       tracing: tracing!(doc),
       secrets: secrets
@@ -462,6 +464,7 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_ROLES", ["node", "roles"]},
     {"ANKUSA_DATA_DIR", ["node", "data_dir"]},
     {"ANKUSA_LOG_LEVEL", ["log", "level"]},
+    {"ANKUSA_LOG_FORMAT", ["log", "format"]},
     {"ANKUSA_BANNER", ["log", "banner"]},
     {"ANKUSA_ADMIN_PORT", ["admin", "port"]},
     {"ANKUSA_ADMIN_IP", ["admin", "ip"]},
@@ -544,10 +547,17 @@ defmodule AnkusaServer.Config do
 
   # ── 4. validate + translate ─────────────────────────────────────────────────
 
-  defp log_level!(doc) do
+  # The log section: the level the node starts at (`Ankusa.LogLevel`, also
+  # changeable at runtime) and the format of every line (`AnkusaServer.LogFormatter`).
+  defp log!(doc) do
     log = section!(doc, "log", @log_keys, [])
     level = enum!(log["level"] || "info", @log_levels, ["log", "level"])
-    String.to_existing_atom(level)
+    format = enum!(log["format"] || "text", @log_formats, ["log", "format"])
+
+    %{
+      format: if(format == "json", do: :json, else: :text),
+      level: String.to_existing_atom(level)
+    }
   end
 
   defp banner?(doc) do
