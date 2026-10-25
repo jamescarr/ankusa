@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-24
+
 ### Added
 
 - `:max_message_bytes` on `Ankusa.Sink.Redis` (default 512 MiB, Redis's bulk
@@ -202,7 +204,8 @@ follows [Semantic Versioning](https://semver.org/).
 - Depends on `ankusa` `~> 0.2`, which introduced `Ankusa.Routes.Store` and
   `Ankusa.Routes.Snapshot`.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.5.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.6.0...HEAD
+[0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.5.0...ankusa_redis-v0.6.0
 [0.5.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.4.0...ankusa_redis-v0.5.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.3.0...ankusa_redis-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.2.4...ankusa_redis-v0.3.0
