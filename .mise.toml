@@ -28,3 +28,4 @@ helm = "4.3.1"
 # Validates the rendered Helm chart (check:examples) against the Kubernetes schemas.
 kubeconform = "0.8.0"
 actionlint = "1.7.12"
+promtool = "3.15.1"

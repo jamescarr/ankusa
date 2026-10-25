@@ -728,6 +728,43 @@ the file or version and what to do:
   batch it committed on the next boot; `mix ankusa.store.migrate --dry-run`
   shows where.
 
+## Monitoring
+
+What to alert on ships in the repository, and is checked in CI
+(`mise run check:monitoring`):
+
+| File | What |
+| --- | --- |
+| [`deploy/monitoring/prometheus-rules.yaml`](https://github.com/jamescarr/ankusa/blob/main/deploy/monitoring/prometheus-rules.yaml) | 22 alerts: one per row of the [SLO table](architecture.md#slis-and-slos), plus ack error ratio, open breakers, a growing or full DLQ, a stale backup, a low disk, store write failures, a failure domain down, intake log failures, one tenant's `429`s |
+| [`deploy/monitoring/prometheus-rules.test.yaml`](https://github.com/jamescarr/ankusa/blob/main/deploy/monitoring/prometheus-rules.test.yaml) | `promtool test rules` cases: each alert fires on the failure's series and stays quiet on normal ones |
+| [`deploy/monitoring/grafana/ankusa.json`](https://github.com/jamescarr/ankusa/blob/main/deploy/monitoring/grafana/ankusa.json) | a Grafana dashboard (import it, pick the Prometheus data source, pick nodes) |
+| [`docs/runbooks/`](https://github.com/jamescarr/ankusa/tree/main/docs/runbooks) | one page per alert family: symptom, metric, action, verification; every alert's `runbook_url` |
+
+Scrape every node's `/metrics`: the metrics listener (`metrics.enabled: true`, port 4004, `metrics.ip`)
+is the one to give Prometheus, since it serves nothing else. Leave
+`honor_labels` at its default `false`: Ankusa labels every series with its own
+instance name (`instance`), Prometheus renames that `exported_instance` and
+makes `instance` the node, and the rules aggregate by `job, instance,
+exported_instance`. Then load the rules:
+
+```yaml
+# prometheus.yml
+rule_files:
+  - /etc/prometheus/ankusa/prometheus-rules.yaml
+scrape_configs:
+  - job_name: ankusa
+    static_configs:
+      - targets: ["ankusa-0.ankusa:4004", "ankusa-1.ankusa:4004"]
+```
+
+The rules assume nothing about the job name. Their thresholds are the SLO
+table's: change the table first, then the rule and its unit test. Route
+`severity: critical` to a pager and `warning` to a ticket queue in Alertmanager.
+Also alert on `up == 0` for the job: a node whose `/metrics` does not answer
+raises none of these alerts. The `runbook_url` points at the `main` branch of
+this repository; mirror `docs/runbooks/` and rewrite the annotation if you
+run them from an internal wiki.
+
 ## Worked examples
 
 Four runnable topologies, HTTP, RabbitMQ, Kafka → SQS FIFO, and Oban on

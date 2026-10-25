@@ -1,0 +1,496 @@
+# Unit tests for prometheus-rules.yaml (`promtool test rules`, run by mise run check:monitoring).
+# Each alert fires on a series shaped like the failure and stays quiet on one shaped like normal
+# operation. AnkusaMetricsSeriesOverBudget counts 10 000 series and has no test here.
+rule_files:
+  - prometheus-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: "ack error ratio: 10 % of requests refused with a 503 fires after 5 minutes"
+    interval: 1m
+    input_series:
+      - series: "ankusa_ingest_requests_total{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",tenant_id=\"acme\",outcome=\"committed\"}"
+        values: "0+90x30"
+      - series: "ankusa_ingest_requests_total{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",tenant_id=\"acme\",outcome=\"store_unavailable\"}"
+        values: "0+10x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AnkusaAckErrorRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002 refuses 10% of hooks with a 503"
+              description: "More than 1 % of the requests Ankusa instance default on node-a:4002 answered in the last 5 minutes were 503s (overload, store_unavailable, intake_unavailable, intake_pending or dlq_full). Providers retry, but a sustained ratio means hooks are at risk of provider give-up."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/ack-slo.md"
+
+  - name: "ack error ratio: 0.1 % refused stays quiet, and 429s are not errors"
+    interval: 1m
+    input_series:
+      - series: "ankusa_ingest_requests_total{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",tenant_id=\"acme\",outcome=\"committed\"}"
+        values: "0+1000x30"
+      - series: "ankusa_ingest_requests_total{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",tenant_id=\"acme\",outcome=\"overload\"}"
+        values: "0+1x30"
+      - series: "ankusa_ingest_requests_total{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",tenant_id=\"acme\",outcome=\"rate_limited\"}"
+        values: "0+500x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AnkusaAckErrorRatioHigh
+        exp_alerts: []
+
+  - name: "ack latency: p99 above 50 ms for 30 minutes breaches the SLO, not the chaos bound"
+    interval: 1m
+    input_series:
+      - series: "ankusa_ingest_duration_seconds_bucket{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",le=\"0.1\"}"
+        values: "0+60x60"
+      - series: "ankusa_ingest_duration_seconds_bucket{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",le=\"+Inf\"}"
+        values: "0+60x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AnkusaAckLatencySLOBreach
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: AnkusaAckLatencySLOBreach
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002 ack p99 is 99ms (target 50 ms)"
+              description: "The p99 of ankusa_ingest_duration_seconds on node-a:4002 has been above the 50 ms objective for 30 minutes."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/ack-slo.md"
+              slo: "Ack latency (steady, 10 KB bodies, 1 k req/s/node)"
+      - eval_time: 50m
+        alertname: AnkusaAckLatencyDegraded
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: AnkusaAckLatencyCritical
+        exp_alerts: []
+
+  - name: "ack latency: p99 above 250 ms for 10 minutes is degraded"
+    interval: 1m
+    input_series:
+      - series: "ankusa_ingest_duration_seconds_bucket{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",le=\"0.5\"}"
+        values: "0+60x60"
+      - series: "ankusa_ingest_duration_seconds_bucket{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",le=\"+Inf\"}"
+        values: "0+60x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AnkusaAckLatencyDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002 ack p99 is 495ms (chaos bound 250 ms)"
+              description: "The p99 of ankusa_ingest_duration_seconds on node-a:4002 has been above 250 ms for 10 minutes: the bound the objectives allow only while pods are being killed."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/ack-slo.md"
+              slo: "Ack latency during chaos (pod kills)"
+      - eval_time: 20m
+        alertname: AnkusaAckLatencyCritical
+        exp_alerts: []
+
+  - name: "ack latency: p99 above one second for 5 minutes is critical"
+    interval: 1m
+    input_series:
+      - series: "ankusa_ingest_duration_seconds_bucket{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",le=\"2.5\"}"
+        values: "0+60x60"
+      - series: "ankusa_ingest_duration_seconds_bucket{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",le=\"+Inf\"}"
+        values: "0+60x60"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: AnkusaAckLatencyCritical
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002 ack p99 is 2.475s"
+              description: "The p99 of ankusa_ingest_duration_seconds on node-a:4002 has been above one second for 5 minutes. Providers with a short timeout are already retrying."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/ack-slo.md"
+
+  - name: "ingest rate: 10 000 hooks/s for 15 minutes is near the node's capacity"
+    interval: 1m
+    input_series:
+      - series: "ankusa_ingest_requests_total{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",tenant_id=\"acme\",outcome=\"committed\"}"
+        values: "0+600000x60"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AnkusaIngestNearCapacity
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: AnkusaIngestNearCapacity
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002 takes 10k hooks/s, 80 % of what the bench sustains"
+              description: "node-a:4002 has handled more than 8 000 requests per second for 15 minutes; the in-process bench sustains at least 10 000 per second per node with 1 KB bodies. Add an edge node before the ack latency objective goes."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/ack-slo.md"
+              slo: "Ingest throughput (1 KB bodies, in-process bench)"
+
+  - name: "drain budget: a commit p99 above the 2 s the drain allows"
+    interval: 1m
+    input_series:
+      - series: "ankusa_wal_commit_duration_seconds_bucket{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",le=\"2.5\"}"
+        values: "0+60x60"
+      - series: "ankusa_wal_commit_duration_seconds_bucket{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",le=\"+Inf\"}"
+        values: "0+60x60"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: AnkusaDrainBudgetAtRisk
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002 store commit p99 is 2.475s"
+              description: "A store commit takes more than the 2 s the SIGTERM drain budgets for it (Ankusa.Listener.ingress_shutdown_timeout_ms/1), so a stop can cut a request off and the provider sees a reset for a hook that may be committed."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/ack-slo.md"
+              slo: "Drain on SIGTERM"
+
+  - name: "tenant overload: only the tenant refused more than once a second pages"
+    interval: 1m
+    input_series:
+      - series: "ankusa_ingest_requests_total{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",tenant_id=\"acme\",outcome=\"tenant_overload\"}"
+        values: "0+120x40"
+      - series: "ankusa_ingest_requests_total{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",tenant_id=\"beta\",outcome=\"tenant_overload\"}"
+        values: "0+30x40"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: AnkusaTenantOverload
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+              tenant_id: "acme"
+            exp_annotations:
+              summary: "node-a:4002 answers 429 tenant_overload 2 times a second"
+              description: "One tenant has used its whole share of the batchers on node-a:4002 for 10 minutes. Other tenants are unaffected; this one is being refused. Without a tenant_id label the node runs with metrics.detail: none."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/tenant-overload.md"
+
+  - name: "delivery latency: p99 above 5 s for a sink that is delivering"
+    interval: 1m
+    input_series:
+      - series: "ankusa_delivery_latency_seconds_bucket{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",le=\"10\",sink=\"Ankusa.Sink.Http\",result=\"ok\"}"
+        values: "0+30x60"
+      - series: "ankusa_delivery_latency_seconds_bucket{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",le=\"+Inf\",sink=\"Ankusa.Sink.Http\",result=\"ok\"}"
+        values: "0+30x60"
+      - series: "ankusa_delivery_latency_seconds_bucket{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",le=\"0.5\",sink=\"Ankusa.Sink.Kafka\",result=\"ok\"}"
+        values: "0+30x60"
+      - series: "ankusa_delivery_latency_seconds_bucket{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",le=\"+Inf\",sink=\"Ankusa.Sink.Kafka\",result=\"ok\"}"
+        values: "0+30x60"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: AnkusaDeliveryLatencySLOBreach
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+              sink: "Ankusa.Sink.Http"
+            exp_annotations:
+              summary: "Ankusa.Sink.Http deliveries settle with p99 9.9s (target 5 s)"
+              description: "Deliveries to Ankusa.Sink.Http from node-a:4002 take longer than 5 seconds from receipt to confirmation at the 99th percentile, retries and backoff included."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/backlog-age.md"
+              slo: "Delivery latency, healthy sinks (received → confirmed)"
+
+  - name: "backlog: an oldest due row older than 5 minutes pages for the node that holds it"
+    interval: 1m
+    input_series:
+      - series: "ankusa_queue_oldest_due_age_seconds{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\"}"
+        values: "0x3 400x30"
+      - series: "ankusa_queue_oldest_due_age_seconds{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"other\"}"
+        values: "100x33"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AnkusaBacklogStale
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AnkusaBacklogStale
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002 has a delivery that has been due for 6m 40s"
+              description: "The oldest due row on node-a:4002 has waited more than 5 minutes: dispatch is stopped, saturated or blocked behind a sink."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/backlog-age.md"
+              slo: "Backlog age (oldest due row)"
+
+  - name: "breaker: an open sink breaker for 5 minutes"
+    interval: 1m
+    input_series:
+      - series: "ankusa_dispatch_breakers_open{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\"}"
+        values: "0x3 2x30"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AnkusaBreakerOpen
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AnkusaBreakerOpen
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002 has 2 open sink breaker(s)"
+              description: "At least one destination on node-a:4002 has had its circuit breaker open for 5 minutes: its deliveries are parked, not attempted."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/breaker-open.md"
+
+  - name: "DLQ: rows that keep growing for 15 minutes, and a full DLQ"
+    interval: 1m
+    input_series:
+      - series: "ankusa_dlq_rows{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\"}"
+        values: "0+10x120"
+      - series: "ankusa_dlq_full{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\"}"
+        values: "0x3 1x30"
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: AnkusaDLQGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002 dead-lettered 600 more deliveries in the last hour"
+              description: "The dead-letter queue on node-a:4002 has grown for 15 minutes: deliveries are giving up. A steady DLQ is not alerting; a growing one is a sink or a config fault."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/dlq-growth.md"
+      - eval_time: 10m
+        alertname: AnkusaDLQFull
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002 refuses new hooks: the DLQ is over its ceiling"
+              description: "The dead-letter queue on node-a:4002 is over queue.dlq.max_rows or max_bytes with no archived row left to evict, so new hooks get 503 dlq_full."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/dlq-growth.md"
+
+  - name: "DLQ: a steady dead-letter queue is not an alert"
+    interval: 1m
+    input_series:
+      - series: "ankusa_dlq_rows{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\"}"
+        values: "500x120"
+      - series: "ankusa_dlq_full{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\"}"
+        values: "0x120"
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: AnkusaDLQGrowing
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: AnkusaDLQFull
+        exp_alerts: []
+
+  - name: "disk: under 10 % free on one node"
+    interval: 1m
+    input_series:
+      - series: "ankusa_disk_free_bytes{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\"}"
+        values: "5000000000x60"
+      - series: "ankusa_disk_total_bytes{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\"}"
+        values: "100000000000x60"
+      - series: "ankusa_disk_free_bytes{job=\"ankusa\",instance=\"node-b:4002\",exported_instance=\"default\"}"
+        values: "50000000000x60"
+      - series: "ankusa_disk_total_bytes{job=\"ankusa\",instance=\"node-b:4002\",exported_instance=\"default\"}"
+        values: "100000000000x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AnkusaDiskLow
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002 has 5% of its data volume free"
+              description: "The file system holding data_dir on node-a:4002 is below 10 % free. At zero the store cannot commit and every hook is a 503."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/disk-full.md"
+
+  - name: "backup: a last successful backup more than 5 minutes ago"
+    interval: 1m
+    input_series:
+      - series: "ankusa_backup_age_seconds{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\"}"
+        values: "0x3 400x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AnkusaBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002 last backed up 6m 40s ago"
+              description: "The last successful checkpoint upload from node-a:4002 is more than 5 minutes old: the data a lost host would take with it."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/backup-stale.md"
+
+  - name: "store writes: a series' first failure alerts, and goes quiet once it is old"
+    interval: 1m
+    input_series:
+      - series: "ankusa_store_write_failures_total{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",class=\"no_space\"}"
+        values: "_ _ _ 3x20"
+      - series: "ankusa_store_write_failures_total{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",class=\"io_error\"}"
+        values: "2x20"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AnkusaStoreWriteFailures
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+              class: "no_space"
+            exp_annotations:
+              summary: "node-a:4002 failed 3 store write(s) of class no_space"
+              description: "A write to the store on node-a:4002 failed in the last 5 minutes (class no_space). Hooks it could not commit were answered 503, never acked."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/store-write-failed.md"
+      - eval_time: 20m
+        alertname: AnkusaStoreWriteFailures
+        exp_alerts: []
+
+  - name: "store: closed for a minute"
+    interval: 1m
+    input_series:
+      - series: "ankusa_store_unavailable_seconds{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\"}"
+        values: "0x3 30x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AnkusaStoreUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002's store has been closed for 30s"
+              description: "The store on node-a:4002 is closed and retrying its open; every request is a 503 store_unavailable until it is back."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/store-write-failed.md"
+
+  - name: "subtree: the first outage of a domain alerts, and goes quiet after 10 minutes"
+    interval: 1m
+    input_series:
+      - series: "ankusa_instance_subtree_down_total{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",domain=\"dispatch\"}"
+        values: "_ _ _ 1x20"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AnkusaSubtreeDown
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+              domain: "dispatch"
+            exp_annotations:
+              summary: "node-a:4002's dispatch subtree went down"
+              description: "The dispatch failure domain of default on node-a:4002 exhausted its restart budget in the last 10 minutes and is waiting out a backoff of up to 60 s. Hooks wait in the store meanwhile."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/node-unready.md"
+      - eval_time: 20m
+        alertname: AnkusaSubtreeDown
+        exp_alerts: []
+
+  - name: "intake log: a first failed publish alerts; a breaker not closed for a minute and a stuck hook page"
+    interval: 1m
+    input_series:
+      - series: "ankusa_intake_failures_total{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\",class=\"timeout\"}"
+        values: "_ _ _ 2x20"
+      - series: "ankusa_intake_ready{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\"}"
+        values: "1x3 0x20"
+      - series: "ankusa_intake_reconcile_stuck{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\"}"
+        values: "0x3 2x30"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AnkusaIntakeFailures
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+              class: "timeout"
+            exp_annotations:
+              summary: "node-a:4002 failed 2 intake log publish(es) (timeout)"
+              description: "A publish to the intake log from node-a:4002 failed in the last 5 minutes (class timeout). Three in a row open the breaker and every hook becomes a 503 intake_unavailable."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/intake-down.md"
+      - eval_time: 20m
+        alertname: AnkusaIntakeFailures
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: AnkusaIntakeNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002's intake breaker is not closed"
+              description: "The intake log breaker on node-a:4002 has not been closed for a minute: with wal.type: dual the node refuses hooks (503 intake_unavailable) while the log does not answer."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/intake-down.md"
+      - eval_time: 15m
+        alertname: AnkusaIntakeReconcileStuck
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002 holds 2 hook(s) the reconciler cannot finish"
+              description: "A hook on node-a:4002 is persisted in the store but not confirmed in the intake log, and the reconciler has not been able to complete it for 5 minutes."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/intake-down.md"
+
+  - name: "memory: a low-water mark growing more than 5 % an hour for an hour"
+    interval: 1m
+    input_series:
+      - series: "ankusa_vm_memory_bytes{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"default\"}"
+        values: "1000000000+20000000x300"
+      - series: "ankusa_vm_memory_bytes{job=\"ankusa\",instance=\"node-a:4002\",exported_instance=\"flat\"}"
+        values: "1000000000x300"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: AnkusaMemoryGrowth
+        exp_alerts: []
+      - eval_time: 210m
+        alertname: AnkusaMemoryGrowth
+        exp_alerts:
+          - exp_labels:
+              severity: "warning"
+              job: "ankusa"
+              instance: "node-a:4002"
+              exported_instance: "default"
+            exp_annotations:
+              summary: "node-a:4002's memory has grown more than 5 % an hour for an hour"
+              description: "The low-water mark of the Erlang VM's memory on node-a:4002 is more than 5 % above where it was an hour earlier, and has been for an hour: a leak, not a spike."
+              runbook_url: "https://github.com/jamescarr/ankusa/blob/main/docs/runbooks/memory-growth.md"
+              slo: "Memory growth, 1 h soak at target rate"
