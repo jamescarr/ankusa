@@ -678,6 +678,7 @@ defmodule Ankusa.Metrics do
           {"ankusa.dispatch.runnable", [:ankusa, :dispatch, :state], :runnable, :unit},
           {"ankusa.dispatch.breakers_open", [:ankusa, :dispatch, :state], :breakers_open, :unit},
           {"ankusa.http.pools", [:ankusa, :http, :state], :pools, :unit},
+          {"ankusa.sources.without_dedupe", [:ankusa, :sources, :state], :without_dedupe, :unit},
           {"ankusa.sink_batch.batchers", [:ankusa, :sink_batch, :state], :batchers, :unit},
           {"ankusa.sink_batch.queued", [:ankusa, :sink_batch, :state], :queued, :unit},
           {"ankusa.sink_batch.queued.bytes", [:ankusa, :sink_batch, :state], :queued_bytes,

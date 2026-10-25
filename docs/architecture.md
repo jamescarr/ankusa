@@ -15,7 +15,7 @@ framework is downstream of that one sentence.
   was lost because nothing was promised.
 - **Crash after the accept, before the HTTP response leaves:** the provider
   retries anyway (it never saw the `2xx`). Without a source
-  [`dedupe:`](configuration.md#sources) setting, that retry is a new hook: a fresh `id`, stored and delivered again. Delivery
+  [`dedupe:`](configuration.md#sources) setting (boot logs a warning per such source), that retry is a new hook: a fresh `id`, stored and delivered again. Delivery
   is at-least-once; consumers are idempotent receivers.
 - **Store slow or down:** `503` with `Retry-After`. Under `wal.type: disk` that
   is the store refusing a commit; under `dual` it is the store or the intake
@@ -550,7 +550,8 @@ carries `ankusa_store_hooks`, `ankusa_queue_pending` / `_scheduled` /
 most first attempts waiting), `ankusa_quarantine_bytes`, `ankusa_quarantine_pending`, `ankusa_disk_free_bytes`,
 `ankusa_dispatch_running` / `_claimed` / `_runnable` / `_active_tenants`,
 `ankusa_dispatch_tenant_inflight{tenant}` (the claimed rows of the 100 tenants
-holding the most, against their windows) and
+holding the most, against their windows), `ankusa_sources_without_dedupe` (the
+configured sources with no `dedupe:`, each also a boot warning) and
 `ankusa_dispatch_breakers_open` — enough to
 alert on a growing backlog, a filling disk or an open breaker before a
 provider sees a `503`. `pending` is first attempts waiting and `scheduled`

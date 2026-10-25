@@ -8,6 +8,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`dedupe: salesforce` (CON-3).** A source's `dedupe` accepts the preset
+  `salesforce` (`json: id`; see `configuration.md` for why it is a convention and
+  not a Salesforce-documented delivery id). A source with no `dedupe` logs one
+  boot warning and counts in `ankusa_sources_without_dedupe`. See the `ankusa`
+  changelog.
+
 - **Structured JSON logs (OPS-2).** `log.format: json` (`ANKUSA_LOG_FORMAT`;
   default `text`, the output as before) writes one JSON object per line:
   `time`, `level`, `msg`, `instance`, `hook_id`, `tenant_id`, `source_id`,

@@ -624,7 +624,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `conformance/check.mjs`, `conformance/cases/message.json`, `packages/ankusa/lib/ankusa/sink/message.ex:72-105`, `packages/sdk-elixir/lib/ankusa/sdk/message.ex`.
   *Evidence:* —
 
-- [ ] **CON-3 — Salesforce dedupe preset and no-dedupe boot warning** · P1 · Deps: —
+- [x] **CON-3 — Salesforce dedupe preset and no-dedupe boot warning** · P1 · Deps: —
   *Why:* without `dedupe:` a provider retry is a new `idempotency_key` (`envelope.ex:61-64`); presets cover github/standard_webhooks/svix/shopify/stripe only (`dedupe.ex:40-46`).
   *Change:* preset `salesforce` in `Ankusa.Dedupe.@presets` keyed on the delivery id Salesforce sends (confirm the header or JSON path against Salesforce's outbound-webhook documentation before coding — unverified; if none is stable, ship the preset as `{:json, "id"}` and say so in `configuration.md`); boot warning `source <id> has no dedupe:` with `ankusa_sources_without_dedupe` gauge; `configuration.md` row.
   *Done when:* a source with `dedupe: salesforce` collapses a retry to the original id; a source without `dedupe` logs the warning once.

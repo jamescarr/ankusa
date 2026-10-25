@@ -522,6 +522,46 @@ defmodule Ankusa.ConfigTest do
     end
   end
 
+  describe "Ankusa.Dedupe.undeduped_sources/1 and warn_undeduped/1" do
+    defp dedupe_config(sources) do
+      Config.new(source_store: {Ankusa.SourceStore.Static, sources: sources})
+    end
+
+    test "lists, sorted, every declared source without dedupe: struct, keyword and map specs" do
+      config =
+        dedupe_config(%{
+          "z-plain" => [sinks: [{Ankusa.Sink.Log, []}]],
+          "a-map" => %{sinks: [{Ankusa.Sink.Log, []}]},
+          "m-struct" => Ankusa.Source.new("m-struct", []),
+          "deduped-kw" => [dedupe: :salesforce],
+          "deduped-map" => %{dedupe: %{header: "x-id"}},
+          "deduped-struct" => Ankusa.Source.new("deduped-struct", dedupe: :github)
+        })
+
+      assert Ankusa.Dedupe.undeduped_sources(config) == ["a-map", "m-struct", "z-plain"]
+      assert Ankusa.Dedupe.undeduped_sources(Config.new()) == []
+    end
+
+    test "warns without dedupe: one line per source that has none, nothing for the rest" do
+      config =
+        dedupe_config(%{
+          "warn-plain" => [],
+          "warn-other" => [],
+          "warn-github" => [dedupe: :github]
+        })
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok = Ankusa.Dedupe.warn_undeduped(config)
+        end)
+
+      assert length(Regex.scan(~r/source warn-plain has no dedupe:/, log)) == 1
+      assert length(Regex.scan(~r/source warn-other has no dedupe:/, log)) == 1
+      assert log =~ "ankusa_sources_without_dedupe"
+      refute log =~ "warn-github"
+    end
+  end
+
   describe "wal normalization" do
     test "the removed disk-log tuple raises with a hint" do
       assert_raise ArgumentError, ~r/use wal: :disk/, fn ->

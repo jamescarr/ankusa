@@ -41,6 +41,7 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :quarantine, :state]` | `:bytes`, `:entries` | `:instance` |
   | `[:ankusa, :disk, :state]` | `:free_bytes`, `:total_bytes` | `:instance` |
   | `[:ankusa, :http, :state]` | `:pools` (outbound HTTP connection pools open in `Ankusa.HttpClient.Pools`) | `:instance` |
+  | `[:ankusa, :sources, :state]` | `:without_dedupe` (configured sources with no `dedupe`) | `:instance` |
   | `[:ankusa, :http_pool, :closed]` | `:count` (pools stopped) | `:instance`, `:reason` (`:idle`, `:evicted`, `:source`) |
   | `[:ankusa, :http_pool, :refused]` | `:count` | `:instance`, `:scope` (`:tenant`, `:instance`: the ceiling that was full with no idle pool to close) |
   | `[:ankusa, :sink_batch, :flush]` | `:entries`, `:bytes`, `:requests` (HTTP requests the batch took), `:bisections` (extra requests spent isolating a message Pub/Sub refused), `:duration_ms` | `:instance`, `:sink` (`Ankusa.Sink.SQS`, `Ankusa.Sink.GooglePubSub`). One per batch a `Ankusa.Sink.Batcher` sent |

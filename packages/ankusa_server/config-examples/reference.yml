@@ -993,7 +993,7 @@ sources:
       # Or from a secret manager (see `secrets.providers` above):
       # secret: ["${sm:prod-vault:ankusa/stripe#whsec}", "${sm:aws:prod/stripe-old}"]
       tolerance_seconds: 300
-    # dedupe: stripe   # a preset (github | standard_webhooks | svix | shopify | stripe), or {header: X-Event-Id} / {json: data.id}, plus optional ttl_seconds (259200)
+    # dedupe: stripe   # a preset (github | standard_webhooks | svix | shopify | stripe | salesforce), or {header: X-Event-Id} / {json: data.id}, plus optional ttl_seconds (259200). A source with no dedupe logs one boot warning and counts in ankusa_sources_without_dedupe.
     # forward_headers: [stripe-signature]   # absent = every header except auth/framing/hop-by-hop and x-ankusa-*
     # max_headers: 64   # at most this many forwarded headers per message; the rest are dropped (ankusa_sink_headers_dropped_total{reason="count"})
     # forward_headers_max_bytes: 16384   # at most this many bytes of forwarded header names and values per message; a header that would pass it is dropped whole (reason="bytes")
