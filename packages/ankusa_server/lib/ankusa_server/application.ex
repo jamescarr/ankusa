@@ -33,13 +33,14 @@ defmodule AnkusaServer.Application do
   defp start_instance do
     loaded = AnkusaServer.Config.load_or_halt!()
 
-    Logger.configure(level: loaded.log_level)
     config = loaded.config
+    start_logging(loaded.log, config.instance)
 
     # What the references resolved to, for `AnkusaServer.Secrets.reload/2`.
     AnkusaServer.Secrets.remember(config.instance, loaded.secrets)
 
-    if loaded.banner, do: AnkusaServer.Banner.print()
+    # Under `log.format: json` stdout is lines of JSON and nothing else.
+    if loaded.banner and loaded.log.format == :text, do: AnkusaServer.Banner.print()
 
     Logger.info(
       "[ankusa] ankusa_server #{version()} roles=#{inspect(config.roles)} http=#{config.port} " <>
@@ -54,6 +55,19 @@ defmodule AnkusaServer.Application do
       strategy: :one_for_one,
       name: AnkusaServer.Supervisor
     )
+  end
+
+  # Before anything logs: the level the file asks for (`Ankusa.LogLevel`) and the
+  # format of every line. A format that cannot be installed is reported in the
+  # one we have and the node runs on; logging never keeps the ingest tier down.
+  defp start_logging(%{level: level, format: format}, instance) do
+    {:ok, _previous} = Ankusa.LogLevel.set(level)
+
+    with {:error, reason} <- AnkusaServer.LogFormatter.install(format, instance) do
+      Logger.error(
+        "[ankusa] log.format #{format} did not start (#{inspect(reason)}); logging as text"
+      )
+    end
   end
 
   # Before the instance, so the first request is already traced. A failure is

@@ -61,6 +61,18 @@ defmodule Ankusa.Edge.Router do
   # ── capture ───────────────────────────────────────────────────────────────
 
   defp capture(conn, instance) do
+    # A connection's process serves many requests: what the last one put in the
+    # process's log metadata (`Ankusa.Edge.Ingest` sets the hook's) must not
+    # label this one's lines. `source_id`, `tenant_id`, `hook_id` and `trace_id`
+    # are set once the request is looked up and ingested.
+    Logger.metadata(
+      instance: instance,
+      source_id: nil,
+      tenant_id: nil,
+      hook_id: nil,
+      trace_id: nil
+    )
+
     config = Ankusa.config(instance)
     max = config.max_body_bytes
     declared = declared_length(conn)
