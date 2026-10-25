@@ -191,6 +191,7 @@ defmodule Ankusa.SourceStore.Table do
 
     with :ok <- Ankusa.Verifier.check_shared(config, source),
          :ok <- Ankusa.Queue.check_durable(config, source),
+         :ok <- Ankusa.Ordering.check(config, source),
          :ok <- claim_horizon(config, source) do
       :ok
     else

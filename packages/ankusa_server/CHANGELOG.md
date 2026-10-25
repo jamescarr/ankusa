@@ -14,6 +14,9 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `ankusa_backup_failures_total`. No new config key; `metrics.detail: source` also puts
   `tenant_id` and `source_id` on the delivery latency histogram. The SLO table is in
   [`architecture.md`](../../docs/architecture.md#slis-and-slos).
+- `ordered` and `ordering_key` (`{header: name}` / `{json: path}`) on every sink
+  but `log` (ordering lanes, ADR 0004).
+
 - **Structured JSON logs (OPS-2).** `log.format: json` (`ANKUSA_LOG_FORMAT`;
   default `text`, the output as before) writes one JSON object per line:
   `time`, `level`, `msg`, `instance`, `hook_id`, `tenant_id`, `source_id`,

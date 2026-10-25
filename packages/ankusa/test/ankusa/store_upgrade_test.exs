@@ -21,6 +21,17 @@ defmodule Ankusa.StoreUpgradeTest do
 
   @fixtures Path.expand("../fixtures", __DIR__)
 
+  defmodule RecordSink do
+    @moduledoc false
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(env, _ctx, opts) do
+      send(Keyword.fetch!(opts, :pid), {:delivered, env.id})
+      :ok
+    end
+  end
+
   # Rewrites every hook value to `value <> "!"`, 100 rows a batch, so a batch
   # applied twice shows as `"!!"`. `crash_after` raises on that step call.
   defmodule Rewrite do
@@ -146,6 +157,67 @@ defmodule Ankusa.StoreUpgradeTest do
     end
   end
 
+  # ADR 0004: a store with lanes boots, drains a busy lane in order (its
+  # claimed head first: a duplicate, in order) and keeps the members of the
+  # lanes whose heads are waiting out a retry.
+  test "store-v8 drains its busy lane in order and keeps the waiting lanes" do
+    {config, manifest} = unpack_fixture(Path.join(@fixtures, "store-v8.tar.zst"))
+    %{"k1" => k1, "keyless" => keyless, "k2" => k2} = manifest["lanes"]
+
+    {mod, opts} = config.source_store
+
+    recording = [
+      verifier: {Ankusa.Verifier.None, []},
+      sinks: [
+        {Mix.Tasks.Ankusa.Store.Fixture.OrderedSink,
+         pid: self(), ordered: true, ordering_key: {:header, "x-entity"}}
+      ]
+    ]
+
+    opts = Keyword.update!(opts, :sources, &Map.put(&1, "ordered", recording))
+    config = %{config | source_store: {mod, opts}}
+
+    start_supervised!({Ankusa.Instance, config})
+    inst = config.instance
+
+    # The busy lane (`k2`: a claimed head, a member) drains: the recovered head
+    # first (a duplicate, in order) and then its member.
+    delivered = receive_deliveries(k2, [])
+    assert delivered == k2
+
+    # k1 and the keyless lane: heads waiting out a retry, members behind them.
+    # Nothing behind a blocked head, and not the head before its due time, may
+    # be delivered.
+    refute_receive {:delivered, _id}, 300
+
+    assert length(k1) == 3 and length(keyless) == 2
+    assert {:ok, %{lanes: 2, lanes_blocked: 2, lane_members: 3}} = lane_counters(inst)
+    assert stored_counters(inst) == folded_counters(inst)
+  end
+
+  defp receive_deliveries(wanted, acc) do
+    if Enum.all?(wanted, &(&1 in acc)) do
+      Enum.reverse(acc)
+    else
+      receive do
+        {:delivered, id} -> receive_deliveries(wanted, [id | acc])
+      after
+        15_000 -> flunk("the busy lane did not drain")
+      end
+    end
+  end
+
+  defp lane_counters(inst, tries \\ 100) do
+    {:ok, counters} = Ankusa.Queue.Deliveries.Counters.read(inst, 0)
+
+    if counters.lanes == 2 or tries == 0 do
+      {:ok, counters}
+    else
+      Process.sleep(50)
+      lane_counters(inst, tries - 1)
+    end
+  end
+
   describe "the format version" do
     test "an unversioned store is stamped format 1 on open, then migrated up" do
       inst = open_store()
@@ -160,9 +232,9 @@ defmodule Ankusa.StoreUpgradeTest do
       assert Store.get(inst, :default, Keys.format_version()) == {:ok, "1"}
       stop_supervised!({Store, inst})
 
-      # This release's registry takes it to format 7.
+      # This release's registry takes it to format 8.
       start_supervised!({Store, instance: inst})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "7"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "8"}
     end
 
     test "format 1 sources become revision 1, and a replayed step keeps a revision it set" do
@@ -186,16 +258,16 @@ defmodule Ankusa.StoreUpgradeTest do
     test "refuses newer format, naming both versions" do
       inst = open_store()
       config = Ankusa.config(inst)
-      :ok = Store.write(inst, [{:put, :default, Keys.format_version(), "8"}], sync: true)
+      :ok = Store.write(inst, [{:put, :default, Keys.format_version(), "9"}], sync: true)
       stop_supervised!({Store, inst})
 
       assert {:error, error} = start_supervised({Store, instance: inst})
-      assert {:store_format_newer, 8, 7} = find(error, &match?({:store_format_newer, _, _}, &1))
+      assert {:store_format_newer, 9, 8} = find(error, &match?({:store_format_newer, _, _}, &1))
 
       # The same refusal from the tasks an operator runs.
       args = ["--data-dir", config.data_dir, "--instance", Atom.to_string(inst)]
 
-      assert_raise Mix.Error, ~r/format 8 is newer than 7/, fn ->
+      assert_raise Mix.Error, ~r/format 9 is newer than 8/, fn ->
         MigrateTask.run(["--dry-run" | args])
       end
 
@@ -203,7 +275,7 @@ defmodule Ankusa.StoreUpgradeTest do
         MigrateTask.run(args)
       end
 
-      # A release whose registry reaches format 8 opens it as it is.
+      # A release whose registry reaches format 9 opens it as it is.
       migrations = [
         {1, 2, Rewrite},
         {2, 3, Rewrite},
@@ -211,11 +283,12 @@ defmodule Ankusa.StoreUpgradeTest do
         {4, 5, Rewrite},
         {5, 6, Rewrite},
         {6, 7, Rewrite},
-        {7, 8, Rewrite}
+        {7, 8, Rewrite},
+        {8, 9, Rewrite}
       ]
 
       start_supervised!({Store, instance: inst, migrations: migrations})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "8"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "9"}
     end
 
     test "a format version that is not a number refuses to open" do
@@ -289,14 +362,15 @@ defmodule Ankusa.StoreUpgradeTest do
                {:ok,
                 %{
                   found: 1,
-                  current: 7,
+                  current: 8,
                   pending: [
                     {1, 2, Ankusa.Store.Migrations.AuditTrail},
                     {2, 3, Ankusa.Store.Migrations.TenantKeys},
                     {3, 4, Ankusa.Store.Migrations.DedupeCounters},
                     {4, 5, Ankusa.Store.Migrations.DlqBytes},
                     {5, 6, Ankusa.Store.Migrations.ClaimLeases},
-                    {6, 7, Ankusa.Store.Migrations.SegmentRows}
+                    {6, 7, Ankusa.Store.Migrations.SegmentRows},
+                    {7, 8, Ankusa.Store.Migrations.OrderingLanes}
                   ],
                   resume: nil
                 }}
@@ -304,7 +378,7 @@ defmodule Ankusa.StoreUpgradeTest do
       args = ["--data-dir", config.data_dir, "--instance", Atom.to_string(inst)]
       MigrateTask.run(["--dry-run" | args])
       assert_received {:mix_shell, :info, ["store: " <> _]}
-      assert_received {:mix_shell, :info, ["format: 1 (this release: 7)"]}
+      assert_received {:mix_shell, :info, ["format: 1 (this release: 8)"]}
       assert_received {:mix_shell, :info, ["  1 -> 2: " <> _]}
 
       assert_received {:mix_shell, :info,
@@ -318,10 +392,11 @@ defmodule Ankusa.StoreUpgradeTest do
       assert_received {:mix_shell, :info, ["  5 -> 6: lease the claim packs of live hooks" <> _]}
 
       assert_received {:mix_shell, :info, ["  6 -> 7: record format 0, codec, node and day" <> _]}
+      assert_received {:mix_shell, :info, ["  7 -> 8: stamp the ordering lanes" <> _]}
 
       MigrateTask.run(args)
       assert_received {:mix_shell, :info, [line]}
-      assert line =~ "is at format 7"
+      assert line =~ "is at format 8"
 
       empty = Path.join(config.data_dir, "nowhere")
       assert Migrate.plan(empty) == {:error, :no_store}
@@ -369,7 +444,7 @@ defmodule Ankusa.StoreUpgradeTest do
       assert manifest["format_version"] == 2
 
       start_supervised!({Store, instance: inst})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "7"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "8"}
 
       # The fixture holds the default tenant only: its retry rows and its dead
       # rows, whichever side of the migration's clock the retries fell on.
@@ -467,7 +542,7 @@ defmodule Ankusa.StoreUpgradeTest do
       assert {:error, error} =
                start_supervised({Store, instance: inst, migrations: [{1, 2, AuditTrail}]})
 
-      assert {:store_format_newer, 7, 2} = find(error, &match?({:store_format_newer, _, _}, &1))
+      assert {:store_format_newer, 8, 2} = find(error, &match?({:store_format_newer, _, _}, &1))
     end
 
     test "a restored format 2 backup migrates on boot" do
@@ -499,13 +574,13 @@ defmodule Ankusa.StoreUpgradeTest do
       File.rm_rf!(config.data_dir)
       start_supervised!({Ankusa.Instance, config})
 
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "7"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "8"}
       assert {:ok, 4} = Tenants.count(inst)
       assert stored_counters(inst) == folded_counters(inst)
       assert {:ok, %{dead: 2}} = Queue.dead_for_tenant(inst, "deadonly")
     end
 
-    test "the fixture task writes a store that boots (format 7)" do
+    test "the fixture task writes a store that boots (format 8)" do
       path =
         Path.join(
           System.tmp_dir!(),
@@ -515,7 +590,7 @@ defmodule Ankusa.StoreUpgradeTest do
       on_exit(fn -> File.rm(path) end)
 
       written = Fixture.build(path)
-      assert written["format_version"] == 7
+      assert written["format_version"] == 8
       assert written["tenants"] == ["default", "acme", "globex", "deadonly"]
 
       # Boot it with the store alone, so nothing moves under the count.
@@ -579,7 +654,7 @@ defmodule Ankusa.StoreUpgradeTest do
       assert manifest["format_version"] == 3
 
       start_supervised!({Store, instance: inst})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "7"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "8"}
 
       # The fixture holds hooks with their dedupe keys: every one is counted.
       assert {:ok, %{dedupe: live}} = Deliveries.Counters.read(inst, 0)
@@ -687,7 +762,7 @@ defmodule Ankusa.StoreUpgradeTest do
       assert manifest["format_version"] == 4
 
       start_supervised!({Store, instance: inst})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "7"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "8"}
 
       # The fixture holds dead-lettered hooks: every one is counted in bytes.
       assert {:ok, %{dead: dead, dead_bytes: bytes}} = Deliveries.Counters.read(inst, 0)
@@ -818,7 +893,7 @@ defmodule Ankusa.StoreUpgradeTest do
       assert manifest["format_version"] == 5
 
       start_supervised!({Store, instance: inst})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "7"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "8"}
       assert lease_keys(inst) == []
       assert {:ok, %{claim_leases: 0}} = Deliveries.Counters.read(inst, 0)
       assert stored_counters(inst) == folded_counters(inst)
@@ -867,7 +942,7 @@ defmodule Ankusa.StoreUpgradeTest do
       inst = seeded_v5_claim_store()
       start_supervised!({Store, instance: inst})
 
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "7"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "8"}
       assert length(lease_keys(inst)) == 1_200
       assert {:ok, %{claim_leases: 1_200}} = Deliveries.Counters.read(inst, 0)
       assert {:ok, %{claim_leases: 600}} = Deliveries.Counters.read(inst, 1)
@@ -951,7 +1026,7 @@ defmodule Ankusa.StoreUpgradeTest do
       assert manifest["format_version"] == 6
 
       start_supervised!({Store, instance: inst})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "7"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "8"}
 
       assert [_ | _] = rows = segment_rows(inst)
       assert Enum.all?(rows, &match?(%{format: 0, codec: nil, node: nil, dt: nil}, &1))
@@ -1018,7 +1093,7 @@ defmodule Ankusa.StoreUpgradeTest do
       inst = seeded_v6_segment_store()
       start_supervised!({Store, instance: inst})
 
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "7"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "8"}
       rows = segment_rows(inst)
       assert length(rows) == 1_200
       assert Enum.count(rows, &(&1.format == 0 and &1.codec == nil)) == 1_199

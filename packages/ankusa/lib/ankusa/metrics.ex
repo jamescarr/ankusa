@@ -386,6 +386,13 @@ defmodule Ankusa.Metrics do
         )
       ),
       counter(
+        "ankusa.dispatch.lane_key_missing.total",
+        scoped(own,
+          event_name: [:ankusa, :dispatch, :lane_key_missing],
+          tags: [:instance, :sink]
+        )
+      ),
+      counter(
         "ankusa.dispatch.dead_lettered.total",
         scoped(own,
           event_name: [:ankusa, :dispatch, :dlq],
@@ -702,6 +709,8 @@ defmodule Ankusa.Metrics do
           {"ankusa.dlq.bytes", [:ankusa, :queue, :state], :dead_bytes, :byte},
           {"ankusa.dlq.full", [:ankusa, :queue, :state], :dlq_full, :unit},
           {"ankusa.claim.leases", [:ankusa, :queue, :state], :claim_leases, :unit},
+          {"ankusa.dispatch.lanes", [:ankusa, :queue, :state], :lanes, :unit},
+          {"ankusa.dispatch.lanes_blocked", [:ankusa, :queue, :state], :lanes_blocked, :unit},
           {"ankusa.claim_check.sweep.backlog", [:ankusa, :claim_check, :sweep], :backlog, :unit},
           {"ankusa.claim_check.sweep.partitions_left", [:ankusa, :claim_check, :sweep],
            :partitions_left, :unit},

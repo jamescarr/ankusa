@@ -1,8 +1,9 @@
 defmodule Ankusa.Queue.Deliveries.Counters do
   @moduledoc false
 
-  # Per-tenant queue counters (ADR 0001, section 4): nine `counters` rows per
-  # tenant, plus the same nine under ordinal 0 for the node. Every row is changed
+  # Per-tenant queue counters (ADR 0001, section 4; ADR 0004, section 3): twelve
+  # `counters` rows per tenant, plus the same twelve under ordinal 0 for the node.
+  # Every row is changed
   # only by blind merge operands (`{:merge, :counters, key, delta}`), in the same
   # batch as the index change it describes, so concurrent writers (the Writer,
   # the Pipeline, the Replayer, the archive compactor) cannot lose a count and a
@@ -20,7 +21,10 @@ defmodule Ankusa.Queue.Deliveries.Counters do
     archive_pending: 6,
     dedupe: 7,
     dead_bytes: 8,
-    claim_leases: 9
+    claim_leases: 9,
+    lanes: 10,
+    lanes_blocked: 11,
+    lane_members: 12
   }
 
   @names Map.keys(@fields)
@@ -33,7 +37,9 @@ defmodule Ankusa.Queue.Deliveries.Counters do
   # `queue.dlq.max_bytes` is checked from one counter read too. `claim_leases`
   # counts the `?l` claim-lease rows (DUR-2.c): `claim_ops/3` adds one for every
   # lease it writes and the `Ankusa.ClaimCheck.Sweeper` takes one off for every
-  # lease it deletes.
+  # lease it deletes. The ordering lanes (ADR 0004): `lanes` counts busy lanes
+  # (a head in `?D`/`?F`), `lanes_blocked` heads waiting out a retry or a breaker
+  # park, `lane_members` the pending rows waiting their turn in `?O`.
   @type field ::
           :pending
           | :scheduled
@@ -44,6 +50,9 @@ defmodule Ankusa.Queue.Deliveries.Counters do
           | :dedupe
           | :dead_bytes
           | :claim_leases
+          | :lanes
+          | :lanes_blocked
+          | :lane_members
   @type delta :: {ord :: non_neg_integer(), field(), integer()}
 
   @doc "The counter fields, in `Keys.counter/2` order."
@@ -90,7 +99,7 @@ defmodule Ankusa.Queue.Deliveries.Counters do
     end
   end
 
-  @doc "The nine counters of `ord` (0 is the node), each `0` when never written."
+  @doc "The twelve counters of `ord` (0 is the node), each `0` when never written."
   @spec read(atom(), non_neg_integer()) :: {:ok, %{field() => integer()}} | {:error, term()}
   def read(instance, ord) do
     names = fields()

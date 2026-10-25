@@ -134,6 +134,22 @@ defmodule Ankusa.Sink.KafkaTest do
     assert Enum.map(fetch_all(topic), & &1.key) == ["fixed", "dyn.other"]
   end
 
+  test "an ordered sink's record key is the lane's key, over the configured key", %{
+    instance: inst,
+    topic: topic
+  } do
+    ordered = Map.merge(ctx(inst), %{ordering_key: "cus_1", lane: "abc"})
+
+    assert :ok = Kafka.deliver(envelope(), ordered, opts(topic, key: "fixed"))
+    assert :ok = Kafka.deliver(envelope(), ctx(inst), opts(topic, key: "fixed"))
+
+    assert [first, second] = fetch_all(topic)
+    assert first.key == "cus_1"
+    assert Map.new(first.headers)["ankusa_ordering_key"] == "cus_1"
+    assert second.key == "fixed"
+    refute Map.has_key?(Map.new(second.headers), "ankusa_ordering_key")
+  end
+
   test "an unknown topic is an error and is not auto-created", %{instance: inst} do
     topic = "ankusa.missing.#{System.unique_integer([:positive])}"
 

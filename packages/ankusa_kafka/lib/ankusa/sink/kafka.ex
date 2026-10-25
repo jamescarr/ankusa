@@ -9,12 +9,15 @@ defmodule Ankusa.Sink.Kafka do
 
     * **key** — `"tenant_id/source_id"` by default. It picks the partition, so
       it is the ordering scope: records with the same key are consumed in the
-      order they were produced.
+      order they were produced. A sink entry with `ordered: true`
+      (`Ankusa.Ordering`) sends the hook's lane key instead, whatever `:key` says,
+      and Ankusa hands a lane's hooks to this sink one at a time, each after the
+      previous was acknowledged.
     * **headers** — `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
       `ankusa_message_version`, `content_type` (`application/json`) and
       `ankusa_idempotency_key` (the key consumers dedupe on, the message's
-      `idempotency_key`), plus `ankusa_dedupe_key` and `ankusa_replay_id` when
-      the hook carries them.
+      `idempotency_key`), plus `ankusa_dedupe_key`, `ankusa_replay_id` and, on a
+      hook of an ordered sink, `ankusa_ordering_key` when the hook carries them.
       Underscores, not hyphens, so they are usable unquoted as Redpanda
       Connect metadata and SQS attribute names.
     * **timestamp** — `env.received_at` (event time, not dispatch time).
@@ -100,7 +103,7 @@ defmodule Ankusa.Sink.Kafka do
     topic = Keyword.fetch!(opts, :topic)
     timeout = Keyword.get(opts, :produce_timeout_ms, 5_000)
     client = client_id(ctx.instance, Keyword.get(opts, :client, :default))
-    key = Messaging.resolve(Keyword.get(opts, :key, &default_key/1), env)
+    key = lane_or_configured_key(ctx, env, opts)
 
     with :ok <- Message.fits(byte_size(payload) + byte_size(key || ""), max_message_bytes(opts)),
          {:ok, _pid} <- client(client, opts, timeout),
@@ -189,6 +192,15 @@ defmodule Ankusa.Sink.Kafka do
     do: %{ts: env.received_at, value: payload, headers: Message.headers(env, ctx)}
 
   defp default_key(env), do: "#{env.tenant_id}/#{env.source_id}"
+
+  # An ordered sink's record key is the lane's (`ctx.ordering_key`, ADR 0004):
+  # brod's `:hash` partitioner then keeps every hook of a lane in one partition.
+  defp lane_or_configured_key(ctx, env, opts) do
+    case ctx[:ordering_key] do
+      key when is_binary(key) -> key
+      _ -> Messaging.resolve(Keyword.get(opts, :key, &default_key/1), env)
+    end
+  end
 
   # ── client lifecycle ────────────────────────────────────────────────────
 

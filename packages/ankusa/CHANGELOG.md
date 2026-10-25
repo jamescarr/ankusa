@@ -26,6 +26,18 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   (`check_in`, `redeem`; from `[:ankusa, :claim_check, :failure]`, only for a
   claim store's fault) and `ankusa_backup_failures_total`. The SLO table is in
   [`architecture.md`](../../docs/architecture.md#slis-and-slos).
+- **Opt-in ordering lanes (DEL-1.b, ADR 0004).** A sink entry with
+  `ordered: true` and an `ordering_key` (`{:header, name}`, `{:json, "a.b"}`,
+  `{mod, fun, args}`) delivers the hooks of one lane (`{tenant, source, sink,
+  key}`) one at a time in `seq` order; a retry blocks its lane only, a dead head
+  releases it, and lane state is in the store (store format 8: index families
+  `?O`/`?H`/`?P`, due kinds 2/3, counters `lanes`, `lanes_blocked`,
+  `lane_members`). `ctx.ordering_key` and `ctx.lane` reach the sink; SQS sends
+  the key as `MessageGroupId`, Pub/Sub as `orderingKey`, `Sink.Http` as
+  `x-ankusa-ordering-key`; queue sinks carry `ankusa_ordering_key`. New gauges
+  `ankusa_dispatch_lanes` and `ankusa_dispatch_lanes_blocked`, counter
+  `ankusa_dispatch_lane_key_missing_total{sink}`. Format 8 is a one-way door at
+  its first start.
 - **Log correlation and a runtime log level (OPS-2).** The process that handles a
   hook carries its correlation as `Logger` metadata: `Ankusa.Edge.Router` clears
   it per request and sets `instance`; `Ankusa.Edge.Ingest` sets `source_id`,
