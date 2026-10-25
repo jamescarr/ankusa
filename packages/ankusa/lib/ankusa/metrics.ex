@@ -37,7 +37,7 @@ defmodule Ankusa.Metrics do
       quarantine, rate-limit and delivery counters, and the two per-tenant
       gauges. Duration histograms carry no identity.
     * `:source`: `tenant_id` and `source_id` on all of those, and on the ingest
-      duration histogram.
+      duration and delivery latency histograms.
     * `:none`: neither label, and no per-tenant gauges: the series set is the
       same for one tenant and for a million.
 
@@ -87,6 +87,12 @@ defmodule Ankusa.Metrics do
   # A reopen replays the WAL: 10 ms for an idle store, up to a minute for one
   # that crashed with 512 MiB of log to apply.
   @replay_seconds_buckets [0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10, 30, 60]
+  # A delivery's age at settling: seconds when the sink is healthy, up to the
+  # end of its retry horizon (`dispatch.retry`) when it is not. The SLO is 5 s.
+  @delivery_seconds_buckets [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60]
+  # One attempt: a local sink answers in milliseconds, a hung one at
+  # `dispatch.attempt_timeout_ms` (30 s by default).
+  @attempt_seconds_buckets [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30]
 
   @doc """
   Child spec for this instance's metrics: a supervisor over the cardinality
@@ -322,6 +328,32 @@ defmodule Ankusa.Metrics do
           tags: [:instance] ++ ids ++ [:result, :sink]
         )
       ),
+      # The delivery SLI: received → confirmed (or dead-lettered), one sample per
+      # delivery that settled, retries and their backoff included. A histogram is
+      # a dozen series per label set, so it carries an identity only at
+      # `detail: :source`, like the ingest histogram.
+      distribution(
+        "ankusa.delivery.latency.seconds",
+        scoped(own,
+          event_name: [:ankusa, :dispatch, :stop],
+          measurement: &since_received_seconds/1,
+          unit: :second,
+          tags: [:instance] ++ histogram_ids ++ [:sink, :result],
+          reporter_options: [buckets: @delivery_seconds_buckets]
+        )
+      ),
+      # One sample per attempt, so a sink that fails or hangs shows here even
+      # when the delivery it belongs to has not settled.
+      distribution(
+        "ankusa.dispatch.attempt.duration.seconds",
+        scoped(own,
+          event_name: [:ankusa, :dispatch, :attempt],
+          measurement: &attempt_seconds/1,
+          unit: :second,
+          tags: [:instance, :sink, :result],
+          reporter_options: [buckets: @attempt_seconds_buckets]
+        )
+      ),
       sum(
         "ankusa.sink.headers_dropped.total",
         scoped(own,
@@ -489,6 +521,14 @@ defmodule Ankusa.Metrics do
         scoped(own, event_name: [:ankusa, :archive, :failure], tags: [:instance])
       ),
       counter(
+        "ankusa.compact.failures.total",
+        scoped(own, event_name: [:ankusa, :compact, :failure], tags: [:instance, :stage])
+      ),
+      counter(
+        "ankusa.claim_check.failures.total",
+        scoped(own, event_name: [:ankusa, :claim_check, :failure], tags: [:instance, :op])
+      ),
+      counter(
         "ankusa.claim_check.reads.total",
         scoped(own,
           event_name: [:ankusa, :claim_check, :read],
@@ -519,6 +559,14 @@ defmodule Ankusa.Metrics do
       counter(
         "ankusa.backup.runs.total",
         scoped(own, event_name: [:ankusa, :backup, :stop], tags: [:instance, :result])
+      ),
+      counter(
+        "ankusa.backup.failures.total",
+        scoped(own,
+          event_name: [:ankusa, :backup, :stop],
+          keep: &(&1.result == :error),
+          tags: [:instance]
+        )
       ),
       counter(
         "ankusa.backup.verify.failed.total",
@@ -687,6 +735,7 @@ defmodule Ankusa.Metrics do
           {"ankusa.dispatch.runnable", [:ankusa, :dispatch, :state], :runnable, :unit},
           {"ankusa.dispatch.breakers_open", [:ankusa, :dispatch, :state], :breakers_open, :unit},
           {"ankusa.http.pools", [:ankusa, :http, :state], :pools, :unit},
+          {"ankusa.sources.without_dedupe", [:ankusa, :sources, :state], :without_dedupe, :unit},
           {"ankusa.sink_batch.batchers", [:ankusa, :sink_batch, :state], :batchers, :unit},
           {"ankusa.sink_batch.queued", [:ankusa, :sink_batch, :state], :queued, :unit},
           {"ankusa.sink_batch.queued.bytes", [:ankusa, :sink_batch, :state], :queued_bytes,
@@ -808,6 +857,14 @@ defmodule Ankusa.Metrics do
 
   defp oldest_due_age_seconds(%{oldest_due_age_ms: ms}), do: ms / 1000
   defp oldest_unarchived_age_seconds(%{oldest_unarchived_age_ms: ms}), do: ms / 1000
+
+  # A delivery that settled without an age (a replay, a hook that did not
+  # decode) has no `since_received_ms`: a nil measurement is skipped.
+  defp since_received_seconds(%{since_received_ms: ms}), do: ms / 1000
+  defp since_received_seconds(_measurements), do: nil
+
+  defp attempt_seconds(%{attempt_ms: ms}), do: ms / 1000
+  defp attempt_seconds(_measurements), do: nil
 
   defp duration_seconds(%{duration: native}) when is_integer(native) do
     System.convert_time_unit(native, :native, :microsecond) / 1_000_000

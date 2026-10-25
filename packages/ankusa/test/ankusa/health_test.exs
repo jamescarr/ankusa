@@ -60,6 +60,20 @@ defmodule Ankusa.HealthTest do
     def run(_config), do: raise("the check broke")
   end
 
+  defmodule FailingGateCheck do
+    @moduledoc false
+    @behaviour Ankusa.Health.Check
+
+    @impl true
+    def name, do: :boom
+    @impl true
+    def applies?(_config), do: true
+    @impl true
+    def gates?(_config), do: true
+    @impl true
+    def run(_config), do: {:failing, :broken}
+  end
+
   defp get_ready(config) do
     Router.call(Plug.Test.conn(:get, "/ready"), Router.init(instance: config.instance))
   end
@@ -354,9 +368,11 @@ defmodule Ankusa.HealthTest do
       {:ok, instance: config.instance}
     end
 
-    test "a check that reports draining makes the node unready", %{instance: inst} do
+    test "a check that reports draining makes the node unready, and the status says so", %{
+      instance: inst
+    } do
       assert {:error,
-              %{status: "unavailable", drain: "draining", reasons: %{drain: "shutting_down"}}} =
+              %{status: "draining", drain: "draining", reasons: %{drain: "shutting_down"}}} =
                Health.evaluate(inst, [DrainingCheck])
     end
 
@@ -370,7 +386,41 @@ defmodule Ankusa.HealthTest do
     test "every registered check has a distinct body key" do
       names = Enum.map(Ankusa.Health.Check.all(), & &1.name())
       assert names == Enum.uniq(names)
-      assert names == [:store, :intake, :sinks, :disk, :backlog, :backup]
+      assert names == [:drain, :store, :intake, :sinks, :disk, :backlog, :backup]
+    end
+
+    test "Health.drain/1 adds the drain check: /ready is 503 draining until the instance restarts",
+         %{instance: inst} do
+      config = Ankusa.config(inst)
+      on_exit(fn -> Health.undrain(inst) end)
+
+      refute Health.draining?(inst)
+      assert {:ok, ready} = Health.ready(inst)
+      refute Map.has_key?(ready, :drain)
+
+      assert :ok = Health.drain(inst)
+      assert Health.draining?(inst)
+      conn = get_ready(config)
+      assert conn.status == 503
+      assert Plug.Conn.get_resp_header(conn, "retry-after") == ["1"]
+
+      assert %{
+               "status" => "draining",
+               "drain" => "draining",
+               "store" => "ok",
+               "reasons" => %{"drain" => "shutting_down"}
+             } = JSON.decode!(conn.resp_body)
+
+      assert :ok = Health.undrain(inst)
+      assert {:ok, %{status: "ready"}} = Health.ready(inst)
+    end
+
+    test "a draining node that also has a failing check is still draining", %{instance: inst} do
+      on_exit(fn -> Health.undrain(inst) end)
+      Health.drain(inst)
+
+      assert {:error, %{status: "draining", boom: "failing", drain: "draining"}} =
+               Health.evaluate(inst, [Ankusa.Health.Check.Drain, FailingGateCheck])
     end
   end
 end

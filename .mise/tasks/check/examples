@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Every example app: locked deps, format, :prod compile, the TypeScript workers' typecheck, the Python worker's lockfile, the Rust worker's fmt/clippy, and the Helm charts' lint/template"
+#MISE description="Every example app: locked deps, format, :prod compile, the TypeScript workers' typecheck, the Python worker's lockfile, the Rust worker's fmt/clippy, and the Helm charts' lint/template, and the deploy/ chart's rendered manifests (kubeconform)"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 source "$MISE_PROJECT_ROOT/.mise/lib/mix_cache.sh"
@@ -60,3 +60,26 @@ for f in examples/*/chart/Chart.yaml; do
   echo "==> $d"
   (cd "$d" && helm lint . && helm template demo . >/dev/null)
 done
+
+# The production chart (OPS-8): lint and render it for every mode under
+# deploy/helm/<chart>/ci/*-values.yaml, and validate what it renders against the
+# Kubernetes schemas (a strict kubeconform: an unknown field is an error). The
+# kind fleet's values (examples/fleet-e2e/kind/values.yaml) are rendered the same
+# way, so the e2e's chart configuration cannot rot between nightly runs. The
+# schema version is the oldest minor the chart supports (Chart.yaml `kubeVersion`)
+# that kubeconform ships schemas for.
+for f in deploy/helm/*/Chart.yaml; do
+  [ -f "$f" ] || continue
+  d="${f%/Chart.yaml}"
+  echo "==> $d"
+  values=("$d"/ci/*-values.yaml)
+  if [ "$d" = deploy/helm/ankusa ]; then values+=(examples/fleet-e2e/kind/values.yaml); fi
+  for v in "${values[@]}"; do
+    [ -f "$v" ] || continue
+    echo "    $v"
+    helm lint "$d" -f "$v"
+    helm template ankusa "$d" -f "$v" | kubeconform -strict -summary -kubernetes-version 1.34.0
+  done
+done
+echo "helm lint OK"
+echo "kubeconform OK"

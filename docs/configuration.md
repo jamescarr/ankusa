@@ -72,9 +72,11 @@ is the [key reference](#ankusa-config) below.
 | Section | Keys (default) |
 | --- | --- |
 | `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`), `min_free_bytes` (unset = no check; the free bytes `data_dir`'s file system must keep, or `/ready` answers `503` with `disk: failing`; see [`/ready`](deployment.md#running-the-container)), `region` (unset; a non-empty string of at most 64 bytes, e.g. `eu-west-1`: stamped on every queue message as `region` and on the AsyncAPI document as `x-ankusa-region`; core's `dispatch.region`) |
+| `config_version` | `1`: the version of the file format. Optional; an older file is migrated on load, a newer one is refused. See [Reloading the config](#reloading-the-config) |
+| `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`), `min_free_bytes` (unset = no check; the free bytes `data_dir`'s file system must keep, or `/ready` answers `503` with `disk: failing`; see [`/ready`](deployment.md#running-the-container)) |
 | `log` | `level` (`info`), `format` (`text` \| `json`; `text`), `banner` (`true`; the ASCII-art banner on start, never printed with `format: json`). See [Logs](#logs) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`), `store_headers` (`drop`: `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`; `hash`: none). See [Stored headers](#stored-headers) |
-| `listener` | Limits for every HTTP listener, and the ingest port's TLS: `max_connections` (20000), `num_acceptors` (null = two per scheduler), `read_timeout_ms` (10000), `body_read_timeout_ms` (15000), `request_deadline_ms` (30000), `max_requests_per_connection` (1000), `max_header_count` (64), `max_header_length` (16384), `http2` (`false`), `tls` (`certfile`, `keyfile`, `cacertfile`, `verify` = `verify_none` \| `verify_peer`, `versions`, `ciphers`). See [Listeners](#listeners-limits-tls-and-mtls) |
+| `listener` | Limits for every HTTP listener, and the ingest port's TLS: `max_connections` (20000), `num_acceptors` (null = two per scheduler), `read_timeout_ms` (10000), `body_read_timeout_ms` (15000), `request_deadline_ms` (30000), `max_requests_per_connection` (1000), `max_header_count` (64), `max_header_length` (16384), `http2` (`false`), `drain_delay_ms` (5000) and `drain_timeout_ms` (30000: how a SIGTERM drains the node), `tls` (`certfile`, `keyfile`, `cacertfile`, `verify` = `verify_none` \| `verify_peer`, `versions`, `ciphers`). See [Listeners](#listeners-limits-tls-and-mtls) |
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it, and then needs `auth`), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled), `tls` (a TLS block, like `listener.tls`), `auth` (who may call it: `mode` = `none` \| `token` \| `jwt` \| `mtls`, `allow_insecure`, `tokens`, `jwt`, `mtls`; see [Control-plane authentication](#control-plane-authentication)) |
 | `metrics` | `enabled` (`false`), `port` (4004), `ip` (`127.0.0.1`), `tls`. A listener that serves only `/metrics`, `/health` and `/ready`. See [A separate metrics listener](#a-separate-metrics-listener) |
 | `tracing` | `enabled` (`false`), `otlp_endpoint` (`http://localhost:4318`), `sample_ratio` (`1.0`; 0 to 1). Image only. Starts the OpenTelemetry SDK and the OTLP exporter. See [Tracing](#tracing) |
@@ -199,7 +201,7 @@ One source per provider endpoint; the key is the catch-URL segment
 | `on_verify_failure` | `reject` \| `quarantine` \| `accept_flag`: what happens when verification fails. |
 | `trust_url_tenant` | `true` \| `false` (default `false`). With `routing: tenant_path`, a source with `tenant: default` and `verify: {type: none}` files hooks under whatever tenant the URL names, unverified: boot, `check-config` and an admin API write refuse it unless it sets `trust_url_tenant: true`. See [`multi-tenancy.md`](multi-tenancy.md#tenant-scoping-what-tenant_id-actually-does). |
 | `sinks` | At least one; every sink is tried on every delivered hook. |
-| `dedupe` | Collapse provider retries at ingest. A preset name (`github`, `standard_webhooks`, `svix`, `shopify`, `stripe`), or a mapping with exactly one of `preset` (same names), `header` (the event-id header, e.g. `X-GitHub-Delivery`) or `json` (a dot path into the body, e.g. `data.id`), plus an optional `ttl_seconds` (default 259 200 = 72 h). Hooks that share a key within the TTL get the same `201` and the original id, with `"duplicate": true` on the later ones. Keys are scoped to the tenant and the source, so two tenants behind one `tenant_path` source never collapse each other's events. The key travels into every delivery as `dedupe_key`. |
+| `dedupe` | Collapse provider retries at ingest. A preset name (`github`, `standard_webhooks`, `svix`, `shopify`, `stripe`, `salesforce`), or a mapping with exactly one of `preset` (same names), `header` (the event-id header, e.g. `X-GitHub-Delivery`) or `json` (a dot path into the body, e.g. `data.id`), plus an optional `ttl_seconds` (default 259 200 = 72 h). Hooks that share a key within the TTL get the same `201` and the original id, with `"duplicate": true` on the later ones. Keys are scoped to the tenant and the source, so two tenants behind one `tenant_path` source never collapse each other's events. The key travels into every delivery as `dedupe_key`. **`salesforce` is `json: id`, not a delivery id Salesforce documents** (unverified against Salesforce's documentation): Salesforce stamps no delivery-id header on any outbound mechanism, Outbound Messages are SOAP/XML (their `Notification/Id` is not a JSON path), and Flow/Apex HTTP callouts and Data 360 webhook targets send a body the org builds. The preset keys on the top-level `"id"` of a JSON body, which the callout must set to a value that is the same on every retry of one event; a body without it is never deduplicated, so use `json:` with your own path when the body is shaped otherwise. A source with no `dedupe` logs one `source <id> has no dedupe:` warning at boot (edge nodes), and the gauge `ankusa_sources_without_dedupe` counts the configured sources that have none. |
 | `forward_headers` | Which provider request headers travel into sink messages (and `Sink.Http` requests): a list of names (lowercased; still minus the never-forwarded set below), or absent for the default set: every header except `authorization`, `proxy-authorization`, `cookie`, `x-api-key`, `host`, `content-length`, `content-type`, `connection`, `keep-alive`, `transfer-encoding`, `te`, `trailer`, `upgrade`, `expect`, and every `x-ankusa-*` header. (`:default` is the Elixir value only; YAML takes a list or nothing.) |
 | `max_headers` | The most forwarded headers one sink message carries (default 64, a positive integer). Names are kept in order of arrival; one past the limit is dropped and counted (`ankusa_sink_headers_dropped_total{reason="count"}`). |
 | `forward_headers_max_bytes` | The most bytes of forwarded header names plus values one sink message carries (default 16384, a positive integer). A header that would pass it is dropped whole, never truncated, and counted (`reason="bytes"`); later, smaller headers are still considered. The message then stays near `inline_max_bytes × 4/3` plus about 1 KiB plus this, however large the provider's headers are. |
@@ -537,11 +539,10 @@ an API client submits cannot use them.
 
 #### Rotating without a redeploy
 
-`AnkusaServer.Secrets.reload/2` (run from `remote`:
-`AnkusaServer.Secrets.reload(:default)`) re-reads the file, resolves every
-reference again and republishes the sources the file declares
-(`source_store.type: static`): a rotated secret takes effect without a restart.
-Nothing triggers it on a signal or over HTTP yet. Rotation is two reloads and a
+A [config reload](#reloading-the-config) (`SIGHUP`, or `POST /v1/config/reload`)
+re-reads the file, resolves every reference again and republishes the sources the
+file declares (`source_store.type: static`): a rotated secret takes effect
+without a restart. Rotation is two reloads and a
 list: put the new secret first and keep the old one second (`secret: [new,
 old]`, or `secret_file: [/new, /old]`) until the provider has switched, reload,
 then drop the old one and reload again. A hook that verifies with either secret
@@ -549,15 +550,66 @@ is accepted in between.
 
 A reference that fails *on a reload* does not take verification down: it keeps
 the value of the last good load, and the reload logs a warning naming the key
-and the reference and returns it under `:kept`. A reference that has no
+and the reference and returns it under `kept`. A reference that has no
 previous value (a path you just added) is an error and nothing is applied, as
 is a file that no longer parses or a source the instance would refuse to boot
 with. `cache_ttl_ms` above `0` makes a reload reuse a `${sm:}` value fetched
-within that many milliseconds (a manager with an API quota); `refresh: true`
-ignores it. With `source_store.type: persistent` or `redis` the file's sources
-are seeds, which a reload does not republish. A reload republishes `sources`
+within that many milliseconds (a manager with an API quota). With
+`source_store.type: persistent` or `redis` the file's sources are seeds, which a
+reload does not republish (it logs that it did not). A reload applies `sources`
 only: a secret under `lifecycle`, `storage` or any other key is read at boot
-and changes with a restart.
+and changes with a restart: the reload that finds one changed is refused.
+
+### Reloading the config
+
+`config_version` is the version of the file format (`1`; a file without the key
+is version 1). An image reads every version up to its own: a file written for an
+older format is migrated as it loads (the loader's migration map, applied before
+`${…}` is substituted), and a file that says a version newer than the image reads
+is refused at boot with `config_version` named, so an older image never guesses
+at a newer file.
+
+A running node re-reads its file on `SIGHUP` (`kill -HUP 1` in the container,
+`kubectl exec … -- kill -HUP 1`) or on
+
+```sh
+curl -X POST http://127.0.0.1:4002/v1/config/reload \
+  -H "authorization: Bearer $ADMIN_TOKEN"
+# {"status":"reloaded","keys":["log.level","rate_limits.tenants.acme.rate"],"sources":[],"kept":[]}
+```
+
+and applies the keys that may change while it runs: `log` (`level` and `format`,
+and only when the file's value changed: a level set with `PUT /v1/log-level`
+survives a reload that does not touch `log`), `rate_limits` (all but `scope`),
+static `sources` (a rotated secret, an added or removed source), the `routes`
+seed, `dispatch.concurrency`, `dispatch.sink_concurrency`, `dispatch.tenants`,
+`metrics.detail` (the metric definitions are rebuilt, so their counters restart
+from zero) and `admin.gauge_interval_ms`. The seed is applied as a difference
+through the routes API: a changed or new seed route is replaced, a route that left
+the seed is deleted, a route created through the API is left alone, and every
+seed route needs an `id`. A lowered dispatch limit never drops a delivery that is
+running: it stops the next start until the count is below it.
+
+Any other key that changed (`http.port`, `wal.type`, a listener's `tls`, …) needs
+a restart. The reload is then refused with nothing applied, over HTTP `409`:
+
+```json
+{"error": "not_reloadable", "keys": ["http.port"], "message": "…"}
+```
+
+The file's keys are compared with the document the running config was built from,
+after the environment is substituted: an unchanged `ANKUSA_*` override is not a
+change. Other answers: `422 invalid_config` (the file no longer loads, a
+reference with no previous value cannot be resolved, a source or seed route the
+node would refuse; `message` names the key, never a value), `503 audit_backlog`
+or `503 store_unavailable` (the trail cannot record the reload, so it is not
+made), `409 reload_unavailable` (an instance embedded in your own application
+that never registered a reload with `Ankusa.Reload.register/2`). The caller needs
+`config:write` and `tenant:*`. Each reload writes one audit row
+(`action: config.reload`, the caller or `system` for a signal as the actor,
+`detail.keys` the keys that changed, `result` `ok` or `failed`); a refused reload
+writes none. Reloads on one node run one at a time, and are node-local: signal or
+call every node.
 
 ### Starting points
 
@@ -735,6 +787,7 @@ config :ankusa,
 | `listener.max_requests_per_connection` | `1_000` | A keep-alive connection is closed after this many requests. |
 | `listener.max_header_count`, `listener.max_header_length` | `64`, `16_384` | Request-head limits, enforced before any body is read. |
 | `listener.http2` | `false` | Serve HTTP/2 (off: HTTP/1.1 only). |
+| `listener.drain_delay_ms`, `listener.drain_timeout_ms` | `5_000`, `30_000` | A stop (SIGTERM) first answers `/ready` with `503` and `"status": "draining"`, keeps serving for `drain_delay_ms` (an integer >= 0) so a load balancer sees the flip, then closes the ingest listener, which waits for the requests it is serving (`Ankusa.Listener.ingress_shutdown_timeout_ms/1`: the batcher's 15 s record deadline, a 2 s store commit and a 5 s margin = 22 s; 13 s under `wal: :none`, 24 s under `wal: :dual`), and waits for every batcher to hold nothing, all within `drain_timeout_ms` (an integer >= 1). A node with the `:edge` role refuses a `drain_timeout_ms` below that wait. Set `terminationGracePeriodSeconds` to at least `(drain_delay_ms + drain_timeout_ms) / 1000 + 10`, plus `backup.final_timeout_ms` when the node backs up ([`deployment.md`](deployment.md)). Not secret: `/v1/config` shows both. |
 | `listener.tls` | `nil` | The ingest listener's TLS block (`certfile`, `keyfile`, `cacertfile`, `verify`, `versions`, `ciphers`). The `listener` limits apply to every listener; this key is the ingest port's alone. See [Listeners](#listeners-limits-tls-and-mtls). |
 | `max_body_bytes` | `8_000_000` | Hard cap on a request body. A `Content-Length` over it is `413` before any of the body is read; a body without one (chunked) is cut off at the cap while streaming. |
 | `store_headers` | `%{drop: [...the six credential headers above], hash: []}` | Which request headers a hook is stored with (`Ankusa.Edge.StoredHeaders`), applied after verification. `drop` removes a header from the stored hook, `hash` keeps it with the value replaced by `"sha256:<hex>"`; names are case-insensitive and a name in both lists is dropped. An absent `drop` or `hash` keeps the default's list. See [Stored headers](#stored-headers). |
@@ -895,7 +948,7 @@ Boot checks ranges, not only types, and fails with `"<dotted.key> must be
 `routes.max_routes`, `routes.memory_budget_bytes` and every
 numeric `listener.*` key (`max_connections`, `num_acceptors`, the three
 timeouts, `max_requests_per_connection`, `max_header_count`,
-`max_header_length`) must be positive; `listener.http2` and `metrics.enabled`
+`max_header_length`) and `listener.drain_timeout_ms` must be positive (`listener.drain_delay_ms`, non-negative); `listener.http2` and `metrics.enabled`
 are booleans, `metrics.ip` an IP address, and a `tls` block names existing
 `certfile`/`keyfile`, a `verify` of `verify_none`/`verify_peer` (the latter
 with a `cacertfile`), non-empty `versions` from `tlsv1.2`/`tlsv1.3` and known
@@ -994,7 +1047,7 @@ metric keeps a bounded number of them.
 | `metrics.detail` | Labels on the ingest, verify-failure, quarantine, rate-limit and delivery counters | Also |
 | --- | --- | --- |
 | `:tenant` (default) | `tenant_id` | the top-100 `ankusa_tenant_pending` and `ankusa_dispatch_tenant_inflight` gauges (label `tenant`) |
-| `:source` | `tenant_id` and `source_id` | the `ankusa_ingest_duration_seconds` histogram carries both, too |
+| `:source` | `tenant_id` and `source_id` | the `ankusa_ingest_duration_seconds` and `ankusa_delivery_latency_seconds` histograms carry both, too |
 | `:none` | neither | no per-tenant gauges: the series set is the same for one tenant and for a million |
 
 `metrics.max_series_per_metric` (default `5000`) caps the label sets one metric
@@ -1101,9 +1154,10 @@ Scopes (`Ankusa.Principal`): `metrics:read` (`/metrics`, `/v1/wal`),
 a [tenant erase](multi-tenancy.md#erasing-a-tenant); it also needs `tenant:*`), and
 `dlq:write`, which starting a `dlq` replay also needs (`quarantine:write` for a
 `quarantine` replay). `config:write` (with `tenant:*`) changes the node's
-[log level](#logs): `PUT /v1/log-level`.
+[log level](#logs) (`PUT /v1/log-level`) and [reloads its config](#reloading-the-config)
+(`POST /v1/config/reload`).
 `audit:read` reads `GET /v1/audit`: every change to a source, route, IP rule,
-rate-limit override, quarantine purge, replay job or log-level change, newest first, with
+rate-limit override, quarantine purge, replay job, log-level change or config reload, newest first, with
 `since`, `until` (ms), `actor`, `action`, `tenant`, `limit` and `cursor`
 filters. The trail spans tenants, so a reader without `tenant:*` sees only its
 own tenants' rows (none of the rows that belong to no tenant), and naming
@@ -1598,7 +1652,7 @@ config :ankusa,
 | `on_verify_failure` | `:reject` | `:reject` (`401`, nothing stored) / `:quarantine` (`202`, durable pen; see [`delivery.md#quarantine`](delivery.md#quarantine)) / `:accept_flag` (commits, envelope flagged). |
 | `trust_url_tenant` | `false` | Under a `route_resolver` other than `Ankusa.RouteResolver.Path`, a source with `tenant_id: "default"` and `Ankusa.Verifier.None` must set it to `true` (`Ankusa.Verifier.validate_shared!/1`); see [`multi-tenancy.md`](multi-tenancy.md#tenant-scoping-what-tenant_id-actually-does). |
 | `sinks` | `[{Ankusa.Sink.Log, []}]` | `[{module, opts}]` implementing `Ankusa.Sink`: one delivery per sink, each retried independently. |
-| `dedupe` | `nil` | Collapse provider retries at ingest: `:github \| :standard_webhooks \| :svix \| :shopify \| :stripe`, or `%{header: "X-Event-Id"}` / `%{json: "data.id"}`, each with an optional `ttl_ms` (default `259_200_000`). |
+| `dedupe` | `nil` | Collapse provider retries at ingest: `:github \| :standard_webhooks \| :svix \| :shopify \| :stripe \| :salesforce` (`:salesforce` is `json: "id"`, a convention rather than a Salesforce-documented delivery id; see [Sources](#sources)), or `%{header: "X-Event-Id"}` / `%{json: "data.id"}`, each with an optional `ttl_ms` (default `259_200_000`). A source with `nil` logs one `source <id> has no dedupe:` warning at boot and counts in `ankusa_sources_without_dedupe`. |
 | `forward_headers` | `:default` | `:default` (every header except the never-forwarded set; see [Sources](#sources)) or a list of header names. |
 | `max_headers` | `64` | The most forwarded headers one sink message carries; a name past it is dropped (`ankusa_sink_headers_dropped_total{reason="count"}`). A positive integer. |
 | `forward_headers_max_bytes` | `16_384` | The most bytes of forwarded header names and values one sink message carries; a header that would pass it is dropped whole (`reason="bytes"`). A positive integer. |

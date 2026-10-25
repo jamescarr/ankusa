@@ -20,6 +20,10 @@ Code.require_file("support/erase_harness.exs", __DIR__)
 # "survives kill".
 Code.require_file("support/lifecycle_harness.exs", __DIR__)
 
+# `Ankusa.DrainHarness`: the child-BEAM harness behind `drain_test.exs`'s SIGTERM
+# drill.
+Code.require_file("support/drain_harness.exs", __DIR__)
+
 # Runs per property in `test/ankusa/property/` (StreamData reads this key when
 # a `check all` starts). 5 000 is the floor the hardening plan asks of CI;
 # `PROPERTY_RUNS=50000 mix test test/ankusa/property` is the long soak.

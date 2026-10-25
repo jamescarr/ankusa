@@ -12,6 +12,9 @@ defmodule AnkusaServer.Application do
   A bad config exits 78 (`EX_CONFIG` from `sysexits.h`) after printing the
   message — a config error is an operator mistake to be read and fixed, not a
   BEAM crash dump to be decoded.
+
+  On SIGTERM it drains the instance (`prep_stop/1`, `Ankusa.Instance.Drain`)
+  before the tree stops.
   """
 
   use Application
@@ -26,8 +29,21 @@ defmodule AnkusaServer.Application do
       # `mix test` (and any embedder that wants the supervision tree without a
       # running instance): read no config, bind no port. Otherwise the suite
       # would fight a developer's own Ankusa for 4000/4002 and write into ./data.
-      Supervisor.start_link([], strategy: :one_for_one, name: AnkusaServer.Supervisor)
+      with {:ok, pid} <-
+             Supervisor.start_link([], strategy: :one_for_one, name: AnkusaServer.Supervisor),
+           do: {:ok, pid, nil}
     end
+  end
+
+  # SIGTERM (`docker stop`, a pod deletion): drain the instance before the tree
+  # stops, so `/ready` flips first and no request in flight is reset
+  # (`Ankusa.Instance.Drain`). The state is the instance name `start/2` returned.
+  @impl true
+  def prep_stop(nil), do: nil
+
+  def prep_stop(instance) do
+    Ankusa.Instance.Drain.run(instance)
+    instance
   end
 
   defp start_instance do
@@ -36,8 +52,13 @@ defmodule AnkusaServer.Application do
     config = loaded.config
     start_logging(loaded.log, config.instance)
 
-    # What the references resolved to, for `AnkusaServer.Secrets.reload/2`.
-    AnkusaServer.Secrets.remember(config.instance, loaded.secrets)
+    # What the file said, for `AnkusaServer.Reload` (`SIGHUP`, `POST /v1/config/reload`).
+    AnkusaServer.Reload.remember(config.instance, loaded)
+
+    Ankusa.Reload.register(
+      config.instance,
+      &AnkusaServer.Reload.reload(config.instance, audit: &1)
+    )
 
     # Under `log.format: json` stdout is lines of JSON and nothing else.
     if loaded.banner and loaded.log.format == :text, do: AnkusaServer.Banner.print()
@@ -51,10 +72,18 @@ defmodule AnkusaServer.Application do
     start_tracing(loaded.tracing)
 
     # The GCP token cache first: the blob store and Pub/Sub sinks ask it for tokens.
-    Supervisor.start_link([AnkusaServer.GcpToken, {Ankusa.Instance, config}],
-      strategy: :one_for_one,
-      name: AnkusaServer.Supervisor
-    )
+    # `SIGHUP` last: a reload needs the instance it reloads.
+    with {:ok, pid} <-
+           Supervisor.start_link(
+             [
+               AnkusaServer.GcpToken,
+               {Ankusa.Instance, config},
+               {AnkusaServer.Reload.Signal, instance: config.instance}
+             ],
+             strategy: :one_for_one,
+             name: AnkusaServer.Supervisor
+           ),
+         do: {:ok, pid, config.instance}
   end
 
   # Before anything logs: the level the file asks for (`Ankusa.LogLevel`) and the

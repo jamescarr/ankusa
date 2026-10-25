@@ -115,6 +115,8 @@ defmodule AnkusaServer.ConfigTest do
 
     assert config.batcher.max_queue_bytes == 268_435_456
     assert config.listener.ready_sink_error_window_ms == 5_000
+    assert config.listener.drain_delay_ms == 5_000
+    assert config.listener.drain_timeout_ms == 30_000
     assert config.listener.ready_min_free_bytes == nil
     assert config.queue.max_oldest_due_ms == nil
     assert config.storage.key_prefix == ""
@@ -863,6 +865,54 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message =~ "admin.ip"
   end
 
+  describe "config_version" do
+    @minimal "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+
+    defp load_versioned(value),
+      do: Config.load!(path: tmp_config("config_version: #{value}\n" <> @minimal), env: %{})
+
+    test "a file without the key is version 1, and so is one that says 1" do
+      assert %{doc: %{"config_version" => 1}} = Config.load!(path: tmp_config(@minimal), env: %{})
+      assert %{doc: %{"config_version" => 1}} = load_versioned(1)
+    end
+
+    test "a version this image does not read is refused, naming the key" do
+      error = assert_raise ConfigError, fn -> load_versioned(2) end
+      assert error.message =~ "config_version: 2 is newer than this image reads (up to 1)"
+
+      for bad <- ["0", "-1", "1.5", "\"1\"", "true", "[1]"] do
+        error = assert_raise ConfigError, fn -> load_versioned(bad) end
+        assert error.message =~ "config_version: expected a positive integer"
+      end
+    end
+
+    test "migrate!/3 runs every step from the file's version up to the current one" do
+      migrations = %{
+        1 => &Map.put(&1, "step1", true),
+        2 => &Map.put(&1, "step2", true)
+      }
+
+      assert Config.migrate!(%{"config_version" => 1}, 3, migrations) ==
+               %{"config_version" => 3, "step1" => true, "step2" => true}
+
+      # no key is version 1
+      assert Config.migrate!(%{}, 3, migrations) ==
+               %{"config_version" => 3, "step1" => true, "step2" => true}
+
+      # a file already at version 2 only needs the last step
+      assert Config.migrate!(%{"config_version" => 2}, 3, migrations) ==
+               %{"config_version" => 3, "step2" => true}
+
+      # the current version is left as it is
+      assert Config.migrate!(%{"config_version" => 3, "a" => 1}, 3, migrations) ==
+               %{"config_version" => 3, "a" => 1}
+
+      assert_raise ConfigError, ~r/no migration from version 2 to 3/, fn ->
+        Config.migrate!(%{}, 3, %{1 => & &1})
+      end
+    end
+  end
+
   describe "listener hardening and TLS" do
     @tls_dir Path.expand("../../../ankusa/test/fixtures/tls", __DIR__)
     @sources "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
@@ -1535,6 +1585,7 @@ defmodule AnkusaServer.ConfigTest do
             a: {verify: {type: none}, dedupe: github, sinks: [{type: log}]}
             b: {verify: {type: none}, dedupe: {header: X-Custom-Id}, sinks: [{type: log}]}
             c: {verify: {type: none}, dedupe: {json: data.id, ttl_seconds: 60}, sinks: [{type: log}]}
+            d: {verify: {type: none}, dedupe: salesforce, sinks: [{type: log}]}
           """),
         env: %{}
       ).config
@@ -1544,6 +1595,8 @@ defmodule AnkusaServer.ConfigTest do
     assert sources["a"][:dedupe] == :github
     assert sources["b"][:dedupe] == %{header: "X-Custom-Id"}
     assert sources["c"][:dedupe] == %{json: "data.id", ttl_ms: 60_000}
+    assert sources["d"][:dedupe] == :salesforce
+    assert Ankusa.Source.new("d", sources["d"]).dedupe.from == {:json, ["id"]}
 
     # `Source.new/2` (what every fetch builds) folds the header name.
     assert Ankusa.Source.new("b", sources["b"]).dedupe.from == {:header, "x-custom-id"}
@@ -2297,6 +2350,24 @@ defmodule AnkusaServer.ConfigTest do
           {"node: {region: 7}", ~s(node.region: expected a string, got 7)},
           {~s(node: {region: ""}),
            ~s(dispatch.region must be nil or a non-empty string of at most 64 bytes, got "")}
+  test "the drain keys (OPS-4) map to core's listener keys and are range checked" do
+    config =
+      Config.load!(
+        path: tmp_config("listener: {drain_delay_ms: 1000, drain_timeout_ms: 40000}\n"),
+        env: %{}
+      ).config
+
+    assert config.listener.drain_delay_ms == 1_000
+    assert config.listener.drain_timeout_ms == 40_000
+    assert config.listener.max_connections == %Ankusa.Config{}.listener.max_connections
+
+    for {yaml, message} <- [
+          {"listener: {drain_delay_ms: -1}",
+           "listener.drain_delay_ms must be a non-negative integer, got -1"},
+          {"listener: {drain_timeout_ms: 0}",
+           "listener.drain_timeout_ms must be a positive integer, got 0"},
+          {"listener: {drain_timeout_ms: 5000}",
+           "listener.drain_timeout_ms (5000) must be at least the ingress listener's shutdown timeout (22000 ms"}
         ] do
       error =
         assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml <> "\n"), env: %{}) end

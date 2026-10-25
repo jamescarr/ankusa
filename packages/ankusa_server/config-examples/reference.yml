@@ -15,6 +15,16 @@
 # Anything you can also set with an ANKUSA_* env var is marked [env]; env wins
 # over this file, which is how a container gets reconfigured without a rebuild.
 
+# The version of this file's format (default 1 when absent). An image reads every
+# version up to its own, migrating an older file as it loads, and refuses a newer
+# one. A running node re-reads the file on SIGHUP or `POST /v1/config/reload`
+# (scope config:write + tenant:*, audited) and applies `log`, `rate_limits` (not
+# `scope`), static `sources`, `routes.seed`, `dispatch.concurrency`,
+# `dispatch.sink_concurrency`, `dispatch.tenants`, `metrics.detail` and
+# `admin.gauge_interval_ms`; a change to any other key is refused with `409`
+# naming it, and needs a restart. See docs/configuration.md#reloading-the-config.
+config_version: 1
+
 node:
   # [env ANKUSA_ROLES] which OTP roles run here. One all-roles process is fine
   # to start with; split for scale (edge in front, dispatch+storage behind).
@@ -106,6 +116,19 @@ listener:
   max_header_length: 16384
   # HTTP/1.1 only by default.
   http2: false
+  # On SIGTERM (`docker stop`, a pod deletion) the node first answers /ready with
+  # 503 {"status":"draining"}, then keeps serving for drain_delay_ms so a load
+  # balancer sees the flip, then closes the ingest listener (waiting for the
+  # requests it is serving: the batcher's 15 s record deadline, the store commit
+  # and a margin, 22 s; 13 s under wal.type: none; 24 s under dual) and waits
+  # for every batcher to empty, all within drain_timeout_ms of the delay. The
+  # backup's final checkpoint runs after (backup.final_timeout_ms). Set the
+  # pod's terminationGracePeriodSeconds to at least
+  # (drain_delay_ms + drain_timeout_ms) / 1000 + 10 (+ backup.final_timeout_ms).
+  # drain_delay_ms is an integer >= 0; drain_timeout_ms an integer >= 1, and on a
+  # node with the edge role at least the listener wait above.
+  drain_delay_ms: 5000
+  drain_timeout_ms: 30000
   # TLS for the ingest listener (admin, routes.admin, claim_check and metrics
   # each take their own `tls:` of the same shape). Off = plain HTTP.
   # tls:
@@ -947,10 +970,10 @@ source_store:
 # `providers`; `#<field>` picks one field of a JSON secret). A source's
 # `secret_file: /abs/path` (or a list) is `secret:` read from a file. A
 # provider's own credentials come from ${VAR} or ${file:}, never another ${sm:}.
-# Unresolvable at boot is a load error naming the key; on a reload
-# (`AnkusaServer.Secrets.reload(:default)` from a `remote` shell) a reference
-# that fails keeps its last value and logs a warning, so a rotated secret
-# takes effect without a restart. See docs/configuration.md#secret-sources.
+# Unresolvable at boot is a load error naming the key; on a reload (SIGHUP, or
+# `POST /v1/config/reload`) a reference that fails keeps its last value and logs
+# a warning, so a rotated secret takes effect without a restart. See
+# docs/configuration.md#secret-sources.
 #   cache_ttl_ms: 0         # reuse a ${sm:} value fetched within this many ms (0..86400000)
 #   providers:
 #     prod-vault:
@@ -993,7 +1016,7 @@ sources:
       # Or from a secret manager (see `secrets.providers` above):
       # secret: ["${sm:prod-vault:ankusa/stripe#whsec}", "${sm:aws:prod/stripe-old}"]
       tolerance_seconds: 300
-    # dedupe: stripe   # a preset (github | standard_webhooks | svix | shopify | stripe), or {header: X-Event-Id} / {json: data.id}, plus optional ttl_seconds (259200)
+    # dedupe: stripe   # a preset (github | standard_webhooks | svix | shopify | stripe | salesforce), or {header: X-Event-Id} / {json: data.id}, plus optional ttl_seconds (259200). A source with no dedupe logs one boot warning and counts in ankusa_sources_without_dedupe.
     # forward_headers: [stripe-signature]   # absent = every header except auth/framing/hop-by-hop and x-ankusa-*
     # max_headers: 64   # at most this many forwarded headers per message; the rest are dropped (ankusa_sink_headers_dropped_total{reason="count"})
     # forward_headers_max_bytes: 16384   # at most this many bytes of forwarded header names and values per message; a header that would pass it is dropped whole (reason="bytes")

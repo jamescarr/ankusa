@@ -14,6 +14,48 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   carries it as the document's `x-ankusa-region` extension. Unset, `region` is
   `null` and the extension is absent. Core keeps it in `dispatch.region`.
 
+- **Config reload and `config_version` (OPS-6).** `SIGHUP` and
+  `POST /v1/config/reload` (scope `config:write` + `tenant:*`) re-read the file,
+  resolve its `${file:}` / `${sm:}` references again and apply the keys that may
+  change while the node runs: `log` (level and format, when the file changed
+  them), `rate_limits` (not `scope`), static `sources`, the `routes` seed,
+  `dispatch.concurrency`, `dispatch.sink_concurrency`, `dispatch.tenants`,
+  `metrics.detail` and `admin.gauge_interval_ms`. A change to any other key is
+  refused with `409` naming it and nothing is applied; each reload writes one
+  `config.reload` audit row. The root key `config_version` (`1`, the default
+  when absent) versions the file format: an older file is migrated on load by the
+  loader's migration map, a newer one is refused. `AnkusaServer.Reload`
+  replaces `AnkusaServer.Secrets.reload/2` (`remember/2` and `recall/1` go with it);
+  `AnkusaServer.Config.load!/1` also answers the substituted document as `doc`.
+  `log.format` changes back to `text` at a reload now restore the text formatter.
+- **Helm chart (OPS-8).** `deploy/helm/ankusa` runs the image on Kubernetes in all
+  three durability modes: a StatefulSet with a PVC per pod for `wal.type: disk` and
+  `dual` (`intake.node_id` = the pod name), a Deployment behind an HPA for `none`.
+  The pod spec is the `restricted` Pod Security Standard (uid 100/gid 101, read-only
+  root file system with `RELEASE_TMP=/tmp`, `drop: [ALL]`, seccomp `RuntimeDefault`);
+  `/health` is the startup and liveness probe and `/ready` the readiness probe;
+  `terminationGracePeriodSeconds` is `(listener.drain_delay_ms + drain_timeout_ms) /
+  1000 + 10` (plus `backup.final_timeout_ms` when backing up); PodDisruptionBudget
+  (`maxUnavailable: 1`), zone and node topology spread, a NetworkPolicy that opens
+  4000 and limits 4001-4004 to the operator namespaces, an optional claim-check
+  gateway. `mise run check:examples` lints and renders every mode and validates the
+  manifests with `kubeconform`; `mise run e2e fleet` runs the fleet drill from the
+  chart on kind. The guide, the PVC sizing table and the multi-region topology are in
+  `docs/deployment.md`. The example manifests' `terminationGracePeriodSeconds: 30`
+  (the Oban example and the jetstream-k8s chart's ankusa pods) are now 60, to cover the
+  drain, and the Oban example's readiness probe is `/ready`.
+
+- **`dedupe: salesforce` (CON-3).** A source's `dedupe` accepts the preset
+  `salesforce` (`json: id`; see `configuration.md` for why it is a convention and
+  not a Salesforce-documented delivery id). A source with no `dedupe` logs one
+  boot warning and counts in `ankusa_sources_without_dedupe`. See the `ankusa`
+  changelog.
+- **SLI metrics (OPS-3).** `/metrics` gains `ankusa_delivery_latency_seconds{sink,result}`
+  (a delivery's age when it settled, buckets to 60 s), `ankusa_dispatch_attempt_duration_seconds{sink,result}`,
+  `ankusa_compact_failures_total{stage}`, `ankusa_claim_check_failures_total{op}` and
+  `ankusa_backup_failures_total`. No new config key; `metrics.detail: source` also puts
+  `tenant_id` and `source_id` on the delivery latency histogram. The SLO table is in
+  [`architecture.md`](../../docs/architecture.md#slis-and-slos).
 - `ordered` and `ordering_key` (`{header: name}` / `{json: path}`) on every sink
   but `log` (ordering lanes, ADR 0004).
 
@@ -56,6 +98,20 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   a label that never makes the node unready. See `config-examples/reference.yml`.
   `/ready`'s body now lists every check with `ok`/`failing`/`draining` and
   `reasons` (see the `ankusa` changelog for the wire change).
+
+- **Graceful drain on SIGTERM (OPS-4).** `docker stop` (and a pod deletion) now
+  drains the node before it stops: `/ready` answers `503` with `"status":
+  "draining"` at once, the ingest port keeps serving for `listener.drain_delay_ms`
+  (5000, an integer >= 0), then closes after the requests it is serving, then
+  every batcher is waited on, all within `listener.drain_timeout_ms` (30000, an
+  integer >= 1; on a node with the `edge` role at least the ingest listener's
+  wait, 22 s by default). The ingest listener waits 22 s (13 s under
+  `wal.type: none`, 24 s under `dual`) for requests in flight instead of Thousand
+  Island's 15 s, so a commit that starts late is no longer killed mid-fsync and
+  no provider sees a reset for a committed hook. Set `terminationGracePeriodSeconds`
+  (and `docker stop -t`) to at least `(drain_delay_ms + drain_timeout_ms) / 1000 +
+  10`, plus `backup.final_timeout_ms` when the node backs up. See
+  `config-examples/reference.yml` and `docs/deployment.md`.
 
 ## [0.7.0] - 2026-10-24
 

@@ -145,6 +145,37 @@ defmodule Ankusa.DedupeTest do
     assert stored_ids(config.instance) == [id1]
   end
 
+  test "salesforce preset: a retried callout with the same id collapses to the original hook" do
+    assert Ankusa.Dedupe.new!(:salesforce).from == {:json, ["id"]}
+
+    config = start_edge(%{"sf" => [dedupe: :salesforce]})
+    body = ~s({"id":"a0B5e00000XyZ1AEAV","Name":"Acme","StageName":"Closed Won"})
+
+    first = route(config, request("sf", body))
+    retry = route(config, request("sf", body))
+    other = route(config, request("sf", ~s({"id":"a0B5e00000XyZ2AEAV"})))
+
+    assert first.status == 201
+    assert %{"id" => id1} = JSON.decode!(first.resp_body)
+    assert %{"id" => ^id1, "duplicate" => true} = JSON.decode!(retry.resp_body)
+    assert %{"id" => id3} = JSON.decode!(other.resp_body)
+    assert id3 != id1
+    assert stored_ids(config.instance) |> Enum.sort() == Enum.sort([id1, id3])
+  end
+
+  test "an edge boots with one warning per source without dedupe, and none for a deduped one" do
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        start_edge(%{
+          "boot-plain" => [],
+          "boot-sf" => [dedupe: :salesforce]
+        })
+      end)
+
+    assert length(Regex.scan(~r/source boot-plain has no dedupe:/, log)) == 1
+    refute log =~ "source boot-sf has no dedupe"
+  end
+
   test "a flag-accepted forged hook never claims a key" do
     sources = %{
       "demo" => [

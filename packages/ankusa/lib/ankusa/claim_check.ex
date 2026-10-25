@@ -176,6 +176,8 @@ defmodule Ankusa.ClaimCheck do
       }
     )
 
+    report_failure(instance, tenant_id, :check_in, result)
+
     case result do
       {:ok, claims, _store} -> {:ok, claims}
       {:error, _reason} = error -> error
@@ -356,6 +358,8 @@ defmodule Ankusa.ClaimCheck do
         result: result_tag(result)
       }
     )
+
+    report_failure(instance, ref.tenant_id, :redeem, result)
 
     result
   end
@@ -1098,6 +1102,29 @@ defmodule Ankusa.ClaimCheck do
   @doc false
   @spec sha256(binary()) :: String.t()
   def sha256(bin), do: Base.encode16(:crypto.hash(:sha256, bin), case: :lower)
+
+  # `ankusa_claim_check_failures_total{op}`: a failure that is this node's or its
+  # claim stores' to fix. A ref that is missing, expired or forged is the
+  # caller's and is only on the operation's own `:result`.
+  defp report_failure(instance, tenant_id, op, {:error, reason}) do
+    if store_fault?(reason) do
+      Telemetry.emit([:claim_check, :failure], %{}, %{
+        instance: instance,
+        op: op,
+        tenant_id: tenant_id,
+        reason: reason
+      })
+    end
+
+    :ok
+  end
+
+  defp report_failure(_instance, _tenant_id, _op, _ok), do: :ok
+
+  defp store_fault?(:forbidden), do: true
+  defp store_fault?(:integrity_mismatch), do: true
+  defp store_fault?({:unavailable, _reason}), do: true
+  defp store_fault?(_other), do: false
 
   defp result_tag({:ok, _bin}), do: :ok
   defp result_tag({:ok, _claims, _store}), do: :ok

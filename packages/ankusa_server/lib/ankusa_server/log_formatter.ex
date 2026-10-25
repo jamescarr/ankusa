@@ -95,13 +95,32 @@ defmodule AnkusaServer.LogFormatter do
   @doc """
   Make `format` the node's log format: `:json` replaces the default handler's
   formatter with this one (`instance` is the name lines carry when they name
-  none); `:text` leaves the release's own text formatter in place.
+  none), keeping the formatter it replaced; `:text` puts that one back when this
+  one is installed (a reload that changes `log.format` back), and otherwise
+  leaves the release's own text formatter alone.
   """
   @spec install(:json | :text, atom()) :: :ok | {:error, term()}
-  def install(:text, _instance), do: :ok
+  def install(:text, _instance) do
+    case :logger.get_handler_config(:default) do
+      {:ok, %{formatter: {__MODULE__, _}}} ->
+        :logger.update_handler_config(:default, :formatter, original_formatter())
 
-  def install(:json, instance),
-    do: :logger.update_handler_config(:default, :formatter, {__MODULE__, %{instance: instance}})
+      _other ->
+        :ok
+    end
+  end
+
+  def install(:json, instance) do
+    with {:ok, %{formatter: formatter}} <- :logger.get_handler_config(:default),
+         {mod, _config} when mod != __MODULE__ <- formatter do
+      :persistent_term.put({__MODULE__, :original}, formatter)
+    end
+
+    :logger.update_handler_config(:default, :formatter, {__MODULE__, %{instance: instance}})
+  end
+
+  defp original_formatter,
+    do: :persistent_term.get({__MODULE__, :original}, nil) || Logger.default_formatter()
 
   # ── the object ────────────────────────────────────────────────────────────
 

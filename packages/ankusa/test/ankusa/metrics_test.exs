@@ -334,6 +334,221 @@ defmodule Ankusa.MetricsTest do
     end
   end
 
+  defmodule GateSink do
+    @moduledoc "Holds each delivery until the test sends `:go` to the delivering process."
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(env, _ctx, opts) do
+      send(Keyword.fetch!(opts, :pid), {:gated, self(), env.id})
+
+      receive do
+        :go -> :ok
+      after
+        5_000 -> {:error, :gate_timeout}
+      end
+    end
+  end
+
+  defmodule ErrorSink do
+    @behaviour Ankusa.Sink
+    @impl true
+    def deliver(_env, _ctx, _opts), do: {:error, :boom}
+  end
+
+  def forward(event, measurements, meta, pid),
+    do: send(pid, {:telemetry, event, measurements, meta})
+
+  defp attach(events) do
+    id = {__MODULE__, System.unique_integer([:positive])}
+    :telemetry.attach_many(id, events, &__MODULE__.forward/4, self())
+    on_exit(fn -> :telemetry.detach(id) end)
+  end
+
+  # The `_sum` sample of a histogram family, or nil without one.
+  defp histogram_sum(scrape, name) do
+    case Regex.run(~r/^#{name}_sum\{[^}]*\} (\S+)$/m, scrape) do
+      [_, value] -> value |> Float.parse() |> elem(0)
+      nil -> nil
+    end
+  end
+
+  test "delivery latency histogram: a held delivery shows in _sum, the attempt series and the stop event" do
+    sources = %{
+      "g" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{GateSink, pid: self()}]]
+    }
+
+    config = start_instance(roles: [:edge, :dispatch], source_store: {Static, sources: sources})
+    inst = config.instance
+    attach([[:ankusa, :dispatch, :stop], [:ankusa, :dispatch, :attempt]])
+
+    assert {:ok, _env} = Ankusa.Edge.Ingest.ingest(inst, request("g", ~s({"id":"1"})))
+    assert_receive {:gated, pid, _id}, 5_000
+    Process.sleep(250)
+    send(pid, :go)
+
+    scrape = scrape_until(inst, ~r/^ankusa_delivery_latency_seconds_count\{[^}]*\} 1(\.0)?$/m)
+
+    assert scrape =~
+             ~r/^ankusa_delivery_latency_seconds_count\{[^}]*result="ok"[^}]*sink="Ankusa.MetricsTest.GateSink"[^}]*\} 1(\.0)?$/m
+
+    assert scrape =~ "ankusa_delivery_latency_seconds_bucket{"
+    # The held 250 ms is in the sample, and nothing like a native-unit value is.
+    assert histogram_sum(scrape, "ankusa_delivery_latency_seconds") >= 0.25
+    assert histogram_sum(scrape, "ankusa_delivery_latency_seconds") < 30
+
+    assert scrape =~
+             ~r/^ankusa_dispatch_attempt_duration_seconds_count\{[^}]*result="ok"[^}]*\} 1(\.0)?$/m
+
+    assert histogram_sum(scrape, "ankusa_dispatch_attempt_duration_seconds") >= 0.25
+
+    assert_receive {:telemetry, [:ankusa, :dispatch, :attempt], %{attempt_ms: attempt_ms},
+                    %{instance: ^inst, result: :ok, attempt: 1}}
+
+    assert is_float(attempt_ms) and attempt_ms >= 250
+
+    assert_receive {:telemetry, [:ankusa, :dispatch, :stop], measurements,
+                    %{instance: ^inst, result: :ok, attempts: 1}}
+
+    assert measurements.attempt_ms >= 250
+    assert is_integer(measurements.since_received_ms) and measurements.since_received_ms >= 250
+  end
+
+  test "attempts are sampled by result, and a delivery that gave up is a latency sample too" do
+    me = self()
+
+    sources = %{
+      "bad" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{ErrorSink, []}]],
+      "hang" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{GateSink, pid: me}]]
+    }
+
+    config =
+      start_instance(
+        roles: [:edge, :dispatch],
+        source_store: {Static, sources: sources},
+        dispatch: %{
+          attempt_timeout_ms: 100,
+          retry: {Ankusa.RetryPolicy.Exponential, base_ms: 0, max_attempts: 1, jitter: false}
+        }
+      )
+
+    inst = config.instance
+    assert {:ok, _env} = Ankusa.Edge.Ingest.ingest(inst, request("bad", ~s({"id":"1"})))
+    assert {:ok, _env} = Ankusa.Edge.Ingest.ingest(inst, request("hang", ~s({"id":"2"})))
+
+    pattern = fn result ->
+      ~r/^ankusa_dispatch_attempt_duration_seconds_count\{[^}]*result="#{result}"[^}]*\} 1(\.0)?$/m
+    end
+
+    scrape_until(inst, pattern.("error"))
+    scrape = scrape_until(inst, pattern.("timeout"))
+
+    assert scrape =~ pattern.("error")
+    assert scrape =~ pattern.("timeout")
+
+    # Both gave up after their one attempt: dead-lettered, and sampled as such.
+    scrape = scrape_until(inst, ~r/ankusa_delivery_latency_seconds_count\{[^}]*result="dlq"/)
+
+    assert scrape =~
+             ~r/^ankusa_delivery_latency_seconds_count\{[^}]*result="dlq"[^}]*sink="Ankusa.MetricsTest.ErrorSink"[^}]*\} 1(\.0)?$/m
+
+    assert scrape =~
+             ~r/^ankusa_delivery_latency_seconds_count\{[^}]*result="dlq"[^}]*sink="Ankusa.MetricsTest.GateSink"[^}]*\} 1(\.0)?$/m
+  end
+
+  test "direct mode samples the same delivery and attempt series" do
+    sources = %{"q" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{OkSink, []}]]}
+    inst = start_instance(wal: :none, source_store: {Static, sources: sources}).instance
+    attach([[:ankusa, :dispatch, :stop], [:ankusa, :dispatch, :attempt]])
+
+    assert {:ok, _env} = Ankusa.Edge.Ingest.ingest(inst, request("q", ~s({"id":"1"})))
+
+    scrape = Ankusa.Metrics.scrape(inst)
+
+    assert scrape =~
+             ~r/^ankusa_delivery_latency_seconds_count\{[^}]*result="ok"[^}]*\} 1(\.0)?$/m
+
+    assert scrape =~
+             ~r/^ankusa_dispatch_attempt_duration_seconds_count\{[^}]*result="ok"[^}]*\} 1(\.0)?$/m
+
+    assert_receive {:telemetry, [:ankusa, :dispatch, :stop],
+                    %{attempt_ms: _, since_received_ms: _}, %{instance: ^inst, result: :ok}}
+  end
+
+  test "compact, claim check and backup failures are counted by stage, op and run" do
+    inst = start_instance().instance
+
+    for stage <- [:segment, :segment, :retention] do
+      Ankusa.Telemetry.emit([:compact, :failure], %{}, %{instance: inst, stage: stage})
+    end
+
+    for op <- [:check_in, :check_in, :redeem] do
+      Ankusa.Telemetry.emit([:claim_check, :failure], %{}, %{
+        instance: inst,
+        op: op,
+        tenant_id: "acme",
+        reason: {:unavailable, :timeout}
+      })
+    end
+
+    for result <- [:ok, :error, :error] do
+      Ankusa.Telemetry.emit([:backup, :stop], %{duration: 1, files: 0, bytes: 0}, %{
+        instance: inst,
+        result: result,
+        reason: nil
+      })
+    end
+
+    scrape = Ankusa.Metrics.scrape(inst)
+
+    assert scrape =~ ~r/^ankusa_compact_failures_total\{[^}]*stage="segment"[^}]*\} 2$/m
+    assert scrape =~ ~r/^ankusa_compact_failures_total\{[^}]*stage="retention"[^}]*\} 1$/m
+    assert scrape =~ ~r/^ankusa_claim_check_failures_total\{[^}]*op="check_in"[^}]*\} 2$/m
+    assert scrape =~ ~r/^ankusa_claim_check_failures_total\{[^}]*op="redeem"[^}]*\} 1$/m
+    assert scrape =~ ~r/^ankusa_backup_failures_total\{instance="#{inst}"\} 2$/m
+
+    # Neither an op nor a stage carries a tenant or a reason.
+    for name <- ~w(ankusa_compact_failures_total ankusa_claim_check_failures_total),
+        line <- series(scrape, name),
+        key <- ~w(tenant_id reason) do
+      assert label(line, key) == nil
+    end
+  end
+
+  test "slo series present: every metric the SLO table names is on /metrics" do
+    sources = %{"q" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{OkSink, []}]]}
+    config = start_instance(roles: [:edge, :dispatch], source_store: {Static, sources: sources})
+    inst = config.instance
+
+    assert {:ok, _env} = Ankusa.Edge.Ingest.ingest(inst, request("q", ~s({"id":"1"})))
+    assert {:ok, _} = Ankusa.Dispatch.Pipeline.tick(inst)
+    :ok = Ankusa.Metrics.Gauges.measure(inst)
+
+    doc = Path.expand("../../../../docs/architecture.md", __DIR__)
+    [_, section] = doc |> File.read!() |> String.split("### SLIs and SLOs", parts: 2)
+
+    names =
+      section
+      |> String.split("\n")
+      |> Enum.filter(&String.starts_with?(&1, "| "))
+      |> Enum.map(fn row -> row |> String.split("|", trim: true) |> List.last() end)
+      |> Enum.flat_map(&Regex.scan(~r/`(ankusa_[a-z_]+)`/, &1, capture: :all_but_first))
+      |> List.flatten()
+
+    # The table is the contract: these rows must still be in it.
+    for name <-
+          ~w(ankusa_ingest_duration_seconds ankusa_delivery_latency_seconds
+             ankusa_queue_oldest_due_age_seconds) do
+      assert name in names, "#{name} is missing from the SLO table"
+    end
+
+    scrape = Ankusa.Metrics.scrape(inst)
+
+    for name <- names do
+      assert scrape =~ ~r/^#{name}(_bucket|_sum|_count)?\{/m, "#{name} is not on /metrics"
+    end
+  end
+
   describe "gauges" do
     defp gauge(scrape, name, instance) do
       case Regex.run(~r/^#{name}\{instance="#{instance}"\} (\S+)$/m, scrape) do
@@ -368,6 +583,8 @@ defmodule Ankusa.MetricsTest do
       assert gauge(scrape, "ankusa_quarantine_bytes", inst) > 0.0
       assert gauge(scrape, "ankusa_quarantine_pending", inst) == 0.0
       assert gauge(scrape, "ankusa_http_pools", inst) == 0.0
+      # `demo` and `strict` both declare no `dedupe`.
+      assert gauge(scrape, "ankusa_sources_without_dedupe", inst) == 2.0
     end
 
     test "config errors are counted per sink, and carry no tenant or source label" do
@@ -853,6 +1070,44 @@ defmodule Ankusa.MetricsTest do
       assert scrape =~ ~r/^ankusa_ingest_requests_total\{[^}]*tenant_id="acme"/m
       assert scrape =~ "ankusa_ingest_duration_seconds_bucket{"
       refute scrape =~ ~r/^ankusa_ingest_duration_seconds_bucket\{[^}]*tenant_id/m
+    end
+
+    test "delivery latency carries an identity only at detail: :source" do
+      sources = %{"q" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{OkSink, []}]]}
+
+      deliver = fn detail ->
+        config =
+          start_instance(
+            wal: :none,
+            source_store: {Static, sources: sources},
+            metrics: %{detail: detail}
+          )
+
+        req = "q" |> request(~s({"id":"x"})) |> Map.put(:tenant_id, "acme")
+        assert {:ok, _env} = Ankusa.Edge.Ingest.ingest(config.instance, req)
+        Ankusa.Metrics.scrape(config.instance)
+      end
+
+      tenant = deliver.(:tenant)
+      lines = series(tenant, "ankusa_delivery_latency_seconds_bucket")
+      assert [_ | _] = lines
+      for line <- lines, key <- ~w(tenant_id source_id), do: assert(label(line, key) == nil)
+
+      source = deliver.(:source)
+      lines = series(source, "ankusa_delivery_latency_seconds_bucket")
+      assert [_ | _] = lines
+
+      for line <- lines do
+        assert label(line, "tenant_id") == "acme"
+        assert label(line, "source_id") == "q"
+      end
+
+      # An attempt's duration is per sink and result, whatever the detail.
+      for scrape <- [tenant, source],
+          line <- series(scrape, "ankusa_dispatch_attempt_duration_seconds_bucket"),
+          key <- ~w(tenant_id source_id) do
+        assert label(line, key) == nil
+      end
     end
 
     test "detail: :none has no identity label and no per-tenant gauge, at any tenant count" do

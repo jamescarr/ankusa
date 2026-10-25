@@ -80,6 +80,17 @@ The always-on tests cover:
   present and `source_id` absent by default, the gauges dropping what the
   ceiling refuses, and a concurrent test that admission never exceeds the
   ceiling or leaks a slot.
+  The SLI series (OPS-3) are in `metrics_test.exs` too: "delivery latency
+  histogram" holds a delivery behind a gate sink for 250 ms and checks it in the
+  latency and attempt `_sum`s and in the `[:ankusa, :dispatch, :stop]` and
+  `:attempt` measurements; "attempts are sampled by result" covers `error`,
+  `timeout` and a dead-lettered delivery; "direct mode samples the same …"
+  covers `wal: :none`; "delivery latency carries an identity only at detail:
+  :source" covers the cardinality; "compact, claim check and backup failures"
+  covers the three counters (the events themselves are asserted in
+  `storage_test.exs` and `claim_check_test.exs`); and "slo series present" reads
+  the SLO table in [`architecture.md`](architecture.md#slis-and-slos) and fails
+  if a metric it names is not on `/metrics`.
 - **Verifier hardening** (`verifier_test.exs` "tolerance range and weak hashes",
   `metrics_test.exs`, `ankusa_server` `config_test.exs` "tolerance range"):
   `tolerance` 0–3600 validates and 3601, a negative or a non-integer is
@@ -332,6 +343,11 @@ The always-on tests cover:
   and `/ready` and answers `404` to the operator API's routes. The image
   smoke drill (`mise run docker:smoke`) repeats the mutual-TLS check with
   `openssl s_client` and `curl` against the built image.
+  The same smoke drill also stops a container under 200 throttled uploads
+  (`docker stop`, `listener.drain_delay_ms: 2000`) and asserts `/ready` flips to
+  `503 draining`, no upload is reset (curl exits 0 for every one, each answered
+  `201` or `503`), the container exits `0`, and every `201`'s id is in the
+  store after `docker start`.
 - **Secret sources** (`source_store_static_test.exs` in core;
   `ankusa_server/test/ankusa_server/secrets_test.exs`): `SourceStore.Static.publish/2`
   swaps a running instance's sources, names the ids that changed, and applies
@@ -341,10 +357,28 @@ The always-on tests cover:
   resolves through a loopback stub of Vault KV v2 and AWS `GetSecretValue`
   (SigV4 header, token header, a JSON field, a binary secret) and a missing or
   unreachable secret fails the boot naming the reference; a signed POST
-  verifies with the new secret after a file swap and a reload while the old one
-  stays valid until it leaves the list; a manager outage or a deleted file at
-  reload keeps the last value and logs a warning; a reload that cannot be
-  applied changes nothing; an API-submitted spec cannot name a file.
+  verifies with the new secret after a file swap and a reload (`AnkusaServer.Reload`)
+  while the old one stays valid until it leaves the list; a manager outage or a
+  deleted file at reload keeps the last value and logs a warning; a reload that
+  cannot be applied changes nothing; an API-submitted spec cannot name a file.
+- **Config reload and `config_version`** (`ankusa/test/ankusa/reload_test.exs`;
+  `ankusa_server/test/ankusa_server/reload_test.exs`, `config_test.exs`): core's
+  `apply_config/3` applies the reloadable set to a running instance and keeps
+  every other field (a rate limit read on the next request, the dispatch
+  pipeline's limits, the gauge poller and metric definitions rebuilt, the seed's
+  difference through the routes API with API routes left alone, static sources),
+  refuses a config that would not boot with nothing applied and no audit row, and
+  records a seed route that collides with an API route as a `failed` row;
+  `POST /v1/config/reload` is `401` / `403` and maps each answer of the loader to
+  its status. The server suite boots an instance from a YAML file, edits the
+  file and reloads over the admin router: `applies reloadable` (`log.level`, a
+  tenant rate limit, a source secret, the seed and `dispatch.concurrency` all
+  change with no restart, one audit row names the keys), `refuses non-reloadable`
+  (a changed `http.port` is `409` naming it and nothing else in the file is
+  applied), a level set at runtime survives a reload that leaves `log` alone, a
+  file that no longer loads is `422`, and a real `SIGHUP` reloads as the system.
+  `config_test.exs` covers `config_version`: absent is 1, a newer version or a
+  non-integer is refused naming the key, `migrate!/3` runs each step.
 - **Dispatch** (`dispatch_test.exs`): a hook reaches every sink of its source
   exactly once; a failing sink is retried until it succeeds; a failing sink's
   retries do not hold the slots a healthy source needs (D1); one dead row per
@@ -561,6 +595,19 @@ The always-on tests cover:
   due row under its tenant's ordinal, `pending_for_tenant/2` agrees, and the
   stored per-tenant counters equal a fold of the index (`counters equal the
   index after kill -9`).
+- **A drain checker** (`drain_test.exs`, OPS-4): like the loss checker, it runs a
+  separate OS process. A child BEAM (`test/support/drain_harness.exs`) runs
+  the real `:ankusa` application with one edge + dispatch instance and a slow
+  sink, and a `STALL` command suspends its queue writer so 200 POSTs sit in
+  the batchers. The test sends `SIGTERM` and asserts what the clients and the
+  store saw: `/ready` answers `503` with `"status":"draining"` within 100 ms of
+  the signal, every request is answered `201` or `503` with **zero connection
+  resets**, the child exits `0`, and every `201`'s hook id is in the store
+  after a restart (it prints `drain: ready flips in <n> ms; zero resets; …`).
+  The `in process` tests cover `Ankusa.Instance.Drain` (it closes the ingress
+  listener, waits while a batcher still holds a record, and is a no-op for an
+  instance that never started) and `Ankusa.Edge.Batcher.queued/2`; the same
+  drill runs against the built image in `mise run docker:smoke` (see Listeners).
 - **Lifecycle events** (`lifecycle_test.exs`, `replay_test.exs`): through a real
   instance, a source's create/update/delete and a route's
   create/replace/patch/delete each deliver one CloudEvent to the configured
@@ -1154,7 +1201,8 @@ sink's deliveries, the log's records):
   `listener.ready_sink_error_window_ms`); a data dir under `listener.ready_min_free_bytes` is
   `503` with `disk: failing` (`unmeasured` without `:os_mon`); a backlog over
   `queue.max_oldest_due_ms` is `backlog: failing` with a `200`; a check that
-  reports `draining` gates, and one that raises is `failing` (reason `error`)
+  reports `draining` gates and makes the body's `status` `draining` (and
+  `Health.drain/1` adds the `drain` check that does), and one that raises is `failing` (reason `error`)
   without crashing the probe. `backup_test.exs` covers `backup` ok/failing and
   `require_fresh`; `edge_test.exs` the `/ready` body over HTTP;
   `admin/router_test.exs` that `/v1/config` shows the new keys.
@@ -1452,10 +1500,26 @@ bounded by the delivery contract, not asserted to be zero.
 
 CI: [`.github/workflows/e2e.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/e2e.yml)
 runs it nightly, on `workflow_dispatch`, on every release tag, and on a pull
-request that touches the example, beside `mise run e2e` (the kind drill below).
+request that touches the example, beside `mise run e2e` (the kind drills below).
 The load generator's reports are uploaded as the `fleet-e2e-reports` artifact.
 `RATE`, `DURATION` (at least 40), `BURST_SECONDS`, `CONCURRENCY`, `KEEP=1` and
 `BUILD_ANKUSA=0` (use the image named by `ANKUSA_IMAGE`) tune a run.
+
+### The same fleet from the Helm chart, on kind
+
+[`examples/fleet-e2e/kind.sh`](https://github.com/jamescarr/ankusa/blob/main/examples/fleet-e2e/kind.sh)
+(`mise run e2e fleet`) runs the compose fleet's `disk` drill from
+[`deploy/helm/ankusa`](https://github.com/jamescarr/ankusa/tree/main/deploy/helm/ankusa)
+on a `kind` cluster: two StatefulSet pods (a PVC each) and a claim-check gateway in a
+namespace that **enforces the `restricted` Pod Security Standard**, and Redis, MinIO,
+RabbitMQ, the consumer and Postgres in another. It asserts that the pods run as uid 100
+on a read-only root file system, that a path nobody defined is a `404`, then drives
+steady load, six 20 KB hooks redeemed at the gateway, a chaos phase (`ankusa-0` deleted
+with the drain, `ankusa-1` `SIGKILL`ed with grace period 0, the consumer deleted) and a
+burst, and prints `verify: missing=0 sha_mismatches=0 extra_deliveries=<n>
+claim_redeemed=true duplicate_hooks=0`. Knobs: the compose run's (`RATE`, `DURATION`,
+`BURST_SECONDS`, `CONCURRENCY`, `KEEP=1`, `BUILD_ANKUSA=0` with `ANKUSA_IMAGE`).
+`mise run check:examples` renders the same values with `kubeconform`.
 
 ## Load and end-to-end (kind + Oban)
 
@@ -1480,9 +1544,10 @@ written by the idempotent `WebhookWorker.perform/1` upsert) until every acked
 id shows up or its timeout expires, and fails the run on any `missing > 0` or
 `sha_mismatches > 0`.
 
-Run it yourself: `mise run e2e` (needs `docker`; `kind`, `kubectl`, and
-Elixir come from `.mise.toml`). `RATE` defaults to 300; `KEEP=1` keeps the
-cluster.
+Run it yourself: `mise run e2e oban` (needs `docker`; `kind`, `kubectl`, and
+Elixir come from `.mise.toml`; plain `mise run e2e` also runs the
+[fleet from the Helm chart](#the-same-fleet-from-the-helm-chart-on-kind) after it).
+`RATE` defaults to 300; `KEEP=1` keeps the cluster.
 
 Results from `RATE=60` and `RATE=300` verification runs, `kind` cluster
 otherwise idle (`RATE=60` is the same load the pre-fix numbers below used, so

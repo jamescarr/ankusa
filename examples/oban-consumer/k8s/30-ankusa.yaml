@@ -23,7 +23,9 @@ spec:
       labels:
         app: ankusa
     spec:
-      terminationGracePeriodSeconds: 30
+      # preStop (5 s) + the drain on SIGTERM: listener.drain_delay_ms (5 s) +
+      # drain_timeout_ms (30 s), and a margin (docs/deployment.md, "Draining on SIGTERM").
+      terminationGracePeriodSeconds: 60
       containers:
         - name: ankusa
           image: ankusa-oban-ingest:e2e
@@ -53,9 +55,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+          # /ready answers 503 while the store refuses writes and while a stop is
+          # draining the pod; /health only says the process is up.
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: 4000
             initialDelaySeconds: 5
             periodSeconds: 5

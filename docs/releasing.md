@@ -118,6 +118,11 @@ The same job pushes `packages/ankusa_server/README.md` as the Docker Hub
 repository description. `release:verify ankusa_server` also checks `latest`
 (for a non-prerelease) and that the tag carries both architectures.
 
+The Helm chart ([`deploy/helm/ankusa`](https://github.com/jamescarr/ankusa/tree/main/deploy/helm/ankusa))
+runs `jamescarr/ankusa:<appVersion>` unless `image.tag` says otherwise: set its
+`appVersion` in `Chart.yaml` to the new `ankusa_server` version in the release PR, and
+bump the chart's own `version` when its templates or values changed.
+
 ### Supply chain: pins, SBOM, provenance, signature
 
 Nothing the image or its pipeline pulls is a moving name. `mise run lint:pins`

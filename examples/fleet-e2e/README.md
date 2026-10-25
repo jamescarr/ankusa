@@ -117,6 +117,18 @@ nothing undelivered to lose and `disk` would look as safe as `dual`.
 and its replacement delivers again from the backup and the log (same hook id, same
 `idempotency_key`); the consumer dedupes on the key and `duplicate_hooks` stays 0.
 
+### On kind, from the Helm chart
+
+`examples/fleet-e2e/kind.sh` (`mise run e2e fleet`) runs the `disk` fleet from
+[`deploy/helm/ankusa`](../../deploy/helm/ankusa/) on a kind cluster instead of
+compose: two StatefulSet pods with a PVC each and a claim-check gateway
+(`kind/values.yaml` is the chart's input, `kind/infra.yaml` the dependencies), the
+chart in a namespace that enforces the `restricted` Pod Security Standard. The chaos
+phase deletes `ankusa-0` (SIGTERM: the drain), `SIGKILL`s `ankusa-1` and deletes the
+consumer; the run ends with `verify: missing=0 sha_mismatches=0 …`. Needs `docker`,
+`kind`, `kubectl`, `helm`, `mix`, `curl` and `jq`; the same knobs as below, and the
+published ports are `18180` (the Service) and `15434` (Postgres).
+
 ### Knobs
 
 | Variable | Default | |

@@ -522,6 +522,46 @@ defmodule Ankusa.ConfigTest do
     end
   end
 
+  describe "Ankusa.Dedupe.undeduped_sources/1 and warn_undeduped/1" do
+    defp dedupe_config(sources) do
+      Config.new(source_store: {Ankusa.SourceStore.Static, sources: sources})
+    end
+
+    test "lists, sorted, every declared source without dedupe: struct, keyword and map specs" do
+      config =
+        dedupe_config(%{
+          "z-plain" => [sinks: [{Ankusa.Sink.Log, []}]],
+          "a-map" => %{sinks: [{Ankusa.Sink.Log, []}]},
+          "m-struct" => Ankusa.Source.new("m-struct", []),
+          "deduped-kw" => [dedupe: :salesforce],
+          "deduped-map" => %{dedupe: %{header: "x-id"}},
+          "deduped-struct" => Ankusa.Source.new("deduped-struct", dedupe: :github)
+        })
+
+      assert Ankusa.Dedupe.undeduped_sources(config) == ["a-map", "m-struct", "z-plain"]
+      assert Ankusa.Dedupe.undeduped_sources(Config.new()) == []
+    end
+
+    test "warns without dedupe: one line per source that has none, nothing for the rest" do
+      config =
+        dedupe_config(%{
+          "warn-plain" => [],
+          "warn-other" => [],
+          "warn-github" => [dedupe: :github]
+        })
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok = Ankusa.Dedupe.warn_undeduped(config)
+        end)
+
+      assert length(Regex.scan(~r/source warn-plain has no dedupe:/, log)) == 1
+      assert length(Regex.scan(~r/source warn-other has no dedupe:/, log)) == 1
+      assert log =~ "ankusa_sources_without_dedupe"
+      refute log =~ "warn-github"
+    end
+  end
+
   describe "wal normalization" do
     test "the removed disk-log tuple raises with a hint" do
       assert_raise ArgumentError, ~r/use wal: :disk/, fn ->
@@ -990,6 +1030,62 @@ defmodule Ankusa.ConfigTest do
         Config.new(dispatch: %{region: "eu-west-1"}) |> Ankusa.Admin.Redact.config()
 
       assert shown["dispatch"]["region"] == "eu-west-1"
+  describe "the drain keys (OPS-4)" do
+    test "defaults: five seconds of delay, thirty to drain" do
+      config = Config.new([])
+      assert config.listener.drain_delay_ms == 5_000
+      assert config.listener.drain_timeout_ms == 30_000
+    end
+
+    test "every key is range-checked at Config.new/1, naming the key" do
+      assert_raise ArgumentError,
+                   "listener.drain_delay_ms must be a non-negative integer, got -1",
+                   fn -> Config.new(listener: %{drain_delay_ms: -1}) end
+
+      assert_raise ArgumentError,
+                   "listener.drain_delay_ms must be a non-negative integer, got nil",
+                   fn -> Config.new(listener: %{drain_delay_ms: nil}) end
+
+      assert_raise ArgumentError,
+                   "listener.drain_timeout_ms must be a positive integer, got 0",
+                   fn -> Config.new(listener: %{drain_timeout_ms: 0}) end
+
+      assert Config.new(listener: %{drain_delay_ms: 0}).listener.drain_delay_ms == 0
+    end
+
+    test "an edge node's drain timeout covers the ingress listener's wait for requests in flight" do
+      # 15 s record deadline + 2 s store commit + 5 s margin
+      assert Ankusa.Listener.ingress_shutdown_timeout_ms(Config.new([])) == 22_000
+
+      assert_raise ArgumentError,
+                   ~r/listener.drain_timeout_ms \(21999\) must be at least the ingress listener's shutdown timeout \(22000 ms/,
+                   fn -> Config.new(listener: %{drain_timeout_ms: 21_999}) end
+
+      assert Config.new(listener: %{drain_timeout_ms: 22_000})
+
+      # no edge role, no ingress listener to wait for
+      assert Config.new(roles: [:dispatch], listener: %{drain_timeout_ms: 1})
+    end
+
+    test "the wait follows the ack path: sinks under wal: :none, the intake publish under dual" do
+      assert Ankusa.Listener.ingress_shutdown_timeout_ms(
+               Config.new(wal: :none, roles: [:edge], direct_publish_timeout_ms: 8_000)
+             ) == 13_000
+
+      assert Config.new(wal: :none, roles: [:edge], listener: %{drain_timeout_ms: 13_000})
+
+      assert_raise ArgumentError, ~r/\(12999\) must be at least .* \(13000 ms/, fn ->
+        Config.new(wal: :none, roles: [:edge], listener: %{drain_timeout_ms: 12_999})
+      end
+
+      # 22 s + the intake attempt (`intake.publish_timeout_ms`, 2 s)
+      assert Ankusa.Listener.ingress_shutdown_timeout_ms(Config.new(dual([]))) == 24_000
+
+      assert_raise ArgumentError, ~r/\(23999\) must be at least .* \(24000 ms/, fn ->
+        Config.new(dual(listener: %{drain_timeout_ms: 23_999}))
+      end
+
+      assert Config.new(dual(listener: %{drain_timeout_ms: 24_000}))
     end
   end
 

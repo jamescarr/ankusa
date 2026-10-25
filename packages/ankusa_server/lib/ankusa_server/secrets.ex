@@ -23,7 +23,7 @@ defmodule AnkusaServer.Secrets do
 
   At boot, a reference that cannot be resolved is a `AnkusaServer.ConfigError`
   naming the dotted key and the reference (never a value). On a reload
-  (`reload/2`), a reference that fails keeps the value it had at the last good
+  (`AnkusaServer.Reload`), a reference that fails keeps the value it had at the last good
   load and is reported in `:kept` and logged as a warning: a secret manager
   that is briefly down must not take verification down with it. A reference
   with no previous value (a new one) is still an error.
@@ -32,17 +32,16 @@ defmodule AnkusaServer.Secrets do
 
   `secrets.cache_ttl_ms` (default `0`) is how long a `${sm:}` value fetched at
   one load is reused by the next. `0` reads the manager on every reload;
-  raise it to protect a manager's API quota from a reload loop. `reload/2`'s
+  raise it to protect a manager's API quota from a reload loop. A reload's
   `refresh: true` ignores it. Files are always read again. Within one load a
   reference is fetched once, however many keys use it.
 
   ## What reload does
 
-  `reload/2` re-reads the file, resolves every reference again, and publishes
-  the declared `sources` of a running instance
-  (`Ankusa.SourceStore.Static.publish/2`), so a rotated secret takes effect
-  without a restart. It does not touch any other key of the running config:
-  that is the config reload's job, which calls this to re-resolve secrets.
+  `AnkusaServer.Reload` loads the file again with the `t:t/0` of the last load
+  (`AnkusaServer.Config.load!/1`'s `:secrets` option), so every reference is
+  resolved again and an outage keeps the old value. Nothing here is applied to a
+  running instance: that is the reload's job.
   """
 
   require Logger
@@ -86,7 +85,7 @@ defmodule AnkusaServer.Secrets do
 
   @typedoc """
   What a load resolved: every reference's value and when it was fetched, and
-  the references that kept an old value. Opaque to callers; `reload/2` hands it
+  the references that kept an old value. Opaque to callers; `AnkusaServer.Reload` hands it
   back to the loader. Inspecting it shows only `:kept`.
   """
   @type t :: %__MODULE__{
@@ -491,79 +490,15 @@ defmodule AnkusaServer.Secrets do
     end
   end
 
-  # ── remembering and reloading ───────────────────────────────────────────────
+  # ── reloading ───────────────────────────────────────────────────────────────
 
   @doc """
-  Remember what a load resolved for `instance`, so `reload/2` can reuse the
-  cache and keep a value through an outage. The boot calls this once.
+  Warn about each reference of `kept` (`t:kept/0`, what a reload could not
+  resolve and kept the previous value of): the reference's place in the file and
+  why, never a value.
   """
-  @spec remember(atom(), t()) :: :ok
-  def remember(instance, %__MODULE__{} = secrets),
-    do: :persistent_term.put({__MODULE__, instance}, secrets)
-
-  @doc "What `remember/2` stored for `instance`, or `nil`."
-  @spec recall(atom()) :: t() | nil
-  def recall(instance), do: :persistent_term.get({__MODULE__, instance}, nil)
-
-  @doc """
-  Re-read the config file, resolve every secret reference again, and publish the
-  declared sources to the running `instance`.
-
-  Options: `:path` and `:env` as for `AnkusaServer.Config.load!/1`, and
-  `refresh: true` to bypass `secrets.cache_ttl_ms`.
-
-  Returns `{:ok, %{changed: ids, kept: kept}}`: the source ids whose spec
-  differs from what was running, and the references that failed and kept their
-  previous value (each one logged as a warning). Returns `{:error, exception}`
-  and applies nothing when the file no longer loads, a reference with no
-  previous value cannot be resolved, or a source is refused by the checks the
-  instance boots under. `instance` must run `Ankusa.SourceStore.Static`; any
-  other source store keeps its sources elsewhere and `{:ok, %{changed: []}}`
-  says so in a warning.
-  """
-  @spec reload(atom(), keyword()) ::
-          {:ok, %{changed: [String.t()], kept: [kept()]}} | {:error, Exception.t()}
-  def reload(instance \\ :default, opts \\ []) do
-    loaded = Config.load!(Keyword.put(opts, :secrets, recall(instance) || %__MODULE__{}))
-
-    with {:ok, changed} <- publish(instance, loaded.config.source_store) do
-      remember(instance, loaded.secrets)
-      kept = loaded.secrets.kept
-      Enum.each(kept, &warn_kept/1)
-
-      Logger.info(
-        "[ankusa] secrets reloaded: #{length(changed)} source(s) changed, #{length(kept)} kept"
-      )
-
-      {:ok, %{changed: changed, kept: kept}}
-    end
-  rescue
-    error in [ConfigError, ArgumentError] -> {:error, error}
-  end
-
-  defp publish(instance, {Ankusa.SourceStore.Static, opts}) do
-    case Ankusa.fetch_config(instance) do
-      {:ok, %Ankusa.Config{source_store: {Ankusa.SourceStore.Static, _}}} ->
-        Ankusa.SourceStore.Static.publish(instance, Keyword.get(opts, :sources, %{}))
-
-      {:ok, _other_store} ->
-        not_republished(instance)
-
-      :error ->
-        {:error, %ConfigError{message: "instance #{inspect(instance)} is not running"}}
-    end
-  end
-
-  defp publish(instance, _file_store), do: not_republished(instance)
-
-  defp not_republished(instance) do
-    Logger.warning(
-      "[ankusa] instance #{inspect(instance)} does not run source_store.type: static; " <>
-        "the sources in the file were not re-published"
-    )
-
-    {:ok, []}
-  end
+  @spec log_kept([kept()]) :: :ok
+  def log_kept(kept), do: Enum.each(kept, &warn_kept/1)
 
   defp warn_kept(%{ref: ref, path: path, reason: reason}) do
     Logger.warning(

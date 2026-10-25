@@ -222,6 +222,20 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   @doc """
+  Take `dispatch.concurrency`, `dispatch.sink_concurrency` and `dispatch.tenants`
+  from the instance's current config (`Ankusa.Reload`), without a restart: the
+  tenants' limits are rebuilt, and rows already claimed or running are never
+  dropped (a lowered limit only stops the next start until the count falls below
+  it). `:ok` also when the pipeline is down: it reads the config when it starts.
+  """
+  @spec reconfigure(atom()) :: :ok
+  def reconfigure(instance) do
+    GenServer.call(Ankusa.via(instance, :dispatch), :reconfigure, 30_000)
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
   Check the `config.dispatch` keys this module reads; raises `ArgumentError`
   naming the key.
   """
@@ -479,6 +493,39 @@ defmodule Ankusa.Dispatch.Pipeline do
   # Runs `fun` here, between two of this process's own steps: the one process
   # that claims rows, so `fun` cannot race a claim (`Deliveries.purge_tenant/3`).
   def handle_call({:exclusive, fun}, _from, state), do: {:reply, fun.(), state}
+
+  def handle_call(:reconfigure, _from, state) do
+    config = Ankusa.config(state.instance)
+    {default_limits, overrides} = tenant_limits(config)
+
+    state = %{
+      state
+      | config: config,
+        default_limits: default_limits,
+        tenant_overrides: overrides,
+        tenant_limits: %{},
+        tenant_full: MapSet.new()
+    }
+
+    # What `tenant_add/2` keeps for a tenant that holds claimed rows: its limits
+    # (only when some tenant has an override) and whether it is at its window.
+    state =
+      Enum.reduce(state.tenant_claimed, state, fn {ord, {_rows, _bytes, tenant} = entry}, acc ->
+        acc =
+          if map_size(overrides) > 0,
+            do: %{
+              acc
+              | tenant_limits:
+                  Map.put(acc.tenant_limits, ord, Map.get(overrides, tenant, default_limits))
+            },
+            else: acc
+
+        mark_full(acc, ord, entry)
+      end)
+
+    send(self(), :wake)
+    {:reply, :ok, state}
+  end
 
   def handle_call({:dead_letter_source, source_id}, _from, state) do
     # A buffered retry outcome is a row about to be pending again: write it
@@ -1296,11 +1343,11 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
-  defp settle_dead(state, env, row, module, attempts) do
+  defp settle_dead(state, env, row, module, attempts, attempt_ms \\ nil) do
     {source_id, _id} = Deliveries.owner(env, row)
     tenant_id = tenant_of(env)
 
-    Telemetry.emit([:dispatch, :stop], %{}, %{
+    Telemetry.emit([:dispatch, :stop], stop_measurements(env, row, attempt_ms), %{
       instance: state.instance,
       result: :dlq,
       attempts: attempts,
@@ -1328,6 +1375,25 @@ defmodule Ankusa.Dispatch.Pipeline do
   # tenant to name, so it is the default tenant's.
   defp tenant_of(%Envelope{tenant_id: tenant_id}), do: Tenants.normalize(tenant_id)
   defp tenant_of(_undecoded), do: Tenants.normalize(nil)
+
+  # What `[:ankusa, :dispatch, :stop]` measures: the final attempt's time (none
+  # for a row dead-lettered without an attempt) and the hook's age. A replayed
+  # delivery has no age: it was received before the replay, which is the
+  # operator's doing and not the delivery's latency.
+  defp stop_measurements(env, row, attempt_ms) do
+    measurements = if attempt_ms, do: %{attempt_ms: attempt_ms}, else: %{}
+
+    with nil <- Map.get(row, :replay),
+         ms when is_integer(ms) <- Telemetry.since_received_ms(env) do
+      Map.put(measurements, :since_received_ms, ms)
+    else
+      _ -> measurements
+    end
+  end
+
+  defp attempt_result(:ok), do: :ok
+  defp attempt_result({:error, {:attempt_timeout, _ms}}), do: :timeout
+  defp attempt_result({:error, _reason}), do: :error
 
   # Sources are looked up once per scan (`sources` is the scan's cache). A store
   # that cannot answer is cached as `:unavailable` for the rest of the scan,
@@ -1823,7 +1889,15 @@ defmodule Ankusa.Dispatch.Pipeline do
       end
 
     counted? = not job.batched?
-    entry = %{job: job, task: task, timer: timer, probe?: probe?, counted?: counted?}
+
+    entry = %{
+      job: job,
+      task: task,
+      timer: timer,
+      probe?: probe?,
+      counted?: counted?,
+      started: System.monotonic_time()
+    }
 
     %{
       state
@@ -1953,7 +2027,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   # ── outcomes ──────────────────────────────────────────────────────────────
 
   defp outcome(state, ref, result, fresh_claim) do
-    {%{job: job, timer: timer, probe?: probe?, counted?: counted?}, running} =
+    {%{job: job, timer: timer, probe?: probe?, counted?: counted?, started: started}, running} =
       Map.pop!(state.running, ref)
 
     Process.cancel_timer(timer)
@@ -1971,20 +2045,32 @@ defmodule Ankusa.Dispatch.Pipeline do
     attempts = job.row.attempts + 1
     now = now_ms()
     claim_ops = if fresh_claim, do: Deliveries.claim_ops(job.seq, job.ord, fresh_claim), else: []
+    attempt_ms = Telemetry.elapsed_ms(started)
+    {mod, _opts} = job.spec
+    tenant_id = Tenants.normalize(job.env.tenant_id)
+
+    # Every attempt, retried or not, so a failing or hung sink shows in the
+    # attempt histogram even when the delivery never settles.
+    Telemetry.emit([:dispatch, :attempt], %{attempt_ms: attempt_ms}, %{
+      instance: state.instance,
+      result: attempt_result(result),
+      attempt: attempts,
+      sink: mod,
+      source_id: job.env.source_id,
+      tenant_id: tenant_id
+    })
 
     {state, ops, pairs} =
       case result do
         :ok ->
-          {mod, _opts} = job.spec
-
-          Telemetry.emit([:dispatch, :stop], %{}, %{
+          Telemetry.emit([:dispatch, :stop], stop_measurements(job.env, job.row, attempt_ms), %{
             instance: state.instance,
             result: :ok,
             attempts: attempts,
             sink: mod,
             source_id: job.env.source_id,
             ordered: ordered?(job.row),
-            tenant_id: Tenants.normalize(job.env.tenant_id)
+            tenant_id: tenant_id
           })
 
           {%{state | settled: state.settled + 1} |> bump_replay(job.row, :delivered),
@@ -1992,7 +2078,7 @@ defmodule Ankusa.Dispatch.Pipeline do
            [cleared(job.seq, job.sink)]}
 
         {:error, reason} ->
-          failed(state, job, reason, attempts, now)
+          failed(state, job, reason, attempts, now, attempt_ms)
       end
 
     state = trip(state, job, result, probe?)
@@ -2009,7 +2095,7 @@ defmodule Ankusa.Dispatch.Pipeline do
     maybe_reply_waiters(state)
   end
 
-  defp failed(state, job, reason, attempts, now) do
+  defp failed(state, job, reason, attempts, now, attempt_ms) do
     row = %{job.row | attempts: attempts}
     class = Sink.classify(reason)
     max_after = state.config.dispatch.max_retry_after_ms
@@ -2032,7 +2118,10 @@ defmodule Ankusa.Dispatch.Pipeline do
           })
         end
 
-        state = state |> settle_dead(job.env, row, mod, attempts) |> bump_replay(row, :dead)
+        state =
+          state
+          |> settle_dead(job.env, row, mod, attempts, attempt_ms)
+          |> bump_replay(row, :dead)
 
         {state,
          Deliveries.dead_ops(:inflight, job.ord, job.seq, job.sink, row, now, error, job.env), []}

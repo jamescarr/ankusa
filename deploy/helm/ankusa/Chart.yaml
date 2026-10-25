@@ -1,0 +1,13 @@
+apiVersion: v2
+name: ankusa
+description: Ankusa inbound webhook receiver. A StatefulSet of store-backed nodes (wal.type disk | dual) or a Deployment of stateless edge nodes (wal.type none), with a hardened pod spec, PodDisruptionBudget, HPA, NetworkPolicy and an optional claim-check gateway.
+type: application
+version: 0.1.0
+# The jamescarr/ankusa image tag the chart runs unless `image.tag` says otherwise:
+# keep it equal to the ankusa_server version (packages/ankusa_server/mix.exs).
+appVersion: "0.7.0"
+home: https://github.com/jamescarr/ankusa
+sources:
+  - https://github.com/jamescarr/ankusa
+# The StatefulSet's persistentVolumeClaimRetentionPolicy is on by default from 1.27.
+kubeVersion: ">=1.27.0-0"
