@@ -283,6 +283,13 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
           : sdk.decodeMessage(input.message as string);
       return { key: sdk.idempotencyKey(hook, { includeReplay }) };
     }
+    case "trusted": {
+      const hook =
+        input.headers !== undefined
+          ? sdk.parseHeaders(input.headers as Record<string, string>)
+          : sdk.decodeMessage(input.message as string);
+      return { trusted: sdk.isTrusted(hook) };
+    }
     case "redeem": {
       const built = await buildClient(gateway, client, requests, makeClaimCheckClient);
       try {

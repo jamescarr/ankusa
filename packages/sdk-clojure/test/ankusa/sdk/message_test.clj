@@ -62,7 +62,7 @@
     (is (= "hello" (text (:body hook))))
     (is (= {:id "01a0" :source-id "demo" :tenant-id "acme" :received-at 1 :size 5
             :content-type nil :dedupe-key nil :replay-id nil :idempotency-key "k1"
-            :headers {"x-a" "b"}}
+            :verification nil :headers {"x-a" "b"}}
            (dissoc hook :body)))
     (is (= [] @rec))))
 

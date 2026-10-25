@@ -608,7 +608,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
 
 ### Phase 6 — Consumer contract
 
-- [ ] **CON-1 — SDKs expose the verification signal** · P0 · Deps: —
+- [x] **CON-1 — SDKs expose the verification signal** · P0 · Deps: —
   *Why:* every queue message and HTTP delivery carries `verification`/`flagged`, but the Elixir SDK drops it (`sdk-elixir/lib/ankusa/sdk/message.ex:164-175`, `hook.ex:24-45`, `webhook.ex:46-56`) and no conformance case covers it; a hook accepted after a failed signature is indistinguishable from a verified one.
   *Change:* `verification: %{status, flagged}` on `Message`, `Hook` and `Webhook.Headers` (parse `x-ankusa-verification`/`-flagged`), `Hook.trusted?/1`; conformance features `message.verification` and `webhook.verification`; every SDK (check each `packages/sdk-*`) updated.
   *Done when:* a `flagged: true` message decodes as untrusted in all nine SDKs.

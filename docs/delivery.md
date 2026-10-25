@@ -485,7 +485,11 @@ on a queue sink, `{"status": "ok" | "failed" | "skipped", "flagged": bool}`.
 event). `flagged` is `true` for a hook a source accepted despite a failed check
 (`on_verify_failure: accept_flag`): `Sink.Http` then also sends
 `x-ankusa-verification-flagged: true`. Treat a flagged hook, and the tenant it
-names, as unverified. The failure's reason is not on the wire.
+names, as unverified. The failure's reason is not on the wire. Every SDK exposes
+the object and a trust check that is `true` only for `ok` and not flagged
+(`isTrusted`, `is_trusted`, `Trusted()`, `trusted?`; see
+[`integrations.md`](integrations.md#signed-deliveries)); the
+conformance features are `message.verification` and `webhook.verification`.
 
 ### `Sink.RabbitMQ`: queue delivery
 

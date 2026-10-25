@@ -234,6 +234,20 @@ func dispatch(t *testing.T, c conformanceCase, recorder *recorder) (any, error) 
 		}
 		return map[string]any{"key": hook.IdempotencyKey(includeReplay)}, nil
 
+	case "trusted":
+		if raw, ok := c.Input["message"]; ok && len(raw) > 0 && string(raw) != "null" {
+			message, err := ankusa.DecodeMessage([]byte(decode[string](t, raw)))
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"trusted": message.Trusted()}, nil
+		}
+		hook, err := ankusa.ParseHeaders(headerInput(t, c.Input["headers"]))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"trusted": hook.Trusted()}, nil
+
 	case "redeem":
 		g := startGateway(t, gateway, client, recorder)
 		defer g.close()

@@ -12,6 +12,10 @@ this project follows [Semantic Versioning](https://semver.org/).
 - `Message.traceparent()` and `Message.tracestate()`: the hook's W3C trace
   context from the message, verbatim (`null` when none); a non-string value is
   `invalid_field`.
+- `Message.trusted()`, `HookHeaders.trusted()` and `Verification.trusted()`:
+  true only when the node verified the hook at ingest (status `ok`) and did not
+  flag it. A flagged, `failed` or `skipped` hook and one with no `verification`
+  are untrusted.
 
 ## [0.1.0] - 2026-10-22
 

@@ -26,7 +26,18 @@ defmodule Ankusa.SDK.Hook do
   `Ankusa.SDK.Idempotency.key/2`; `replay_id` names the replay job when this
   delivery is a replay; `headers` are the provider request headers — the
   request's over HTTP, the forwarded ones from a queue message.
+
+  ## Verification
+
+  `verification` says how the *node* verified the hook at ingest: `%{status:
+  "ok" | "failed" | "skipped", flagged: boolean()}`, or `nil` from a node that
+  predates the field. A source with `on_verify_failure: accept_flag` commits a
+  hook whose signature check failed, with `flagged: true`; nothing about that
+  hook proves the provider sent it, and neither does the tenant it names. Ask
+  `trusted?/1` before acting on a hook whose origin matters.
   """
+
+  @type verification :: %{status: String.t(), flagged: boolean()}
 
   @type t :: %__MODULE__{
           id: String.t(),
@@ -39,7 +50,7 @@ defmodule Ankusa.SDK.Hook do
           dedupe_key: String.t() | nil,
           replay_id: String.t() | nil,
           idempotency_key: String.t() | nil,
-          verification: %{status: String.t(), flagged: boolean()} | nil,
+          verification: verification() | nil,
           headers: %{String.t() => String.t()}
         }
 
@@ -57,4 +68,22 @@ defmodule Ankusa.SDK.Hook do
     :verification,
     headers: %{}
   ]
+
+  @doc """
+  Whether the node verified the hook at ingest and nothing flags it: `true`
+  only for `status: "ok"` with `flagged: false`.
+
+  A flagged hook (accepted despite a failed check), a `"failed"` or `"skipped"`
+  one (a source with no verifier checked nothing), any other status, and a hook
+  with no `verification` (a node older than the field) are all untrusted, so
+  the answer fails closed. Takes a `Hook`, a decoded `Ankusa.SDK.Message` or the
+  `Ankusa.SDK.Webhook.Headers` of a delivery.
+
+  ```elixir
+  if Ankusa.SDK.Hook.trusted?(hook), do: act_on(hook), else: quarantine(hook)
+  ```
+  """
+  @spec trusted?(%{verification: verification() | nil}) :: boolean()
+  def trusted?(%{verification: %{status: "ok", flagged: false}}), do: true
+  def trusted?(%{verification: _other}), do: false
 end

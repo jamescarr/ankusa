@@ -243,6 +243,16 @@ final readonly class Message
         );
     }
 
+    /**
+     * Whether the node verified this message's hook at ingest and nothing
+     * flags it (see {@see Verification::isTrusted()}). A message with no
+     * `verification` (a node older than the field) is untrusted.
+     */
+    public function isTrusted(): bool
+    {
+        return $this->verification?->isTrusted() === true;
+    }
+
     private static function field(\stdClass $raw, string $key): mixed
     {
         return property_exists($raw, $key) ? $raw->{$key} : null;

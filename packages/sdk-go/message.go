@@ -245,6 +245,12 @@ func (m Message) IdempotencyKey(includeReplay bool) string {
 	return idempotencyKey(m.ShippedIdempotencyKey, m.TenantID, m.SourceID, m.ID, m.DedupeKey, m.ReplayID, includeReplay)
 }
 
+// Trusted reports whether the node verified this message's hook at ingest and
+// nothing flags it; see Verification.Trusted.
+func (m Message) Trusted() bool {
+	return m.Verification.Trusted()
+}
+
 // idempotencyKey is the shared rule behind Message.IdempotencyKey and
 // HookHeaders.IdempotencyKey. sourceID and tenant are the message's source_id
 // and tenant_id, or the HTTP sink's x-ankusa-source and x-ankusa-tenant for

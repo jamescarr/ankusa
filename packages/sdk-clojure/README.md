@@ -225,7 +225,11 @@ the hook id, so a delivery that fails it is a `401` even when it also lacks
 says how the *node* verified the hook at ingest, `nil` from a node older than
 the field. `(:flagged (:verification hook))` being `true` means the node
 accepted a failed check (`on_verify_failure: accept_flag`) — treat it as
-unverified.
+unverified. `ankusa.sdk.verification/trusted?` is that decision in one call
+(`(verification/trusted? hook)`): `true` only for `{:status "ok" :flagged
+false}`, so a flagged, `"failed"` or `"skipped"` hook, or one from a node older
+than the field, is untrusted. It takes a decoded message, a hook from
+`->hook`, parsed headers or a received delivery.
 
 ## Consuming queue messages
 

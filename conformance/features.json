@@ -27,7 +27,8 @@
     "decode_message",
     "idempotency_key",
     "verify_signature",
-    "receive_delivery"
+    "receive_delivery",
+    "trusted"
   ],
   "features": [
     {"id": "claim_ref.parse", "description": "Parse urn:ankusa:claim:v1:<tenant>:<claim_id> into tenant_id, claim_id, and the /v1/claims/{tenant_id}/{claim_id} path; anything else raises InvalidClaimRefError."},
@@ -60,6 +61,7 @@
     {"id": "admin.operations", "description": "Operator API: health, Prometheus metrics, redacted config, DLQ list, replay jobs, and quarantine."},
     {"id": "admin.audit", "description": "GET /v1/audit on the operator API: the audit trail, newest first, paged by cursor/limit and filtered by since, until, actor, action, tenant (query parameters in input order, only those given). Returns {entries, next_cursor}; errors as admin.errors."},
     {"id": "admin.errors", "description": "2xx is success. A 409 whose body has error role_not_enabled -> RoleNotEnabledError(role); every other 4xx -> AdminRejectedError(status, code = the body's error, scope = the body's scope when present, else null). Anything else that isn't 2xx (5xx, an unfollowed 3xx redirect, 1xx) or a transport failure -> AdminUnavailableError (retryable)."},
-    {"id": "delivery.verification", "description": "Every delivery says how the hook was verified at ingest. decode_message exposes the message's verification object ({status, flagged}; null when the message predates the field; a present value that is not an object of a non-empty string status and a boolean flagged is InvalidMessageError(invalid_field, field verification)). parse_headers exposes x-ankusa-verification as {status: <value>, flagged: <x-ankusa-verification-flagged == \"true\">}, null when the header is absent or empty. receive_delivery returns the same object. status is ok, failed or skipped; the SDK does not reject other values. A flagged hook was accepted despite a failed check (on_verify_failure: accept_flag) and is the consumer's to distrust."}
+    {"id": "message.verification", "description": "A queue message says how the hook was verified at ingest. decode_message exposes the message's verification object ({status, flagged}; null when the message predates the field or says null; a present value that is not an object of a non-empty string status and a boolean flagged is InvalidMessageError(invalid_field, field verification)). status is ok, failed or skipped; the SDK does not reject other values. trusted answers whether the decoded message may be treated as verified: true only for status ok with flagged false; a flagged message (accepted despite a failed check, on_verify_failure: accept_flag), a failed or skipped one, any other status, and a message with no verification are untrusted."},
+    {"id": "webhook.verification", "description": "An HTTP-sink delivery says how the hook was verified at ingest. parse_headers exposes x-ankusa-verification as {status: <value>, flagged: <x-ankusa-verification-flagged == \"true\">}, null when the header is absent or empty; receive_delivery returns the same object. status is ok, failed or skipped; the SDK does not reject other values. trusted answers whether the parsed headers may be treated as verified: true only for status ok with flagged false; a flagged delivery, a failed or skipped one, any other status, and one with no verification header are untrusted. This is separate from the signature check of receive_delivery (webhook.require_signature): that proves the sink signed the delivery, this says how the node verified the provider's request."}
   ]
 }

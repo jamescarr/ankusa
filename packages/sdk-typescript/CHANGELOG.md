@@ -6,6 +6,14 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `isTrusted(hook)`: `true` only when the node verified the hook at ingest
+  (`status === "ok"`) and did not flag it (`flagged` false); works on a decoded
+  `Message` or the `HookHeaders` of a delivery. A flagged, `failed` or
+  `skipped` hook and one with no `verification` are untrusted. The
+  `Verification` type is now exported.
+
 ### Changed
 
 - The generated admin types (`src/admin/admin-schema.d.ts`) follow the server's new

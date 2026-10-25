@@ -11,6 +11,7 @@
             [ankusa.sdk.routes :as routes]
             [ankusa.sdk.signature :as signature]
             [ankusa.sdk.support.gateway :as gateway]
+            [ankusa.sdk.verification :as verification]
             [ankusa.sdk.webhook :as webhook]
             [clojure.data.json :as json]
             [clojure.java.io :as io]
@@ -96,6 +97,9 @@
                                 (webhook/parse-headers (get input "headers")))]
                         (idempotency/key m (when (true? (get input "include_replay"))
                                              {:include-replay true})))
+    "trusted" (verification/trusted? (if (contains? input "message")
+                                       (message/decode (get input "message"))
+                                       (webhook/parse-headers (get input "headers"))))
     "redeem" (claim-check/redeem (claim-check/client base-url opts)
                                  (get input "ref")
                                  (get input "sha256"))
@@ -176,6 +180,7 @@
                       "traceparent" (:traceparent result)
                       "tracestate" (:tracestate result)}
     "idempotency_key" {"key" result}
+    "trusted" {"trusted" result}
     "redeem" {"body" {"base64" (base64 result)}}
     "admin_metrics" {"text" result}
     "routes_delete" nil

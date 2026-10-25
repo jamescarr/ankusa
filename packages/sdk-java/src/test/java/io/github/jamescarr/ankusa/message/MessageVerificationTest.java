@@ -1,8 +1,10 @@
 package io.github.jamescarr.ankusa.message;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.jamescarr.ankusa.webhook.Verification;
 import org.junit.jupiter.api.Test;
@@ -39,5 +41,20 @@ class MessageVerificationTest {
 
     assertEquals("invalid_field", error.code());
     assertEquals("verification", error.field());
+  }
+
+  @Test
+  void trusted_only_for_an_unflagged_ok() {
+    assertTrue(
+        Message.decode(BASE.formatted(",\"verification\":{\"status\":\"ok\",\"flagged\":false}"))
+            .trusted());
+    assertFalse(
+        Message.decode(BASE.formatted(",\"verification\":{\"status\":\"failed\",\"flagged\":true}"))
+            .trusted());
+    assertFalse(
+        Message.decode(
+                BASE.formatted(",\"verification\":{\"status\":\"skipped\",\"flagged\":false}"))
+            .trusted());
+    assertFalse(Message.decode(BASE.formatted("")).trusted());
   }
 }

@@ -19,7 +19,7 @@ from .claim_check import (
     ParsedClaimRef,
     parse_claim_ref,
 )
-from .message import InvalidMessageError, Message, decode_message, idempotency_key
+from .message import InvalidMessageError, Message, decode_message, idempotency_key, is_trusted
 from .routes import (
     InvalidRouteIdError,
     RouteNotFoundError,
@@ -94,4 +94,5 @@ __all__ = [
     "InvalidMessageError",
     "decode_message",
     "idempotency_key",
+    "is_trusted",
 ]
