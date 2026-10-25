@@ -13,6 +13,16 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Alert rules, dashboard and runbooks (OPS-7).** Two series the shipped alerts
+  read: `ankusa_instance_subtree_down_total{domain}` (from
+  `[:ankusa, :instance, :subtree_down]`: a failure domain out of restart budget)
+  and `ankusa_vm_memory_bytes` (`:erlang.memory(:total)`, a new
+  `[:ankusa, :vm, :state]` gauge event, sampled with the other gauges every
+  `admin.gauge_interval_ms`). The rules, a `promtool` unit test for each, the
+  Grafana dashboard and twelve runbooks are in the repository under
+  `deploy/monitoring/` and `docs/runbooks/`, checked by
+  `mise run check:monitoring`; see
+  [`architecture.md`](../../docs/architecture.md#alerts-dashboard-and-runbooks).
 - **Allocation cuts on the request path (PERF-1).** A signature is verified
   without a second copy of the body: `Ankusa.Verifier.Template` compiles a
   scheme's `signed` template once (`compile/1`; a preset's at build time) and
