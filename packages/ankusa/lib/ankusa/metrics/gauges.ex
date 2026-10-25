@@ -32,6 +32,8 @@ defmodule Ankusa.Metrics.Gauges do
     * `[:ankusa, :sink_batch, :state]` — `batchers`, `queued` and `queued_bytes`
       across the `Ankusa.Sink.Batcher`s (SQS, Pub/Sub) of the instance; summed
       from counters each batcher keeps, no queue is scanned.
+    * `[:ankusa, :vm, :state]` — `memory_bytes`, `:erlang.memory(:total)`: what
+      the Erlang VM holds, the series the memory-growth alert reads.
 
   Each probe runs on its own: one that fails (the store is reopening) emits
   nothing, so its gauges keep their last value, and logs at `:debug`; the
@@ -82,6 +84,7 @@ defmodule Ankusa.Metrics.Gauges do
     probe(instance, :disk, &disk(&1, config))
     probe(instance, :http, &http_pools/1)
     probe(instance, :sink_batch, &sink_batch/1)
+    probe(instance, :vm, &vm/1)
     if config.wal == :dual, do: probe(instance, :intake, &intake/1)
     :ok
   end
@@ -227,6 +230,10 @@ defmodule Ankusa.Metrics.Gauges do
     with {:ok, held} <- Ankusa.Edge.Quarantine.held(instance) do
       emit(instance, :quarantine, held)
     end
+  end
+
+  defp vm(instance) do
+    emit(instance, :vm, %{memory_bytes: :erlang.memory(:total)})
   end
 
   # `:disksup` is os_mon's, which core does not start or depend on (the server

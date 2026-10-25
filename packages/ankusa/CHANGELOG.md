@@ -13,6 +13,16 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Alert rules, dashboard and runbooks (OPS-7).** Two series the shipped alerts
+  read: `ankusa_instance_subtree_down_total{domain}` (from
+  `[:ankusa, :instance, :subtree_down]`: a failure domain out of restart budget)
+  and `ankusa_vm_memory_bytes` (`:erlang.memory(:total)`, a new
+  `[:ankusa, :vm, :state]` gauge event, sampled with the other gauges every
+  `admin.gauge_interval_ms`). The rules, a `promtool` unit test for each, the
+  Grafana dashboard and twelve runbooks are in the repository under
+  `deploy/monitoring/` and `docs/runbooks/`, checked by
+  `mise run check:monitoring`; see
+  [`architecture.md`](../../docs/architecture.md#alerts-dashboard-and-runbooks).
 - **SLI metrics (OPS-3).** `[:ankusa, :dispatch, :stop]` now measures `attempt_ms`
   (the final attempt) and `since_received_ms` (the hook's age when the delivery
   settled; absent for a replayed delivery), and a new `[:ankusa, :dispatch,

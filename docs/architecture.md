@@ -375,7 +375,7 @@ where it happens:
   port someone else took stops that domain, not the edge. Hooks wait in the
   store and are dispatched when the domain returns. A child that cannot start
   when the instance *boots* still fails the boot. Each outage emits
-  `[:ankusa, :instance, :subtree_down]` and each recovery `:subtree_up`.
+  `[:ankusa, :instance, :subtree_down]` (`ankusa_instance_subtree_down_total{domain}`) and each recovery `:subtree_up`.
 - **The registry.** A restart of `Ankusa.Registry`, or of one of its partitions,
   forgets every name an instance registered, and the processes that trap exits
   outlive it unregistered. The instance notices and stops itself so that
@@ -551,9 +551,9 @@ carries `ankusa_store_hooks`, `ankusa_queue_pending` / `_scheduled` /
 most first attempts waiting), `ankusa_quarantine_bytes`, `ankusa_quarantine_pending`, `ankusa_disk_free_bytes`,
 `ankusa_dispatch_running` / `_claimed` / `_runnable` / `_active_tenants`,
 `ankusa_dispatch_tenant_inflight{tenant}` (the claimed rows of the 100 tenants
-holding the most, against their windows) and
-`ankusa_dispatch_breakers_open` — enough to
-alert on a growing backlog, a filling disk or an open breaker before a
+holding the most, against their windows), `ankusa_vm_memory_bytes` (what the
+Erlang VM holds) and `ankusa_dispatch_breakers_open` — what the
+[shipped alert rules](#alerts-dashboard-and-runbooks) read to alert on a growing backlog, a filling disk or an open breaker before a
 provider sees a `503`. `pending` is first attempts waiting and `scheduled`
 retries waiting (a retry whose backoff just ended counts there until it is
 claimed; their sum is what `pending` alone used to say), so a backlog alarm
@@ -616,3 +616,22 @@ per node unless stated:
 
 `metrics_test.exs` (`slo series present`) reads this table and fails if a metric
 it names is missing from a scrape.
+
+### Alerts, dashboard and runbooks
+
+The alerts that fire on the series above ship in the repository, not as prose:
+[`deploy/monitoring/prometheus-rules.yaml`](https://github.com/jamescarr/ankusa/blob/main/deploy/monitoring/prometheus-rules.yaml)
+has one alert per row of the SLO table (its `slo` annotation repeats the row),
+plus ack error ratio, an open breaker, a growing dead-letter queue, a stale
+backup, a low disk, store write failures, a failure domain going down (`ankusa_instance_subtree_down_total`),
+intake log failures and one tenant's `429 tenant_overload`. Every alert's
+`runbook_url` names a page in
+[`docs/runbooks/`](https://github.com/jamescarr/ankusa/tree/main/docs/runbooks)
+(symptom, metric, action, verification), and
+[`deploy/monitoring/grafana/ankusa.json`](https://github.com/jamescarr/ankusa/blob/main/deploy/monitoring/grafana/ankusa.json)
+is the dashboard. `mise run check:monitoring` runs `promtool check rules`, the unit
+tests in `prometheus-rules.test.yaml`, and fails on an alert whose runbook is
+missing or an SLO row without an alert; `metrics_test.exs` (`the alert rules,
+their unit tests and the dashboard name only series /metrics can serve`) fails
+when a rule or a panel names a series `Ankusa.Metrics` does not define. Loading
+them: [`deployment.md`](deployment.md#monitoring).

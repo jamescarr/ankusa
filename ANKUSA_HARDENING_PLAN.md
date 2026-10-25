@@ -590,7 +590,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa_server/lib/ankusa_server/config.ex:60-70,200-260,320-340`, `packages/ankusa/lib/ankusa/config.ex`, `source_store.ex:208-224`.
   *Evidence:* —
 
-- [ ] **OPS-7 — Alert rules, dashboards, runbooks, checked in CI** · P1 · Deps: OPS-3 (after: 57)
+- [x] **OPS-7 — Alert rules, dashboards, runbooks, checked in CI** · P1 · Deps: OPS-3 (after: 57)
   *Why:* nothing ships; `architecture.md:486-498` only asserts the metrics are "enough to alert".
   *Change:* `deploy/monitoring/prometheus-rules.yaml` (ack error ratio > 1 %, ack p99 > 1 s, `oldest_due_age > 300`, `dispatch_breakers_open > 0` for 5 m, `backup_age > 300`, `disk_free < 10 %`, `dlq_rows` growth, `subtree_down`, `intake_failures`, `tenant_overload` rate, `store_write_failures`), `deploy/monitoring/grafana/ankusa.json`, `docs/runbooks/{disk-full,dlq-growth,breaker-open,backup-stale,node-unready,intake-down,tenant-overload,store-write-failed}.md` each with symptom → metric → action → verification; `.mise/tasks/check/monitoring` running `promtool check rules` and verifying every alert's `runbook_url` resolves; wired into `check/_default` and `ci.yml`.
   *Done when:* CI fails on a broken rule or a missing runbook; every SLO row has an alert.

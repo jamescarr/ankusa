@@ -528,6 +528,14 @@ defmodule Ankusa.Metrics do
         "ankusa.claim_check.failures.total",
         scoped(own, event_name: [:ankusa, :claim_check, :failure], tags: [:instance, :op])
       ),
+      # A failure domain's subtree exhausted its restart budget and is down until
+      # its backoff ends (`Ankusa.Instance.Isolated`): the node still answers
+      # `/health`, so this is what an alert on a dead dispatch or edge subtree
+      # reads. `domain` is a fixed atom set; the `reason` term is never a label.
+      counter(
+        "ankusa.instance.subtree_down.total",
+        scoped(own, event_name: [:ankusa, :instance, :subtree_down], tags: [:instance, :domain])
+      ),
       counter(
         "ankusa.claim_check.reads.total",
         scoped(own,
@@ -741,7 +749,8 @@ defmodule Ankusa.Metrics do
            :byte},
           {"ankusa.dispatch.active_tenants", [:ankusa, :dispatch, :state], :active_tenants,
            :unit},
-          {"ankusa.backup.age.seconds", [:ankusa, :backup, :state], :age_seconds, :second}
+          {"ankusa.backup.age.seconds", [:ankusa, :backup, :state], :age_seconds, :second},
+          {"ankusa.vm.memory.bytes", [:ankusa, :vm, :state], :memory_bytes, :byte}
         ] do
       last_value(
         name,

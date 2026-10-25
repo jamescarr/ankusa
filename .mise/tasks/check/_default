@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Every check CI runs: workflows, pins, links, every package, examples, tools"
+#MISE description="Every check CI runs: workflows, pins, links, monitoring rules, every package, examples, tools"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT"
@@ -26,6 +26,7 @@ jobs=${CHECK_JOBS:-$((cores / 4))}
 mise run lint:workflows
 mise run lint:pins
 mise run check:links
+mise run check:monitoring
 
 failed=""
 

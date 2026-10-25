@@ -19,6 +19,7 @@ If you want to run it first, start with [quickstart.md](quickstart.md).
 | [integrations.md](integrations.md) | How do I hand deliveries to Oban, Celery, or a queue consumer, and verify signatures? |
 | [asyncapi.md](asyncapi.md) | What AsyncAPI document and lifecycle events does an instance serve? |
 | [elixir.md](elixir.md) | How do I embed Ankusa in an Elixir application? |
+| [runbooks/](runbooks/README.md) | What do I do when an alert fires: symptom, metric, action, verification? |
 
 ## Working on Ankusa
 
