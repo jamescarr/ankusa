@@ -992,7 +992,7 @@ metric keeps a bounded number of them.
 | `metrics.detail` | Labels on the ingest, verify-failure, quarantine, rate-limit and delivery counters | Also |
 | --- | --- | --- |
 | `:tenant` (default) | `tenant_id` | the top-100 `ankusa_tenant_pending` and `ankusa_dispatch_tenant_inflight` gauges (label `tenant`) |
-| `:source` | `tenant_id` and `source_id` | the `ankusa_ingest_duration_seconds` histogram carries both, too |
+| `:source` | `tenant_id` and `source_id` | the `ankusa_ingest_duration_seconds` and `ankusa_delivery_latency_seconds` histograms carry both, too |
 | `:none` | neither | no per-tenant gauges: the series set is the same for one tenant and for a million |
 
 `metrics.max_series_per_metric` (default `5000`) caps the label sets one metric

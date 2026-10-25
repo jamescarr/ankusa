@@ -238,6 +238,7 @@ defmodule Ankusa.Storage.Compactor do
     # Markers a crash left between "obligation cleared" and "hook deleted".
     with {:error, reason} <- Reclaim.sweep(instance) do
       Logger.warning("[ankusa] hook reclaim sweep failed: #{inspect(reason)}")
+      failure(instance, :reclaim)
     end
 
     schedule(interval)
@@ -297,6 +298,7 @@ defmodule Ankusa.Storage.Compactor do
 
           {:error, reason} ->
             Logger.warning("[ankusa] catalogue retention failed, retrying: #{inspect(reason)}")
+            failure(instance, :retention)
             exit(:normal)
         end
       end)
@@ -360,6 +362,7 @@ defmodule Ankusa.Storage.Compactor do
           )
 
           Ankusa.Telemetry.emit([:archive, :failure], %{}, %{instance: state.instance})
+          failure(state.instance, :segment)
 
           {written, %{state | failures: state.failures + 1}}
       end
@@ -510,6 +513,7 @@ defmodule Ankusa.Storage.Compactor do
       # A failed reclaim only defers: the markers stay and the sweep finds them.
       with {:error, reason} <- Reclaim.run(instance, markers) do
         Logger.warning("[ankusa] hook reclaim deferred to the next sweep: #{inspect(reason)}")
+        failure(instance, :reclaim)
       end
 
       Ankusa.Telemetry.emit(
@@ -627,6 +631,11 @@ defmodule Ankusa.Storage.Compactor do
   end
 
   defp schedule(_), do: :ok
+
+  # `ankusa_compact_failures_total{stage}`: what the compactor tried and could not
+  # finish (`:segment`, `:retention`, `:reclaim`), beside the log line.
+  defp failure(instance, stage),
+    do: Ankusa.Telemetry.emit([:compact, :failure], %{}, %{instance: instance, stage: stage})
 
   # Same guard as `put/3`.
   defp get(instance, key) do
