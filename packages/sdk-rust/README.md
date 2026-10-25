@@ -173,7 +173,7 @@ message plus additive fields, so a consumer reads it the same way; any other
 `v` is `unsupported_version` (permanent: dead-letter it). `message.instance` and
 `message.region` are the Ankusa instance that published the message and the
 region it is configured with (`None` for none). A message from the instance's
-lifecycle sinks carries a CloudEvents event as its body:
+lifecycle sinks carries a `CloudEvents` event as its body:
 `decode_lifecycle(body)` returns a `LifecycleEvent`.
 
 An Ankusa sink delivers the `v: 1` queue message as JSON: the body inline

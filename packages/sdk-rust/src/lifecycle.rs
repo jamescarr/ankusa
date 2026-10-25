@@ -1,4 +1,4 @@
-//! Decoding a lifecycle event: the CloudEvents 1.0 (structured mode) event an
+//! Decoding a lifecycle event: the `CloudEvents` 1.0 (structured mode) event an
 //! Ankusa instance publishes when a source or a route is created, updated or
 //! deleted, when a tenant is erased, or when the instance is restored from a
 //! backup.
@@ -21,7 +21,7 @@ use crate::message::InvalidMessageError;
 /// `None` when the event omitted it or said `null`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LifecycleEvent {
-    /// The CloudEvents version. Always `"1.0"`.
+    /// The `CloudEvents` version. Always `"1.0"`.
     pub specversion: String,
     /// The event id, derived from the change.
     pub id: String,
@@ -57,7 +57,7 @@ pub struct LifecycleEvent {
     pub tracestate: Option<String>,
 }
 
-/// Decodes one lifecycle event (the JSON of the CloudEvent).
+/// Decodes one lifecycle event (the JSON of the `CloudEvent`).
 ///
 /// Unknown keys and unknown event types are ignored.
 ///

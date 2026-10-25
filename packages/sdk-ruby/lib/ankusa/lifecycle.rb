@@ -61,15 +61,13 @@ module Ankusa
     lifecycle_invalid_field("data") unless body.nil? || body.is_a?(Hash)
 
     revision = parsed["revision"]
-    lifecycle_invalid_field("revision") unless revision.nil? || (revision.is_a?(Integer) && revision >= 1)
+    lifecycle_invalid_field("revision") unless revision.nil? || lifecycle_revision?(revision)
 
     actor = lifecycle_optional_string(parsed, "actor")
     instance = lifecycle_optional_string(parsed, "instance")
 
     sequence = parsed["sequence"]
-    unless sequence.nil? || (sequence.is_a?(String) && LIFECYCLE_DECIMAL.match?(sequence))
-      lifecycle_invalid_field("sequence")
-    end
+    lifecycle_invalid_field("sequence") unless sequence.nil? || lifecycle_decimal?(sequence)
 
     LifecycleEvent.new(
       specversion: "1.0",
@@ -96,6 +94,16 @@ module Ankusa
     value
   end
   private_class_method :lifecycle_optional_string
+
+  def self.lifecycle_revision?(value)
+    value.is_a?(Integer) && value >= 1
+  end
+  private_class_method :lifecycle_revision?
+
+  def self.lifecycle_decimal?(value)
+    value.is_a?(String) && LIFECYCLE_DECIMAL.match?(value)
+  end
+  private_class_method :lifecycle_decimal?
 
   def self.lifecycle_invalid_field(field)
     raise InvalidMessageError.new("invalid or missing field: #{field}", code: "invalid_field", field: field)
