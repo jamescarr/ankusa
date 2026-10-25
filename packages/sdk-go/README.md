@@ -189,6 +189,16 @@ the field, is untrusted.
 
 ## Consuming queue messages
 
+The message's `v` is the wire format's major version: `DecodeMessage` accepts
+every `v` from `ankusa.MinSupportedVersion` to `ankusa.MaxSupportedVersion` (1
+and 2) into the one `Message`, with `V` as the wire said it. A `v: 2` message is
+a `v: 1` message plus additive fields, so a consumer reads it the same way; any
+other `v` is `unsupported_version` (permanent: dead-letter it).
+`message.Instance` and `message.Region` are the Ankusa instance that published
+the message and the region it is configured with (nil for none). A message from
+the instance's lifecycle sinks carries a CloudEvents event as its body:
+`ankusa.DecodeLifecycle(body)` returns a `LifecycleEvent`.
+
 A worker reading a broker's deliveries gets the v1 queue message as JSON.
 Decode it, compute the idempotency key, and record that key in the same
 transaction as the side effect, so a redelivery is a no-op:

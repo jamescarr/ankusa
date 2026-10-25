@@ -7,6 +7,7 @@
             [ankusa.sdk.claim-ref :as claim-ref]
             [ankusa.sdk.errors :as errors]
             [ankusa.sdk.idempotency :as idempotency]
+            [ankusa.sdk.lifecycle :as lifecycle]
             [ankusa.sdk.message :as message]
             [ankusa.sdk.routes :as routes]
             [ankusa.sdk.signature :as signature]
@@ -100,6 +101,9 @@
     "trusted" (verification/trusted? (if (contains? input "message")
                                        (message/decode (get input "message"))
                                        (webhook/parse-headers (get input "headers"))))
+    "supported_versions" {:min message/min-supported-version
+                          :max message/max-supported-version}
+    "decode_lifecycle" (lifecycle/decode (get input "event"))
     "redeem" (claim-check/redeem (claim-check/client base-url opts)
                                  (get input "ref")
                                  (get input "sha256"))
@@ -178,7 +182,9 @@
                       "headers" (:headers result)
                       "verification" (verification-json result)
                       "traceparent" (:traceparent result)
-                      "tracestate" (:tracestate result)}
+                      "tracestate" (:tracestate result)
+                      "instance" (:instance result)
+                      "region" (:region result)}
     "idempotency_key" {"key" result}
     "trusted" {"trusted" result}
     "redeem" {"body" {"base64" (base64 result)}}

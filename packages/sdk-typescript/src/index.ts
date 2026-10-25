@@ -6,5 +6,6 @@
 export * from "./claim-check/index.js";
 export * from "./webhook/index.js";
 export * from "./message/index.js";
+export * from "./lifecycle/index.js";
 export * from "./admin/index.js";
 export * from "./routes/index.js";

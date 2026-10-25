@@ -16,7 +16,8 @@ defmodule Ankusa.Sink.Message do
   `on_verify_failure: accept_flag`, so a consumer treats that hook as
   unverified), the forwarded provider `headers` and the W3C trace context
   `traceparent` / `tracestate` (`Ankusa.Trace`: strings, or `null` for a hook
-  that carries none; a consumer continues the trace from them):
+  that carries none; a consumer continues the trace from them) and the origin,
+  `instance` and `region` (strings, or `null`):
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 245,
@@ -25,6 +26,7 @@ defmodule Ankusa.Sink.Message do
        "headers": {"x-github-event": "push"},
        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
        "tracestate": null,
+       "instance": "default", "region": "eu-west-1",
        "sha256": "2cf24dba...", "body_base64": "eyJpZCI6..."}
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
@@ -32,14 +34,30 @@ defmodule Ankusa.Sink.Message do
        "dedupe_key": "evt_1", "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
        "verification": {"status": "ok", "flagged": false},
        "headers": {},
+       "instance": "default", "region": "eu-west-1",
        "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
        "sha256": "3bea8a9a07c1e8dc..."}
 
-  `v` changes only when an existing field changes meaning or disappears.
-  Adding a field keeps `v: 1`; consumers must ignore keys they don't know. A hook of
-  an ordered sink (`Ankusa.Ordering`) also carries `ordering_key`, the key of its
-  lane (`"tenant/source"` for the sink's keyless lane): the only place a sink with
-  no headers, `Sink.Redis`, can show a consumer which lane a message is in.
+  ## Versioning
+
+  `v` is the wire format's major version. The producer writes `v: 1`. Every
+  SDK accepts `min_supported <= v <= max_supported` (1 and 2, exposed by each
+  SDK) and maps each to its current struct: a `v: 2` message is defined as a
+  `v: 1` message plus additive fields, so an SDK decodes it exactly like a
+  `v: 1` one and ignores the keys it does not know. Adding a field keeps `v`,
+  and consumers must ignore keys they don't know. A field that changes meaning
+  or disappears needs a new `v` (3 or later), which no SDK accepts until its
+  `max_supported` is raised. `instance` (the name of the instance that
+  published) and `region` (`Ankusa.Config` `region`, `null` for none) are such
+  additive fields. A hook of an ordered sink (`Ankusa.Ordering`) also carries
+  `ordering_key`, the key of its lane (`"tenant/source"` for the sink's keyless
+  lane): the only place a sink with no headers, `Sink.Redis`, can show a
+  consumer which lane a message is in.
+
+  What this function writes is pinned by the producer vectors in
+  `conformance/cases/producer.json`, generated from it by
+  `mix ankusa.conformance.gen`; `mise run check:conformance` fails when a field
+  is added, removed or changed here without regenerating them.
 
   ## Size budget
 
@@ -126,6 +144,8 @@ defmodule Ankusa.Sink.Message do
   def encode(%Envelope{} = env, ctx, inline_max_bytes, max_bytes \\ @default_max_message_bytes)
       when is_integer(inline_max_bytes) and inline_max_bytes > 0 and is_integer(max_bytes) and
              max_bytes > 0 do
+    {instance, region} = origin(ctx)
+
     base =
       %{
         v: 1,
@@ -141,7 +161,9 @@ defmodule Ankusa.Sink.Message do
         verification: verification(env.verification),
         headers: forwarded_headers(env, ctx),
         traceparent: trace_value(env.trace, :traceparent),
-        tracestate: trace_value(env.trace, :tracestate)
+        tracestate: trace_value(env.trace, :tracestate),
+        instance: instance,
+        region: region
       }
       |> put_ordering_key(ctx)
 
@@ -251,6 +273,21 @@ defmodule Ankusa.Sink.Message do
     do: Map.put(base, :ordering_key, key)
 
   defp put_ordering_key(base, _ctx), do: base
+
+  # The origin of the message: the instance's name, and the region its
+  # `Ankusa.Config` declares (`dispatch.region`, `nil` for none). A ctx with no
+  # `:instance` (a sink called outside dispatch, a test) has neither.
+  defp origin(%{instance: instance}) when is_atom(instance) and not is_nil(instance) do
+    region =
+      case Ankusa.fetch_config(instance) do
+        {:ok, %{dispatch: %{region: region}}} -> region
+        :error -> nil
+      end
+
+    {Atom.to_string(instance), region}
+  end
+
+  defp origin(_ctx), do: {nil, nil}
 
   # The W3C trace context of the hook, as the pairs a broker carries natively
   # (Kafka and NATS headers, SQS and Pub/Sub attributes): `traceparent`, and

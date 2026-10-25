@@ -1,0 +1,469 @@
+{
+  "cases": [
+    {
+      "id": "lifecycle.decode.source_created",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":1,\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"42\"}"
+      },
+      "expect": {
+        "ok": {
+          "specversion": "1.0",
+          "id": "0193a2b4-7c2e-7000-8000-00000000a001",
+          "source": "urn:ankusa:instance:default",
+          "type": "io.ankusa.source.created",
+          "subject": "acme.stripe",
+          "time": "2026-10-25T09:30:00.123Z",
+          "datacontenttype": "application/json",
+          "data": {
+            "id": "acme.stripe",
+            "tenant_id": "acme",
+            "verifier": {
+              "type": "hmac"
+            }
+          },
+          "revision": 1,
+          "actor": "system",
+          "instance": "default",
+          "sequence": "42",
+          "replayid": null,
+          "traceparent": null,
+          "tracestate": null
+        }
+      }
+    },
+    {
+      "id": "lifecycle.decode.route_updated_replayed_traced",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a002\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.route.updated\",\"subject\":\"route_1\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"route_1\",\"tenant_id\":\"acme\"},\"revision\":3,\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"43\",\"replayid\":\"rpl_1\",\"traceparent\":\"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\",\"tracestate\":\"vendor=1\"}"
+      },
+      "expect": {
+        "ok": {
+          "specversion": "1.0",
+          "id": "0193a2b4-7c2e-7000-8000-00000000a002",
+          "source": "urn:ankusa:instance:default",
+          "type": "io.ankusa.route.updated",
+          "subject": "route_1",
+          "time": "2026-10-25T09:30:00.123Z",
+          "datacontenttype": "application/json",
+          "data": {
+            "id": "route_1",
+            "tenant_id": "acme"
+          },
+          "revision": 3,
+          "actor": "system",
+          "instance": "default",
+          "sequence": "43",
+          "replayid": "rpl_1",
+          "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+          "tracestate": "vendor=1"
+        }
+      }
+    },
+    {
+      "id": "lifecycle.decode.instance_restored",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a003\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.instance.restored\",\"subject\":\"default\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"incarnation\":\"a1b2c3\",\"restored_sequence\":40},\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"41\"}"
+      },
+      "expect": {
+        "ok": {
+          "specversion": "1.0",
+          "id": "0193a2b4-7c2e-7000-8000-00000000a003",
+          "source": "urn:ankusa:instance:default",
+          "type": "io.ankusa.instance.restored",
+          "subject": "default",
+          "time": "2026-10-25T09:30:00.123Z",
+          "datacontenttype": "application/json",
+          "data": {
+            "incarnation": "a1b2c3",
+            "restored_sequence": 40
+          },
+          "revision": null,
+          "actor": "system",
+          "instance": "default",
+          "sequence": "41",
+          "replayid": null,
+          "traceparent": null,
+          "tracestate": null
+        }
+      }
+    },
+    {
+      "id": "lifecycle.decode.tenant_deleted",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a004\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.tenant.deleted\",\"subject\":\"acme\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"tenant\":\"acme\"},\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"44\"}"
+      },
+      "expect": {
+        "ok": {
+          "specversion": "1.0",
+          "id": "0193a2b4-7c2e-7000-8000-00000000a004",
+          "source": "urn:ankusa:instance:default",
+          "type": "io.ankusa.tenant.deleted",
+          "subject": "acme",
+          "time": "2026-10-25T09:30:00.123Z",
+          "datacontenttype": "application/json",
+          "data": {
+            "tenant": "acme"
+          },
+          "revision": null,
+          "actor": "system",
+          "instance": "default",
+          "sequence": "44",
+          "replayid": null,
+          "traceparent": null,
+          "tracestate": null
+        }
+      }
+    },
+    {
+      "id": "lifecycle.decode.unknown_keys_and_type_ignored",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.archived\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":1,\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"42\",\"extension_field\":{\"nested\":[1,2]},\"dataschema\":\"urn:x\"}"
+      },
+      "expect": {
+        "ok": {
+          "specversion": "1.0",
+          "id": "0193a2b4-7c2e-7000-8000-00000000a001",
+          "source": "urn:ankusa:instance:default",
+          "type": "io.ankusa.source.archived",
+          "subject": "acme.stripe",
+          "time": "2026-10-25T09:30:00.123Z",
+          "datacontenttype": "application/json",
+          "data": {
+            "id": "acme.stripe",
+            "tenant_id": "acme",
+            "verifier": {
+              "type": "hmac"
+            }
+          },
+          "revision": 1,
+          "actor": "system",
+          "instance": "default",
+          "sequence": "42",
+          "replayid": null,
+          "traceparent": null,
+          "tracestate": null
+        }
+      }
+    },
+    {
+      "id": "lifecycle.decode.data_absent_minimal",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"e1\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.deleted\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00Z\"}"
+      },
+      "expect": {
+        "ok": {
+          "specversion": "1.0",
+          "id": "e1",
+          "source": "urn:ankusa:instance:default",
+          "type": "io.ankusa.source.deleted",
+          "subject": "acme.stripe",
+          "time": "2026-10-25T09:30:00Z",
+          "datacontenttype": null,
+          "data": null,
+          "revision": null,
+          "actor": null,
+          "instance": null,
+          "sequence": null,
+          "replayid": null,
+          "traceparent": null,
+          "tracestate": null
+        }
+      }
+    },
+    {
+      "id": "lifecycle.decode.null_optionals",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":null,\"data\":null,\"revision\":null,\"actor\":null,\"instance\":null,\"sequence\":null,\"replayid\":null,\"traceparent\":null,\"tracestate\":null}"
+      },
+      "expect": {
+        "ok": {
+          "specversion": "1.0",
+          "id": "0193a2b4-7c2e-7000-8000-00000000a001",
+          "source": "urn:ankusa:instance:default",
+          "type": "io.ankusa.source.created",
+          "subject": "acme.stripe",
+          "time": "2026-10-25T09:30:00.123Z",
+          "datacontenttype": null,
+          "data": null,
+          "revision": null,
+          "actor": null,
+          "instance": null,
+          "sequence": null,
+          "replayid": null,
+          "traceparent": null,
+          "tracestate": null
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.invalid_json",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "not json"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_json",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.not_an_object",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "[1,2,3]"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "not_an_object",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.old_specversion",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"0.3\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":1,\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"42\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "unsupported_version",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.missing_specversion",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":1,\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"42\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "unsupported_version",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.missing_id",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":1,\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"42\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "id"
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.empty_subject",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":1,\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"42\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "subject"
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.type_not_string",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":5,\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":1,\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"42\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "type"
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.time_missing",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":1,\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"42\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "time"
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.data_not_object",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":[1],\"revision\":1,\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"42\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "data"
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.revision_string",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":\"3\",\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"42\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "revision"
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.revision_zero",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":0,\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"42\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "revision"
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.actor_not_string",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":1,\"actor\":1,\"instance\":\"default\",\"sequence\":\"42\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "actor"
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.sequence_number",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":1,\"actor\":\"system\",\"instance\":\"default\",\"sequence\":5}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "sequence"
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.sequence_not_decimal",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":1,\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"4a\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "sequence"
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.traceparent_not_string",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"0193a2b4-7c2e-7000-8000-00000000a001\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":1,\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"42\",\"traceparent\":1}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "traceparent"
+        }
+      }
+    },
+    {
+      "id": "lifecycle.reject.first_failure_wins",
+      "feature": "lifecycle.decode",
+      "operation": "decode_lifecycle",
+      "input": {
+        "event": "{\"specversion\":\"1.0\",\"id\":\"\",\"source\":\"urn:ankusa:instance:default\",\"type\":\"io.ankusa.source.created\",\"subject\":\"acme.stripe\",\"time\":\"2026-10-25T09:30:00.123Z\",\"datacontenttype\":\"application/json\",\"data\":{\"id\":\"acme.stripe\",\"tenant_id\":\"acme\",\"verifier\":{\"type\":\"hmac\"}},\"revision\":\"x\",\"actor\":\"system\",\"instance\":\"default\",\"sequence\":\"42\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "id"
+        }
+      }
+    }
+  ]
+}

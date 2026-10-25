@@ -166,6 +166,16 @@ older than the field, is untrusted.
 
 ## Consuming queue messages
 
+The message's `v` is the wire format's major version: `decode_message` accepts
+every `v` from `MIN_SUPPORTED_VERSION` to `MAX_SUPPORTED_VERSION` (1 and 2) into
+the one `Message`, with `v` as the wire said it. A `v: 2` message is a `v: 1`
+message plus additive fields, so a consumer reads it the same way; any other
+`v` is `unsupported_version` (permanent: dead-letter it). `message.instance` and
+`message.region` are the Ankusa instance that published the message and the
+region it is configured with (`None` for none). A message from the instance's
+lifecycle sinks carries a CloudEvents event as its body:
+`decode_lifecycle(body)` returns a `LifecycleEvent`.
+
 An Ankusa sink delivers the `v: 1` queue message as JSON: the body inline
 (`body_base64`) or as a claim-check ref (`claim`), the body's `sha256`, the
 provider's `dedupe_key`, the `idempotency_key` Ankusa computed for the hook,

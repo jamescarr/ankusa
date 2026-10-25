@@ -9,8 +9,10 @@ cd "$ROOT"
 #   - a package whose check:package brings docker-compose up runs alone (the
 #     adapters share the docker daemon);
 #   - check:conformance installs and builds inside packages/sdk-* (`npm ci`,
-#     `bundle install`, `composer install`, `uv sync`, sbt, cargo) — the same
-#     directories `check:package sdk-*` writes — so it starts after that pool;
+#     `bundle install`, `composer install`, `uv sync`, sbt, cargo) and builds
+#     packages/ankusa's test env (`mix ankusa.conformance.gen` regenerates the
+#     producer vectors) — the same directories `check:package` writes — so it
+#     starts after that pool;
 #   - check:examples rebuilds the SDK packages' dist/ that its workers import,
 #     the same directories conformance and `check:package sdk-*` use, so it
 #     runs last.

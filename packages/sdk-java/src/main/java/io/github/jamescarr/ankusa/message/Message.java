@@ -18,7 +18,7 @@ import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
 
 /**
- * One v1 queue message, as it travels from Ankusa to a consumer over any broker.
+ * One queue message, as it travels from Ankusa to a consumer over any broker.
  *
  * <p>A worker consuming Ankusa's queue receives the message as JSON text. {@link #decode(String)}
  * turns that text into a {@code Message}: it validates every field, decodes and verifies the body,
@@ -43,7 +43,8 @@ import tools.jackson.databind.JsonNode;
  * String key = message.idempotencyKey(false); // drops replays of events already processed
  * }</pre>
  *
- * @param v the message version; always {@code 1}
+ * @param v the message version the wire carried, from {@link #MIN_SUPPORTED_VERSION} to {@link
+ *     #MAX_SUPPORTED_VERSION}
  * @param id the delivery id, a UUIDv7
  * @param sourceId the source that accepted the hook
  * @param tenantId the tenant the source belongs to, or null when the source is not tenant-scoped
@@ -63,6 +64,10 @@ import tools.jackson.databind.JsonNode;
  * @param traceparent the hook's W3C {@code traceparent}, verbatim, to continue the trace from; null
  *     when the message carries none
  * @param tracestate the W3C {@code tracestate} that goes with {@code traceparent}, or null
+ * @param instance the name of the Ankusa instance that published the message, or null when it says
+ *     so or predates the field
+ * @param region the region that instance is configured with, or null when it has none or predates
+ *     the field
  */
 public record Message(
     int v,
@@ -81,7 +86,23 @@ public record Message(
     Map<String, String> headers,
     @Nullable Verification verification,
     @Nullable String traceparent,
-    @Nullable String tracestate) {
+    @Nullable String tracestate,
+    @Nullable String instance,
+    @Nullable String region) {
+
+  /**
+   * The lowest message {@code v} {@link #decode(String)} accepts.
+   *
+   * <p>{@code v} is the wire format's major version: a {@code v: 2} message is a {@code v: 1}
+   * message plus additive fields, decoded exactly like it (the keys this decoder does not know are
+   * ignored) into the one {@code Message} type, with {@link #v()} as the wire said it. Raising
+   * {@link #MAX_SUPPORTED_VERSION} is the whole change an SDK needs for a producer that starts
+   * writing the next additive version.
+   */
+  public static final int MIN_SUPPORTED_VERSION = 1;
+
+  /** The highest message {@code v} {@link #decode(String)} accepts. */
+  public static final int MAX_SUPPORTED_VERSION = 2;
 
   /** A lowercase-hex SHA-256, the only digest shape a message may carry. */
   private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
@@ -100,7 +121,7 @@ public record Message(
    *
    * @param json the message text
    * @return the decoded message
-   * @throws InvalidMessageError when the text is not a valid v1 message
+   * @throws InvalidMessageError when the text is not a valid message of a supported version
    */
   public static Message decode(String json) {
     JsonNode root;
@@ -115,8 +136,14 @@ public record Message(
     }
 
     JsonNode version = root.get("v");
-    if (version == null || !version.isIntegralNumber() || version.longValue() != 1L) {
-      throw new InvalidMessageError("unsupported_version", null, "message version is not 1");
+    if (version == null
+        || !version.isIntegralNumber()
+        || version.longValue() < MIN_SUPPORTED_VERSION
+        || version.longValue() > MAX_SUPPORTED_VERSION) {
+      throw new InvalidMessageError(
+          "unsupported_version",
+          null,
+          "message version is not " + MIN_SUPPORTED_VERSION + " to " + MAX_SUPPORTED_VERSION);
     }
 
     String id = requiredText(root, "id");
@@ -142,6 +169,8 @@ public record Message(
     String idempotencyKey = nullableText(root, "idempotency_key");
     String traceparent = nullableText(root, "traceparent");
     String tracestate = nullableText(root, "tracestate");
+    String instance = nullableText(root, "instance");
+    String region = nullableText(root, "region");
     Map<String, String> headers = headers(root);
     String sha256 = sha256(root);
     Verification verification = verification(root);
@@ -170,7 +199,7 @@ public record Message(
       }
 
       return new Message(
-          1,
+          version.intValue(),
           id,
           sourceId,
           tenantId,
@@ -186,7 +215,9 @@ public record Message(
           headers,
           verification,
           traceparent,
-          tracestate);
+          tracestate,
+          instance,
+          region);
     }
 
     if (!claimNode.isString()) {
@@ -211,7 +242,7 @@ public record Message(
     }
 
     return new Message(
-        1,
+        version.intValue(),
         id,
         sourceId,
         tenantId,
@@ -227,7 +258,9 @@ public record Message(
         headers,
         verification,
         traceparent,
-        tracestate);
+        tracestate,
+        instance,
+        region);
   }
 
   /**

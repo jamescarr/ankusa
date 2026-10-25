@@ -71,7 +71,7 @@ is the [key reference](#ankusa-config) below.
 
 | Section | Keys (default) |
 | --- | --- |
-| `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`), `min_free_bytes` (unset = no check; the free bytes `data_dir`'s file system must keep, or `/ready` answers `503` with `disk: failing`; see [`/ready`](deployment.md#running-the-container)) |
+| `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`), `min_free_bytes` (unset = no check; the free bytes `data_dir`'s file system must keep, or `/ready` answers `503` with `disk: failing`; see [`/ready`](deployment.md#running-the-container)), `region` (unset; a non-empty string of at most 64 bytes, e.g. `eu-west-1`: stamped on every queue message as `region` and on the AsyncAPI document as `x-ankusa-region`; core's `dispatch.region`) |
 | `log` | `level` (`info`), `format` (`text` \| `json`; `text`), `banner` (`true`; the ASCII-art banner on start, never printed with `format: json`). See [Logs](#logs) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`), `store_headers` (`drop`: `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`; `hash`: none). See [Stored headers](#stored-headers) |
 | `listener` | Limits for every HTTP listener, and the ingest port's TLS: `max_connections` (20000), `num_acceptors` (null = two per scheduler), `read_timeout_ms` (10000), `body_read_timeout_ms` (15000), `request_deadline_ms` (30000), `max_requests_per_connection` (1000), `max_header_count` (64), `max_header_length` (16384), `http2` (`false`), `tls` (`certfile`, `keyfile`, `cacertfile`, `verify` = `verify_none` \| `verify_peer`, `versions`, `ciphers`). See [Listeners](#listeners-limits-tls-and-mtls) |
@@ -444,6 +444,7 @@ reconfigured without a new file. Env wins over the file.
 | --- | --- |
 | `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`) |
 | `ANKUSA_DATA_DIR` | `node.data_dir` |
+| `ANKUSA_REGION` | `node.region` |
 | `ANKUSA_LOG_LEVEL` | `log.level` |
 | `ANKUSA_LOG_FORMAT` | `log.format` (`text` or `json`) |
 | `ANKUSA_BANNER` | `log.banner` |
@@ -622,6 +623,7 @@ config :ankusa,
     breaker_failures: 5,
     breaker_open_ms: 30_000,
     breaker_max_open_ms: 300_000,
+    region: nil,
     tenants: %{
       default: %{max_inflight: 1024, max_inflight_bytes: 33_554_432, concurrency: 16},
       "acme" => %{max_inflight: 2048, concurrency: 24}
@@ -772,6 +774,7 @@ config :ankusa,
 | `dispatch.breaker_open_ms`, `dispatch.breaker_max_open_ms` | `30_000`, `300_000` | How long a breaker stays open, doubling per consecutive open up to the max; one probe attempt then closes it or reopens it. In memory: a restart closes every breaker. |
 | `dispatch.retry` | `{Ankusa.RetryPolicy.Exponential, []}` | `{module, opts}` implementing `Ankusa.RetryPolicy`: the instance's policy; a source's `retry:` lays options over `opts`. Whatever the module, `opts[:max_elapsed_ms]` (default `86_400_000`, 24 h; 1000 to 2 592 000 000) is the horizon: a delivery still failing that long after its first attempt is dead-lettered. The shipped policy's other options: `base_ms` (100), `max_ms` (300 000), `max_attempts` (`nil`: unlimited), `jitter` (`true`). |
 | `dispatch.max_retry_after_ms` | `3_600_000` | The longest pause a sink's `Retry-After` or throttle answer (`{:retry_after, ms, _}`) can impose on one retry. 1000 to 86 400 000. The horizon still ends the delivery. |
+| `dispatch.region` | `nil` | The region this deployment runs in (YAML `node.region`, `ANKUSA_REGION`): stamped on every queue message as `region`, beside `instance` (the instance's name), and on the AsyncAPI document as the `x-ankusa-region` extension. `nil` = none: `region` is `null` in messages and the extension is absent. `nil` or a non-empty string of at most 64 bytes. Not secret: `/v1/config` shows it. It lives in `dispatch` because `Ankusa.Config` has no field to spare. |
 | `egress.pools.pool_size`, `egress.pools.pool_count` | `32`, `1` | HTTP/1 connections per pool, and shards per pool, of the pool each receiver address gets (`Ankusa.HttpClient.Pools`). Integers 1 to 1024 and 1 to 64. Several sinks posting to one receiver share one pool, so keep `pool_size * pool_count` at or above `dispatch.concurrency`: boot warns when it is not, and a pool smaller than the concurrency that can reach it caps that receiver's throughput at `pool_size ÷ latency` with nothing to say so. A sink overrides them with `pool: [pool_size:, pool_count:, pool_timeout:, protocols:]`. |
 | `egress.pools.pool_timeout` | `5_000` | How long a request waits for a free connection of its pool; then that attempt fails as a transport error and is retried. 1 to 600000. |
 | `egress.pools.pool_max_idle_ms`, `egress.pools.conn_max_idle_ms` | `60_000`, `30_000` | A pool with no request in flight for `pool_max_idle_ms` is closed by the sweep (every 30 s), and so is a deleted source's idle pool at once; a connection idle for `conn_max_idle_ms` is not reused. Positive integers. |

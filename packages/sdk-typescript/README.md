@@ -241,6 +241,16 @@ hook, or one from a node older than the field, is untrusted.
 
 ## Consuming queue messages
 
+The message's `v` is the wire format's major version: `decodeMessage` accepts
+every `v` from `MIN_SUPPORTED_VERSION` to `MAX_SUPPORTED_VERSION` (1 and 2)
+into the one `Message`, with `v` as the wire said it. A `v: 2` message is a
+`v: 1` message plus additive fields, so a consumer reads it the same way; any
+other `v` is `unsupported_version` (permanent: dead-letter it).
+`message.instance` and `message.region` are the Ankusa instance that published
+the message and the region it is configured with (`null` for none). A message
+from the instance's lifecycle sinks carries a CloudEvents event as its body:
+`decodeLifecycle(body)` returns a `LifecycleEvent`.
+
 Ankusa's broker sinks (RabbitMQ, Kafka, NATS, Redis) carry a JSON envelope
 (`v: 1`) alongside the body as the broker payload. The HTTP sink sends the
 original body verbatim plus `x-ankusa-*` headers; read those with the webhook

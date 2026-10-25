@@ -32,12 +32,25 @@ from .claim_check.errors import InvalidClaimRefError
 from .claim_check.ref import parse_claim_ref
 from .webhook import HookHeaders, Verification
 
-__all__ = ["InvalidMessageError", "Message", "decode_message", "idempotency_key", "is_trusted"]
+__all__ = [
+    "MAX_SUPPORTED_VERSION",
+    "MIN_SUPPORTED_VERSION",
+    "InvalidMessageError",
+    "Message",
+    "decode_message",
+    "idempotency_key",
+    "is_trusted",
+]
 
-# The message JSON version this decoder understands. Every field since v1 was
-# added without bumping it (see "Versioning" in docs/delivery.md), so a v1
-# decoder stays correct as senders add fields.
-_SUPPORTED_VERSION = 1
+# The message versions this decoder understands, both ends inclusive. ``v`` is
+# the wire format's major version: a ``v: 2`` message is a ``v: 1`` message plus
+# additive fields, decoded exactly like it (the keys this decoder does not know
+# are ignored) into the one ``Message`` type, with ``v`` as the wire said it.
+# Raising ``MAX_SUPPORTED_VERSION`` is the whole change an SDK needs for a
+# producer that starts writing the next additive version (see "Versioning" in
+# docs/delivery.md).
+MIN_SUPPORTED_VERSION = 1
+MAX_SUPPORTED_VERSION = 2
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -95,6 +108,10 @@ class Message:
     # when the message carries none (or comes from a node older than the fields).
     traceparent: str | None = None
     tracestate: str | None = None
+    # The name of the Ankusa instance that published the message and the region
+    # it is configured with; None when the message says null or predates the fields.
+    instance: str | None = None
+    region: str | None = None
 
 
 def _is_int(value: Any) -> TypeGuard[int]:
@@ -145,7 +162,7 @@ def decode_message(data: str | bytes) -> Message:
         raise InvalidMessageError("message is not a JSON object", code="not_an_object")
 
     version = payload.get("v")
-    if not _is_int(version) or version != _SUPPORTED_VERSION:
+    if not _is_int(version) or not MIN_SUPPORTED_VERSION <= version <= MAX_SUPPORTED_VERSION:
         raise InvalidMessageError(f"unsupported message version: {version!r}", code="unsupported_version")
 
     hook_id = payload.get("id")
@@ -173,6 +190,8 @@ def decode_message(data: str | bytes) -> Message:
     idempotency_key = _optional_string(payload, "idempotency_key")
     traceparent = _optional_string(payload, "traceparent")
     tracestate = _optional_string(payload, "tracestate")
+    instance = _optional_string(payload, "instance")
+    region = _optional_string(payload, "region")
 
     forwarded = payload.get("headers")
     headers: dict[str, str] = {}
@@ -222,7 +241,7 @@ def decode_message(data: str | bytes) -> Message:
             )
 
     return Message(
-        v=_SUPPORTED_VERSION,
+        v=version,
         id=hook_id,
         source_id=source_id,
         tenant_id=tenant_id,
@@ -239,6 +258,8 @@ def decode_message(data: str | bytes) -> Message:
         verification=verification,
         traceparent=traceparent,
         tracestate=tracestate,
+        instance=instance,
+        region=region,
     )
 
 

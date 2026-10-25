@@ -5,28 +5,28 @@
       "feature": "message.verification",
       "operation": "decode_message",
       "input": {"message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"content_type\":\"application/json\",\"size\":5,\"sha256\":\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\",\"dedupe_key\":null,\"replay_id\":null,\"idempotency_key\":\"01a0\",\"verification\":{\"status\":\"ok\",\"flagged\":false},\"headers\":{},\"body_base64\":\"aGVsbG8=\"}"},
-      "expect": {"ok": {"v": 1, "id": "01a0", "source_id": "demo", "tenant_id": "acme", "received_at": 1720000000000, "content_type": "application/json", "size": 5, "body_base64": "aGVsbG8=", "claim": null, "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "dedupe_key": null, "replay_id": null, "idempotency_key": "01a0", "headers": {}, "verification": {"status": "ok", "flagged": false}, "traceparent": null, "tracestate": null}}
+      "expect": {"ok": {"v": 1, "id": "01a0", "source_id": "demo", "tenant_id": "acme", "received_at": 1720000000000, "content_type": "application/json", "size": 5, "body_base64": "aGVsbG8=", "claim": null, "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "dedupe_key": null, "replay_id": null, "idempotency_key": "01a0", "headers": {}, "verification": {"status": "ok", "flagged": false}, "traceparent": null, "tracestate": null, "instance": null, "region": null}}
     },
     {
       "id": "verification.message.flagged",
       "feature": "message.verification",
       "operation": "decode_message",
       "input": {"message": "{\"v\":1,\"id\":\"01a1\",\"source_id\":\"demo\",\"tenant_id\":null,\"received_at\":1720000000000,\"content_type\":null,\"size\":0,\"verification\":{\"status\":\"failed\",\"flagged\":true},\"body_base64\":\"\"}"},
-      "expect": {"ok": {"v": 1, "id": "01a1", "source_id": "demo", "tenant_id": null, "received_at": 1720000000000, "content_type": null, "size": 0, "body_base64": "", "claim": null, "sha256": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "headers": {}, "verification": {"status": "failed", "flagged": true}, "traceparent": null, "tracestate": null}}
+      "expect": {"ok": {"v": 1, "id": "01a1", "source_id": "demo", "tenant_id": null, "received_at": 1720000000000, "content_type": null, "size": 0, "body_base64": "", "claim": null, "sha256": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "headers": {}, "verification": {"status": "failed", "flagged": true}, "traceparent": null, "tracestate": null, "instance": null, "region": null}}
     },
     {
       "id": "verification.message.skipped",
       "feature": "message.verification",
       "operation": "decode_message",
       "input": {"message": "{\"v\":1,\"id\":\"01a2\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":0,\"verification\":{\"status\":\"skipped\",\"flagged\":false},\"body_base64\":\"\"}"},
-      "expect": {"ok": {"v": 1, "id": "01a2", "source_id": "demo", "tenant_id": null, "received_at": 1720000000000, "content_type": null, "size": 0, "body_base64": "", "claim": null, "sha256": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "headers": {}, "verification": {"status": "skipped", "flagged": false}, "traceparent": null, "tracestate": null}}
+      "expect": {"ok": {"v": 1, "id": "01a2", "source_id": "demo", "tenant_id": null, "received_at": 1720000000000, "content_type": null, "size": 0, "body_base64": "", "claim": null, "sha256": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "headers": {}, "verification": {"status": "skipped", "flagged": false}, "traceparent": null, "tracestate": null, "instance": null, "region": null}}
     },
     {
       "id": "verification.message.unknown_status_passes_through",
       "feature": "message.verification",
       "operation": "decode_message",
       "input": {"message": "{\"v\":1,\"id\":\"01a3\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":0,\"verification\":{\"status\":\"attested\",\"flagged\":false},\"body_base64\":\"\"}"},
-      "expect": {"ok": {"v": 1, "id": "01a3", "source_id": "demo", "tenant_id": null, "received_at": 1720000000000, "content_type": null, "size": 0, "body_base64": "", "claim": null, "sha256": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "headers": {}, "verification": {"status": "attested", "flagged": false}, "traceparent": null, "tracestate": null}}
+      "expect": {"ok": {"v": 1, "id": "01a3", "source_id": "demo", "tenant_id": null, "received_at": 1720000000000, "content_type": null, "size": 0, "body_base64": "", "claim": null, "sha256": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "headers": {}, "verification": {"status": "attested", "flagged": false}, "traceparent": null, "tracestate": null, "instance": null, "region": null}}
     },
     {
       "id": "verification.message.not_an_object",
@@ -54,7 +54,7 @@
       "feature": "message.verification",
       "operation": "decode_message",
       "input": {"message": "{\"v\":1,\"id\":\"01a7\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":0,\"verification\":null,\"body_base64\":\"\"}"},
-      "expect": {"ok": {"v": 1, "id": "01a7", "source_id": "demo", "tenant_id": null, "received_at": 1720000000000, "content_type": null, "size": 0, "body_base64": "", "claim": null, "sha256": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "headers": {}, "verification": null, "traceparent": null, "tracestate": null}}
+      "expect": {"ok": {"v": 1, "id": "01a7", "source_id": "demo", "tenant_id": null, "received_at": 1720000000000, "content_type": null, "size": 0, "body_base64": "", "claim": null, "sha256": null, "dedupe_key": null, "replay_id": null, "idempotency_key": null, "headers": {}, "verification": null, "traceparent": null, "tracestate": null, "instance": null, "region": null}}
     },
     {
       "id": "verification.message.trusted.ok",

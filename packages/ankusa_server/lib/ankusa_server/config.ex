@@ -36,6 +36,7 @@ defmodule AnkusaServer.Config do
   | --- | --- |
   | `ANKUSA_ROLES` | `node.roles` (comma-separated) |
   | `ANKUSA_DATA_DIR` | `node.data_dir` |
+  | `ANKUSA_REGION` | `node.region` |
   | `ANKUSA_LOG_LEVEL` | `log.level` |
   | `ANKUSA_LOG_FORMAT` | `log.format` (`text` or `json`) |
   | `ANKUSA_BANNER` | `log.banner` |
@@ -74,7 +75,7 @@ defmodule AnkusaServer.Config do
   @fallback_path "./ankusa.yml"
 
   @root_keys ~w(node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive health)
-  @node_keys ~w(roles data_dir min_free_bytes)
+  @node_keys ~w(roles data_dir min_free_bytes region)
   @health_keys ~w(sink_error_window_ms)
   @log_keys ~w(level banner format)
   @tracing_keys ~w(enabled otlp_endpoint sample_ratio)
@@ -463,6 +464,7 @@ defmodule AnkusaServer.Config do
   @env_overrides [
     {"ANKUSA_ROLES", ["node", "roles"]},
     {"ANKUSA_DATA_DIR", ["node", "data_dir"]},
+    {"ANKUSA_REGION", ["node", "region"]},
     {"ANKUSA_LOG_LEVEL", ["log", "level"]},
     {"ANKUSA_LOG_FORMAT", ["log", "format"]},
     {"ANKUSA_BANNER", ["log", "banner"]},
@@ -680,6 +682,12 @@ defmodule AnkusaServer.Config do
     |> put_opt(
       :data_dir,
       node["data_dir"] && expect_string(node["data_dir"], ["node", "data_dir"])
+    )
+    # Core keeps the region in its `dispatch` section (`dispatch.region`),
+    # because `Ankusa.Config` has no field to spare; the range is core's.
+    |> put_opt(
+      :dispatch,
+      node["region"] && [region: expect_string(node["region"], ["node", "region"])]
     )
   end
 

@@ -13,7 +13,9 @@ then runs every registered SDK's native runner.
   Every `cases/*.json` case names one `feature` id and one `operation`.
 - `cases/<file>.json` — `{"cases": [Case, ...]}`.
 - `sdks.json` — the SDK registry the checker runs. See "Registering an SDK".
-- `check.mjs` — the checker (Node, stdlib only).
+- `check.mjs` — the checker (Node, stdlib only). It also regenerates the
+  producer vectors and compares them with the checked-in file (see "Producer
+  vectors"), so it needs Elixir and the `packages/ankusa` dependencies.
 
 ## Case format
 
@@ -79,12 +81,17 @@ then runs every registered SDK's native runner.
   "sha256": string|null, "dedupe_key": string|null,
   "replay_id": string|null, "idempotency_key": string|null, "headers": {},
   "verification": {"status": string, "flagged": bool}|null,
-  "traceparent": string|null, "tracestate": string|null}`.
+  "traceparent": string|null, "tracestate": string|null,
+  "instance": string|null, "region": string|null}`.
   `body_base64` here is the decoded body re-encoded as standard base64, so
   runners compare bytes. `traceparent` and `tracestate` are the message's W3C
   trace context, passed through verbatim (the SDK neither parses nor validates
   them): a string, or `null` for a message with none or from a node older than
-  the fields. `verification` is the message's `verification`
+  the fields. `instance` and `region` are the name of the Ankusa instance that
+  published the message and the region it is configured with
+  (`message.origin`): a string, or `null` for a message that says so or lacks
+  the key (a node older than the fields). `verification` is the message's
+  `verification`
   key verbatim; absent or `null` → `null` (a node older than the field);
   present but not an object of a non-empty string `status` and a boolean
   `flagged` → `invalid_field` (field `verification`); any `status` value
@@ -93,12 +100,16 @@ then runs every registered SDK's native runner.
   `InvalidMessageError` with `retryable=false`, `code`, and `field`
   (string or null):
   1. Not JSON → `invalid_json`; JSON that isn't an object → `not_an_object`.
-  2. `v` missing or not the integer 1 → `unsupported_version`.
+  2. `v` missing or not an integer from `min` to `max` inclusive (the values
+     of `supported_versions`: 1 and 2) → `unsupported_version`. The result's
+     `v` is the wire `v`; every accepted version decodes by the rules below,
+     because a `v: 2` message is a `v: 1` message plus additive fields
+     (`message.decode.v2_additive`).
   3. Field types, in this order, else `invalid_field` with `field` set to the
      key name: `id` a non-empty string; `source_id` a string; `received_at` an
      integer; `size` an integer ≥ 0; `tenant_id`/`content_type`/`dedupe_key`/
-     `replay_id`/`idempotency_key`/`traceparent`/`tracestate` a string, null, or
-     absent; `headers` absent
+     `replay_id`/`idempotency_key`/`traceparent`/`tracestate`/`instance`/`region`
+     a string, null, or absent (in that order); `headers` absent
      or an object whose values are all strings; `sha256` absent or 64 lowercase
      hex characters.
   4. Body form: both `body_base64` and `claim` → `ambiguous_body`; neither →
@@ -112,7 +123,8 @@ then runs every registered SDK's native runner.
      `tenant_mismatch`.
 
   Unknown keys are ignored. Absent `dedupe_key`, `replay_id`, `idempotency_key`
-  and `sha256` decode to `null`; absent `headers` decodes to `{}`.
+  and `sha256` decode to `null`; absent `headers` decodes to `{}`. Absent
+  `instance` and `region` decode to `null`.
 - `idempotency_key`: `{"message": string}` or `{"headers": {…}}`, plus an
   optional `"include_replay": bool`. The runner decodes the message with
   `decode_message` or parses the headers with `parse_headers`, then calls the
@@ -216,6 +228,37 @@ then runs every registered SDK's native runner.
   check, `on_verify_failure: accept_flag`), a `failed` or `skipped` one, any
   other `status`, and a hook with no `verification` (a node older than the
   field) are all untrusted: the SDK fails closed.
+- `supported_versions`: `{}` → `ok` is `{"min": 1, "max": 2}`: the lowest and
+  highest message `v` the SDK accepts (`message.versions`). The runner reads
+  the two bounds the SDK exposes (constants, or functions where the language
+  has no constants); `decode_message` accepts exactly `min ≤ v ≤ max`.
+- `decode_lifecycle`: `{"event": string}` → `ok` is the decoded lifecycle event
+  (`lifecycle.decode`). `event` is the JSON of a CloudEvents 1.0 structured-mode
+  event, which is the decoded body of a message the instance's lifecycle sinks
+  publish (content type `application/cloudevents+json`; the `source_id` of that
+  message is `ankusa:lifecycle`). `ok` is `{"specversion": string, "id": string,
+  "source": string, "type": string, "subject": string, "time": string,
+  "datacontenttype": string|null, "data": object|null, "revision": int|null,
+  "actor": string|null, "instance": string|null, "sequence": string|null,
+  "replayid": string|null, "traceparent": string|null,
+  "tracestate": string|null}`: every field passed through verbatim (`data` as
+  the JSON object it is: runners deep-compare it), an absent or `null` optional
+  field is `null`. `sequence` stays the decimal string it is on the wire, and
+  `time` stays the string (the SDK does not parse it). The rules run in order
+  and the first failure wins; every failure raises `InvalidMessageError` with
+  `retryable=false`, `code`, and `field` (string or null):
+  1. Not JSON → `invalid_json`; JSON that isn't an object → `not_an_object`.
+  2. `specversion` missing or not the string `"1.0"` → `unsupported_version`.
+  3. Field types, in this order, else `invalid_field` with `field` set to the
+     key name: `id`, `source`, `type`, `subject`, `time` non-empty strings;
+     `datacontenttype` a string, null, or absent; `data` an object, null, or
+     absent; `revision` an integer ≥ 1, null, or absent; `actor`, `instance` a
+     string, null, or absent; `sequence` a string of decimal digits only (at
+     least one), null, or absent; `replayid`, `traceparent`, `tracestate` a
+     string, null, or absent.
+
+  Unknown keys are ignored, and so is an unknown `type`: a consumer written
+  against an older SDK still decodes the events a newer node adds.
 
 ### Helpers
 
@@ -231,6 +274,24 @@ then runs every registered SDK's native runner.
 - `Body` = `{"text": string}` (UTF-8) | `{"base64": string}` | `{"json": any}`
   (compact `JSON.stringify` / `json.dumps(separators=(",", ":"))`, content-type
   only if `headers` sets it). A missing body means zero bytes.
+
+## Producer vectors
+
+`cases/producer.json` is the one generated file. Every other case is a decoder
+vector somebody wrote by hand, which proves an SDK reads the messages the
+vectors describe; these prove the SDKs read the messages Ankusa core actually
+writes. `mix ankusa.conformance.gen` (in `packages/ankusa`) builds a fixed set
+of hooks (inline and claim bodies, a replay of an ordered sink's hook, a flagged
+one, instances with and without a region), encodes each with
+`Ankusa.Sink.Message.encode/3`, and writes the message beside the
+`decode_message` result an SDK must return (feature `message.producer`).
+
+`check.mjs` runs the same task into a temporary file and fails when it differs
+from `cases/producer.json`, naming the cases and the message keys that were
+added, removed or changed. So a field added to `encode/3` fails
+`mise run check:conformance` until the vectors are regenerated
+(`cd packages/ankusa && mix ankusa.conformance.gen`) and committed, and then
+every SDK has to decode it. Never edit the file by hand.
 
 ## Runner contract
 

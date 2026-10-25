@@ -24,10 +24,11 @@ use ankusa::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, Status
 use ankusa::{
     AdminClient, AdminError, ClaimCheckClient, ClaimCheckError, ClientBuilder, DryRunRequest,
     InvalidClaimRefError, InvalidMessageError, InvalidSignatureError, IpRules, ListAuditParams,
-    ListDeadLettersParams, ListQuarantinedParams, ListRoutesParams, Message, MissingHookIdError,
-    ReceiveError, ReceiveOptions, ReplayPatch, ReplaySpec, RouteInput, RoutePatch, RoutesClient,
-    RoutesError, Transport, TransportError, Verification, VerifyOptions, decode_message,
-    parse_claim_ref, parse_headers, receive_delivery, verify_signature,
+    ListDeadLettersParams, ListQuarantinedParams, ListRoutesParams, MAX_SUPPORTED_VERSION,
+    MIN_SUPPORTED_VERSION, Message, MissingHookIdError, ReceiveError, ReceiveOptions, ReplayPatch,
+    ReplaySpec, RouteInput, RoutePatch, RoutesClient, RoutesError, Transport, TransportError,
+    Verification, VerifyOptions, decode_lifecycle, decode_message, parse_claim_ref, parse_headers,
+    receive_delivery, verify_signature,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -352,6 +353,31 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
                     .is_trusted(),
             };
             Ok(json!({ "trusted": trusted }))
+        }
+        "supported_versions" => Ok(json!({
+            "min": MIN_SUPPORTED_VERSION,
+            "max": MAX_SUPPORTED_VERSION,
+        })),
+        "decode_lifecycle" => {
+            let event =
+                decode_lifecycle(input_str(case, "event").as_bytes()).map_err(OpError::Message)?;
+            Ok(json!({
+                "specversion": event.specversion,
+                "id": event.id,
+                "source": event.source,
+                "type": event.r#type,
+                "subject": event.subject,
+                "time": event.time,
+                "datacontenttype": event.datacontenttype,
+                "data": event.data,
+                "revision": event.revision,
+                "actor": event.actor,
+                "instance": event.instance,
+                "sequence": event.sequence,
+                "replayid": event.replayid,
+                "traceparent": event.traceparent,
+                "tracestate": event.tracestate,
+            }))
         }
         "redeem" => {
             let client = claim_check(builder);
@@ -797,6 +823,8 @@ fn message_json(message: &Message) -> Value {
         "verification": verification_json(message.verification.as_ref()),
         "traceparent": message.traceparent,
         "tracestate": message.tracestate,
+        "instance": message.instance,
+        "region": message.region,
     })
 }
 

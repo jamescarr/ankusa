@@ -8,6 +8,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`node.region` (`ANKUSA_REGION`) (CON-2).** The region the node runs in: a
+  non-empty string of at most 64 bytes. Every queue message carries it as
+  `region` (beside `instance`, the instance's name) and `GET /asyncapi.json`
+  carries it as the document's `x-ankusa-region` extension. Unset, `region` is
+  `null` and the extension is absent. Core keeps it in `dispatch.region`.
+
 - `ordered` and `ordering_key` (`{header: name}` / `{json: path}`) on every sink
   but `log` (ordering lanes, ADR 0004).
 
