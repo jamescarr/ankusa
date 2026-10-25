@@ -247,6 +247,16 @@ def _run_idempotency_key(case: dict[str, Any], requests: list[RecordedRequest]) 
     return {"key": ankusa.idempotency_key(hook, include_replay=inp.get("include_replay", False))}
 
 
+def _run_trusted(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    hook = (
+        ankusa.decode_message(inp["message"])
+        if "message" in inp
+        else ankusa.parse_headers(inp["headers"])
+    )
+    return {"trusted": ankusa.is_trusted(hook)}
+
+
 def _run_redeem(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
     inp = case["input"]
     with _connected_with(ankusa.ClaimCheckClient, inp["gateway"], inp.get("client") or {}, requests) as claim_check:
@@ -388,6 +398,7 @@ RUNNERS: dict[str, Runner] = {
     "receive_delivery": _run_receive_delivery,
     "decode_message": _run_decode_message,
     "idempotency_key": _run_idempotency_key,
+    "trusted": _run_trusted,
     "redeem": _run_redeem,
     "health": _run_health,
     "routes_health": _run_routes_health,

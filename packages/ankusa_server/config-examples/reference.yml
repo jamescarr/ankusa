@@ -116,6 +116,19 @@ listener:
   max_header_length: 16384
   # HTTP/1.1 only by default.
   http2: false
+  # On SIGTERM (`docker stop`, a pod deletion) the node first answers /ready with
+  # 503 {"status":"draining"}, then keeps serving for drain_delay_ms so a load
+  # balancer sees the flip, then closes the ingest listener (waiting for the
+  # requests it is serving: the batcher's 15 s record deadline, the store commit
+  # and a margin, 22 s; 13 s under wal.type: none; 24 s under dual) and waits
+  # for every batcher to empty, all within drain_timeout_ms of the delay. The
+  # backup's final checkpoint runs after (backup.final_timeout_ms). Set the
+  # pod's terminationGracePeriodSeconds to at least
+  # (drain_delay_ms + drain_timeout_ms) / 1000 + 10 (+ backup.final_timeout_ms).
+  # drain_delay_ms is an integer >= 0; drain_timeout_ms an integer >= 1, and on a
+  # node with the edge role at least the listener wait above.
+  drain_delay_ms: 5000
+  drain_timeout_ms: 30000
   # TLS for the ingest listener (admin, routes.admin, claim_check and metrics
   # each take their own `tls:` of the same shape). Off = plain HTTP.
   # tls:

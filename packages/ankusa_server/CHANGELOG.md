@@ -23,6 +23,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `AnkusaServer.Config.load!/1` also answers the substituted document as `doc`.
   `log.format` changes back to `text` at a reload now restore the text formatter.
 
+- **SLI metrics (OPS-3).** `/metrics` gains `ankusa_delivery_latency_seconds{sink,result}`
+  (a delivery's age when it settled, buckets to 60 s), `ankusa_dispatch_attempt_duration_seconds{sink,result}`,
+  `ankusa_compact_failures_total{stage}`, `ankusa_claim_check_failures_total{op}` and
+  `ankusa_backup_failures_total`. No new config key; `metrics.detail: source` also puts
+  `tenant_id` and `source_id` on the delivery latency histogram. The SLO table is in
+  [`architecture.md`](../../docs/architecture.md#slis-and-slos).
 - `ordered` and `ordering_key` (`{header: name}` / `{json: path}`) on every sink
   but `log` (ordering lanes, ADR 0004).
 
@@ -65,6 +71,20 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   a label that never makes the node unready. See `config-examples/reference.yml`.
   `/ready`'s body now lists every check with `ok`/`failing`/`draining` and
   `reasons` (see the `ankusa` changelog for the wire change).
+
+- **Graceful drain on SIGTERM (OPS-4).** `docker stop` (and a pod deletion) now
+  drains the node before it stops: `/ready` answers `503` with `"status":
+  "draining"` at once, the ingest port keeps serving for `listener.drain_delay_ms`
+  (5000, an integer >= 0), then closes after the requests it is serving, then
+  every batcher is waited on, all within `listener.drain_timeout_ms` (30000, an
+  integer >= 1; on a node with the `edge` role at least the ingest listener's
+  wait, 22 s by default). The ingest listener waits 22 s (13 s under
+  `wal.type: none`, 24 s under `dual`) for requests in flight instead of Thousand
+  Island's 15 s, so a commit that starts late is no longer killed mid-fsync and
+  no provider sees a reset for a committed hook. Set `terminationGracePeriodSeconds`
+  (and `docker stop -t`) to at least `(drain_delay_ms + drain_timeout_ms) / 1000 +
+  10`, plus `backup.final_timeout_ms` when the node backs up. See
+  `config-examples/reference.yml` and `docs/deployment.md`.
 
 ## [0.7.0] - 2026-10-24
 

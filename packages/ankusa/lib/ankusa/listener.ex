@@ -164,22 +164,31 @@ defmodule Ankusa.Listener do
 
   defp peer_needs_ca!(tls, _key), do: tls
 
+  # What an ingress stop leaves each in-flight request (see
+  # `ingress_shutdown_timeout_ms/1`): the store commit's p99 budget, and the
+  # margin kept beyond the deadline arithmetic.
+  @store_commit_budget_ms 2_000
+  @shutdown_margin_ms 5_000
+
   @doc """
   The Bandit options that apply `config.listener`'s limits and the listener's
   own `tls` block. The caller adds `:plug`, `:port` and `:ip`.
 
   `listener.max_connections` is spread over `listener.num_acceptors`
-  (Thousand Island counts connections per acceptor).
+  (Thousand Island counts connections per acceptor). `thousand_island_extra`
+  is appended to the Thousand Island options (the ingress listener passes its
+  `:shutdown_timeout`).
   """
-  @spec bandit_options(Config.t(), tls() | nil) :: keyword()
-  def bandit_options(%Config{listener: listener}, tls) do
+  @spec bandit_options(Config.t(), tls() | nil, keyword()) :: keyword()
+  def bandit_options(%Config{listener: listener}, tls, thousand_island_extra \\ []) do
     acceptors = listener.num_acceptors || default_acceptors()
 
-    thousand_island = [
-      num_acceptors: acceptors,
-      num_connections: max(1, ceil_div(listener.max_connections, acceptors)),
-      read_timeout: listener.read_timeout_ms
-    ]
+    thousand_island =
+      [
+        num_acceptors: acceptors,
+        num_connections: max(1, ceil_div(listener.max_connections, acceptors)),
+        read_timeout: listener.read_timeout_ms
+      ] ++ thousand_island_extra
 
     [
       http_1_options: [
@@ -190,6 +199,32 @@ defmodule Ankusa.Listener do
       http_2_options: [enabled: listener.http2]
     ]
     |> Keyword.merge(tls_options(tls, thousand_island))
+  end
+
+  @doc """
+  How long the ingress listener waits, on a stop, for the requests it is
+  serving before it closes their connections (Thousand Island's
+  `:shutdown_timeout`, which defaults to 15 s: the batcher's own record
+  deadline, so a commit that starts late would be killed mid-fsync and the
+  provider would see a reset for a committed hook).
+
+  A request may wait its whole record deadline
+  (`Ankusa.Edge.Batcher.record_deadline_ms/0`) before its batch starts
+  committing, then needs the store commit (#{@store_commit_budget_ms} ms of
+  budget; under `wal: :dual` also one intake publish,
+  `intake.publish_timeout_ms`), and the listener keeps #{@shutdown_margin_ms}
+  ms in hand. Under `wal: :none` the request waits for its sinks instead:
+  `direct_publish_timeout_ms` plus the margin.
+  """
+  @spec ingress_shutdown_timeout_ms(Config.t()) :: pos_integer()
+  def ingress_shutdown_timeout_ms(%Config{wal: :none} = config),
+    do: config.direct_publish_timeout_ms + @shutdown_margin_ms
+
+  def ingress_shutdown_timeout_ms(%Config{wal: wal} = config) do
+    intake = if wal == :dual, do: config.intake.publish_timeout_ms, else: 0
+
+    Ankusa.Edge.Batcher.record_deadline_ms() + @store_commit_budget_ms + intake +
+      @shutdown_margin_ms
   end
 
   @doc "The default number of acceptors: two per scheduler."

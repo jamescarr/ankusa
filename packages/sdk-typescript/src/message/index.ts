@@ -277,3 +277,18 @@ export function idempotencyKey(
   if (options.includeReplay && replayId !== null) key += `#replay:${replayId}`;
   return key;
 }
+
+/**
+ * Whether the node verified the hook at ingest and nothing flags it: `true`
+ * only for `verification.status === "ok"` with `flagged` false.
+ *
+ * A flagged hook (accepted despite a failed check, `on_verify_failure:
+ * accept_flag`), a `failed` or `skipped` one, any other status, and a hook with
+ * no `verification` (a node older than the field) are untrusted: the answer
+ * fails closed. `hook` is a decoded `Message` or the `HookHeaders` of an
+ * HTTP-sink delivery.
+ */
+export function isTrusted(hook: Message | HookHeaders): boolean {
+  const verification = hook.verification;
+  return verification !== null && verification.status === "ok" && verification.flagged === false;
+}

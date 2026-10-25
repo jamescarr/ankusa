@@ -85,6 +85,16 @@ impl Message {
         }
         .key(include_replay)
     }
+
+    /// Whether the node verified this message's hook at ingest and nothing
+    /// flags it (see [`Verification::is_trusted`]). A message with no
+    /// `verification` (a node older than the field) is untrusted.
+    #[must_use]
+    pub fn is_trusted(&self) -> bool {
+        self.verification
+            .as_ref()
+            .is_some_and(Verification::is_trusted)
+    }
 }
 
 /// The fields the idempotency key is built from, borrowed from a [`Message`]
@@ -485,5 +495,23 @@ mod tests {
         );
         assert_eq!(bad.code, "invalid_field");
         assert_eq!(bad.field, Some("verification"));
+    }
+
+    #[test]
+    fn is_trusted_is_false_for_a_flagged_or_absent_verification() {
+        let decode = |verification: &str| {
+            decode_message(
+                format!(
+                    r#"{{"v":1,"id":"01a0","source_id":"s","received_at":1,"size":5,
+                        "body_base64":"aGVsbG8="{verification}}}"#
+                )
+                .as_bytes(),
+            )
+            .expect("valid message")
+        };
+        assert!(decode(r#","verification":{"status":"ok","flagged":false}"#).is_trusted());
+        assert!(!decode(r#","verification":{"status":"failed","flagged":true}"#).is_trusted());
+        assert!(!decode(r#","verification":{"status":"skipped","flagged":false}"#).is_trusted());
+        assert!(!decode("").is_trusted());
     }
 }

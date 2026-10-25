@@ -460,7 +460,21 @@ defmodule Ankusa.StorageTest do
       nil
     )
 
-    on_exit(fn -> :telemetry.detach(handler) end)
+    failure_handler = "compact-failure-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      failure_handler,
+      [:ankusa, :compact, :failure],
+      fn _event, _measurements, meta, _ ->
+        if meta.instance == inst, do: send(test, {:compact_failure, meta.stage})
+      end,
+      nil
+    )
+
+    on_exit(fn ->
+      :telemetry.detach(handler)
+      :telemetry.detach(failure_handler)
+    end)
 
     commit!(inst, [envelope("old")])
     Process.sleep(30)
@@ -471,11 +485,15 @@ defmodule Ankusa.StorageTest do
     assert age >= 20
     assert_received {:archive, [:ankusa, :archive, :failure], _}
     refute_received {:archive, [:ankusa, :archive, :failure], _}
+    # The same failed tick, as `ankusa_compact_failures_total{stage="segment"}`.
+    assert_received {:compact_failure, :segment}
+    refute_received {:compact_failure, _}
 
     assert {:ok, 1} == Compactor.tick(inst)
     assert_received {:archive, [:ankusa, :archive, :state], %{oldest_unarchived_age_ms: older}}
     assert older >= age
     refute_received {:archive, [:ankusa, :archive, :failure], _}
+    refute_received {:compact_failure, _}
 
     # Nothing is owed any more.
     assert {:ok, 0} == Compactor.tick(inst)

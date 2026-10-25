@@ -186,7 +186,7 @@
   "Turn a decoded `message` into the hook a handler takes:
 
   `{:id :source-id :tenant-id :content-type :body :received-at :size :dedupe-key
-  :replay-id :idempotency-key :headers}`
+  :replay-id :idempotency-key :verification :headers}`
 
   `claim-check-client` (from `ankusa.sdk.claim-check/client`) is required even
   for an inline message, so a consumer cannot forget to supply one and then fail
@@ -212,4 +212,5 @@
      :dedupe-key (:dedupe-key message)
      :replay-id (:replay-id message)
      :idempotency-key (:idempotency-key message)
+     :verification (:verification message)
      :headers (:headers message)}))

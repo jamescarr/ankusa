@@ -267,6 +267,7 @@ final class ConformanceTest extends TestCase
             'admin_replay_update' => self::admin($conn)->updateReplay(self::string($inp, 'id'), self::object($inp['patch'] ?? null, 'patch')),
             'decode_message' => self::decodeMessage($inp),
             'idempotency_key' => self::idempotencyKey($inp),
+            'trusted' => self::trusted($inp),
             default => self::fail("unknown conformance operation {$operation}"),
         };
     }
@@ -447,6 +448,20 @@ final class ConformanceTest extends TestCase
             : Message::decode(self::string($inp, 'message'));
 
         return ['key' => $hook->idempotencyKey($includeReplay)];
+    }
+
+    /**
+     * @param array<string, mixed> $inp
+     *
+     * @return array{trusted: bool}
+     */
+    private static function trusted(array $inp): array
+    {
+        $hook = \array_key_exists('headers', $inp)
+            ? HookHeaders::fromHeaders(self::stringMap($inp['headers'] ?? null))
+            : Message::decode(self::string($inp, 'message'));
+
+        return ['trusted' => $hook->isTrusted()];
     }
 
     /**

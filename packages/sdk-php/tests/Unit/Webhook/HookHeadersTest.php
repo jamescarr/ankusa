@@ -216,6 +216,23 @@ final class HookHeadersTest extends TestCase
         self::assertTrue($headers->verification->flagged);
     }
 
+    public function testIsTrustedIsTrueOnlyForAnUnflaggedOk(): void
+    {
+        $ok = HookHeaders::fromHeaders(['x-ankusa-id' => '01a0', 'x-ankusa-verification' => 'ok']);
+        $flagged = HookHeaders::fromHeaders([
+            'x-ankusa-id' => '01a0',
+            'x-ankusa-verification' => 'failed',
+            'x-ankusa-verification-flagged' => 'true',
+        ]);
+        $skipped = HookHeaders::fromHeaders(['x-ankusa-id' => '01a0', 'x-ankusa-verification' => 'skipped']);
+        $legacy = HookHeaders::fromHeaders(['x-ankusa-id' => '01a0']);
+
+        self::assertTrue($ok->isTrusted());
+        self::assertFalse($flagged->isTrusted());
+        self::assertFalse($skipped->isTrusted());
+        self::assertFalse($legacy->isTrusted());
+    }
+
     /* --- helpers ------------------------------------------------------------ */
 
     /**

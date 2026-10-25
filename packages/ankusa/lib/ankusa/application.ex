@@ -29,7 +29,29 @@ defmodule Ankusa.Application do
     # `rest_for_one`: a Registry restart forgets every registered name, so
     # anything started after it (the default instance) must restart with it.
     opts = [strategy: :rest_for_one, name: Ankusa.Supervisor]
-    Supervisor.start_link(children, opts)
+
+    with {:ok, pid} <- Supervisor.start_link(children, opts), do: {:ok, pid, []}
+  end
+
+  # The VM is stopping (SIGTERM): drain every instance in this tree before the
+  # tree stops (`Ankusa.Instance.Drain`). An instance an embedding app or
+  # `ankusa_server` supervises itself is drained by that app's own `prep_stop/1`.
+  @impl true
+  def prep_stop(state) do
+    instances()
+    |> Task.async_stream(&Ankusa.Instance.Drain.run/1, timeout: :infinity, ordered: false)
+    |> Stream.run()
+
+    state
+  end
+
+  defp instances do
+    for {{Ankusa.Instance, instance}, pid, _type, _modules} <-
+          Supervisor.which_children(Ankusa.Supervisor),
+        is_pid(pid),
+        do: instance
+  catch
+    :exit, _ -> []
   end
 
   # The default instance boots from application env only if `autostart` is
