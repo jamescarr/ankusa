@@ -867,4 +867,184 @@ defmodule Ankusa.ReplayTest do
                Replay.start(config.instance, kind: :lifecycle, since: 10, until: 5)
     end
   end
+
+  describe "DEL-6 filters" do
+    defp write_dead_row!(inst, seq, env, sink, at, extra \\ %{}) do
+      row =
+        Map.merge(
+          %{module: RecordSink, state: :dead, attempts: 2, at: at, error: "x", size: env.size},
+          extra
+        )
+
+      :ok =
+        Store.write(
+          inst,
+          [
+            {:put, :hooks, Keys.hook(seq), Envelope.to_binary(env)},
+            {:put, :deliveries, Keys.delivery(seq, sink), Deliveries.encode_row(row)}
+          ] ++
+            dead_index_ops(
+              inst,
+              seq,
+              sink,
+              at,
+              env.source_id,
+              env.id,
+              env.tenant_id || "default",
+              env.size
+            ),
+          sync: true
+        )
+
+      env
+    end
+
+    defp tenant_env(tenant), do: %{build_env("src") | tenant_id: tenant}
+
+    defp two_sinks,
+      do: %{"src" => [sinks: [{RecordSink, pid: self()}, {RecordSink, pid: self()}]]}
+
+    defp await_done(inst, id) do
+      poll(fn ->
+        case Replay.get(inst, id) do
+          {:ok, %{state: :done} = job} -> {:ok, job}
+          _ -> :retry
+        end
+      end)
+    end
+
+    defp dead_ids(inst, opts \\ []) do
+      {:ok, %{entries: entries}} = Ankusa.Queue.dead(inst, [limit: 100] ++ opts)
+      entries |> Enum.map(& &1.envelope.id) |> MapSet.new()
+    end
+
+    test "tenant filter: a job scoped to one tenant revives only that tenant's rows" do
+      config = start(%{"src" => [sinks: [{RecordSink, pid: self()}]]})
+      inst = config.instance
+      at = System.system_time(:millisecond) - 60_000
+
+      acme =
+        for i <- 1..4, do: write_dead_row!(inst, 2_000_000 + i, tenant_env("acme"), 0, at)
+
+      globex =
+        for i <- 1..3, do: write_dead_row!(inst, 2_100_000 + i, tenant_env("globex"), 0, at)
+
+      assert {:ok, :created, job} =
+               Replay.start(inst, %{kind: :dlq, tenants: ["acme"], rate: 500})
+
+      assert job.filter.tenants == ["acme"]
+
+      acme_ids = MapSet.new(acme, & &1.id)
+      assert collect_replayed(MapSet.new(), acme_ids, job.id) == acme_ids
+
+      done = await_done(inst, job.id)
+      assert done.moved == 4
+
+      # Only globex's rows are still dead, and none of them was delivered.
+      assert dead_ids(inst) == MapSet.new(globex, & &1.id)
+      refute_receive {:replayed, _id, _replay_id}, 200
+
+      assert {:ok, %{dead: 0}} = Deliveries.dead_for_tenant(inst, "acme")
+      assert {:ok, %{dead: 3}} = Deliveries.dead_for_tenant(inst, "globex")
+    end
+
+    test "sink filter: a job for one sink index revives only that sink's rows" do
+      config = start(two_sinks())
+      inst = config.instance
+      at = System.system_time(:millisecond) - 60_000
+      env = build_env("src")
+      second = build_env("src")
+
+      write_dead_row!(inst, 3_000_001, env, 0, at)
+      write_dead_row!(inst, 3_000_001, env, 1, at + 1)
+      write_dead_row!(inst, 3_000_002, second, 1, at + 2)
+
+      assert {:ok, :created, job} = Replay.start(inst, %{kind: :dlq, sink: 1, rate: 500})
+      assert collect_replayed(MapSet.new(), MapSet.new([env.id, second.id]), job.id)
+
+      assert %{moved: 2} = await_done(inst, job.id)
+      assert {:ok, %{total: 1, entries: [%{sink: 0}]}} = Ankusa.Queue.dead(inst, limit: 10)
+
+      assert {:error, {:invalid, "sink"}} = Replay.start(inst, %{kind: :dlq, sink: -1})
+    end
+
+    test "error_class filter: only rows dead-lettered as that class are revived" do
+      config = start(%{"src" => [sinks: [{RecordSink, pid: self()}]]})
+      inst = config.instance
+      at = System.system_time(:millisecond) - 60_000
+
+      transient =
+        write_dead_row!(inst, 4_000_001, build_env("src"), 0, at, %{error_class: :transient})
+
+      permanent =
+        write_dead_row!(inst, 4_000_002, build_env("src"), 0, at, %{error_class: :permanent})
+
+      unclassified = write_dead_row!(inst, 4_000_003, build_env("src"), 0, at)
+
+      assert {:ok, :created, job} =
+               Replay.start(inst, %{kind: :dlq, error_class: :transient, rate: 500})
+
+      assert collect_replayed(MapSet.new(), MapSet.new([transient.id]), job.id)
+      assert %{moved: 1, scanned: 3} = await_done(inst, job.id)
+
+      # What the job left is still listed, and still filterable by its class.
+      assert dead_ids(inst) == MapSet.new([permanent.id, unclassified.id])
+      assert dead_ids(inst, error_class: :permanent) == MapSet.new([permanent.id])
+      assert dead_ids(inst, error_class: :transient) == MapSet.new()
+
+      assert {:error, {:invalid, "error_class"}} =
+               Replay.start(inst, %{kind: :dlq, error_class: :bogus})
+
+      # Quarantine jobs have no sink or class: a typo, not a dropped filter.
+      assert {:error, {:invalid, "error_class"}} =
+               Replay.start(inst, %{kind: :quarantine, error_class: :transient})
+    end
+
+    test "job_id: the same id answers the same job in any state, a different spec is refused" do
+      config = start(%{"src" => [sinks: [{RecordSink, pid: self()}]]})
+      inst = config.instance
+      at = System.system_time(:millisecond) - 60_000
+      env = write_dead_row!(inst, 5_000_001, tenant_env("acme"), 0, at)
+      job_id = UUIDv7.generate()
+      spec = %{kind: :dlq, tenants: ["acme"], job_id: job_id, rate: 500}
+
+      assert {:ok, :created, job} = Replay.start(inst, spec)
+      assert job.id == job_id
+      assert collect_replayed(MapSet.new(), MapSet.new([env.id]), job_id)
+      assert %{moved: 1} = await_done(inst, job_id)
+
+      # Finished, and still the answer: a fleet command started again gets it.
+      assert {:ok, :existing, again} = Replay.start(inst, spec)
+      assert %{id: ^job_id, state: :done, moved: 1} = again
+
+      # The id belongs to that job: a different filter on it is not a second job.
+      assert {:error, {:invalid, "job_id"}} =
+               Replay.start(inst, %{spec | tenants: ["globex"]})
+
+      assert {:error, {:invalid, "job_id"}} = Replay.start(inst, %{kind: :dlq, job_id: "nope"})
+    end
+
+    test "job_id survives a restart: the resumed node answers the job it had" do
+      config = start(%{"src" => [sinks: [{RecordSink, pid: self()}]]})
+      inst = config.instance
+      dead_rows(inst, 3)
+      job_id = UUIDv7.generate()
+      spec = %{kind: :dlq, job_id: job_id, rate: 500}
+
+      assert {:ok, :created, _job} = Replay.start(inst, spec)
+      assert %{moved: 3} = await_done(inst, job_id)
+
+      # The test supervisor restarts the instance; the replayer loads its jobs again.
+      :ok = Supervisor.stop(Ankusa.whereis(inst, :instance))
+
+      poll(fn ->
+        case Replay.list(inst) do
+          {:ok, [%{id: ^job_id} | _]} -> {:ok, :loaded}
+          _ -> :retry
+        end
+      end)
+
+      assert {:ok, :existing, %{id: ^job_id, state: :done}} = Replay.start(inst, spec)
+    end
+  end
 end

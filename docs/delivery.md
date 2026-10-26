@@ -168,7 +168,9 @@ rows that die again during the replay are never picked up twice by one job.
 Replayed deliveries keep the hook's original `id`, `dedupe_key` and
 `idempotency_key` and carry the job's `replay_id` in the message, the broker
 headers, and the HTTP headers. Manage jobs with `GET /v1/replays`,
-`GET|PATCH /v1/replays/{id}`.
+`GET|PATCH /v1/replays/{id}`. A `dlq` job can be limited to a `tenant`, a `sink`
+and an `error_class`, and `docker-entrypoint replay` runs one on every node of
+a fleet ([Replaying across a fleet](#replaying-across-a-fleet)).
 See the runbook in [`Ankusa.Replay`](https://hexdocs.pm/ankusa/Ankusa.Replay.html).
 
 ## Direct mode
@@ -1297,9 +1299,10 @@ original `id`, `dedupe_key` and `idempotency_key` and carry the job id as
 is **asynchronous**: by the time a page is moved the rows are out of the DLQ
 and the pipeline will deliver them (a row that fails again is dead-lettered
 again). It needs the `:dispatch` role on this node. Filters (`:source_id`,
-`:id`, `:since`, `:until`, unix-ms bounds) are all optional and combine as
-AND; a `dlq` job touches only rows dead-lettered at or before its own
-creation, so rows that die again during the replay are never picked up twice.
+`:id`, `:sink`, `:error_class`, `:since`, `:until`; the times are unix-ms
+bounds) are all optional and combine as AND; a `dlq` job touches only rows
+dead-lettered at or before its own creation, so rows that die again during the
+replay are never picked up twice.
 `kind: :archive` re-sends archived hooks over a `received_at` window instead,
 `kind: :quarantine` releases held hooks that now verify (see
 [Quarantine](#quarantine)), and `kind: :lifecycle` re-emits lifecycle events from
@@ -1327,6 +1330,75 @@ synced chunks. A
 `lifecycle` job's events belong to their tenant (a route's to `default`), so the
 same filter selects them.
 Delivery is at-least-once, so a replayed hook is a redelivery.
+
+### Listing the DLQ
+
+`GET /v1/dlq` is a bounded read, however many rows the DLQ holds: it never
+folds the dead family. Newest first, `limit` entries (default 100, at most
+1 000) from a reverse range scan, and a `next_cursor` to pass back as `cursor`
+for the next page (`null` on the last). A page of a 10-million-row DLQ is
+`limit` index reads plus one row and one hook read per entry it returns.
+
+| Query | Meaning |
+| --- | --- |
+| `tenant` | one tenant (a token limited to some tenants is held to them; see above) |
+| `source_id` | the hook's source |
+| `sink` | the sink's index in the source (`0` is the first) |
+| `error_class` | `permanent` (the sink said it will never work, or the source, the sink or the hook is gone), `throttled` (the destination asked for a pause and the retry horizon ended it) or `transient` (anything else that kept failing until the retry policy gave up) |
+| `since` | dead-lettered at or after (unix ms) |
+| `cursor` | the `next_cursor` of the previous page; anything else is `400 invalid_filter` (`cursor`) |
+
+Every entry carries `sink` and `error_class` beside `reason`. A row written
+before dead letters carried a class has `error_class: null` and matches no
+`error_class` filter.
+
+No scan examines more than 10 000 dead keys. A filter that matches little
+(`source_id`, `sink`, `error_class`) can therefore return a short page, or an
+empty one, with `next_cursor` set: ask again with it until it is `null`.
+`total` is exact where it is free: a counter read when the only filter is the
+tenant (or none), and the count of the matches when a filtered scan reached the
+end of the DLQ inside that first page. Otherwise it is `null`.
+The bound and the paging are proved by `GET /v1/dlq is bounded` and
+`GET /v1/dlq cursor page` in `admin/router_test.exs`.
+
+### Replaying across a fleet
+
+Replay jobs live on one node, because a node's DLQ is its own store. A `dlq` job
+also takes `sink` and `error_class` (the same values as the listing), beside
+`tenant`, `source_id`, `id`, `since` and `until`; they combine as AND, and a row
+of another class stays dead. Every body may carry a `job_id`, a lowercase UUID
+that names the job: asked again with the same `job_id`, kind and filter, a node
+answers the job it has (`200`, whatever its state) instead of creating a second
+one, and the same `job_id` on a different kind or filter is `400 invalid_filter`
+(`job_id`).
+
+`docker-entrypoint replay` is the fleet's client for that, with no clustering in
+the nodes: it sends the same `POST /v1/replays`, with one `job_id`, to every
+node's admin API and follows each job to the end.
+
+```sh
+docker run --rm -e ANKUSA_ADMIN_TOKEN jamescarr/ankusa replay \
+  --nodes ankusa-0.ankusa:4002,ankusa-1.ankusa:4002,ankusa-2.ankusa:4002 \
+  --filter tenant=acme,error_class=transient --rate 200
+# replay 0192f1c0-… kind=dlq: 3 node(s): …
+#   ankusa-0.ankusa:4002: running moved=1200 scanned=1200 …
+# replay 0192f1c0-… kind=dlq nodes=3 done=3 running=0 … moved=3600 scanned=3600 …
+```
+
+`--nodes` takes `[scheme://]host[:port]` entries (port `4002`), or one DNS name
+that resolves to every node (a headless service): each address is a node. A node
+that does not answer is asked again every second until `--timeout` (default
+3600 s); a node that was killed resumes its job from the cursor it committed,
+and one that comes back with an empty store is given the job again under the
+same id. Started again with the same `--job-id` after the command itself died,
+it finds the jobs where they are. It exits `0` when every node is `done`, `1`
+otherwise, and prints the totals either way. `--filter` takes `tenant`,
+`source_id`, `id`, `error_class`, `sink`, `since`, `until` (and `from`, `to`,
+`sinks=0+2` for an `archive` job); `--kind`, `--rate`, `--max-lag-ms`, `--token`
+(default `ANKUSA_ADMIN_TOKEN`) and `--cacertfile` as in the admin API. The
+token needs `replays:write`, `dlq:write` and the tenants of the filter (or
+`tenant:*`). The fleet drill is `examples/fleet-e2e/run.sh --replay-drill`
+([testing](testing.md#fleet-end-to-end-compose-nightly)).
 
 ### Retention and the DLQ ceilings
 

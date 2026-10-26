@@ -25,6 +25,14 @@ defmodule Ankusa.Admin.RouterTest do
     def deliver(_env, _ctx, _opts), do: {:error, :always}
   end
 
+  # Fails permanently: dead-lettered at once, whatever the retry policy says.
+  defmodule PermanentFailSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(_env, _ctx, _opts), do: {:error, {:permanent, :nope}}
+  end
+
   # Fails while its agent holds `false`; once it holds `true` it delivers the
   # body to the test pid.
   defmodule GatedSink do
@@ -237,6 +245,122 @@ defmodule Ankusa.Admin.RouterTest do
              JSON.decode!(call(config.instance, :get, "/v1/dlq?limit=5000").resp_body)
 
     assert length(entries) == 1000
+  end
+
+  defp walk_dlq(inst, query, cursor \\ nil, pages \\ []) do
+    assert length(pages) < 50, "the DLQ walk does not end"
+    path = "/v1/dlq?" <> query <> if(cursor, do: "&cursor=" <> cursor, else: "")
+    page = JSON.decode!(call(inst, :get, path).resp_body)
+
+    case page["next_cursor"] do
+      nil -> Enum.reverse([page | pages])
+      next -> walk_dlq(inst, query, next, [page | pages])
+    end
+  end
+
+  test "GET /v1/dlq cursor page: next_cursor walks the DLQ newest first and ends with null" do
+    config = start_dlq_instance(%{"a" => [sinks: [{AlwaysFailSink, []}]]})
+    envs = for n <- 1..5, do: ingest!(config, "a", ~s({"n":#{n}}))
+    assert {:ok, _settled} = Pipeline.tick(config.instance)
+
+    pages = walk_dlq(config.instance, "limit=2")
+
+    assert Enum.map(pages, &length(&1["entries"])) == [2, 2, 1]
+
+    assert Enum.flat_map(pages, & &1["entries"]) |> Enum.map(& &1["id"]) ==
+             envs |> Enum.reverse() |> Enum.map(& &1.id)
+
+    # No filter: the node's counter, on every page.
+    assert Enum.map(pages, & &1["total"]) == [5, 5, 5]
+
+    assert [%{"next_cursor" => first}, %{"next_cursor" => second}, %{"next_cursor" => nil}] =
+             pages
+
+    assert is_binary(first) and first != second
+
+    # A cursor this API did not hand out is a 400, not a silent first page.
+    for bad <- ["garbage", "AAAA", Base.url_encode64("short", padding: false)] do
+      conn = call(config.instance, :get, "/v1/dlq?cursor=#{bad}")
+      assert conn.status == 400
+      assert %{"error" => "invalid_filter", "field" => "cursor"} = JSON.decode!(conn.resp_body)
+    end
+  end
+
+  test "GET /v1/dlq filters by sink and error_class and pages a filtered listing" do
+    config =
+      start_dlq_instance(%{
+        "a" => [sinks: [{AlwaysFailSink, []}, {PermanentFailSink, []}]]
+      })
+
+    for n <- 1..3, do: ingest!(config, "a", ~s({"n":#{n}}))
+    assert {:ok, _settled} = Pipeline.tick(config.instance)
+    inst = config.instance
+
+    assert %{"total" => 6} = JSON.decode!(call(inst, :get, "/v1/dlq").resp_body)
+
+    assert %{"total" => 3, "entries" => entries} =
+             JSON.decode!(call(inst, :get, "/v1/dlq?sink=1").resp_body)
+
+    assert Enum.all?(entries, &(&1["sink"] == 1 and &1["error_class"] == "permanent"))
+
+    assert Enum.all?(
+             entries,
+             &(&1["reason"] == inspect({:sink, PermanentFailSink, {:permanent, :nope}}))
+           )
+
+    assert %{"total" => 3, "entries" => entries} =
+             JSON.decode!(call(inst, :get, "/v1/dlq?error_class=transient").resp_body)
+
+    assert Enum.all?(entries, &(&1["sink"] == 0 and &1["error_class"] == "transient"))
+
+    assert %{"total" => 0, "entries" => []} =
+             JSON.decode!(call(inst, :get, "/v1/dlq?sink=7").resp_body)
+
+    assert %{"total" => 0, "entries" => []} =
+             JSON.decode!(call(inst, :get, "/v1/dlq?sink=0&error_class=permanent").resp_body)
+
+    # A filtered walk: a page short of `limit` never ends it, only a null cursor.
+    pages = walk_dlq(inst, "error_class=transient&limit=2")
+    assert Enum.map(pages, &length(&1["entries"])) == [2, 1]
+    assert Enum.map(pages, & &1["total"]) == [nil, nil]
+
+    for {query, field} <- [
+          {"sink=-1", "sink"},
+          {"sink=x", "sink"},
+          {"error_class=weird", "error_class"}
+        ] do
+      conn = call(inst, :get, "/v1/dlq?" <> query)
+      assert conn.status == 400
+      assert %{"error" => "invalid_filter", "field" => ^field} = JSON.decode!(conn.resp_body)
+    end
+  end
+
+  test "GET /v1/dlq is bounded: a filter that matches nothing examines a fixed number of keys per page" do
+    config = start_dlq_instance(%{"a" => [sinks: [{AlwaysFailSink, []}]]})
+    inst = config.instance
+    at = System.system_time(:millisecond) - 60_000
+
+    for chunk <- Enum.chunk_every(1..10_500, 1_000) do
+      ops =
+        Enum.flat_map(
+          chunk,
+          &dead_index_ops(inst, 9_000_000 + &1, 0, at + &1, "other", "id-#{&1}")
+        )
+
+      :ok = Store.write(inst, ops, sync: true)
+    end
+
+    # The first page examines 10 000 keys and stops, short, with a cursor.
+    assert %{"entries" => [], "total" => nil, "next_cursor" => cursor} =
+             JSON.decode!(call(inst, :get, "/v1/dlq?source_id=nomatch").resp_body)
+
+    assert is_binary(cursor)
+
+    # The next reaches the oldest 500 and ends.
+    assert %{"entries" => [], "total" => nil, "next_cursor" => nil} =
+             JSON.decode!(
+               call(inst, :get, "/v1/dlq?source_id=nomatch&cursor=#{cursor}").resp_body
+             )
   end
 
   test "a non-integer since or limit is 400 invalid_filter", %{inst: inst} do
@@ -1897,6 +2021,80 @@ defmodule Ankusa.Admin.RouterTest do
 
       assert folds == [:dead_by_tenant]
       assert hook_reads == [1]
+    end
+
+    test "tenant scoped dlq cursor page walks one tenant newest first" do
+      config = start_tenant_instance(failing_sources())
+      inst = config.instance
+
+      # the tenants' burst limits: acme 2, globex 4
+      acme = for n <- 1..2, do: ingest!(config, "acme.hooks", ~s({"n":#{n}}))
+      globex = for n <- 1..4, do: ingest!(config, "globex.hooks", ~s({"n":#{n}}))
+      assert {:ok, _settled} = Pipeline.tick(inst)
+
+      ids = fn envs -> envs |> Enum.reverse() |> Enum.map(& &1.id) end
+
+      # `total` is the tenant's own counter on every page of the walk.
+      assert %{"total" => 4, "entries" => first, "next_cursor" => cursor} =
+               json(tcall(inst, :get, "/v1/dlq?limit=3", "globex"))
+
+      assert %{"total" => 4, "entries" => [last], "next_cursor" => nil} =
+               json(tcall(inst, :get, "/v1/dlq?limit=3&cursor=#{cursor}", "globex"))
+
+      assert Enum.map(first ++ [last], & &1["id"]) == ids.(globex)
+
+      # A source filter reads each candidate's hook source: no total mid-walk.
+      path = "/v1/dlq?limit=3&source_id=globex.hooks"
+
+      assert %{"total" => nil, "entries" => [_, _, _], "next_cursor" => next} =
+               json(tcall(inst, :get, path, "globex"))
+
+      assert %{"total" => nil, "entries" => [_], "next_cursor" => nil} =
+               json(tcall(inst, :get, path <> "&cursor=#{next}", "globex"))
+
+      # Two tenants merge by key: the page is the newest rows of both.
+      assert %{"total" => 6, "entries" => first, "next_cursor" => next} =
+               json(tcall(inst, :get, "/v1/dlq?limit=4", "both"))
+
+      assert %{"total" => 6, "entries" => rest, "next_cursor" => nil} =
+               json(tcall(inst, :get, "/v1/dlq?limit=4&cursor=#{next}", "both"))
+
+      assert Enum.map(first ++ rest, & &1["id"]) == ids.(acme ++ globex)
+    end
+
+    test "a listing for more than eight tenants scans the global family with the tenants as a predicate" do
+      tenants = for i <- 1..10, do: "t#{i}"
+
+      sources =
+        Map.new(tenants, &{"#{&1}.hooks", [tenant_id: &1, sinks: [{AlwaysFailSink, []}]]})
+
+      config = start_tenant_instance(sources)
+      inst = config.instance
+      envs = for t <- tenants, do: ingest!(config, "#{t}.hooks", "{}")
+      assert {:ok, _settled} = Pipeline.tick(inst)
+
+      {first, calls} =
+        store_calls(fn -> Ankusa.Queue.dead(inst, tenants: tenants, limit: 4) end)
+
+      assert {:ok, %{total: 10, entries: entries, next_cursor: cursor}} = first
+      assert length(entries) == 4 and is_binary(cursor)
+      assert for({:fold, family} <- calls, do: family) == [:dead]
+
+      walk = fn walk, cursor, acc ->
+        assert {:ok, %{entries: page, next_cursor: next}} =
+                 Ankusa.Queue.dead(inst, tenants: tenants, limit: 4, cursor: cursor)
+
+        if next, do: walk.(walk, next, acc ++ page), else: acc ++ page
+      end
+
+      all = walk.(walk, cursor, entries)
+      assert Enum.map(all, & &1.envelope.id) == envs |> Enum.reverse() |> Enum.map(& &1.id)
+
+      # Fewer tenants than the hosts of the rows: the others' rows are not listed.
+      assert {:ok, %{total: 2, entries: two, next_cursor: nil}} =
+               Ankusa.Queue.dead(inst, tenants: ["t1", "t2"], limit: 10)
+
+      assert length(two) == 2
     end
 
     test "tenant scoped quarantine purge" do

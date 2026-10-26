@@ -98,7 +98,8 @@ docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
 
 `check-config` exits `78` (`EX_CONFIG`) on a bad file, which is also how the
 container fails at startup: a message, not a crash dump. `version` prints the
-server and core versions.
+server and core versions. `replay` starts one replay job on every node of a
+fleet and follows it ([below](#replay-a-whole-fleet)).
 
 ### Env overrides
 
@@ -204,7 +205,8 @@ Operating Ankusa without a shell:
 ```sh
 curl localhost:4002/v1/config                 # the effective config, secrets redacted
 curl localhost:4002/v1/wal                    # this node's store stats (409 under wal.type: none)
-curl 'localhost:4002/v1/dlq?limit=10'         # dead-lettered hooks (metadata only)
+curl 'localhost:4002/v1/dlq?limit=10'         # dead-lettered hooks (metadata only), newest first
+curl 'localhost:4002/v1/dlq?error_class=transient&sink=0&cursor=<next_cursor>'   # filter, next page
 curl -XPOST localhost:4002/v1/replays -d '{"kind":"dlq","id":"<id from GET /v1/dlq>","rate":100}'
 curl localhost:4002/v1/replays                # every replay job, newest first
 curl -XPATCH localhost:4002/v1/replays/<job-id> -d '{"state":"cancelled"}'
@@ -221,6 +223,28 @@ for the WAL, `409 wal_disabled`) when you ask the wrong node, and
 `503 store_unavailable` when the store cannot be read. Metrics are node-local
 too: an edge node exports ingest series, a worker exports dispatch and
 compaction series. Scrape every node.
+
+#### Replay a whole fleet
+
+Replay jobs are per node. `replay` is the command that starts one on every node
+and follows them, so an incident that left dead letters on a hundred nodes is one
+command, not a hundred `curl`s:
+
+```sh
+docker run --rm -e ANKUSA_ADMIN_TOKEN jamescarr/ankusa replay \
+  --nodes ankusa-0.ankusa:4002,ankusa-1.ankusa:4002,ankusa-2.ankusa:4002 \
+  --filter tenant=acme,error_class=transient --rate 200
+# replay 0192f1c0-… kind=dlq nodes=3 done=3 running=0 paused=0 … moved=3600 scanned=3600 …
+```
+
+Every node gets the same `POST /v1/replays` with one `job_id`, so running the
+command again (`--job-id` to name the job) finds the jobs where they are: a node
+that was killed resumes from the cursor it committed. It exits `0` when every
+node is `done`. `--nodes` also takes one DNS name that resolves to every node
+(a headless service), `--filter` the keys of the replay body (`tenant`,
+`source_id`, `id`, `error_class`, `sink`, `since`, `until`), and `--timeout`
+bounds the wait. The options, and what the token needs, are in
+[Replaying across a fleet](https://github.com/jamescarr/ankusa/blob/main/docs/delivery.md#replaying-across-a-fleet).
 
 The HTTP contracts are in
 [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml),

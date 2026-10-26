@@ -117,6 +117,21 @@ nothing undelivered to lose and `disk` would look as safe as `dual`.
 and its replacement delivers again from the backup and the log (same hook id, same
 `idempotency_key`); the consumer dedupes on the key and `duplicate_hooks` stays 0.
 
+### `--replay-drill`: one tenant's DLQ, replayed across the fleet
+
+```sh
+examples/fleet-e2e/run.sh --replay-drill
+# replay drill: replayed=120 duplicates=0 redelivered=<n> untouched=120
+```
+
+| Phase | What it does | What it asserts |
+| --- | --- | --- |
+| replay drill | RabbitMQ is stopped; `DRILL_N` (60) hooks of each of two tenants (`acme`, `globex`: the sources `drill-acme` and `drill-globex`, one attempt each, a one-second horizon) go to each node and dead-letter there; RabbitMQ and the consumer return; `docker-entrypoint replay --nodes ankusa-a:4002,ankusa-b:4002 --filter tenant=acme` starts one job, with one job id, on both nodes at `REPLAY_RATE` (10) rows per second each; **`ankusa-a` is killed while it moves** and started again | the command ends with both nodes `done` and `moved` = every acme row; acme's DLQ is empty on both nodes and globex's is untouched, the consumer received none of it; every acme hook is in `processed_webhooks` under the id it was acked with; `duplicates=0` |
+
+The nodes' admin ports are not published, so the drill reads their DLQs from
+inside their containers, and runs the command in a one-off container of the
+`claim-check` service (the same image).
+
 ### On kind, from the Helm chart
 
 `examples/fleet-e2e/kind.sh` (`mise run e2e fleet`) runs the `disk` fleet from

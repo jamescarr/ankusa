@@ -93,11 +93,23 @@ routes:
     - id: demo
       path: /webhooks/demo
       methods: [POST]
+    - id: drill-acme
+      path: /webhooks/drill-acme
+      methods: [POST]
+    - id: drill-globex
+      path: /webhooks/drill-globex
+      methods: [POST]
 
 source_store:
   type: redis
   url: "${REDIS_URL}"
   namespace: ankusa:sources:fleet
+
+# No circuit breakers: `run.sh --replay-drill` dead-letters a source's hooks while
+# RabbitMQ is stopped, and a breaker that opened then would park the replayed rows
+# (a node that was not restarted keeps it open) instead of delivering them.
+dispatch:
+  breaker_failures: 0
 
 # Provider event keys collapse fleet-wide: the node that receives an event claims
 # its key in Redis before committing, so the same event retried on the other node
@@ -127,3 +139,31 @@ sources:
         routing_key: ankusa.demo
         # Low so the fat hook the run sends takes the claim path.
         inline_max_bytes: 8192
+
+  # `run.sh --replay-drill`: two tenants' sources whose deliveries dead-letter at
+  # once while RabbitMQ is stopped (one attempt, a one-second horizon), so each
+  # node holds a DLQ with both tenants' rows in it. No `dedupe`: the consumer's
+  # idempotency key is the hook id, so a hook the replay duplicated shows as a
+  # second hook id on one row, and `duplicates` is that count.
+  drill-acme:
+    tenant: acme
+    verify: {type: none}
+    on_verify_failure: accept_flag
+    retry: {max_attempts: 1, max_elapsed_ms: 1000}
+    sinks:
+      - type: rabbitmq
+        url: "${RABBITMQ_URL}"
+        exchange: ankusa.events
+        exchange_type: topic
+        routing_key: ankusa.drill
+  drill-globex:
+    tenant: globex
+    verify: {type: none}
+    on_verify_failure: accept_flag
+    retry: {max_attempts: 1, max_elapsed_ms: 1000}
+    sinks:
+      - type: rabbitmq
+        url: "${RABBITMQ_URL}"
+        exchange: ankusa.events
+        exchange_type: topic
+        routing_key: ankusa.drill

@@ -165,7 +165,11 @@ export interface paths {
         /**
          * List dead-lettered hooks
          * @description Newest first, metadata only — bodies are never returned. Results are
-         *     this node's dead delivery rows; with several dispatch nodes, ask each one.
+         *     this node's dead delivery rows; with several dispatch nodes, ask each one
+         *     (`docker-entrypoint replay` is the fleet's view of replays). A page is
+         *     read in a bounded number of store reads: no scan examines more than
+         *     10 000 dead keys, so a filter that matches little can return a short, or
+         *     empty, page with `next_cursor` set. Keep asking until it is `null`.
          */
         get: operations["listDeadLetters"];
         put?: never;
@@ -734,11 +738,32 @@ export interface components {
             content_type: string | null;
             /** @description `inspect/1` of the give-up reason, e.g. `{:sink, Ankusa.Sink.Http, {:status, 503}}`. */
             reason: string;
+            /** @description The index of the sink in the source, `0` the first. */
+            sink: number | null;
+            /**
+             * @description Why dispatch gave up: `permanent` (the sink said it will never work,
+             *     or the source, the sink or the hook is gone), `throttled` (the
+             *     destination asked for a pause and the retry horizon ended it) or
+             *     `transient`. `null` for a row written before dead letters carried a class.
+             * @enum {string|null}
+             */
+            error_class: "permanent" | "throttled" | "transient" | null;
         };
         DlqPage: {
-            /** @description Number of matching entries, before `limit`. */
-            total: number;
+            /**
+             * @description Number of matching entries, before `limit`, when it is known without
+             *     a scan: a counter (no filter but the tenant), or the count of a
+             *     filtered scan that reached the end of the DLQ within this first page.
+             *     `null` otherwise.
+             */
+            total: number | null;
             entries: components["schemas"]["DlqEntry"][];
+            /**
+             * @description Pass as `cursor` for the next page; `null` on the last. A page can
+             *     be shorter than `limit`, or empty, while it is set: no scan examines
+             *     more than 10 000 dead keys.
+             */
+            next_cursor: string | null;
         };
         QuarantineEntry: {
             id: string;
@@ -849,6 +874,32 @@ export interface components {
              * @default 2000
              */
             max_lag_ms: number;
+            /**
+             * @description Only this tenant's rows. A caller limited to some tenants is held to
+             *     the tenants it holds whatever the body says.
+             */
+            tenant?: string;
+            /**
+             * @description Only rows of the sink at this index in the source (`0` is the first)
+             *     (`dlq` only).
+             */
+            sink?: number;
+            /**
+             * @description Only rows dead-lettered as this class (`dlq` only); a row written
+             *     before dead letters carried a class is never revived by it. The
+             *     others stay dead.
+             * @enum {string}
+             */
+            error_class?: "permanent" | "throttled" | "transient";
+            /**
+             * @description The id of the job (a lowercase UUID), instead of a generated one.
+             *     Asking again with the same `job_id`, kind and filter answers that
+             *     job (`200`, in any state) instead of creating a second one; the
+             *     same `job_id` on another kind or filter is `400 invalid_filter`
+             *     (`job_id`). `docker-entrypoint replay` sends one `job_id` to every
+             *     node of a fleet.
+             */
+            job_id?: string;
         };
         ReplayPatch: {
             /** @enum {string} */
@@ -1598,10 +1649,25 @@ export interface operations {
             query?: {
                 /** @description Exact source id to filter on. */
                 source_id?: string;
+                /** @description Only this tenant's dead letters. A caller limited to some tenants is held to them. */
+                tenant?: string;
+                /** @description Only rows of the sink at this index in the source (`0` is the first). */
+                sink?: number;
+                /**
+                 * @description Only rows dead-lettered as this class; a row written before dead
+                 *     letters carried a class matches none.
+                 */
+                error_class?: "permanent" | "throttled" | "transient";
                 /** @description Inclusive lower bound on when the hook was dead-lettered, in unix milliseconds. */
                 since?: number;
                 /** @description Maximum entries returned. Values outside 0..1000 are clamped to that range. */
                 limit?: number;
+                /**
+                 * @description The `next_cursor` of the previous page (an opaque, URL-safe string);
+                 *     the page resumes below it. Anything else is `400 invalid_filter`
+                 *     (`cursor`).
+                 */
+                cursor?: string;
             };
             header?: never;
             path?: never;
@@ -1609,7 +1675,11 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Matching entries, newest first. `total` counts all matches, before `limit`. */
+            /**
+             * @description Matching entries, newest first, and a `next_cursor` for the next page.
+             *     `total` is a counter when no filter but the tenant is set, and `null`
+             *     when it cannot be known without a scan.
+             */
             200: {
                 headers: {
                     [name: string]: unknown;

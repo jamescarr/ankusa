@@ -29,7 +29,9 @@ defmodule Ankusa.Replay do
 
   ## Runbook for a Salesforce-sized incident
 
-    1. One job per node — a fleet replay is one `POST /v1/replays` per node.
+    1. One job per node — a fleet replay is one `POST /v1/replays` per node, with
+       the same `job_id`: `docker-entrypoint replay --nodes … --filter …` (the
+       server image) does that and aggregates the status.
     2. Start low: `rate: 100` or so, and watch the node's metrics.
     3. PATCH `rate` upward while live latency stays flat. The replay takes only
        spare capacity, so it is always safe to leave running; the only knob is
@@ -59,25 +61,46 @@ defmodule Ankusa.Replay do
   @min_max_lag_ms 100
   @max_max_lag_ms 600_000
 
-  @dlq_keys [:kind, :source_id, :id, :since, :until, :tenants, :rate, :max_lag_ms]
-  @archive_keys [:kind, :from, :to, :source_id, :tenants, :sinks, :rate, :max_lag_ms]
-  @lifecycle_keys [:kind, :since, :until, :tenants, :rate, :max_lag_ms]
+  @dlq_keys [
+    :kind,
+    :source_id,
+    :id,
+    :since,
+    :until,
+    :tenants,
+    :sink,
+    :error_class,
+    :job_id,
+    :rate,
+    :max_lag_ms
+  ]
+  @quarantine_keys [:kind, :source_id, :id, :since, :until, :tenants, :job_id, :rate, :max_lag_ms]
+  @archive_keys [:kind, :from, :to, :source_id, :tenants, :sinks, :job_id, :rate, :max_lag_ms]
+  @lifecycle_keys [:kind, :since, :until, :tenants, :job_id, :rate, :max_lag_ms]
   @patch_keys [:state, :rate, :max_lag_ms]
   @max_tenants 1_000
+  @job_id_re ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
 
   @doc """
   Create a replay job. `spec` (map or keyword) takes the admin API's keys as
   atoms: for `kind: :dlq` and `kind: :quarantine` the optional `:source_id`,
-  `:id`, `:since`, `:until`; for `kind: :archive` the required `:from`, `:to`,
-  and the optional `:source_id` and `:sinks`; for `kind: :lifecycle` the
-  optional `:since` and `:until`; plus `:rate` and `:max_lag_ms`.
-  Every kind also takes `:tenants`, a non-empty list of tenant ids: the job
-  only touches hooks (a lifecycle job, events) owned by those tenants (the
-  admin API sets it from the caller's `tenant:` scopes).
+  `:id`, `:since`, `:until`; for `kind: :dlq` also `:sink` (the sink's index in
+  the source) and `:error_class` (`t:Ankusa.Sink.error_class/0`: only rows
+  dead-lettered as that class are revived); for `kind: :archive` the required
+  `:from`, `:to`, and the optional `:source_id` and `:sinks`; for
+  `kind: :lifecycle` the optional `:since` and `:until`; plus `:rate` and
+  `:max_lag_ms`. Every kind also takes `:tenants`, a non-empty list of tenant
+  ids: the job only touches hooks (a lifecycle job, events) owned by those
+  tenants (the admin API sets it from the caller's `tenant:` scopes), and
+  `:job_id`, a lowercase UUID that names the job: starting again with the same
+  `:job_id`, kind and filter answers `:existing` whatever the job's state, which
+  is how one job is fanned out to every node of a fleet and started again after
+  a failure (`docker-entrypoint replay`).
 
   Returns `{:ok, :created, job}`, or `{:ok, :existing, job}` when a `running`
   or `paused` job with the same kind and filter already exists (a proxy retry
-  is idempotent). `{:error, {:invalid, field}}` names a bad field,
+  is idempotent). `{:error, {:invalid, field}}` names a bad field (`"job_id"`
+  also when that id belongs to a job with another kind or filter),
   `{:error, :too_many_replays}` the 16-job cap, and
   `{:error, {:role_not_enabled, :edge}}` an archive or quarantine job on a
   node without a queue writer (`{:role_not_enabled, :lifecycle}`: a lifecycle
@@ -222,19 +245,32 @@ defmodule Ankusa.Replay do
       # bound — the former would otherwise replay the whole DLQ.
       keys = keys_for(kind)
 
-      with :ok <- reject_unknown(spec, keys) do
+      with :ok <- reject_unknown(spec, keys),
+           :ok <- job_id_ok(Map.get(spec, :job_id)) do
         case kind do
           kind when kind in [:dlq, :quarantine] ->
             with :ok <- optional_field(spec, :source_id, :string),
                  :ok <- optional_field(spec, :id, :string),
                  :ok <- optional_field(spec, :since, :integer),
                  :ok <- optional_field(spec, :until, :integer),
+                 :ok <- sink_ok(Map.get(spec, :sink)),
+                 :ok <- error_class_ok(Map.get(spec, :error_class)),
                  :ok <- tenants_ok(Map.get(spec, :tenants)),
                  :ok <- until_ok(spec) do
               {:ok,
                %{
                  kind: kind,
-                 filter: Map.take(spec, [:source_id, :id, :since, :until, :tenants]),
+                 job_id: Map.get(spec, :job_id),
+                 filter:
+                   Map.take(spec, [
+                     :source_id,
+                     :id,
+                     :since,
+                     :until,
+                     :tenants,
+                     :sink,
+                     :error_class
+                   ]),
                  rate: Map.get(spec, :rate, @default_rate),
                  max_lag_ms: Map.get(spec, :max_lag_ms, @default_max_lag_ms)
                }}
@@ -248,6 +284,7 @@ defmodule Ankusa.Replay do
               {:ok,
                %{
                  kind: :archive,
+                 job_id: Map.get(spec, :job_id),
                  filter: Map.take(spec, [:from, :to, :source_id, :tenants, :sinks]),
                  rate: Map.get(spec, :rate, @default_rate),
                  max_lag_ms: Map.get(spec, :max_lag_ms, @default_max_lag_ms)
@@ -262,6 +299,7 @@ defmodule Ankusa.Replay do
               {:ok,
                %{
                  kind: :lifecycle,
+                 job_id: Map.get(spec, :job_id),
                  filter: Map.take(spec, [:since, :until, :tenants]),
                  rate: Map.get(spec, :rate, @default_rate),
                  max_lag_ms: Map.get(spec, :max_lag_ms, @default_max_lag_ms)
@@ -274,6 +312,7 @@ defmodule Ankusa.Replay do
 
   defp keys_for(:archive), do: @archive_keys
   defp keys_for(:lifecycle), do: @lifecycle_keys
+  defp keys_for(:quarantine), do: @quarantine_keys
   defp keys_for(_kind), do: @dlq_keys
 
   defp validate_patch(patch) do
@@ -371,6 +410,24 @@ defmodule Ankusa.Replay do
           {:error, {:invalid, "to"}}
         end
     end
+  end
+
+  defp job_id_ok(nil), do: :ok
+
+  defp job_id_ok(id) do
+    if is_binary(id) and Regex.match?(@job_id_re, id),
+      do: :ok,
+      else: {:error, {:invalid, "job_id"}}
+  end
+
+  defp sink_ok(nil), do: :ok
+  defp sink_ok(sink) when is_integer(sink) and sink >= 0 and sink <= 0xFFFD, do: :ok
+  defp sink_ok(_), do: {:error, {:invalid, "sink"}}
+
+  defp error_class_ok(nil), do: :ok
+
+  defp error_class_ok(class) do
+    if class in Ankusa.Sink.error_classes(), do: :ok, else: {:error, {:invalid, "error_class"}}
   end
 
   defp sinks_ok(nil), do: :ok

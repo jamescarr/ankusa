@@ -1280,7 +1280,7 @@ defmodule Ankusa.Dispatch.Pipeline do
         item.sink,
         item.row,
         now,
-        error,
+        {dead_class(reason), error},
         item.env
       )
 
@@ -1291,6 +1291,13 @@ defmodule Ankusa.Dispatch.Pipeline do
 
     {state, dead_ops ++ ops, pairs, jobs, sources}
   end
+
+  # The class a dead letter is filed under (`Ankusa.Sink.error_class/0`): a
+  # delivery that ran out of time behind an open breaker was still retryable;
+  # everything else `dead/4` sees (a source or sink that is gone, a hook this
+  # node cannot decode) will never succeed as it is.
+  defp dead_class({:retry_horizon, _module}), do: :transient
+  defp dead_class(_reason), do: :permanent
 
   # Pending rows of a source being deleted (`dead_letter_source/2`): the same
   # dead row, dead key, telemetry and replay count as `dead/4`, from the due
@@ -1324,7 +1331,18 @@ defmodule Ankusa.Dispatch.Pipeline do
               {Deliveries.orphan_ops(from, entry.ord, seq, sink, entry.size, row) ++ ops, dead}
 
             env ->
-              dead_ops = Deliveries.dead_ops(from, entry.ord, seq, sink, row, now, error, env)
+              dead_ops =
+                Deliveries.dead_ops(
+                  from,
+                  entry.ord,
+                  seq,
+                  sink,
+                  row,
+                  now,
+                  {:permanent, error},
+                  env
+                )
+
               {dead_ops ++ ops, [{env, row} | dead]}
           end
         end)
@@ -2124,7 +2142,16 @@ defmodule Ankusa.Dispatch.Pipeline do
           |> bump_replay(row, :dead)
 
         {state,
-         Deliveries.dead_ops(:inflight, job.ord, job.seq, job.sink, row, now, error, job.env), []}
+         Deliveries.dead_ops(
+           :inflight,
+           job.ord,
+           job.seq,
+           job.sink,
+           row,
+           now,
+           {Sink.error_class(class), error},
+           job.env
+         ), []}
     end
   end
 
