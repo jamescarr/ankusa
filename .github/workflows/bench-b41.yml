@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   measure:
-    name: 10 KB cell: this branch, main, F1
+    name: "10 KB cell - this branch, main, F1"
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
