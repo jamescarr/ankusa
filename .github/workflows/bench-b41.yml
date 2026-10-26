@@ -66,10 +66,10 @@ jobs:
             )
           done
 
-      - name: the 10240B cell, interleaved, 5 runs each
+      - name: the 10240B cell, interleaved, 3 runs each
         run: |
           set -euo pipefail
-          for run in 1 2 3 4 5; do
+          for run in 1 2 3; do
             for tree in head main f1; do
               case "$tree" in
                 head) dir="$GITHUB_WORKSPACE" ;;
@@ -91,23 +91,31 @@ jobs:
               | awk -v t="$tree" '{a[NR]=$1} END {printf "%s median %s of %d\n", t, a[int((NR+1)/2)], NR}'
           done
 
-      - name: process-level profile of this branch's cell
+      - name: what limits the cell - roles and compactor toggled, this branch
         run: |
-          set -euo pipefail
+          set -uo pipefail
           cd packages/ankusa
           export MIX_ENV=test ELIXIR_ERL_OPTIONS="+sbwt none +sbwtdcpu none +sbwtdio none"
-          for g in 1 0 1 0; do
-            echo "== group_commit_delay_ms=$g"
-            GC_DELAY=$g mix run bench/b41_profile.exs 2>&1 | grep -v '^\s*$' | grep -v '0.00%  100.00%' | head -45
-          done
-          echo "== with the compactor"
-          COMPACT=1 mix run bench/b41_profile.exs 2>&1 | grep -E '^(acked|compactor|commits|scheduler_busy)'
-          echo "== compactor eprof"
-          COMPACT=1 EPROF_COMPACT=1 N=8000 mix run bench/b41_profile.exs 2>&1 \
-            | awk '/^FUNCTION/{p=1} p&&/^compactor:/{p=0} p' | sort -k4 -n -r | head -30
+          run() {
+            label="$1"; shift
+            for i in 1 2 3; do
+              env "$@" mix run bench/b41_profile.exs > "$RUNNER_TEMP/p.txt" 2>&1
+              echo "$label run $i: $(grep -E '^(acked|commits)=' "$RUNNER_TEMP/p.txt" | tr '\n' ' ')"
+            done
+          }
+          run "full                 " GC_DELAY=1
+          run "full, no linger      " GC_DELAY=0
+          run "no compactor         " COMPACTOR=0
+          run "no dispatch          " ROLES=edge,storage NODRAIN=1
+          run "no dispatch/compactor" ROLES=edge,storage NODRAIN=1 COMPACTOR=0
+          run "edge+storage only, no linger, no compactor" ROLES=edge,storage NODRAIN=1 COMPACTOR=0 GC_DELAY=0
+          echo "== reductions and msacc of the full cell"
+          mix run bench/b41_profile.exs > "$RUNNER_TEMP/p.txt" 2>&1
+          grep -v '^\s*$' "$RUNNER_TEMP/p.txt" | grep -v '0.00%  100.00%' | sed -n 1,60p
           echo "== writer eprof"
-          N=8000 EPROF=1 EPROF_TARGET=writer mix run bench/b41_profile.exs 2>&1 \
-            | awk '/^FUNCTION/{p=1} p&&/^acked=/{p=0} p' | sort -k4 -n -r | head -30
-          echo "== request-process eprof"
-          N=8000 EPROF=1 EPROF_TARGET=client mix run bench/b41_profile.exs 2>&1 \
-            | awk '/^FUNCTION/{p=1} p&&/^acked=/{p=0} p' | sort -k4 -n -r | head -40
+          N=8000 EPROF=1 EPROF_TARGET=writer mix run bench/b41_profile.exs > "$RUNNER_TEMP/p.txt" 2>&1
+          awk '/^FUNCTION/{p=1} p&&/^acked=/{p=0} p' "$RUNNER_TEMP/p.txt" | sort -k4 -n -r | sed -n 1,25p
+          echo "== compactor eprof"
+          COMPACT=1 EPROF_COMPACT=1 N=8000 mix run bench/b41_profile.exs > "$RUNNER_TEMP/p.txt" 2>&1
+          awk '/^FUNCTION/{p=1} p&&/^compactor:/{p=0} p' "$RUNNER_TEMP/p.txt" | sort -k4 -n -r | sed -n 1,25p
+          grep -E '^compactor' "$RUNNER_TEMP/p.txt"
