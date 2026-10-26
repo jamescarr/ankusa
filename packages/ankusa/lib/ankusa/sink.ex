@@ -87,6 +87,28 @@ defmodule Ankusa.Sink do
 
   def classify(reason), do: {:transient, reason}
 
+  @typedoc """
+  Why a delivery was dead-lettered, as an operator filters on it
+  (`error_class` of `GET /v1/dlq` and of a replay job): `:permanent` (the sink
+  said it will never work, or the hook or its destination is gone), `:throttled`
+  (the destination asked for a pause, `{:retry_after, ms, reason}`, and the
+  retry horizon ended it) or `:transient` (anything else that kept failing until
+  the retry policy gave up).
+  """
+  @type error_class :: :permanent | :throttled | :transient
+
+  @error_classes [:permanent, :throttled, :transient]
+
+  @doc "Every `t:error_class/0`."
+  @spec error_classes() :: [error_class()]
+  def error_classes, do: @error_classes
+
+  @doc "The `t:error_class/0` of a `classify/1` answer."
+  @spec error_class(class()) :: error_class()
+  def error_class({:permanent, _term}), do: :permanent
+  def error_class({:retry_after, _ms, _term}), do: :throttled
+  def error_class({:transient, _term}), do: :transient
+
   @throttle_base_ms 500
   @throttle_cap_ms 30_000
 

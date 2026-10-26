@@ -5,9 +5,10 @@ name: E2E
 #
 #   fleet : examples/fleet-e2e/run.sh. Load balancer -> two edge nodes ->
 #           shared bucket and claim-check gateway -> consumer, with a node
-#           killed mid-run and a provider retry sent to the other node. It also
-#           runs on a pull request that touches the example, so a change to it
-#           is proven before it merges.
+#           killed mid-run and a provider retry sent to the other node, then a
+#           tenant-filtered fleet replay of each node's DLQ (--replay-drill). It
+#           also runs on a pull request that touches the example, so a change to
+#           it is proven before it merges.
 #   kind  : `mise run e2e`. The Oban consumer on a kind cluster, pods killed, and
 #           the fleet run from the Helm chart (deploy/helm/ankusa) on kind, pods
 #           deleted and SIGKILLed.
@@ -58,8 +59,10 @@ jobs:
           cache-from: type=gha,scope=fleet-e2e
           cache-to: type=gha,mode=max,scope=fleet-e2e
       - run: mix local.hex --force && mix local.rebar --force
-      - name: examples/fleet-e2e/run.sh
-        run: BUILD_ANKUSA=0 examples/fleet-e2e/run.sh
+      # The default drill, plus DEL-6's: a tenant-filtered fleet replay (`docker-entrypoint
+      # replay`) over a DLQ on each node, with a node killed while it moves.
+      - name: examples/fleet-e2e/run.sh --replay-drill
+        run: BUILD_ANKUSA=0 examples/fleet-e2e/run.sh --replay-drill
       # The host-loss drill of `wal.type: dual` (ADR 0002): a node and its volume lost
       # under load, the intake brokers stopped, a restore from the secondary backup alone;
       # and its control, which must see `disk` lose the hooks acked since the last backup.

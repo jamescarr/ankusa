@@ -13,6 +13,28 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Bounded, cursor-paged DLQ listing and filtered replay (DEL-6).**
+  `GET /v1/dlq` / `Ankusa.Queue.dead/2` no longer folds the whole dead family: a
+  page is a reverse range scan of `limit + 1` keys (no scan examines more than
+  10 000), returned with a `next_cursor` to pass back as `cursor` (`null` on the
+  last page; a selective filter can give a short page with the cursor set, so
+  keep asking until it is `null`). `total` is a counter read when the only filter
+  is the tenant, the match count when a filtered scan reached the end inside the
+  first page, and `null` otherwise (it was always exact before, at the price of
+  the full scan). New filters `sink` and `error_class` (`permanent`,
+  `throttled`, `transient`: `Ankusa.Sink.error_class/1`), which every entry now
+  also carries beside `sink`; a dead row records its class (`error_class` in the
+  delivery row: additive, a row without one lists `null` and matches no class
+  filter). `POST /v1/replays` takes `sink` and `error_class` for a `dlq` job
+  (a row of another class stays dead) and, for every kind, a `job_id`: the same
+  id with the same kind and filter answers that job whatever its state, another
+  filter on it is `400 invalid_filter` (`job_id`), which is what lets a fleet
+  command start one job on every node and again after a failure. The server
+  image's `replay` command is that client; see its changelog.
+  `Ankusa.Queue.dead/2` now returns `next_cursor` beside `total` and `entries`.
+  Proofs: `replay_test.exs` ("tenant filter", "sink filter", "error_class
+  filter", "job_id"), `admin/router_test.exs` ("cursor page", "is bounded"),
+  `examples/fleet-e2e/run.sh --replay-drill`.
 - **Alert rules, dashboard and runbooks (OPS-7).** Two series the shipped alerts
   read: `ankusa_instance_subtree_down_total{domain}` (from
   `[:ankusa, :instance, :subtree_down]`: a failure domain out of restart budget)

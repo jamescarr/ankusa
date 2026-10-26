@@ -10,6 +10,7 @@
 #   examples/fleet-e2e/run.sh --wal dual               # wal.type: dual (a three-broker Kafka intake log)
 #   examples/fleet-e2e/run.sh --wal dual --kill-node   # + host loss, the log's brokers down, the secondary backup
 #   examples/fleet-e2e/run.sh --wal disk --kill-node   # the same host loss under `disk`: it LOSES hooks, as promised
+#   examples/fleet-e2e/run.sh --replay-drill           # + a tenant-filtered fleet replay, a node killed in it
 #
 # `--kill-node` turns the backup on (every 15 s, a primary and a secondary
 # bucket) and adds, after the chaos phase:
@@ -33,12 +34,13 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 usage() {
-  echo "usage: $0 [--wal disk|dual] [--kill-node]" >&2
+  echo "usage: $0 [--wal disk|dual] [--kill-node] [--replay-drill]" >&2
   exit 2
 }
 
 WAL=disk
 KILL_NODE=0
+REPLAY_DRILL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --wal)
@@ -48,6 +50,10 @@ while [ $# -gt 0 ]; do
       ;;
     --kill-node)
       KILL_NODE=1
+      shift
+      ;;
+    --replay-drill)
+      REPLAY_DRILL=1
       shift
       ;;
     *) usage ;;
@@ -64,6 +70,9 @@ case "$WAL" in disk | dual) ;; *) usage ;; esac
 : "${BURST_SECONDS:=10}"
 : "${CONCURRENCY:=32}"
 : "${KEEP:=0}"
+# the replay drill: hooks per tenant per node, and the fleet replay's rate per node
+: "${DRILL_N:=60}"
+: "${REPLAY_RATE:=10}"
 : "${BUILD_ANKUSA:=1}"
 : "${ANKUSA_IMAGE:=ankusa-fleet-e2e:local}"
 : "${OUT_DIR:=examples/fleet-e2e/.e2e-out}"
@@ -157,6 +166,7 @@ LOADGEN_PID=""
 cleanup() {
   rc=$?
   if [ -n "$LOADGEN_PID" ] && kill -0 "$LOADGEN_PID" 2>/dev/null; then kill "$LOADGEN_PID" 2>/dev/null || true; fi
+  if [ -n "${REPLAY_PID:-}" ] && kill -0 "$REPLAY_PID" 2>/dev/null; then kill "$REPLAY_PID" 2>/dev/null || true; fi
   # a run that dies with RabbitMQ paused or the brokers stopped must not leave them so
   compose unpause rabbitmq >/dev/null 2>&1 || true
   if [ "$rc" -ne 0 ]; then
@@ -237,6 +247,7 @@ PHASES=4
 if [ "$KILL_NODE" = 1 ]; then
   if [ "$WAL" = dual ]; then PHASES=7; else PHASES=5; fi
 fi
+if [ "$REPLAY_DRILL" = 1 ]; then PHASES=$((PHASES + 1)); fi
 PHASE=0
 phase() {
   PHASE=$((PHASE + 1))
@@ -501,6 +512,157 @@ if [ "$KILL_NODE" = 1 ] && [ "$WAL" = dual ]; then
   verify_phase secondary 300
 fi
 
+# ── --replay-drill: a tenant-filtered fleet replay, one node killed in it ─────
+#
+# RabbitMQ is stopped, so the two drill sources (tenants `acme` and `globex`,
+# one attempt, a one-second horizon) dead-letter every hook on whichever node
+# took it: each node holds DRILL_N dead rows of each tenant. Then
+# `docker-entrypoint replay --nodes ankusa-a:4002,ankusa-b:4002 --filter tenant=acme`
+# starts one job, with one job id, on both nodes; `ankusa-a` is killed while it
+# moves, and comes back. The drill asserts that the command finished with both
+# nodes done, that only acme's rows moved (globex's are still dead, and the
+# consumer saw none), that every acme hook reached the consumer under the id it
+# was acked with, and that none of them was stored twice.
+DRILL_REPLAYED=0
+DRILL_DUPLICATES=0
+DRILL_REDELIVERED=0
+DRILL_UNTOUCHED=0
+
+# The admin API is not published: ask a node from inside its own container.
+admin_get() { compose exec -T "$1" curl -sf --max-time 10 "http://127.0.0.1:4002$2"; }
+
+# dlq_total SERVICE TENANT -> the tenant's dead rows on that node (a counter read)
+dlq_total() { admin_get "$1" "/v1/dlq?tenant=$2&limit=1" | jq -r '.total'; }
+
+# every drill DLQ holds DRILL_N rows: two tenants on two nodes
+drill_dlqs_full() {
+  local svc tenant
+  for svc in ankusa-a ankusa-b; do
+    for tenant in acme globex; do
+      [ "$(dlq_total "$svc" "$tenant")" = "$DRILL_N" ] || return 1
+    done
+  done
+}
+
+# a replay job on the node that has moved some rows and is not done
+replay_moving() {
+  [ "$(admin_get "$1" /v1/replays | jq '[.replays[] | select(.state == "running" and .moved > 0)] | length')" -ge 1 ]
+}
+
+# drill_post NODE_URL TENANT -- one hook; its id goes to $OUT_ABS/drill-<tenant>.ids
+drill_post() {
+  local file="$OUT_ABS/drill-hook.json" code id
+  jq -nc --arg id "drill-$(rand_id)" '{id: $id, event: "drill"}' >"$file"
+  read -r code id <<<"$(post_hook "$1/webhooks/drill-$2" "$file")"
+  if [ "$code" != "201" ] || [ -z "$id" ]; then
+    echo "error: a drill hook to $1 for $2 answered $code" >&2
+    return 1
+  fi
+  echo "$id" >>"$OUT_ABS/drill-$2.ids"
+}
+
+# wait_count SECONDS DESCRIPTION SQL WANT -- polls until SQL (a count) returns WANT.
+wait_count() {
+  local secs=$1 desc=$2 sql=$3 want=$4
+  for _ in $(seq 1 "$secs"); do
+    if [ "$(psql_q "$sql" 2>/dev/null || true)" = "$want" ]; then return 0; fi
+    sleep 1
+  done
+  echo "error: timed out after ${secs}s waiting for $desc" >&2
+  return 1
+}
+
+if [ "$REPLAY_DRILL" = 1 ]; then
+  phase "replay drill: a fleet replay of one tenant's DLQ, ankusa-a killed while it moves ($DRILL_N rows per tenant per node, $REPLAY_RATE/s)"
+  rm -f "$OUT_ABS"/drill-*.ids
+  DRILL_WANT=$((2 * DRILL_N))
+
+  echo "    RabbitMQ stops: every drill hook dead-letters on the node that took it"
+  compose stop rabbitmq >/dev/null
+  for _ in $(seq 1 "$DRILL_N"); do
+    for url in "$NODE_A" "$NODE_B"; do
+      for tenant in acme globex; do
+        drill_post "$url" "$tenant" || FAILED=1
+      done
+    done
+  done
+  wait_for 180 "$DRILL_N dead rows of each tenant on both nodes" drill_dlqs_full || FAILED=1
+
+  echo "    RabbitMQ and the consumer come back"
+  compose start rabbitmq >/dev/null
+  wait_for 180 "RabbitMQ to accept connections" rabbitmq_up
+  compose restart consumer >/dev/null
+  wait_for 180 "the consumer to be consuming" consumer_consuming
+
+  replay_out="$OUT_ABS/replay.out"
+  echo "    docker-entrypoint replay --nodes ankusa-a:4002,ankusa-b:4002 --filter tenant=acme --rate $REPLAY_RATE"
+  compose run --rm --no-deps -T claim-check replay \
+    --nodes ankusa-a:4002,ankusa-b:4002 --kind dlq --filter tenant=acme \
+    --rate "$REPLAY_RATE" --timeout 900 >"$replay_out" 2>&1 &
+  REPLAY_PID=$!
+
+  wait_for 120 "the replay to move rows on ankusa-a" replay_moving ankusa-a
+  echo "    ankusa-a is killed mid-replay"
+  compose kill ankusa-a
+  sleep 3
+  echo "    ankusa-a starts again and resumes its job from the cursor it committed"
+  compose start ankusa-a
+  wait_for 240 "ankusa-a /ready after restart" node_ready "$NODE_A"
+  REPLAY_RC=0
+  wait "$REPLAY_PID" || REPLAY_RC=$?
+  REPLAY_PID=""
+  sed 's/^/    | /' "$replay_out"
+
+  summary="$(grep ' nodes=[0-9]* done=' "$replay_out" | tail -1 || true)"
+  DRILL_MOVED="$(printf '%s' "$summary" | sed -n 's/.* moved=\([0-9]*\).*/\1/p')"
+  if [ "$REPLAY_RC" != 0 ] || ! printf '%s' "$summary" | grep -q ' nodes=2 done=2 '; then
+    echo "error: the fleet replay did not finish with both nodes done (exit $REPLAY_RC)" >&2
+    FAILED=1
+  fi
+  if [ "$DRILL_MOVED" != "$DRILL_WANT" ]; then
+    echo "error: the fleet replay moved ${DRILL_MOVED:-?} rows, want $DRILL_WANT (acme's, on both nodes)" >&2
+    FAILED=1
+  fi
+
+  # only acme's rows moved: its DLQs are empty, globex's untouched
+  for svc in ankusa-a ankusa-b; do
+    if [ "$(dlq_total "$svc" acme)" != 0 ]; then
+      echo "error: $svc still holds acme dead rows after the replay" >&2
+      FAILED=1
+    fi
+    DRILL_UNTOUCHED=$((DRILL_UNTOUCHED + $(dlq_total "$svc" globex)))
+  done
+  if [ "$DRILL_UNTOUCHED" != "$DRILL_WANT" ]; then
+    echo "error: globex has $DRILL_UNTOUCHED dead rows left, want $DRILL_WANT: the tenant filter touched them" >&2
+    FAILED=1
+  fi
+
+  # every acme hook reaches the consumer, under the id it was acked with
+  wait_count 240 "all $DRILL_WANT acme hooks in processed_webhooks" \
+    "SELECT count(*) FROM processed_webhooks WHERE source_id = 'drill-acme' AND processed_at IS NOT NULL" "$DRILL_WANT" || FAILED=1
+  DRILL_REPLAYED="$(psql_q "SELECT count(*) FROM processed_webhooks WHERE source_id = 'drill-acme' AND processed_at IS NOT NULL" || echo 0)"
+  psql_q "SELECT ankusa_id FROM processed_webhooks WHERE source_id = 'drill-acme'" | sort >"$OUT_ABS/drill-acme.got"
+  sort "$OUT_ABS/drill-acme.ids" >"$OUT_ABS/drill-acme.want"
+  if ! diff -q "$OUT_ABS/drill-acme.want" "$OUT_ABS/drill-acme.got" >/dev/null; then
+    echo "error: the hook ids the consumer recorded are not the ids acked to the provider" >&2
+    FAILED=1
+  fi
+  if [ "$(psql_q "SELECT count(*) FROM processed_webhooks WHERE source_id = 'drill-globex'")" != 0 ]; then
+    echo "error: the consumer received a globex hook: the replay was not tenant-filtered" >&2
+    FAILED=1
+  fi
+
+  # `duplicates`: a hook stored twice, i.e. a second hook id on one idempotency key.
+  # `redelivered`: receipts beyond the first of one hook id (the hook the killed
+  # node had in flight is delivered again: at-least-once allows it).
+  DRILL_DUPLICATES="$(psql_q "SELECT coalesce(sum(cardinality(hook_ids) - 1), 0) FROM processed_webhooks WHERE source_id = 'drill-acme'" || echo '?')"
+  DRILL_REDELIVERED="$(psql_q "SELECT coalesce(sum(deliveries - 1), 0) FROM processed_webhooks WHERE source_id = 'drill-acme'" || echo '?')"
+  if [ "$DRILL_DUPLICATES" != 0 ]; then
+    echo "error: $DRILL_DUPLICATES acme hook(s) were stored twice by the replay" >&2
+    FAILED=1
+  fi
+fi
+
 phase "burst ($CONCURRENCY workers for ${BURST_SECONDS}s)"
 run_loadgen burst --concurrency "$CONCURRENCY" --duration "$BURST_SECONDS"
 verify_phase burst 900
@@ -547,6 +709,9 @@ echo
 echo "verify: wal=$WAL missing=$MISSING sha_mismatches=$SHA_MISMATCHES extra_deliveries=$EXTRA claim_redeemed_cross_node=$CLAIM_OK duplicate_hooks=$DUPLICATE_HOOKS"
 if [ "$KILL_NODE" = 1 ]; then
   echo "host loss: wal=$WAL lost_with_the_host=$HOSTLOSS_MISSING outage_acked=$OUTAGE_ACKED outage_refused=$OUTAGE_REFUSED secondary_recovered=$SECONDARY_APPLIED"
+fi
+if [ "$REPLAY_DRILL" = 1 ]; then
+  echo "replay drill: replayed=$DRILL_REPLAYED duplicates=$DRILL_DUPLICATES redelivered=$DRILL_REDELIVERED untouched=$DRILL_UNTOUCHED"
 fi
 
 if [ "$MISSING" != 0 ] || [ "$SHA_MISMATCHES" != 0 ]; then FAILED=1; fi

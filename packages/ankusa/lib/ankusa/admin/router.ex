@@ -78,6 +78,11 @@ defmodule Ankusa.Admin.Router do
   @max_log_level_body 1_024
   @default_limit 100
   @max_limit 1000
+  @error_class_map %{
+    "permanent" => :permanent,
+    "throttled" => :throttled,
+    "transient" => :transient
+  }
   # A purge is one synced store batch: big enough to clear a flood in a few
   # calls, small enough that one call never holds the pen for long.
   @default_purge_limit 1000
@@ -261,26 +266,60 @@ defmodule Ankusa.Admin.Router do
 
   defp put_intake(body, _config), do: body
 
+  # A page of the DLQ, newest first. `cursor` is the `next_cursor` of the
+  # previous page (opaque to the caller: URL-safe base64 of the last key
+  # examined); the listing is bounded (`Ankusa.Queue.dead/2`), so a filtered page
+  # can be short with `next_cursor` set, and `total` is `null` unless it is known
+  # without a scan.
   defp dlq_index(conn, tenants) do
     params = Plug.Conn.fetch_query_params(conn).query_params
 
     with {:ok, source_id} <- string_param(params, "source_id"),
          {:ok, since} <- int_param(params, "since", nil),
+         {:ok, sink} <- non_neg_param(params, "sink"),
+         {:ok, error_class} <- optional_enum(params, "error_class", @error_class_map),
+         {:ok, cursor} <- dlq_cursor_param(params),
          {:ok, limit} <- int_param(params, "limit", @default_limit) do
       case Ankusa.Queue.dead(instance(conn),
              source_id: source_id,
              since: since,
+             sink: sink,
+             error_class: error_class,
+             cursor: cursor,
              tenants: tenants,
              limit: clamp_limit(limit)
            ) do
-        {:ok, %{total: total, entries: entries}} ->
-          send_json(conn, 200, %{total: total, entries: Enum.map(entries, &dlq_entry/1)})
+        {:ok, %{total: total, entries: entries, next_cursor: next}} ->
+          send_json(conn, 200, %{
+            total: total,
+            entries: Enum.map(entries, &dlq_entry/1),
+            next_cursor: next && Base.url_encode64(next, padding: false)
+          })
+
+        {:error, :invalid_cursor} ->
+          invalid_filter(conn, "cursor")
 
         {:error, _reason} ->
           send_json(conn, 503, %{error: "store_unavailable"})
       end
     else
       {:error, field} -> invalid_filter(conn, field)
+    end
+  end
+
+  defp dlq_cursor_param(params) do
+    case string_param(params, "cursor") do
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, text} ->
+        case Base.url_decode64(text, padding: false) do
+          {:ok, cursor} when byte_size(cursor) == 18 -> {:ok, cursor}
+          _ -> {:error, "cursor"}
+        end
+
+      {:error, _field} = error ->
+        error
     end
   end
 
@@ -951,7 +990,8 @@ defmodule Ankusa.Admin.Router do
   }
 
   @state_map %{"running" => :running, "paused" => :paused, "cancelled" => :cancelled}
-  @replay_spec_keys ~w(kind source_id id tenant since until from to sinks rate max_lag_ms)
+
+  @replay_spec_keys ~w(kind source_id id tenant since until from to sinks sink error_class job_id rate max_lag_ms)
   @replay_patch_keys ~w(state rate max_lag_ms)
 
   # The route needed `replays:write` and a tenant the caller holds; the body
@@ -1073,7 +1113,10 @@ defmodule Ankusa.Admin.Router do
              {:ok, to} <- int_param(map, "to", nil),
              {:ok, rate} <- int_param(map, "rate", nil),
              {:ok, max_lag_ms} <- int_param(map, "max_lag_ms", nil),
-             {:ok, sinks} <- sinks_param(map) do
+             {:ok, sinks} <- sinks_param(map),
+             {:ok, sink} <- int_param(map, "sink", nil),
+             {:ok, error_class} <- optional_enum(map, "error_class", @error_class_map),
+             {:ok, job_id} <- string_param(map, "job_id") do
           spec =
             %{kind: kind}
             |> put_present(:source_id, source_id)
@@ -1086,6 +1129,9 @@ defmodule Ankusa.Admin.Router do
             |> put_present(:rate, rate)
             |> put_present(:max_lag_ms, max_lag_ms)
             |> put_present(:sinks, sinks)
+            |> put_present(:sink, sink)
+            |> put_present(:error_class, error_class)
+            |> put_present(:job_id, job_id)
 
           {:ok, spec}
         end
@@ -1172,7 +1218,7 @@ defmodule Ankusa.Admin.Router do
 
   # Bodies are never returned: an operator triaging the DLQ wants to know what
   # failed and why, and the payloads in there are the customer's.
-  defp dlq_entry(%{envelope: env, reason: reason, at: at}) do
+  defp dlq_entry(%{envelope: env, reason: reason, at: at} = entry) do
     %{
       id: env.id,
       source_id: env.source_id,
@@ -1182,9 +1228,14 @@ defmodule Ankusa.Admin.Router do
       dead_lettered_at: at,
       size: env.size,
       content_type: env.content_type,
+      sink: Map.get(entry, :sink),
+      error_class: dlq_error_class(Map.get(entry, :error_class)),
       reason: reason
     }
   end
+
+  defp dlq_error_class(nil), do: nil
+  defp dlq_error_class(class), do: to_string(class)
 
   # `tenant_id` and `size` are absent from entries written before the pen kept
   # them (0.4): `null`.

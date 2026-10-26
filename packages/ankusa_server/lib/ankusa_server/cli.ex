@@ -1,7 +1,7 @@
 defmodule AnkusaServer.CLI do
   @moduledoc """
   The `bin/ankusa eval` entry points behind the container's `check-config`,
-  `print-config`, `version` and `recover` commands.
+  `print-config`, `version`, `recover` and `replay` commands.
 
   These exist so an operator can answer "is my config valid?" and "what config
   is this container actually running?" from outside the container, without an
@@ -78,6 +78,42 @@ defmodule AnkusaServer.CLI do
 
       {:error, reason} ->
         IO.puts(:stderr, "ankusa recover: recovery failed: #{inspect(reason)}")
+        halt(1)
+    end
+  end
+
+  @doc """
+  Starts one replay job on every node of a fleet and follows it to the end:
+  `docker run … replay --nodes <dns-or-list> [--kind dlq] [--filter k=v,…]`
+  (`AnkusaServer.FleetReplay` has the options). It is a client of the nodes'
+  admin APIs and starts no instance, so it needs no config file. Prints one
+  line per node state change and, last, a `replay <id> kind=… nodes=… done=…`
+  summary; exits `0` when every node finished the job, `1` when one did not
+  (unreachable, rejected, paused, failed, or still running at `--timeout`) and
+  `64` for a bad option.
+  """
+  @spec replay([String.t()]) :: no_return()
+  def replay(args) do
+    case AnkusaServer.FleetReplay.parse_args(args) do
+      {:ok, options} ->
+        {:ok, _apps} = Application.ensure_all_started(:ankusa)
+        run_replay(options)
+
+      {:error, message} ->
+        IO.puts(:stderr, "ankusa replay: " <> message)
+        halt(64)
+    end
+  end
+
+  @spec run_replay(AnkusaServer.FleetReplay.options()) :: no_return()
+  defp run_replay(options) do
+    case AnkusaServer.FleetReplay.run(options) do
+      {:ok, result} ->
+        IO.puts(AnkusaServer.FleetReplay.format_summary(result))
+        halt(AnkusaServer.FleetReplay.exit_code(result))
+
+      {:error, message} ->
+        IO.puts(:stderr, "ankusa replay: " <> message)
         halt(1)
     end
   end

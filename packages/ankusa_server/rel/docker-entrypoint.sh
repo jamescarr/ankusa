@@ -7,6 +7,9 @@
 #   version       print the server and core versions
 #   recover [--node ID] [--from backup|earliest|N] [--dry-run] [--allow-gap]
 #                 wal.type: dual: replay this node's intake log into its stopped store
+#   replay --nodes <dns-or-list> [--kind dlq] [--filter k=v,…] [--job-id UUID] [--timeout S]
+#                 one replay job on every node of a fleet (POST /v1/replays with one job id to
+#                 each), followed until each is done; the admin token is ANKUSA_ADMIN_TOKEN
 #   healthcheck   exit 0 when the node is ready (GET /ready), the image's HEALTHCHECK
 #   remote        an IEx shell attached to the running node (loopback distribution)
 #   rpc EXPR      evaluate EXPR inside the running node and print what it prints
@@ -21,14 +24,15 @@ case "${1:-start}" in
   version) exec /opt/ankusa/bin/ankusa eval 'AnkusaServer.CLI.version()' ;;
   # The arguments become an Elixir list literal for `eval` (it takes no argv):
   # backslash, double quote and `#` (interpolation) are escaped.
-  recover)
+  recover | replay)
+    command=$1
     shift
     list=""
     for arg in "$@"; do
       escaped=$(printf '%s' "$arg" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/#/\\#/g')
       list="${list}\"${escaped}\","
     done
-    exec /opt/ankusa/bin/ankusa eval "AnkusaServer.CLI.recover([${list%,}])"
+    exec /opt/ankusa/bin/ankusa eval "AnkusaServer.CLI.${command}([${list%,}])"
     ;;
   # The ingress listener first (an :edge node always has it); a node without
   # the :edge role, or whose ingress listener terminates TLS (this probe is

@@ -8,6 +8,17 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`docker-entrypoint replay` (DEL-6).** One replay job on every node of a fleet:
+  `replay --nodes <dns-or-list> [--kind dlq] [--filter tenant=acme,error_class=transient]
+  [--rate N] [--job-id UUID] [--timeout S]`. It sends the same `POST /v1/replays`,
+  with one `job_id`, to every node's admin API (a name that resolves to several
+  addresses is one node per address), follows each job, asks a node that does not
+  answer again every second, starts the job again on a node that restarted with
+  an empty store, and prints one summary line (`replay <id> kind=dlq nodes=3
+  done=3 … moved=… dead=…`); exit `0` when every node is `done`, `1` otherwise,
+  `64` for a bad option. The admin token is `ANKUSA_ADMIN_TOKEN`. It is a client
+  of the admin APIs: no clustering, no config file. See
+  [`delivery.md`](../../docs/delivery.md#replaying-across-a-fleet).
 - **`dedupe.max_json_bytes` (PERF-1).** The biggest body a `json` dedupe source
   decodes (default 1048576, an integer >= 1); a larger body is stored with no
   dedupe key and never decoded. See the `ankusa` changelog.

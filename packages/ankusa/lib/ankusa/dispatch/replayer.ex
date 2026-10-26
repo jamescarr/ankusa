@@ -228,12 +228,23 @@ defmodule Ankusa.Dispatch.Replayer do
   def handle_call({:start, _spec, _context}, _from, %{loaded?: false} = state),
     do: {:reply, {:error, :store_unavailable}, state}
 
+  # A spec carrying a `job_id` names the job it creates, so a caller that fans
+  # one job out to several nodes (`docker-entrypoint replay`) can start it again
+  # after a failure without a second job: a job with that id and the same kind
+  # and filter, in any state, is the answer (`:existing`). The same id on a
+  # different job is refused.
   def handle_call({:start, spec, context}, _from, state) do
     active = active_jobs(state.jobs)
+    job_id = Map.get(spec, :job_id)
+    named = job_id && Map.get(state.jobs, job_id)
 
-    existing = Enum.find(active, &(&1.kind == spec.kind and &1.filter == spec.filter))
+    existing =
+      named || Enum.find(active, &(&1.kind == spec.kind and &1.filter == spec.filter))
 
     cond do
+      named != nil and (named.kind != spec.kind or named.filter != spec.filter) ->
+        {:reply, {:error, {:invalid, "job_id"}}, state}
+
       existing != nil ->
         {:reply, {:ok, :existing, existing}, state}
 
@@ -485,7 +496,7 @@ defmodule Ankusa.Dispatch.Replayer do
 
     case Deliveries.dead_page(instance, {lower, upper}, job.filter, n, @max_scan_per_tick) do
       {:ok, hits, last, exhausted?, scanned} ->
-        case Deliveries.revive_ops(instance, hits, now, job.id) do
+        case Deliveries.revive_ops(instance, hits, now, job.id, Map.get(job.filter, :error_class)) do
           {:ok, ops, revived} ->
             job = %{
               job
@@ -1124,7 +1135,7 @@ defmodule Ankusa.Dispatch.Replayer do
 
     with {:ok, ceiling} <- ceiling(state.instance, spec),
          job = %{
-           id: UUIDv7.generate(),
+           id: Map.get(spec, :job_id) || UUIDv7.generate(),
            kind: spec.kind,
            filter: spec.filter,
            rate: spec.rate,

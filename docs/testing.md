@@ -1555,6 +1555,32 @@ accepts connections); **burst**
 (closed loop). Each phase is verified; the run fails on any `missing`,
 `sha_mismatches` or `duplicate_hooks`.
 
+`--replay-drill` adds a phase before the burst (DEL-6): RabbitMQ is stopped, so
+the two drill sources (tenants `acme` and `globex`, one attempt, a one-second
+horizon) dead-letter every hook on the node that took it: `DRILL_N` (60) of each
+tenant on each node. With RabbitMQ and the consumer back,
+`docker-entrypoint replay --nodes ankusa-a:4002,ankusa-b:4002 --filter
+tenant=acme` starts one job, with one job id, on both nodes (`REPLAY_RATE`, 10
+rows per second per node), and `ankusa-a` is killed while it moves and started
+again. The phase fails unless the command ends with both nodes `done`, acme's
+DLQ is empty on both and globex's is untouched (the consumer saw none of it),
+every acme hook reached the consumer under the id it was acked with, and none was
+stored twice:
+
+```sh
+examples/fleet-e2e/run.sh --replay-drill
+# replay drill: replayed=120 duplicates=0 redelivered=<n> untouched=120
+```
+
+`duplicates` is hook ids beyond the first per idempotency key, as
+`duplicate_hooks` above, and must be `0`; `redelivered` is receipts beyond the
+first of one hook id, which the killed node's in-flight delivery can add and
+at-least-once allows. The unit-level proofs are `tenant filter`, `sink filter`,
+`error_class filter` and `job_id` in `test/ankusa/replay_test.exs`,
+`GET /v1/dlq cursor page` and `GET /v1/dlq is bounded` in
+`test/ankusa/admin/router_test.exs`, and `test/ankusa_server/fleet_replay_test.exs`
+for the command.
+
 `extra_deliveries` counts consumer receipts beyond the first per idempotency
 key, and has two components. **Duplicate hooks** are one provider event stored as
 two hooks (two ids): the example runs `dedupe.scope: fleet`, so the retry on node

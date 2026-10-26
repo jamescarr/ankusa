@@ -923,6 +923,12 @@ defmodule Ankusa.Queue.Deliveries do
   Dead-letter the row. `row` carries the final attempt count; `env` is the
   hook or its decode error (see `owner/2`). A lane head's batch carries the
   lane's release: a poison hook must not hold its key forever.
+
+  `error` is the reason text, or `{class, text}` with a `t:Ankusa.Sink.error_class/0`
+  `class`: the row then also carries `error_class`, which the DLQ listing and a
+  replay job filter on. A row written without one (before the class existed, or
+  by a caller that does not know it) has no `error_class` and matches no class
+  filter.
   """
   @spec dead_ops(
           from(),
@@ -936,7 +942,8 @@ defmodule Ankusa.Queue.Deliveries do
         ) ::
           [Store.op()]
   def dead_ops(from, ord, seq, sink, row, at, error, env) do
-    row = %{row | state: :dead, at: at, error: error}
+    {error, class} = split_error(error)
+    row = row |> Map.merge(%{state: :dead, at: at, error: error}) |> put_error_class(class)
     {source_id, id} = owner(env, row)
     {leaves, deltas} = leave(from, ord, seq, sink)
 
@@ -949,6 +956,18 @@ defmodule Ankusa.Queue.Deliveries do
       Counters.ops(deltas ++ [{ord, :dead, 1}, {ord, :dead_bytes, row_size(row)}]) ++
       release(from, ord, row)
   end
+
+  # `Ankusa.Sink.error_classes/0`, spelled out so this module has no compile-time
+  # dependency on the sink behaviour.
+  @error_classes [:permanent, :throttled, :transient]
+
+  defp split_error({class, text}) when class in @error_classes and is_binary(text),
+    do: {text, class}
+
+  defp split_error(error), do: {error, nil}
+
+  defp put_error_class(row, nil), do: Map.delete(row, :error_class)
+  defp put_error_class(row, class), do: Map.put(row, :error_class, class)
 
   defp row_size(%{size: size}) when is_integer(size), do: size
   defp row_size(_row), do: 0
@@ -1026,7 +1045,7 @@ defmodule Ankusa.Queue.Deliveries do
   # ── the DLQ ───────────────────────────────────────────────────────────────
 
   # A paged scan over dead rows in `range`, for the replay engine. Keeps keys
-  # matching `filter` (`:source_id`, `:id`, `:tenants`) — the dead-letter time is
+  # matching `filter` (`:source_id`, `:id`, `:sink`, `:tenants`) — the dead-letter time is
   # bounded by the range itself. Stops after `limit` hits or `max_scan` keys
   # examined. Returns the hits (ascending), the last key seen (`nil` when the
   # range held nothing), whether the range was exhausted, and the keys scanned.
@@ -1073,7 +1092,7 @@ defmodule Ankusa.Queue.Deliveries do
           {source_id, id, ord} = :erlang.binary_to_term(value)
 
           cond do
-            not (dead_match?(filter, source_id, id) and tenant_match?(ords, ord)) ->
+            not (dead_match?(filter, source_id, id, sink) and tenant_match?(ords, ord)) ->
               {:cont, {scanned + 1, hit_n, hits, key}}
 
             hit_n >= limit ->
@@ -1099,9 +1118,11 @@ defmodule Ankusa.Queue.Deliveries do
   defp tenant_match?(nil, _ord), do: true
   defp tenant_match?(ords, ord), do: ord in ords
 
-  # `matches?/4` minus the `:since` bound: the page's range carries that.
-  defp dead_match?(filter, source_id, id) do
-    keep?(filter, :source_id, source_id) and keep?(filter, :id, id)
+  # The filter's `:source_id`, `:id` and `:sink`: the page's range carries the
+  # time bounds.
+  defp dead_match?(filter, source_id, id, sink) do
+    keep?(filter, :source_id, source_id) and keep?(filter, :id, id) and
+      keep?(filter, :sink, sink)
   end
 
   @typedoc "A dead row a reaper or an operator may evict: `{key, seq, sink, ord, source_id, id}`."
@@ -1135,7 +1156,7 @@ defmodule Ankusa.Queue.Deliveries do
         {source_id, id, ord} = :erlang.binary_to_term(value)
 
         {n, hits} =
-          if dead_match?(filter, source_id, id) and tenant_match?(ords, ord),
+          if dead_match?(filter, source_id, id, sink) and tenant_match?(ords, ord),
             do: {n + 1, [{key, seq, sink, ord, source_id, id} | hits]},
             else: {n, hits}
 
@@ -1201,11 +1222,13 @@ defmodule Ankusa.Queue.Deliveries do
   # Move dead rows back to pending for a replay job: the revived row keeps its
   # hook and gets `replay: replay_id`, `attempts: 0`, a due time of `now` and a
   # fresh retry horizon (`first_attempt_at` dropped: dispatch stamps it again).
-  # A dead key whose row is gone is deleted as an orphan. Returns the batch ops
-  # and the number of rows actually revived.
-  @spec revive_ops(atom(), [hit()], integer(), String.t()) ::
+  # A dead key whose row is gone is deleted as an orphan. With `error_class`, a
+  # row of another class (or none) stays dead and is not counted: the job's
+  # cursor moves past it. Returns the batch ops and the number of rows actually
+  # revived.
+  @spec revive_ops(atom(), [hit()], integer(), String.t(), Ankusa.Sink.error_class() | nil) ::
           {:ok, [Ankusa.Store.op()], non_neg_integer()} | {:error, term()}
-  def revive_ops(instance, hits, now, replay_id) do
+  def revive_ops(instance, hits, now, replay_id, error_class \\ nil) do
     keys = Enum.map(hits, fn {_key, seq, sink, _ord} -> Keys.delivery(seq, sink) end)
 
     with {:ok, rows} <- Store.multi_get(instance, :deliveries, keys) do
@@ -1213,7 +1236,9 @@ defmodule Ankusa.Queue.Deliveries do
         hits
         |> Enum.zip(rows)
         |> Enum.reduce({[], 0}, fn {{key, seq, sink, ord}, result}, {ops, n} ->
-          {row_ops, n} = revive_row(key, seq, sink, ord, result, now, replay_id, n)
+          {row_ops, n} =
+            revive_row({key, seq, sink, ord}, result, {now, replay_id, error_class}, n)
+
           {row_ops ++ ops, n}
         end)
 
@@ -1226,21 +1251,26 @@ defmodule Ankusa.Queue.Deliveries do
   # be revived: it stays in the DLQ (still visible to `GET /v1/dlq`) and the
   # job's cursor simply moves past it, so one corrupt row cannot wedge the
   # replay engine on it forever.
-  defp revive_row(key, seq, sink, ord, {:ok, bin}, now, replay_id, n) do
+  defp revive_row({key, seq, sink, ord}, {:ok, bin}, {now, replay_id, error_class}, n) do
     case decode_row(bin) do
       {:ok, %{size: size} = row} when is_integer(size) ->
-        row =
-          row
-          |> Map.merge(%{state: :pending, attempts: 0, at: now, error: nil})
-          |> Map.delete(:first_attempt_at)
-          |> Map.put(:replay, replay_id)
+        if error_class == nil or Map.get(row, :error_class) == error_class do
+          row =
+            row
+            |> Map.merge(%{state: :pending, attempts: 0, at: now, error: nil})
+            |> Map.drop([:first_attempt_at, :error_class])
+            |> Map.put(:replay, replay_id)
 
-        {[
-           {:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)}
-           | dead_gone(key, ord, seq, sink)
-         ] ++
-           requeue_ops(ord, now, seq, sink, size, row) ++
-           Counters.ops([{ord, :dead, -1}, {ord, :dead_bytes, -size}, {ord, :pending, 1}]), n + 1}
+          {[
+             {:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)}
+             | dead_gone(key, ord, seq, sink)
+           ] ++
+             requeue_ops(ord, now, seq, sink, size, row) ++
+             Counters.ops([{ord, :dead, -1}, {ord, :dead_bytes, -size}, {ord, :pending, 1}]),
+           n + 1}
+        else
+          {[], n}
+        end
 
       {:error, reason} ->
         left_in_dlq(seq, sink, reason, n)
@@ -1251,7 +1281,7 @@ defmodule Ankusa.Queue.Deliveries do
   end
 
   # The row is gone, so what it counted in `bytes` cannot be taken back.
-  defp revive_row(key, seq, sink, ord, :not_found, _now, _replay_id, n) do
+  defp revive_row({key, seq, sink, ord}, :not_found, _job, n) do
     {dead_gone(key, ord, seq, sink) ++ Counters.ops([{ord, :dead, -1}]), n}
   end
 
@@ -1278,29 +1308,384 @@ defmodule Ankusa.Queue.Deliveries do
     {[], n}
   end
 
+  # The most dead keys one scan of `dead/2` examines, whatever the DLQ holds: a
+  # page costs this much at worst, not the size of the DLQ.
+  @list_max_scan 10_000
+  # Candidate keys a filtered listing checks per batch of store reads.
+  @list_chunk 1_000
+  # A tenant-scoped listing reads each tenant's own index up to this many tenants;
+  # beyond it, one scan of the global dead family with the tenants as a predicate.
+  @list_tenant_indexes 8
+  @list_cursor_bytes 18
+
   @doc """
-  The dead rows, newest first: `total` counts every match, `entries` holds the
-  first `:limit`. `opts`: `:source_id`, `:since`, `:tenants` (only rows of
-  hooks owned by one of these tenants, read from the by-tenant index with no
-  hook read; `nil` is every tenant), `:limit`.
+  One page of the dead rows, newest first, in a bounded number of reads.
+
+  `opts`: `:limit` (the page size), `:cursor` (the `next_cursor` of the previous
+  page: the page resumes below it), `:source_id`, `:since` (dead-lettered at or
+  after, ms), `:sink` (the sink index), `:error_class` (`t:Ankusa.Sink.error_class/0`),
+  and `:tenants` (only rows of hooks owned by one of these tenants, read from the
+  by-tenant index with no hook read; `nil` is every tenant).
+
+  No scan examines more than #{@list_max_scan} dead keys. A filter that matches
+  little can therefore make a page short, or empty, with `next_cursor` set: keep
+  asking until it is `nil`. `next_cursor` is `nil` on the last page.
+
+  `total` is the number of matching rows when that is known without a scan: no
+  filter but `:tenants` (a counter read), or a filter whose scan reached the end
+  of the DLQ within this one page (no `:cursor`). Otherwise it is `nil`. A row
+  written before dead letters carried a class has no `error_class` and matches no
+  `:error_class` filter.
   """
   @spec dead(atom(), keyword()) ::
-          {:ok, %{total: non_neg_integer(), entries: [map()]}} | {:error, term()}
+          {:ok, %{total: non_neg_integer() | nil, entries: [map()], next_cursor: binary() | nil}}
+          | {:error, term()}
   def dead(instance, opts) do
     limit = Keyword.fetch!(opts, :limit)
-
-    filter =
-      for {k, v} <- Keyword.take(opts, [:source_id, :since]), v != nil, into: %{}, do: {k, v}
-
+    cursor = Keyword.get(opts, :cursor)
     tenants = Keyword.get(opts, :tenants)
 
-    scan =
-      if is_list(tenants),
-        do: dead_scan_tenants(instance, filter, tenants, limit),
-        else: dead_scan(instance, filter, limit)
+    filter =
+      for {k, v} <- Keyword.take(opts, [:source_id, :since, :sink, :error_class]),
+          v != nil,
+          into: %{},
+          do: {k, v}
 
-    with {:ok, {total, kept}} <- scan,
-         {:ok, rows} <-
+    if cursor != nil and not (is_binary(cursor) and byte_size(cursor) == @list_cursor_bytes) do
+      {:error, :invalid_cursor}
+    else
+      with {:ok, sources} <- dead_sources(instance, tenants),
+           {:ok, scans} <- scan_sources(instance, sources, filter, cursor, max(limit, 1)),
+           {hits, frontier} = merge_scans(scans),
+           {:ok, total} <- dead_total(instance, sources, filter, cursor, frontier, hits),
+           {:ok, kept} <- fill_owners(instance, Enum.take(hits, limit)),
+           {:ok, entries, orphans} <- list_entries(instance, kept) do
+        # A dead key whose row or hook is gone lists nothing, so orphans on the
+        # returned page are not counted either, and are logged since it should
+        # not happen; replay deletes them.
+        if orphans != [] do
+          Logger.warning(
+            "[ankusa] DLQ key(s) with no delivery row or hook, not listed: #{inspect(Enum.reverse(orphans))}"
+          )
+        end
+
+        {:ok,
+         %{
+           total: total && total - length(orphans),
+           entries: entries,
+           next_cursor: next_cursor(hits, limit, frontier)
+         }}
+      end
+    end
+  end
+
+  # Where `dead/2` reads: `:all` (the global dead family), `{:index, ords}` (one
+  # by-tenant index per ordinal) or `{:filtered, ords}` (the global family, the
+  # tenants a predicate on each row's own ordinal).
+  defp dead_sources(_instance, nil), do: {:ok, :all}
+
+  defp dead_sources(instance, tenants) when is_list(tenants) do
+    with {:ok, ords} <- tenant_ords(instance, tenants) do
+      if length(ords) <= @list_tenant_indexes,
+        do: {:ok, {:index, ords}},
+        else: {:ok, {:filtered, ords}}
+    end
+  end
+
+  defp scan_sources(instance, :all, filter, cursor, limit) do
+    with {:ok, scan} <- scan_dead(instance, :dead, nil, filter, cursor, limit), do: {:ok, [scan]}
+  end
+
+  defp scan_sources(instance, {:filtered, ords}, filter, cursor, limit) do
+    with {:ok, scan} <-
+           scan_dead(instance, :dead, nil, Map.put(filter, :ords, ords), cursor, limit),
+         do: {:ok, [scan]}
+  end
+
+  defp scan_sources(instance, {:index, ords}, filter, cursor, limit) do
+    Enum.reduce_while(ords, {:ok, []}, fn ord, {:ok, scans} ->
+      case scan_dead(instance, :dead_by_tenant, ord, filter, cursor, limit) do
+        {:ok, scan} -> {:cont, {:ok, [scan | scans]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # One reverse range scan, newest first, that stops at `limit + 1` matches (the
+  # extra one proves there is a next page) or at the scan budget. Returns
+  # `{hits, status}`: the hits as `{at, seq, sink, owner_source}` and `:exhausted`
+  # when the range ended, or `{:more, {at, seq, sink}}`: every key at or above
+  # that one was examined, nothing below it was.
+  defp scan_dead(instance, family, ord, filter, cursor, limit) do
+    acc = %{
+      scanned: 0,
+      chunk: [],
+      chunk_n: 0,
+      hits: [],
+      hit_n: 0,
+      last: nil,
+      stop: nil
+    }
+
+    deferred? = dead_deferred?(family, filter)
+
+    scan =
+      Store.fold(
+        instance,
+        family,
+        dead_range(family, ord, filter, cursor),
+        acc,
+        fn key, value, acc ->
+          dead_step(instance, {family, filter, deferred?, limit}, key, value, acc)
+        end,
+        reverse: true
+      )
+
+    with {:ok, acc} when is_map(acc) <- scan,
+         acc when is_map(acc) <- flush_dead(instance, family, filter, acc) do
+      {:ok, dead_scan_result(acc, limit)}
+    else
+      {:ok, {:error, reason}} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp dead_range(:dead, _ord, filter, cursor) do
+    %{hi: hi} = Keys.family(:dead)
+
+    {<<?x, max(Map.get(filter, :since, 0), 0)::64>>,
+     if(cursor, do: <<?x, cursor::binary>>, else: hi)}
+  end
+
+  defp dead_range(:dead_by_tenant, ord, filter, cursor) do
+    {_lower, hi} = Keys.range(<<?X, ord::32>>)
+
+    {<<?X, ord::32, max(Map.get(filter, :since, 0), 0)::64>>,
+     if(cursor, do: <<?X, ord::32, cursor::binary>>, else: hi)}
+  end
+
+  # A predicate that needs a read per candidate: the row's class, or (from a
+  # by-tenant key, which does not carry it) the hook's source.
+  defp dead_deferred?(family, filter) do
+    Map.has_key?(filter, :error_class) or
+      (family == :dead_by_tenant and Map.has_key?(filter, :source_id))
+  end
+
+  defp dead_step(instance, {family, filter, deferred?, limit}, key, value, acc) do
+    {at, seq, sink} = decode_dead_key(family, key)
+    cand = {at, seq, sink, if(family == :dead, do: {:value, value}, else: nil)}
+    acc = %{acc | scanned: acc.scanned + 1, last: {at, seq, sink}}
+
+    acc =
+      cond do
+        not (keep?(filter, :sink, sink) and owner_match?(filter, family, cand)) ->
+          acc
+
+        deferred? ->
+          %{acc | chunk: [cand | acc.chunk], chunk_n: acc.chunk_n + 1}
+
+        true ->
+          add_dead_hits(acc, [cand])
+      end
+
+    acc =
+      if acc.chunk_n >= @list_chunk or (deferred? and acc.scanned >= @list_max_scan),
+        do: flush_dead(instance, family, filter, acc),
+        else: acc
+
+    cond do
+      not is_map(acc) -> {:halt, acc}
+      acc.hit_n > limit -> {:halt, %{acc | stop: :limit}}
+      acc.scanned >= @list_max_scan -> {:halt, %{acc | stop: :budget}}
+      true -> {:cont, acc}
+    end
+  end
+
+  defp decode_dead_key(:dead, key), do: Keys.decode_dead(key)
+
+  defp decode_dead_key(:dead_by_tenant, key) do
+    {_ord, at, seq, sink} = Keys.decode_dead_by_tenant(key)
+    {at, seq, sink}
+  end
+
+  # The global dead row carries the owner and the tenant ordinal: `:source_id`
+  # and a tenant predicate are free there. A by-tenant key carries neither.
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
+  defp owner_match?(filter, :dead, {_at, _seq, _sink, {:value, bin}}) do
+    if Map.has_key?(filter, :source_id) or Map.has_key?(filter, :ords) do
+      {source_id, _id, ord} = :erlang.binary_to_term(bin)
+      keep?(filter, :source_id, source_id) and tenant_match?(Map.get(filter, :ords), ord)
+    else
+      true
+    end
+  end
+
+  defp owner_match?(_filter, _family, _cand), do: true
+
+  defp add_dead_hits(acc, cands) do
+    %{
+      acc
+      | hits: Enum.reduce(cands, acc.hits, &[&1 | &2]),
+        hit_n: acc.hit_n + length(cands)
+    }
+  end
+
+  # Applies the predicates that need reads to the pending candidates (newest
+  # first once reversed) and moves the survivors to the hits. An acc, or
+  # `{:error, reason}`.
+  defp flush_dead(_instance, _family, _filter, %{chunk: []} = acc), do: acc
+
+  defp flush_dead(instance, family, filter, acc) do
+    cands = Enum.reverse(acc.chunk)
+
+    with {:ok, cands} <- resolve_owners(instance, family, filter, cands),
+         {:ok, cands} <- check_error_class(instance, filter, cands) do
+      add_dead_hits(%{acc | chunk: [], chunk_n: 0}, cands)
+    end
+  end
+
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
+  defp resolve_owners(instance, :dead_by_tenant, %{source_id: source_id}, cands) do
+    with {:ok, values} <-
+           Store.multi_get(
+             instance,
+             :index,
+             Enum.map(cands, fn {at, seq, sink, _} -> Keys.dead(at, seq, sink) end)
+           ) do
+      {:ok,
+       for {{at, seq, sink, _}, {:ok, bin}} <- Enum.zip(cands, values),
+           {^source_id, _id, _ord} <- [:erlang.binary_to_term(bin)] do
+         {at, seq, sink, {:value, bin}}
+       end}
+    end
+  end
+
+  defp resolve_owners(_instance, _family, _filter, cands), do: {:ok, cands}
+
+  defp check_error_class(instance, %{error_class: class}, cands) do
+    with {:ok, rows} <-
+           Store.multi_get(
+             instance,
+             :deliveries,
+             Enum.map(cands, fn {_at, seq, sink, _} -> Keys.delivery(seq, sink) end)
+           ) do
+      {:ok,
+       for {cand, {:ok, bin}} <- Enum.zip(cands, rows),
+           {:ok, %{error_class: ^class}} <- [decode_row(bin)] do
+         cand
+       end}
+    end
+  end
+
+  defp check_error_class(_instance, _filter, cands), do: {:ok, cands}
+
+  defp dead_scan_result(acc, limit) do
+    hits = Enum.reverse(acc.hits)
+
+    cond do
+      acc.hit_n > limit ->
+        kept = Enum.take(hits, limit + 1)
+        {at, seq, sink, _} = List.last(kept)
+        {kept, {:more, {at, seq, sink}}}
+
+      acc.stop == :budget ->
+        {hits, {:more, acc.last}}
+
+      true ->
+        {hits, :exhausted}
+    end
+  end
+
+  # The hits of every scan, newest first, and the frontier: the highest key any
+  # unfinished scan stopped at. Only what is at or above it is known to be
+  # complete across the scans, so the page is cut there.
+  defp merge_scans(scans) do
+    frontier =
+      scans
+      |> Enum.flat_map(fn
+        {_hits, {:more, key}} -> [key]
+        {_hits, :exhausted} -> []
+      end)
+      |> Enum.max(fn -> nil end)
+
+    hits =
+      scans
+      |> Enum.flat_map(fn {hits, _status} -> hits end)
+      |> Enum.sort_by(fn {at, seq, sink, _} -> {at, seq, sink} end, :desc)
+
+    hits =
+      if frontier,
+        do: Enum.filter(hits, fn {at, seq, sink, _} -> {at, seq, sink} >= frontier end),
+        else: hits
+
+    {hits, frontier}
+  end
+
+  defp next_cursor(_hits, 0, _frontier), do: nil
+
+  defp next_cursor(hits, limit, frontier) do
+    case Enum.split(hits, limit) do
+      {page, [_ | _]} ->
+        {at, seq, sink, _} = List.last(page)
+        <<at::64, seq::64, sink::16>>
+
+      {_page, []} when frontier == nil ->
+        nil
+
+      {_page, []} ->
+        {at, seq, sink} = frontier
+        <<at::64, seq::64, sink::16>>
+    end
+  end
+
+  @total_filters [:source_id, :since, :sink, :error_class]
+
+  defp dead_total(instance, sources, filter, cursor, frontier, hits) do
+    cond do
+      Enum.any?(@total_filters, &Map.has_key?(filter, &1)) ->
+        {:ok, if(cursor == nil and frontier == nil, do: length(hits), else: nil)}
+
+      sources == :all ->
+        with {:ok, [total]} <- Counters.read_field(instance, [0], :dead), do: {:ok, total}
+
+      true ->
+        {_kind, ords} = sources
+
+        with {:ok, totals} <- Counters.read_field(instance, ords, :dead),
+             do: {:ok, Enum.sum(totals)}
+    end
+  end
+
+  # The owners of the kept page: from the global dead row a scan already read,
+  # or, for a by-tenant key, read now.
+  defp fill_owners(instance, page) do
+    missing = for {at, seq, sink, nil} <- page, do: Keys.dead(at, seq, sink)
+
+    with {:ok, values} <- Store.multi_get(instance, :index, missing) do
+      found = missing |> Enum.zip(values) |> Map.new()
+
+      {:ok,
+       for {at, seq, sink, source} <- page do
+         {at, seq, sink, owner_of(source, Map.get(found, Keys.dead(at, seq, sink)))}
+       end}
+    end
+  end
+
+  defp owner_of({:value, bin}, _read), do: decode_owner(bin)
+  defp owner_of(nil, {:ok, bin}), do: decode_owner(bin)
+  defp owner_of(nil, _not_found), do: {@unknown_source, nil}
+
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
+  defp decode_owner(bin) do
+    {source_id, id, _ord} = :erlang.binary_to_term(bin)
+    {source_id, id}
+  end
+
+  defp list_entries(instance, kept) do
+    with {:ok, rows} <-
            Store.multi_get(
              instance,
              :deliveries,
@@ -1316,11 +1701,15 @@ defmodule Ankusa.Queue.Deliveries do
         [kept, rows, hooks]
         |> Enum.zip()
         |> Enum.reduce({[], []}, fn
-          {{at, seq, _sink, owner}, {:ok, row}, {:ok, hook}}, {entries, orphans} ->
+          {{at, seq, sink, owner}, {:ok, row}, {:ok, hook}}, {entries, orphans} ->
+            {reason, class} = row_error(row)
+
             entry = %{
               envelope: listed_envelope(hook, seq, at, owner, row),
-              reason: row_error(row),
-              at: at
+              reason: reason,
+              at: at,
+              sink: sink,
+              error_class: class
             }
 
             {[entry | entries], orphans}
@@ -1329,187 +1718,7 @@ defmodule Ankusa.Queue.Deliveries do
             {entries, [{seq, sink} | orphans]}
         end)
 
-      # A dead key whose row or hook is gone lists nothing, so orphans on the
-      # returned page are not counted either, and are logged since it should
-      # not happen; replay deletes them. One past the page is still counted,
-      # so `total` is exact unless corruption hides beyond it.
-      if orphans != [] do
-        Logger.warning(
-          "[ankusa] DLQ key(s) with no delivery row or hook, not listed: #{inspect(Enum.reverse(orphans))}"
-        )
-      end
-
-      {:ok, %{total: total - length(orphans), entries: Enum.reverse(entries)}}
-    end
-  end
-
-  # `{total, kept}` of the dead keys matching `filter`, newest first: every
-  # match is counted, the first `limit` are kept as `{at, seq, sink, owner}`.
-  # Trusted, internally written data (this node's own store rows); never request input.
-  # sobelow_skip ["Misc.BinToTerm"]
-  defp dead_scan(instance, filter, limit) do
-    %{lo: lo, hi: hi} = Keys.family(:dead)
-
-    scan =
-      Store.fold(
-        instance,
-        :dead,
-        {lo, hi},
-        {0, 0, []},
-        fn key, value, {total, kept_n, kept} = acc ->
-          {at, seq, sink} = Keys.decode_dead(key)
-          {source_id, id, _ord} = :erlang.binary_to_term(value)
-
-          cond do
-            not matches?(filter, source_id, id, at) ->
-              {:cont, acc}
-
-            kept_n < limit ->
-              {:cont, {total + 1, kept_n + 1, [{at, seq, sink, {source_id, id}} | kept]}}
-
-            true ->
-              {:cont, {total + 1, kept_n, kept}}
-          end
-        end,
-        reverse: true
-      )
-
-    with {:ok, {total, _kept_n, kept}} <- scan, do: {:ok, {total, Enum.reverse(kept)}}
-  end
-
-  # `dead_scan/3` limited to `tenants`: one reverse range scan of each tenant's
-  # by-tenant dead index, never a hook read. Only a `:source_id` filter needs the
-  # global dead row's value (the owner), read 1 000 keys at a time; the page's
-  # owners are read once at the end.
-  defp dead_scan_tenants(instance, filter, tenants, limit) do
-    with {:ok, ords} <- tenant_ords(instance, tenants),
-         {:ok, {total, kept}} <- scan_tenants(instance, ords, filter, limit),
-         {:ok, kept} <- fill_owners(instance, kept) do
-      {:ok, {total, kept}}
-    end
-  end
-
-  defp scan_tenants(instance, ords, filter, limit) do
-    Enum.reduce_while(ords, {:ok, {0, []}}, fn ord, {:ok, {total, kept}} ->
-      case tenant_dead(instance, ord, filter, limit) do
-        {:ok, {t, k}} ->
-          merged =
-            (kept ++ k)
-            |> Enum.sort_by(fn {at, seq, sink} -> {at, seq, sink} end, :desc)
-            |> Enum.take(limit)
-
-          {:cont, {:ok, {total + t, merged}}}
-
-        {:error, reason} ->
-          {:halt, {:error, reason}}
-      end
-    end)
-  end
-
-  # `{total, kept}` for one tenant, `kept` newest first, as `{at, seq, sink}`.
-  defp tenant_dead(instance, ord, filter, limit) do
-    {_lower, hi} = Keys.range(<<?X, ord::32>>)
-    range = {<<?X, ord::32, Map.get(filter, :since, 0)::64>>, hi}
-    need_owner? = Map.has_key?(filter, :source_id)
-
-    scan =
-      Store.fold(
-        instance,
-        :dead_by_tenant,
-        range,
-        {{0, 0, []}, [], 0},
-        fn key, _value, {acc, chunk, n} ->
-          {_ord, at, seq, sink} = Keys.decode_dead_by_tenant(key)
-
-          cond do
-            not need_owner? ->
-              {:cont, {push_dead(acc, {at, seq, sink}, limit), [], 0}}
-
-            n + 1 < @source_chunk ->
-              {:cont, {acc, [{at, seq, sink} | chunk], n + 1}}
-
-            true ->
-              case owner_step(instance, [{at, seq, sink} | chunk], filter, limit, acc) do
-                {:ok, acc} -> {:cont, {acc, [], 0}}
-                {:error, reason} -> {:halt, {:error, reason}}
-              end
-          end
-        end,
-        reverse: true
-      )
-
-    case scan do
-      {:ok, {:error, reason}} ->
-        {:error, reason}
-
-      {:ok, {acc, chunk, _n}} ->
-        with {:ok, {total, _kept_n, kept}} <- owner_step(instance, chunk, filter, limit, acc),
-             do: {:ok, {total, Enum.reverse(kept)}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp push_dead({total, kept_n, kept}, entry, limit) when kept_n < limit,
-    do: {total + 1, kept_n + 1, [entry | kept]}
-
-  defp push_dead({total, kept_n, kept}, _entry, _limit), do: {total + 1, kept_n, kept}
-
-  # Folds one chunk of dead keys (`chunk` is oldest first, as the reverse scan
-  # built it) into the accumulator, keeping those whose owner matches `filter`.
-  defp owner_step(_instance, [], _filter, _limit, acc), do: {:ok, acc}
-
-  # Trusted, internally written data (this node's own store rows).
-  # sobelow_skip ["Misc.BinToTerm"]
-  defp owner_step(instance, chunk, filter, limit, acc) do
-    entries = Enum.reverse(chunk)
-
-    with {:ok, values} <-
-           Store.multi_get(
-             instance,
-             :index,
-             Enum.map(entries, fn {at, seq, sink} -> Keys.dead(at, seq, sink) end)
-           ) do
-      {:ok,
-       entries
-       |> Enum.zip(values)
-       |> Enum.reduce(acc, fn
-         {entry, {:ok, value}}, acc ->
-           {source_id, id, _ord} = :erlang.binary_to_term(value)
-           {at, _seq, _sink} = entry
-
-           if matches?(filter, source_id, id, at), do: push_dead(acc, entry, limit), else: acc
-
-         {_entry, :not_found}, acc ->
-           acc
-       end)}
-    end
-  end
-
-  # The owners of the kept page, from the global dead rows.
-  # sobelow_skip ["Misc.BinToTerm"]
-  defp fill_owners(instance, kept) do
-    with {:ok, values} <-
-           Store.multi_get(
-             instance,
-             :index,
-             Enum.map(kept, fn {at, seq, sink} -> Keys.dead(at, seq, sink) end)
-           ) do
-      {:ok,
-       for {{at, seq, sink}, value} <- Enum.zip(kept, values) do
-         owner =
-           case value do
-             {:ok, bin} ->
-               {source_id, id, _ord} = :erlang.binary_to_term(bin)
-               {source_id, id}
-
-             :not_found ->
-               {@unknown_source, nil}
-           end
-
-         {at, seq, sink, owner}
-       end}
+      {:ok, Enum.reverse(entries), orphans}
     end
   end
 
@@ -1543,31 +1752,21 @@ defmodule Ankusa.Queue.Deliveries do
   end
 
   # A delivery row that does not decode still lists: the replay engine leaves
-  # such a row in the DLQ (see `revive_row/7`), so listing must not raise on
-  # it and take the whole page down.
+  # such a row in the DLQ (see `revive_row/4`), so listing must not raise on
+  # it and take the whole page down. `{reason, error_class}`; a row without a
+  # class (written before dead letters had one, or undecodable) has `nil`.
   defp row_error(bin) do
     case decode_row(bin) do
-      {:ok, row} -> Map.get(row, :error)
-      {:error, :unsupported_delivery_row_version} -> "unsupported delivery row version"
-      {:error, :undecodable} -> "undecodable delivery row"
+      {:ok, row} -> {Map.get(row, :error), Map.get(row, :error_class)}
+      {:error, :unsupported_delivery_row_version} -> {"unsupported delivery row version", nil}
+      {:error, :undecodable} -> {"undecodable delivery row", nil}
     end
-  end
-
-  defp matches?(filter, source_id, id, at) do
-    keep?(filter, :source_id, source_id) and keep?(filter, :id, id) and since_ok?(filter, at)
   end
 
   defp keep?(filter, key, actual) do
     case Map.get(filter, key) do
       nil -> true
       expected -> actual == expected
-    end
-  end
-
-  defp since_ok?(filter, at) do
-    case Map.get(filter, :since) do
-      nil -> true
-      since -> at >= since
     end
   end
 

@@ -265,19 +265,37 @@ defmodule Ankusa.Queue do
   end
 
   @doc """
-  The dead-lettered deliveries (the DLQ), newest first. `total` counts the
-  matching dead keys that could be read back as a row and a hook; `entries`
-  holds the first `:limit`, each `%{envelope, reason, at}` with `reason` the
-  failure as text. A dead key whose row or hook is gone (corruption) is logged
-  and not listed; one beyond the returned page is still counted, so `total` is
-  exact unless corruption hides past the page. Options: `:source_id`, `:since`
-  (a unix-ms lower bound on the dead-letter time), `:tenants` (a list of tenant
-  ids: only dead letters of those tenants' hooks, read from each tenant's range
-  of the by-tenant dead index with no hook read; `nil`, the default, is
-  every tenant), `:limit`.
+  One page of the dead-lettered deliveries (the DLQ), newest first, in a bounded
+  number of store reads: no call examines more than 10 000 dead keys, whatever
+  the DLQ holds. Returns `%{total, entries, next_cursor}`; each entry is
+  `%{envelope, reason, at, sink, error_class}` with `reason` the failure as text,
+  `sink` the sink's index and `error_class` its `t:Ankusa.Sink.error_class/0`
+  (`nil` for a row written before dead letters carried one).
+
+  Options: `:limit`, `:cursor` (the `next_cursor` of the previous page; a page
+  resumes below it), `:source_id`, `:since` (a unix-ms lower bound on the
+  dead-letter time), `:sink` (an index), `:error_class`, and `:tenants` (a list
+  of tenant ids: only dead letters of those tenants' hooks, read from each
+  tenant's range of the by-tenant dead index with no hook read; `nil`, the
+  default, is every tenant).
+
+  `next_cursor` is `nil` on the last page. A filter that matches little can make
+  a page short, or empty, with `next_cursor` set: ask again with it until it is
+  `nil`. `total` is a counter read (the node's, or the named tenants') when
+  there is no filter but `:tenants`, the number of matches when a filtered scan
+  reached the end of the DLQ within the page (no `:cursor`), and `nil` when it
+  cannot be known without a scan. A dead key whose row or hook is gone
+  (corruption) is logged and not listed. `{:error, :invalid_cursor}` for a
+  cursor this function did not return.
   """
   @spec dead(atom(), keyword()) ::
-          {:ok, %{total: non_neg_integer(), entries: [map()]}} | {:error, term()}
+          {:ok,
+           %{
+             total: non_neg_integer() | nil,
+             entries: [map()],
+             next_cursor: binary() | nil
+           }}
+          | {:error, term()}
   def dead(instance, opts), do: Deliveries.dead(instance, opts)
 
   @doc """

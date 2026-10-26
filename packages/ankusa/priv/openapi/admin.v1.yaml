@@ -297,7 +297,11 @@ paths:
       summary: List dead-lettered hooks
       description: |
         Newest first, metadata only — bodies are never returned. Results are
-        this node's dead delivery rows; with several dispatch nodes, ask each one.
+        this node's dead delivery rows; with several dispatch nodes, ask each one
+        (`docker-entrypoint replay` is the fleet's view of replays). A page is
+        read in a bounded number of store reads: no scan examines more than
+        10 000 dead keys, so a filter that matches little can return a short, or
+        empty, page with `next_cursor` set. Keep asking until it is `null`.
       parameters:
         - name: source_id
           in: query
@@ -305,6 +309,28 @@ paths:
           description: Exact source id to filter on.
           schema:
             type: string
+        - name: tenant
+          in: query
+          required: false
+          description: Only this tenant's dead letters. A caller limited to some tenants is held to them.
+          schema:
+            type: string
+        - name: sink
+          in: query
+          required: false
+          description: Only rows of the sink at this index in the source (`0` is the first).
+          schema:
+            type: integer
+            minimum: 0
+        - name: error_class
+          in: query
+          required: false
+          description: |
+            Only rows dead-lettered as this class; a row written before dead
+            letters carried a class matches none.
+          schema:
+            type: string
+            enum: [permanent, throttled, transient]
         - name: since
           in: query
           required: false
@@ -318,13 +344,25 @@ paths:
           schema:
             type: integer
             default: 100
+        - name: cursor
+          in: query
+          required: false
+          description: |
+            The `next_cursor` of the previous page (an opaque, URL-safe string);
+            the page resumes below it. Anything else is `400 invalid_filter`
+            (`cursor`).
+          schema:
+            type: string
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '200':
-          description: Matching entries, newest first. `total` counts all matches, before `limit`.
+          description: |
+            Matching entries, newest first, and a `next_cursor` for the next page.
+            `total` is a counter when no filter but the tenant is set, and `null`
+            when it cannot be known without a scan.
           content:
             application/json:
               schema:
@@ -1735,6 +1773,8 @@ components:
         - dead_lettered_at
         - size
         - content_type
+        - sink
+        - error_class
         - reason
       properties:
         id:
@@ -1760,17 +1800,38 @@ components:
         reason:
           type: string
           description: '`inspect/1` of the give-up reason, e.g. `{:sink, Ankusa.Sink.Http, {:status, 503}}`.'
+        sink:
+          type: [integer, 'null']
+          description: The index of the sink in the source, `0` the first.
+        error_class:
+          type: [string, 'null']
+          enum: [permanent, throttled, transient, null]
+          description: |
+            Why dispatch gave up: `permanent` (the sink said it will never work,
+            or the source, the sink or the hook is gone), `throttled` (the
+            destination asked for a pause and the retry horizon ended it) or
+            `transient`. `null` for a row written before dead letters carried a class.
     DlqPage:
       type: object
-      required: [total, entries]
+      required: [total, entries, next_cursor]
       properties:
         total:
-          type: integer
-          description: Number of matching entries, before `limit`.
+          type: [integer, 'null']
+          description: |
+            Number of matching entries, before `limit`, when it is known without
+            a scan: a counter (no filter but the tenant), or the count of a
+            filtered scan that reached the end of the DLQ within this first page.
+            `null` otherwise.
         entries:
           type: array
           items:
             $ref: '#/components/schemas/DlqEntry'
+        next_cursor:
+          type: [string, 'null']
+          description: |
+            Pass as `cursor` for the next page; `null` on the last. A page can
+            be shorter than `limit`, or empty, while it is set: no scan examines
+            more than 10 000 dead keys.
     QuarantineEntry:
       type: object
       required: [id, source_id, received_at, reason]
@@ -1930,6 +1991,34 @@ components:
           maximum: 600000
           default: 2000
           description: The oldest-due lag at which the job throttles, in milliseconds.
+        tenant:
+          type: string
+          description: |
+            Only this tenant's rows. A caller limited to some tenants is held to
+            the tenants it holds whatever the body says.
+        sink:
+          type: integer
+          minimum: 0
+          description: |
+            Only rows of the sink at this index in the source (`0` is the first)
+            (`dlq` only).
+        error_class:
+          type: string
+          enum: [permanent, throttled, transient]
+          description: |
+            Only rows dead-lettered as this class (`dlq` only); a row written
+            before dead letters carried a class is never revived by it. The
+            others stay dead.
+        job_id:
+          type: string
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          description: |
+            The id of the job (a lowercase UUID), instead of a generated one.
+            Asking again with the same `job_id`, kind and filter answers that
+            job (`200`, in any state) instead of creating a second one; the
+            same `job_id` on another kind or filter is `400 invalid_filter`
+            (`job_id`). `docker-entrypoint replay` sends one `job_id` to every
+            node of a fleet.
     ReplayPatch:
       type: object
       properties:
