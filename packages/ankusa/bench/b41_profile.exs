@@ -89,7 +89,11 @@ config =
     instance: :bench,
     data_dir: dir,
     port: 0,
-    roles: [:edge, :dispatch, :storage],
+    roles:
+      System.get_env("ROLES", "edge,dispatch,storage")
+      |> String.split(",")
+      |> Enum.map(&String.to_atom/1),
+    storage: if(System.get_env("COMPACTOR") == "0", do: %{interval_ms: 0}, else: %{}),
     batcher: %{group_commit_delay_ms: String.to_integer(System.get_env("GC_DELAY", "1"))},
     source_store:
       {Ankusa.SourceStore.Static,
@@ -335,5 +339,5 @@ wait = fn wait ->
       )
 end
 
-wait.(wait)
+if System.get_env("NODRAIN") != "1", do: wait.(wait)
 Supervisor.stop(instance_sup)
