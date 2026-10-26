@@ -21,6 +21,11 @@ name: bench 10kb ceiling
 # slow runner. The numbers are in the job log.
 
 on:
+  # GitHub only registers a `workflow_dispatch` workflow once it is on the
+  # default branch, so this throwaway branch triggers itself on a push instead.
+  # (Dispatched with `gh workflow run` where the file is already registered.)
+  push:
+    branches: [bench/ci-10kb-ceiling]
   workflow_dispatch:
 
 permissions:
