@@ -63,14 +63,12 @@ defmodule Ankusa.UUIDv7 do
     <<ms::48, 7::4, -1::12, 2::2, -1::62>> |> encode()
   end
 
-  defp encode(<<a::32, b::16, c::16, d::16, e::48>>) do
-    [
-      Base.encode16(<<a::32>>, case: :lower),
-      Base.encode16(<<b::16>>, case: :lower),
-      Base.encode16(<<c::16>>, case: :lower),
-      Base.encode16(<<d::16>>, case: :lower),
-      Base.encode16(<<e::48>>, case: :lower)
-    ]
-    |> Enum.join("-")
+  # One hex encoding of the 16 bytes, cut into the five groups: five encodings of
+  # the groups (and a join) were most of what an id cost on the request path.
+  defp encode(<<bin::binary-16>>) do
+    <<a::binary-8, b::binary-4, c::binary-4, d::binary-4, e::binary-12>> =
+      Base.encode16(bin, case: :lower)
+
+    <<a::binary, ?-, b::binary, ?-, c::binary, ?-, d::binary, ?-, e::binary>>
   end
 end

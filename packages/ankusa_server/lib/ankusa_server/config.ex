@@ -97,7 +97,7 @@ defmodule AnkusaServer.Config do
   @auth_mtls_keys ~w(subject_map)
   @tls_verifies ~w(verify_none verify_peer)
   @tls_versions %{"tlsv1.2" => :"tlsv1.2", "tlsv1.3" => :"tlsv1.3"}
-  @batcher_keys ~w(partitions max_batch max_commits group_commit_max_bytes group_commit_max_records group_commit_delay_ms max_delay_ms max_queue max_queue_bytes)
+  @batcher_keys ~w(partitions group_commit_max_bytes group_commit_max_records group_commit_delay_ms max_queue max_queue_bytes)
   @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms sink_concurrency breaker_failures breaker_open_ms breaker_max_open_ms max_retry_after_ms retry tenants)
   @dispatch_tenant_keys ~w(max_inflight max_inflight_bytes concurrency)
   @retry_keys ~w(base_ms max_ms max_attempts jitter max_elapsed_ms)
@@ -222,13 +222,28 @@ defmodule AnkusaServer.Config do
 
   # The version of the file format this image reads (`config_version`). A file
   # without the key is version 1: every file written before it existed.
-  @config_version 1
+  @config_version 2
 
   # `from => fun`: rewrites a document of version `from` into one of `from + 1`,
   # on the YAML map as written (before `${…}` is substituted). A format change
   # that renames or moves a key adds its step here and bumps `@config_version`;
-  # the files of the older version keep loading. Empty until one does.
-  @migrations %{}
+  # the files of the older version keep loading.
+  #
+  #   1 -> 2  `batcher.max_batch`, `batcher.max_commits` and `batcher.max_delay_ms`
+  #           are gone: a request hands its hook to the queue writer from its own
+  #           process, so there is no batch to size, no commit slots to count and
+  #           no linger to set (DUR-4.b.b.b). A version 1 file that still sets
+  #           them loads; the keys are dropped.
+  @migrations %{
+    1 => &__MODULE__.drop_batcher_buffer_keys/1
+  }
+
+  @doc false
+  @spec drop_batcher_buffer_keys(map()) :: map()
+  def drop_batcher_buffer_keys(%{"batcher" => %{} = batcher} = doc),
+    do: %{doc | "batcher" => Map.drop(batcher, ~w(max_batch max_commits max_delay_ms))}
+
+  def drop_batcher_buffer_keys(doc), do: doc
 
   @typedoc """
   A loaded config plus the log level and banner switch the file asked for, and
@@ -1082,8 +1097,6 @@ defmodule AnkusaServer.Config do
       batcher:
         []
         |> put_opt(:partitions, int_opt(batcher, "partitions", ["batcher"]))
-        |> put_opt(:max_batch, int_opt(batcher, "max_batch", ["batcher"]))
-        |> put_opt(:max_commits, int_opt(batcher, "max_commits", ["batcher"]))
         |> put_opt(
           :group_commit_max_bytes,
           int_opt(batcher, "group_commit_max_bytes", ["batcher"])
@@ -1092,7 +1105,6 @@ defmodule AnkusaServer.Config do
           :group_commit_max_records,
           int_opt(batcher, "group_commit_max_records", ["batcher"])
         )
-        |> put_opt(:max_delay_ms, int_opt(batcher, "max_delay_ms", ["batcher"]))
         |> put_opt(
           :group_commit_delay_ms,
           int_opt(batcher, "group_commit_delay_ms", ["batcher"])

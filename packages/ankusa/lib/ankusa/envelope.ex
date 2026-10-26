@@ -46,6 +46,16 @@ defmodule Ankusa.Envelope do
   @enforce_keys [:id, :source_id, :received_at, :method, :path, :headers, :body]
   defstruct @fields
 
+  # An envelope with every field at its default, for the decoder: `struct/2`
+  # looks every field up once per decoded row, a merge over this does not
+  # (`@enforce_keys` keeps `%__MODULE__{}` for callers that have the fields).
+  @blank @fields
+         |> Map.new(fn
+           {key, default} -> {key, default}
+           key -> {key, nil}
+         end)
+         |> Map.put(:__struct__, __MODULE__)
+
   @type t :: %__MODULE__{
           id: String.t(),
           source_id: String.t(),
@@ -156,7 +166,7 @@ defmodule Ankusa.Envelope do
   # sobelow_skip ["Misc.BinToTerm"]
   defp decode(term) do
     case :erlang.binary_to_term(term) do
-      %{} = map -> {:ok, struct(__MODULE__, Map.take(map, @known_keys))}
+      %{} = map -> {:ok, Map.merge(@blank, Map.take(map, @known_keys))}
       _ -> {:error, :undecodable}
     end
   rescue

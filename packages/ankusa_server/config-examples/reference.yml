@@ -23,7 +23,7 @@
 # `dispatch.sink_concurrency`, `dispatch.tenants`, `metrics.detail` and
 # `admin.gauge_interval_ms`; a change to any other key is refused with `409`
 # naming it, and needs a restart. See docs/configuration.md#reloading-the-config.
-config_version: 1
+config_version: 2
 
 node:
   # [env ANKUSA_ROLES] which OTP roles run here. One all-roles process is fine
@@ -494,15 +494,10 @@ queue:
       counters: 1048576
 
 batcher:
-  # One process per partition holds its callers' request bodies and prepares
-  # their commit (rows, dedupe read). The queue writer merges every partition's
-  # queued batches into one group commit, so more partitions are not more fsyncs.
+  # The admission gate of one partition: a request hands its hook to the queue
+  # writer from its own process, and the writer merges the calls of every
+  # partition into one group commit, so more partitions are not more fsyncs.
   partitions: 4
-  max_batch: 256
-  # Commits one partition keeps in flight: a batch goes to the writer without
-  # waiting for the one ahead, so the writer finds every waiting caller in its
-  # mailbox and merges them. 1 is the old one-commit-at-a-time behaviour.
-  max_commits: 64
   # A group is cut at whichever cap comes first. Every caller in a group waits
   # for the whole group, so the byte cap bounds the ack latency a backlog adds
   # (default 4 MiB); under wal.type dual one group is one produce request.
@@ -512,11 +507,8 @@ batcher:
   # the callers it just answered to call again, so they join the next group.
   # Never delays a request at low load; 0 disables it.
   group_commit_delay_ms: 1
-  # 0 = commit as soon as a batch is ready; the store commit runs in a task, so
-  # raising this trades a little ack latency for larger batches.
-  max_delay_ms: 0
   # Full queue = shed load with 503 rather than grow without bound. Counts
-  # buffered *and* in-flight records.
+  # every record from admission until its caller is answered.
   max_queue: 10000
   # The same bound in bytes of body (default 256 MiB): a burst of large hooks
   # sheds load before it can exhaust memory, whatever the record count.

@@ -871,14 +871,36 @@ defmodule AnkusaServer.ConfigTest do
     defp load_versioned(value),
       do: Config.load!(path: tmp_config("config_version: #{value}\n" <> @minimal), env: %{})
 
-    test "a file without the key is version 1, and so is one that says 1" do
-      assert %{doc: %{"config_version" => 1}} = Config.load!(path: tmp_config(@minimal), env: %{})
-      assert %{doc: %{"config_version" => 1}} = load_versioned(1)
+    test "a file without the key is version 1, and is read at the current one" do
+      assert %{doc: %{"config_version" => 2}} = Config.load!(path: tmp_config(@minimal), env: %{})
+      assert %{doc: %{"config_version" => 2}} = load_versioned(1)
+      assert %{doc: %{"config_version" => 2}} = load_versioned(2)
+    end
+
+    test "a version 1 file that sets the batcher keys DUR-4.b.b.b removed still loads" do
+      path =
+        tmp_config("""
+        config_version: 1
+        batcher: {partitions: 2, max_batch: 256, max_commits: 64, max_delay_ms: 0}
+        #{@minimal}
+        """)
+
+      assert %{config: config, doc: doc} = Config.load!(path: path, env: %{})
+      assert config.batcher.partitions == 2
+      assert doc["batcher"] == %{"partitions" => 2}
+    end
+
+    test "a version 2 file that sets a removed batcher key is refused, naming it" do
+      for key <- ~w(max_batch max_commits max_delay_ms) do
+        path = tmp_config("config_version: 2\nbatcher: {#{key}: 1}\n#{@minimal}")
+        error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+        assert error.message == ~s(batcher: unknown key "#{key}")
+      end
     end
 
     test "a version this image does not read is refused, naming the key" do
-      error = assert_raise ConfigError, fn -> load_versioned(2) end
-      assert error.message =~ "config_version: 2 is newer than this image reads (up to 1)"
+      error = assert_raise ConfigError, fn -> load_versioned(3) end
+      assert error.message =~ "config_version: 3 is newer than this image reads (up to 2)"
 
       for bad <- ["0", "-1", "1.5", "\"1\"", "true", "[1]"] do
         error = assert_raise ConfigError, fn -> load_versioned(bad) end

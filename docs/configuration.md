@@ -72,7 +72,7 @@ is the [key reference](#ankusa-config) below.
 | Section | Keys (default) |
 | --- | --- |
 | `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`), `min_free_bytes` (unset = no check; the free bytes `data_dir`'s file system must keep, or `/ready` answers `503` with `disk: failing`; see [`/ready`](deployment.md#running-the-container)), `region` (unset; a non-empty string of at most 64 bytes, e.g. `eu-west-1`: stamped on every queue message as `region` and on the AsyncAPI document as `x-ankusa-region`; core's `dispatch.region`) |
-| `config_version` | `1`: the version of the file format. Optional; an older file is migrated on load, a newer one is refused. See [Reloading the config](#reloading-the-config) |
+| `config_version` | `2`: the version of the file format. Optional; an older file is migrated on load, a newer one is refused. See [Reloading the config](#reloading-the-config) |
 | `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`), `min_free_bytes` (unset = no check; the free bytes `data_dir`'s file system must keep, or `/ready` answers `503` with `disk: failing`; see [`/ready`](deployment.md#running-the-container)) |
 | `log` | `level` (`info`), `format` (`text` \| `json`; `text`), `banner` (`true`; the ASCII-art banner on start, never printed with `format: json`). See [Logs](#logs) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`), `store_headers` (`drop`: `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`; `hash`: none). See [Stored headers](#stored-headers) |
@@ -80,7 +80,7 @@ is the [key reference](#ankusa-config) below.
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it, and then needs `auth`), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled), `tls` (a TLS block, like `listener.tls`), `auth` (who may call it: `mode` = `none` \| `token` \| `jwt` \| `mtls`, `allow_insecure`, `tokens`, `jwt`, `mtls`; see [Control-plane authentication](#control-plane-authentication)) |
 | `metrics` | `enabled` (`false`), `port` (4004), `ip` (`127.0.0.1`), `tls`. A listener that serves only `/metrics`, `/health` and `/ready`. See [A separate metrics listener](#a-separate-metrics-listener) |
 | `tracing` | `enabled` (`false`), `otlp_endpoint` (`http://localhost:4318`), `sample_ratio` (`1.0`; 0 to 1). Image only. Starts the OpenTelemetry SDK and the OTLP exporter. See [Tracing](#tracing) |
-| `batcher` | `partitions` (4), `max_batch` (256), `max_commits` (64), `group_commit_max_bytes` (4194304), `group_commit_max_records` (1024), `group_commit_delay_ms` (1), `max_delay_ms` (0), `max_queue` (10000), `max_queue_bytes` (268435456) |
+| `batcher` | `partitions` (4), `group_commit_max_bytes` (4194304), `group_commit_max_records` (1024), `group_commit_delay_ms` (1), `max_queue` (10000), `max_queue_bytes` (268435456) |
 | `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `sink_concurrency` (8; null = only `concurrency`), `breaker_failures` (5; 0 disables breakers), `breaker_open_ms` (30000), `breaker_max_open_ms` (300000), `tenants` (`default` and one entry per tenant id, each any of `max_inflight` (1024), `max_inflight_bytes` (33554432), `concurrency` (16)), `max_retry_after_ms` (3600000; 1000 to 86400000), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (null: no attempt limit), `retry.jitter` (`true`), `retry.max_elapsed_ms` (86400000, 24 h; 1000 to 2592000000: the wall-clock horizon, see [Retry horizon](delivery.md#retry-horizon)). See [`delivery.md`](delivery.md#a-slow-or-dead-sink) and [Dispatch fairness between tenants](delivery.md#fairness-between-tenants) |
 | `wal` | `type` (`disk` \| `dual` \| `none`; the queue's mode — the name is historical; `dual` also confirms every hook in the intake log, see `intake`), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
 | `intake` | The intake log behind `wal.type: dual` ([ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)); read whatever `wal.type` is, required under `dual`. `type` (`kafka`; required under `dual`), `node_id` (required under `dual`; `[a-z0-9._-]{1,64}`, the node's **stable** identity, the same on a replacement; `ANKUSA_INTAKE_NODE_ID`), `fleet` (`default`), `topic` (`ankusa.intake.<fleet>`), `kafka` (`brokers`: a list of `host:port`, required; `ssl`: bool; `sasl`: `mechanism` (`plain` \| `scram_sha_256` \| `scram_sha_512`), `username`, `password`; the same shape as a Kafka sink), `publish_timeout_ms` (`2000`; 100–60000, under the batcher's 15 s record deadline: the one publish attempt's deadline), `reconcile_deadline_ms` (`20000`; 1000–600000, and under `fleet.pending_ttl_ms` with `dedupe.scope: fleet`), `breaker_failures` (`3`; 1–100), `probe_ms` (`1000`; 100–60000), `retry_after_s` (`2`; 1–300), `offset_flush_ms` (`1000`; 100–60000), `pending.max_records` (`50000`; 1–10⁷), `pending.max_bytes` (`268435456`), `max_record_bytes` (`10000000`; at least `http.max_body_bytes` + 65536), `recover_on_boot` (`true`), `verify_topic` (`true`; `false` skips the boot check of the topic's settings and the startup line says `intake topic settings UNVERIFIED`). `kafka.sasl` is redacted in `GET /v1/config`. Boot refuses `dual` without `intake.type`, `intake.node_id`, `backup.enabled` and `backup.max_age_ms`. See [Host loss and the intake log](deployment.md#host-loss-and-the-intake-log) |
@@ -562,12 +562,21 @@ and changes with a restart: the reload that finds one changed is refused.
 
 ### Reloading the config
 
-`config_version` is the version of the file format (`1`; a file without the key
+`config_version` is the version of the file format (`2`; a file without the key
 is version 1). An image reads every version up to its own: a file written for an
 older format is migrated as it loads (the loader's migration map, applied before
 `${…}` is substituted), and a file that says a version newer than the image reads
 is refused at boot with `config_version` named, so an older image never guesses
 at a newer file.
+
+Version 2 removed `batcher.max_batch`, `batcher.max_commits` and
+`batcher.max_delay_ms`: a request hands its hook to the queue writer from its own
+process, so there is no batch to size, no commit slots to count and no linger to
+set. A version 1 file that still sets them loads, and the loader drops them
+(`batcher.group_commit_*` size the writer's group, as before); a version 2 file
+that sets one is refused, naming it. Rolling back to the previous image needs the
+file to say `config_version: 1` (or to omit it); the three keys may stay out, the
+previous image has a default for each.
 
 A running node re-reads its file on `SIGHUP` (`kill -HUP 1` in the container,
 `kubectl exec … -- kill -HUP 1`) or on
@@ -656,12 +665,9 @@ config :ankusa,
   direct_publish_timeout_ms: 8_000,
   batcher: %{
     partitions: 4,
-    max_batch: 256,
-    max_commits: 64,
     group_commit_max_bytes: 4_194_304,
     group_commit_max_records: 1_024,
     group_commit_delay_ms: 1,
-    max_delay_ms: 0,
     max_queue: 10_000,
     max_queue_bytes: 268_435_456
   },
@@ -806,14 +812,11 @@ config :ankusa,
 | `intake.pending.max_records`, `intake.pending.max_bytes` | `50_000`, `268_435_456` | The pending set (records not yet confirmed in both places) is bounded; a full set is `503 intake_unavailable` (`ankusa_intake_refused_total{reason="backlog"}`) before a seq is assigned. |
 | `intake.max_record_bytes` | `10_000_000` | One intake record's ceiling; at least `max_body_bytes + 65 536` so a body the node accepts always fits. |
 | `intake.recover_on_boot`, `intake.verify_topic` | `true`, `true` | Replay the log into the store at boot (`false`: run `mix ankusa.recover` by hand); verify the log's settings at boot (`false` says `intake topic settings UNVERIFIED` in the startup line). |
-| `batcher.partitions` | `4` | One group-commit `GenServer` per partition: where request bodies are held, delivery rows encoded and dedupe keys read (a prefetch the writer re-validates). Partitions do not add commits: the queue writer merges every partition's queued batches into one group (`batcher.group_commit_*`), so the number buys parallel preparation and fault isolation, not fsyncs. |
-| `batcher.max_batch` | `256` | Flush once this many envelopes have queued in one partition. |
-| `batcher.max_commits` | `64` | Commits one partition keeps in flight. A batch is handed to the writer without waiting for the one ahead, so the writer finds every waiting caller in its mailbox and merges them into one group (and, under `wal.type: dual`, a publish overlaps the next local write); a caller waits for its own group, not for the commit ahead of it plus its own. The writer applies a group without an fsync and the queue's syncer (`Ankusa.Queue.Syncer`) fsyncs the WAL once for every group applied so far, so the next group is assembled while one syncs ([`storage.md`](storage.md)). Measured with 256 closed-loop clients, 10 KB bodies, 4 partitions and a 5 ms fsync (`bench/store_commit.exs`, `SWEEP=1`): 1 slot, 64 hooks per commit and 5.6 k hooks/s; 64 slots, 130 per commit and 10.7 k/s (before the pipelined fsync). `1` is the old one-at-a-time behaviour. Bounded by `batcher.max_queue` either way. |
+| `batcher.partitions` | `4` | The admission gate of one partition: a request counts its hook against its partition's bound (`batcher.max_queue`, `batcher.max_queue_bytes`) and hands it to the queue writer from its own process; there is no process or buffer between the request and the writer. Partitions do not add commits: the queue writer merges the calls of every partition into one group (`batcher.group_commit_*`), so the number is how many bounds the node keeps, and one wedged partition does not shed the others. |
 | `batcher.group_commit_max_bytes` | `4_194_304` (4 MiB) | The most body bytes the writer merges into one group, across partitions: one store write, one fsync and, under `wal.type: dual`, one produce request. Every caller in a group waits for the whole group, so this bounds the ack latency a backlog adds (64 MiB at ~1 GB/s of WAL write is 65 ms before the fsync, which alone breaks the 50 ms p99); a single call larger than the cap is still committed alone. |
 | `batcher.group_commit_max_records` | `1_024` | The most hooks in one group. A call that would pass either cap starts the next group. |
 | `batcher.group_commit_delay_ms` | `1` | How long a saturated writer waits for the callers it just answered to call again, so they join the next group instead of forming the one after it (a closed loop of clients otherwise splits into two cohorts that commit alternately, each half the size it could be). Applies only when the writer's last group held 64 or more hooks, so it never delays a request at low concurrency (a wait there costs most of the throughput of a 32-client closed loop once the fsync is cheap); `0` disables it. |
-| `batcher.max_delay_ms` | `0` | Commit immediately. The store commit runs in a task, so waiting is a scheduling hop rather than head-of-line blocking. Raise it to trade a little ack latency for larger batches. |
-| `batcher.max_queue` | `10_000` | Bound per partition, counting buffered **and** in-flight records; full means `{:error, :overload}` → `503`. |
+| `batcher.max_queue` | `10_000` | Bound per partition, counting every record from its admission until its caller is answered; full means `{:error, :overload}` → `503`. |
 | `batcher.max_queue_bytes` | `268_435_456` (256 MiB) | The same bound in body bytes, buffered and in flight, so a burst of large hooks sheds load (`503`) before it exhausts memory. |
 | `dispatch.batch` | `128` | Delivery rows claimed per store scan. |
 | `dispatch.concurrency` | `32` | Max sink deliveries in flight at once. Keep Req's Finch pool (default 50) at least this large for `Sink.Http`. |
@@ -954,7 +957,7 @@ are booleans, `metrics.ip` an IP address, and a `tls` block names existing
 `certfile`/`keyfile`, a `verify` of `verify_none`/`verify_peer` (the latter
 with a `cacertfile`), non-empty `versions` from `tlsv1.2`/`tlsv1.3` and known
 `ciphers`;
-`batcher.max_delay_ms`, `batcher.group_commit_delay_ms`, `storage.roll_ms`, `storage.interval_ms`,
+`batcher.group_commit_delay_ms`, `storage.roll_ms`, `storage.interval_ms`,
 `claim_check.read_retries`, `claim_check.read_queue_max`,
 `claim_check.read_cache_bytes` and `claim_check.max_concurrent_reads` may be
 `0` (no linger, roll at once, a compactor that runs only when asked, no read

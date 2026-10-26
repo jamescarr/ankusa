@@ -833,26 +833,60 @@ defmodule Ankusa.Queue.Deliveries do
           binary(),
           Lanes.lane() | nil
         ) :: [Store.op()]
-  def new_ops(ord, at, seq, sink, size, row_bin, lane \\ nil)
-
-  def new_ops(ord, at, seq, sink, size, row_bin, nil) do
-    [{:put, :deliveries, Keys.delivery(seq, sink), row_bin}] ++
-      due_ops(ord, at, seq, sink, size, @first_attempt) ++
-      Counters.ops([{ord, :pending, 1}, {ord, :bytes, size}])
+  def new_ops(ord, at, seq, sink, size, row_bin, lane \\ nil) do
+    {puts, deltas} = new_entry(ord, at, seq, sink, size, row_bin, lane)
+    puts ++ [active_op(ord, at)] ++ Counters.ops(deltas)
   end
 
-  def new_ops(ord, at, seq, sink, size, row_bin, lane) do
-    [{:put, :deliveries, Keys.delivery(seq, sink), row_bin}] ++
-      Lanes.member_ops(ord, at, seq, sink, size, lane) ++
-      Counters.ops([{ord, :pending, 1}, {ord, :bytes, size}])
+  @doc """
+  `new_ops/7` in pieces, for a caller that builds a whole group at once
+  (`Ankusa.Queue.Writer`): the puts of one delivery (its row, and its due row or
+  lane member), and the counter deltas the delivery adds, **without** the
+  tenant's active marker (`active_op/2`: one per tenant is enough for a group) and
+  without turning the deltas into merges (`Counters.ops/1` once for the group
+  folds them per tenant and per field).
+  """
+  @spec new_entry(
+          pos_integer(),
+          integer(),
+          pos_integer(),
+          integer(),
+          integer(),
+          binary(),
+          Lanes.lane() | nil
+        ) :: {[Store.op()], [Counters.delta()]}
+  def new_entry(ord, at, seq, sink, size, row_bin, nil) do
+    {[
+       {:put, :deliveries, Keys.delivery(seq, sink), row_bin},
+       {:put, :index, Keys.due(ord, at, seq, sink), <<size::32, @first_attempt::8>>}
+     ], [{ord, :pending, 1}, {ord, :bytes, size}]}
   end
+
+  def new_entry(ord, _at, seq, sink, size, row_bin, lane) do
+    {member_puts, member_deltas} = Lanes.member_entry(ord, seq, sink, size, lane)
+
+    {[{:put, :deliveries, Keys.delivery(seq, sink), row_bin} | member_puts],
+     [{ord, :pending, 1}, {ord, :bytes, size} | member_deltas]}
+  end
+
+  @doc "The tenant's active marker (`?A`) for a row due at `at`: what makes the scan look at the tenant."
+  @spec active_op(pos_integer(), integer()) :: Store.op()
+  def active_op(ord, at), do: {:put, :index, Keys.active(div(at, 1000), ord), <<>>}
 
   @doc "An archive obligation of tenant `ord`'s hook."
   @spec archive_ops(pos_integer(), pos_integer(), integer()) :: [Store.op()]
   def archive_ops(ord, seq, size) do
-    [{:put, :index, Keys.archive_pending(seq), <<size::32, ord::32>>}] ++
-      Counters.ops([{ord, :archive_pending, 1}])
+    {puts, deltas} = archive_entry(ord, seq, size)
+    puts ++ Counters.ops(deltas)
   end
+
+  @doc "`archive_ops/3` in pieces, like `new_entry/7`."
+  @spec archive_entry(pos_integer(), pos_integer(), integer()) ::
+          {[Store.op()], [Counters.delta()]}
+  def archive_entry(ord, seq, size),
+    do:
+      {[{:put, :index, Keys.archive_pending(seq), <<size::32, ord::32>>}],
+       [{ord, :archive_pending, 1}]}
 
   @doc """
   A delivered row is gone; the marker tells `Ankusa.Queue.Reclaim` to look at its

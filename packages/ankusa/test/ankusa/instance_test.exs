@@ -227,12 +227,13 @@ defmodule Ankusa.InstanceTest do
 
     log =
       ExUnit.CaptureLog.capture_log(fn ->
-        # Break each process's state so the next call it handles raises; the
-        # crash report then prints that call as its "Last message".
-        batcher = Ankusa.whereis(inst, {:batcher, 0})
-        :sys.replace_state(batcher, &%{&1 | count: :broken})
-        catch_exit(Batcher.commit(inst, 0, %{envelope: nil, sinks: [sink]}))
+        # A hook the queue cannot prepare raises in the request process, which
+        # logs the exception and answers 503; the sinks it carried stay out of it.
+        assert {:error, :store_unavailable} =
+                 Batcher.commit(inst, 0, %{envelope: nil, sinks: [sink]})
 
+        # Break the store's state so the next call it handles raises; the crash
+        # report then prints that call as its "Last message".
         store = Ankusa.whereis(inst, :source_store)
         :sys.replace_state(store, &%{&1 | table: :no_such_table})
         spec = %{"sinks" => [%{"type" => "log", "token" => @canary}]}
@@ -243,7 +244,7 @@ defmodule Ankusa.InstanceTest do
         Process.sleep(200)
       end)
 
-    assert log =~ "Ankusa.Edge.Batcher"
+    assert log =~ "queue enqueue raised"
     assert log =~ "Ankusa.SourceStore.Persistent"
     refute log =~ @canary
   end

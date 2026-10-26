@@ -353,7 +353,9 @@ defmodule Ankusa.SourceStore.Static do
   @moduledoc """
   Default source store: sources are declared in config as a map of
   `source_id => keyword/map` (see `Ankusa.Source.new/2`) and cached in
-  `:persistent_term`. Change rarely, read on every request.
+  `:persistent_term`. Change rarely, read on every request: an instance builds
+  each `Ankusa.Source` once, when it boots and again when a reload publishes
+  sources (`prebuild/1`), so `fetch/2` on the request path is a map lookup.
 
   It implements only the read callbacks, so the admin API's write routes answer
   `409 source_store_read_only` against it. Use
@@ -375,6 +377,20 @@ defmodule Ankusa.SourceStore.Static do
 
   @impl true
   def list(instance), do: Map.keys(sources(instance))
+
+  @doc """
+  `config` with every static source built (`Ankusa.Source.new/2`): the specs in
+  `:sources` become `Ankusa.Source` structs, which `fetch/2` hands out as they
+  are. A config on another source store is returned as it is. Raises what
+  `Ankusa.Source.new/2` raises, so run it after the instance's own validation.
+  """
+  @spec prebuild(Config.t()) :: Config.t()
+  def prebuild(%Config{source_store: {__MODULE__, opts}} = config) do
+    built = config |> Ankusa.Queue.static_sources() |> Map.new()
+    %Config{config | source_store: {__MODULE__, Keyword.put(opts, :sources, built)}}
+  end
+
+  def prebuild(%Config{} = config), do: config
 
   defp sources(instance) do
     %Config{source_store: {_mod, opts}} = Ankusa.config(instance)
@@ -442,6 +458,6 @@ defmodule Ankusa.SourceStore.Static do
       |> Enum.filter(&(Map.get(old, &1) != Map.get(new, &1)))
       |> Enum.sort()
 
-    {updated, changed}
+    {prebuild(updated), changed}
   end
 end

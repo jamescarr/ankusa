@@ -76,20 +76,13 @@ defmodule Ankusa.Config do
             # direct mode only: the overall deadline every sink must confirm
             # under. Must stay under the provider's own timeout (GitHub's is 10 s).
             direct_publish_timeout_ms: 8_000,
-            # group-commit batcher: one process per partition, each committing
-            # asynchronously. The queue writer merges the batches every
-            # partition has queued into one group (one synced write, one intake
-            # publish) and only the writer assigns seqs, so partitions are where
-            # request bodies are held and rows are encoded, not extra commits.
+            # group-commit batcher: the admission gate of one partition. A request
+            # hands its hook to the queue writer from its own process; the writer
+            # merges the calls of every partition into one group (one synced write,
+            # one intake publish) and only the writer assigns seqs, so partitions
+            # are where the load-shedding bound is kept, not extra commits.
             batcher: %{
               partitions: 4,
-              max_batch: 256,
-              # commits one partition keeps in flight: a batch is handed to the
-              # writer without waiting for the one ahead, so the writer finds every
-              # waiting caller in its mailbox and merges them into one group (at 4
-              # partitions and 256 closed-loop clients a group is ~130 hooks at 64
-              # slots, ~65 at 1, the old one-commit-at-a-time behaviour)
-              max_commits: 64,
               # a group is cut at whichever of these two is reached first; every
               # caller in it waits for the whole group, so the byte cap bounds
               # the added ack latency (4 MiB is a few ms of WAL write), and under
@@ -100,13 +93,9 @@ defmodule Ankusa.Config do
               # hooks) waits for the callers it just answered to call again, so
               # they join the next group; 0 disables it. Never at low load.
               group_commit_delay_ms: 1,
-              # 0 = commit as soon as the batch fills, no linger: the commit is a
-              # Task, so waiting costs a scheduling hop, not head-of-line
-              # blocking.
-              max_delay_ms: 0,
               # load shedding: a partition refuses (503 overload) once it holds
-              # max_queue records, or max_queue_bytes of bodies, counting both
-              # the buffer and the batch being committed
+              # max_queue records, or max_queue_bytes of bodies, counting every
+              # record from admission until its caller is answered
               max_queue: 10_000,
               max_queue_bytes: 268_435_456
             },
@@ -894,8 +883,6 @@ defmodule Ankusa.Config do
     {[:max_body_bytes], "max_body_bytes"},
     {[:direct_publish_timeout_ms], "direct_publish_timeout_ms"},
     {[:batcher, :partitions], "batcher.partitions"},
-    {[:batcher, :max_batch], "batcher.max_batch"},
-    {[:batcher, :max_commits], "batcher.max_commits"},
     {[:batcher, :group_commit_max_bytes], "batcher.group_commit_max_bytes"},
     {[:batcher, :group_commit_max_records], "batcher.group_commit_max_records"},
     {[:batcher, :max_queue], "batcher.max_queue"},
@@ -943,7 +930,6 @@ defmodule Ankusa.Config do
   # a compactor that only runs when asked (`Compactor.tick/1`), a claim read
   # with no retry, one that never waits for a slot, and no claim cache.
   @non_negative [
-    {[:batcher, :max_delay_ms], "batcher.max_delay_ms"},
     {[:batcher, :group_commit_delay_ms], "batcher.group_commit_delay_ms"},
     {[:storage, :roll_ms], "storage.roll_ms"},
     {[:storage, :interval_ms], "storage.interval_ms"},

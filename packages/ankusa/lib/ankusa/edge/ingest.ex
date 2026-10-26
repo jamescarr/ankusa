@@ -599,7 +599,7 @@ defmodule Ankusa.Edge.Ingest do
 
     # Read it back through the envelope so "the content-type header" is defined
     # in exactly one place, `Ankusa.Envelope.header/2`.
-    %{env | content_type: Envelope.header(env, "content-type")}
+    %{env | content_type: Envelope.header_downcased(env, "content-type")}
   end
 
   # A sub-binary of the socket buffer pins that whole buffer for as long as the

@@ -30,7 +30,7 @@ defmodule Ankusa.ConfigTest do
   test "Config.new/1 deep-merges a keyword-list section over the defaults" do
     config = Config.new(batcher: [max_queue: 5])
 
-    assert config.batcher.max_batch == 256
+    assert config.batcher.group_commit_max_records == 1_024
     assert config.batcher.max_queue == 5
   end
 
@@ -762,7 +762,7 @@ defmodule Ankusa.ConfigTest do
         Config.new(batcher: %{partitions: 0})
       end
 
-      for key <- [:max_commits, :group_commit_max_bytes, :group_commit_max_records] do
+      for key <- [:group_commit_max_bytes, :group_commit_max_records] do
         assert_raise ArgumentError, "batcher.#{key} must be a positive integer, got 0", fn ->
           Config.new(batcher: %{key => 0})
         end
@@ -789,11 +789,12 @@ defmodule Ankusa.ConfigTest do
         Config.new(port: 70_000)
       end
 
-      assert_raise ArgumentError,
-                   "batcher.max_delay_ms must be a non-negative integer, got -1",
-                   fn ->
-                     Config.new(batcher: %{max_delay_ms: -1})
-                   end
+      # The keys of the batcher process that no longer exists (DUR-4.b.b.b).
+      for key <- [:max_batch, :max_commits, :max_delay_ms] do
+        assert_raise ArgumentError, "unknown Ankusa.Config key: batcher.#{key}", fn ->
+          Config.new(batcher: %{key => 1})
+        end
+      end
 
       for key <- [:read_retries, :read_queue_max, :read_cache_bytes, :max_concurrent_reads] do
         assert_raise ArgumentError,

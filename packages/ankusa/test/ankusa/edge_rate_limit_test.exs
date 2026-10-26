@@ -292,12 +292,7 @@ defmodule Ankusa.Edge.RateLimitTest do
     on_exit(fn -> :telemetry.detach("admission-refused") end)
   end
 
-  defp held_by(batcher) do
-    state = :sys.get_state(batcher)
-
-    state.count +
-      Enum.reduce(state.inflight, 0, fn {_ref, %{entries: entries}}, n -> n + length(entries) end)
-  end
+  defp held_by(instance), do: Ankusa.Edge.Batcher.queued(instance, 0)
 
   defp wait_until(fun, tries \\ 200) do
     cond do
@@ -549,17 +544,16 @@ defmodule Ankusa.Edge.RateLimitTest do
       start_edge(
         %{tenants: %{"acme" => %{rate: 1_000_000, burst: 1_000_000, max_queue: 2}}},
         @demo,
-        batcher: %{partitions: 1, max_batch: 1, max_delay_ms: 0}
+        batcher: %{partitions: 1}
       )
 
     inst = config.instance
     writer = Ankusa.whereis(inst, :queue_writer)
-    batcher = Ankusa.whereis(inst, {:batcher, 0})
 
     # Nothing commits while the writer is stuck, so what is admitted is held.
     :ok = :sys.suspend(writer)
     acme = for _ <- 1..2, do: Task.async(fn -> post(config, "/webhooks/acme/demo", "{}") end)
-    wait_until(fn -> held_by(batcher) == 2 end)
+    wait_until(fn -> held_by(inst) == 2 end)
 
     # Acme holds its whole share: its own 429, not the node's 503.
     over = post(config, "/webhooks/acme/demo", "{}")
@@ -570,7 +564,7 @@ defmodule Ankusa.Edge.RateLimitTest do
 
     # Globex is not in acme's queue share: it gets in behind it.
     globex = Task.async(fn -> post(config, "/webhooks/globex/demo", "{}") end)
-    wait_until(fn -> held_by(batcher) == 3 end)
+    wait_until(fn -> held_by(inst) == 3 end)
 
     :ok = :sys.resume(writer)
     assert Enum.map(Task.await_many(acme ++ [globex], 30_000), & &1.status) == [201, 201, 201]
@@ -585,18 +579,17 @@ defmodule Ankusa.Edge.RateLimitTest do
       start_edge(
         %{tenants: %{"acme" => %{rate: 1_000_000, burst: 1_000_000, max_queue_bytes: 1_000}}},
         @demo,
-        batcher: %{partitions: 1, max_batch: 1, max_delay_ms: 0}
+        batcher: %{partitions: 1}
       )
 
     inst = config.instance
     writer = Ankusa.whereis(inst, :queue_writer)
-    batcher = Ankusa.whereis(inst, {:batcher, 0})
     :ok = :sys.suspend(writer)
 
     # Bigger than the share on its own, and the tenant holds nothing else.
     big = String.duplicate("x", 5_000)
     first = Task.async(fn -> post(config, "/webhooks/acme/demo", big) end)
-    wait_until(fn -> held_by(batcher) == 1 end)
+    wait_until(fn -> held_by(inst) == 1 end)
 
     assert error(post(config, "/webhooks/acme/demo", "{}")) == "tenant_overload"
 
@@ -610,16 +603,15 @@ defmodule Ankusa.Edge.RateLimitTest do
       start_edge(
         %{tenants: %{"acme" => %{rate: 1_000_000, burst: 1_000_000, max_queue: 1}}},
         @demo,
-        batcher: %{partitions: 1, max_batch: 1, max_delay_ms: 0, max_queue: 100}
+        batcher: %{partitions: 1, max_queue: 100}
       )
 
     inst = config.instance
     writer = Ankusa.whereis(inst, :queue_writer)
-    batcher = Ankusa.whereis(inst, {:batcher, 0})
     :ok = :sys.suspend(writer)
 
     held = Task.async(fn -> post(config, "/webhooks/acme/demo", "{}") end)
-    wait_until(fn -> held_by(batcher) == 1 end)
+    wait_until(fn -> held_by(inst) == 1 end)
 
     statuses = for _ <- 1..20, do: post(config, "/webhooks/acme/demo", "{}").status
     assert Enum.uniq(statuses) == [429]

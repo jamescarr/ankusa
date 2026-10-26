@@ -413,20 +413,21 @@ defmodule Ankusa.EdgeTest do
   end
 
   test "load shed: a full batcher queue returns 503 with Retry-After" do
-    # A batch that lingers a minute holds the one record max_queue allows, so
-    # the next request is shed at once.
+    # One request, held at the stalled writer, fills the one place max_queue
+    # allows, so the next request is shed at once.
     config =
       test_config(
         roles: [:edge],
         source_store:
           {Ankusa.SourceStore.Static, sources: %{"demo" => [sinks: [{Ankusa.Sink.Log, []}]]}},
-        batcher: %{partitions: 1, max_batch: 100_000, max_delay_ms: 60_000, max_queue: 1}
+        batcher: %{partitions: 1, max_queue: 1}
       )
 
     start_supervised!({Ankusa.Instance, config})
+    writer = Ankusa.whereis(config.instance, :queue_writer)
+    :ok = :sys.suspend(writer)
     held = Task.async(fn -> Ingest.ingest(config.instance, request("demo", "x")) end)
-    batcher = Ankusa.whereis(config.instance, {:batcher, 0})
-    eventually(fn -> :sys.get_state(batcher).count == 1 end)
+    eventually(fn -> Batcher.queued(config.instance, 0) == 1 end)
 
     assert {:error, :overload} = Ingest.ingest(config.instance, request("demo", "x"))
 
@@ -434,7 +435,8 @@ defmodule Ankusa.EdgeTest do
     assert conn.status == 503
     assert Plug.Conn.get_resp_header(conn, "retry-after") == ["1"]
 
-    Task.shutdown(held, :brutal_kill)
+    :ok = :sys.resume(writer)
+    assert {:ok, {:ok, _env}} = Task.yield(held, 10_000)
   end
 
   test "sheds with 503 once the bodies held pass max_queue_bytes, in flight included" do
@@ -443,7 +445,7 @@ defmodule Ankusa.EdgeTest do
         roles: [:edge],
         source_store:
           {Ankusa.SourceStore.Static, sources: %{"demo" => [sinks: [{Ankusa.Sink.Log, []}]]}},
-        batcher: %{partitions: 1, max_batch: 1, max_delay_ms: 0, max_queue_bytes: 10_000}
+        batcher: %{partitions: 1, max_queue_bytes: 10_000}
       )
 
     start_supervised!({Ankusa.Instance, config})
@@ -455,8 +457,7 @@ defmodule Ankusa.EdgeTest do
     first = Task.async(fn -> Ingest.ingest(inst, request("demo", body)) end)
 
     # The first 8 KB body is the commit in flight (stuck on the writer)...
-    batcher = Ankusa.whereis(inst, {:batcher, 0})
-    eventually(fn -> map_size(:sys.get_state(batcher).inflight) > 0 end)
+    eventually(fn -> Batcher.queued(inst, 0) == 1 end)
 
     # ...so a second one would hold 16 KB: refused, though one record is far
     # below `max_queue`.
@@ -479,7 +480,7 @@ defmodule Ankusa.EdgeTest do
         roles: [:edge],
         source_store:
           {Ankusa.SourceStore.Static, sources: %{"demo" => [sinks: [{Ankusa.Sink.Log, []}]]}},
-        batcher: %{partitions: 1, max_batch: 2, max_queue: 4, max_delay_ms: 0}
+        batcher: %{partitions: 1, max_queue: 4}
       )
 
     start_supervised!({Ankusa.Instance, config})
@@ -523,13 +524,8 @@ defmodule Ankusa.EdgeTest do
         roles: [:edge],
         source_store:
           {Ankusa.SourceStore.Static, sources: %{"demo" => [sinks: [{Ankusa.Sink.Log, []}]]}},
-        # one commit at a time: these tests stall the writer and watch what a
-        # partition does with the records behind the commit that is stuck
-        batcher:
-          Map.merge(
-            %{partitions: 1, max_batch: 1, max_commits: 1, max_delay_ms: 0, max_queue: 10_000},
-            batcher
-          )
+        # these tests stall the writer and watch what the calls waiting at it do
+        batcher: Map.merge(%{partitions: 1, max_queue: 10_000}, batcher)
       )
 
     start_supervised!({Ankusa.Instance, config})
@@ -573,36 +569,9 @@ defmodule Ankusa.EdgeTest do
     Task.async(fn -> Batcher.commit(inst, 0, entry, timeout) end)
   end
 
-  defp inflight?(batcher), do: map_size(:sys.get_state(batcher).inflight) > 0
-
   @tag :capture_log
-  test "a record still buffered at its deadline is answered 503 while the commit ahead of it is stuck" do
+  test "a deadline that passes while the writer is stalled is refused afterwards; :infinity and a live one commit" do
     inst = start_stalled_edge()
-    batcher = Ankusa.whereis(inst, {:batcher, 0})
-    writer = Ankusa.whereis(inst, :queue_writer)
-    :ok = :sys.suspend(writer)
-
-    a = entry(1)
-    b = entry(2)
-    task_a = commit_in_task(inst, a, 10_000)
-    eventually(fn -> inflight?(batcher) end)
-    task_b = commit_in_task(inst, b, 200)
-
-    # B waited behind A and ran out its deadline; the writer is still stuck.
-    assert {:ok, {:error, :store_unavailable}} = Task.yield(task_b, 1_000)
-
-    :ok = :sys.resume(writer)
-    assert {:committed, _} = Task.await(task_a)
-
-    stored = stored_ids(inst)
-    assert a.envelope.id in stored
-    refute b.envelope.id in stored
-  end
-
-  @tag :capture_log
-  test "an :infinity timeout waits behind a stuck commit and never expires; a finite one beside it does" do
-    inst = start_stalled_edge()
-    batcher = Ankusa.whereis(inst, {:batcher, 0})
     writer = Ankusa.whereis(inst, :queue_writer)
     :ok = :sys.suspend(writer)
 
@@ -610,19 +579,20 @@ defmodule Ankusa.EdgeTest do
     b = entry(2)
     c = entry(3)
     task_a = commit_in_task(inst, a, :infinity)
-    eventually(fn -> inflight?(batcher) end)
-    task_b = commit_in_task(inst, b, :infinity)
-    eventually(fn -> :sys.get_state(batcher).count == 1 end)
+    task_b = commit_in_task(inst, b, 10_000)
     task_c = commit_in_task(inst, c, 200)
+    eventually(fn -> Process.info(writer, :message_queue_len) == {:message_queue_len, 3} end)
+    assert Batcher.queued(inst, 0) == 3
 
-    # C expires behind the stuck commit; B, with no deadline, keeps waiting.
-    assert {:ok, {:error, :store_unavailable}} = Task.yield(task_c, 1_000)
-    assert Task.yield(task_b, 0) == nil
-    assert Ankusa.whereis(inst, {:batcher, 0}) == batcher
+    # C's deadline passes while the writer is stuck; A and B keep waiting.
+    Process.sleep(400)
+    assert Task.yield(task_c, 0) == nil
 
     :ok = :sys.resume(writer)
+    assert {:error, :store_unavailable} = Task.await(task_c)
     assert {:committed, _} = Task.await(task_a)
     assert {:committed, _} = Task.await(task_b)
+    eventually(fn -> Batcher.queued(inst, 0) == 0 end)
 
     stored = stored_ids(inst)
     assert a.envelope.id in stored
@@ -665,70 +635,27 @@ defmodule Ankusa.EdgeTest do
   end
 
   @tag :capture_log
-  test "a commit task killed from outside fails its own batch only; the batcher and the buffer survive" do
+  test "a caller that dies while its call waits at the writer commits nothing" do
     inst = start_stalled_edge()
-    batcher = Ankusa.whereis(inst, {:batcher, 0})
     writer = Ankusa.whereis(inst, :queue_writer)
     :ok = :sys.suspend(writer)
 
     a = entry(1)
     b = entry(2)
     task_a = commit_in_task(inst, a, 10_000)
-    eventually(fn -> inflight?(batcher) end)
-    # A's call has reached the writer's mailbox, not just started its task: the
-    # kill below must land while it waits there.
     eventually(fn -> Process.info(writer, :message_queue_len) == {:message_queue_len, 1} end)
     task_b = commit_in_task(inst, b, 10_000)
-    eventually(fn -> :sys.get_state(batcher).count == 1 end)
+    eventually(fn -> Process.info(writer, :message_queue_len) == {:message_queue_len, 2} end)
 
-    task_sup = :sys.get_state(batcher).task_sup
-    [commit_task] = Task.Supervisor.children(task_sup)
-    Process.exit(commit_task, :kill)
-
-    assert {:error, :store_unavailable} = Task.await(task_a)
-    assert Ankusa.whereis(inst, {:batcher, 0}) == batcher
+    Task.shutdown(task_a, :brutal_kill)
 
     :ok = :sys.resume(writer)
     assert {:committed, _} = Task.await(task_b)
 
-    # A was answered 503, so it must not be stored behind the caller's back: the
-    # writer found its caller gone and committed nothing.
+    # A's caller was gone when the writer reached its call: nothing of it is stored.
     stored = stored_ids(inst)
     refute a.envelope.id in stored
     assert b.envelope.id in stored
-  end
-
-  @tag :capture_log
-  test "the batcher's status shows how many records it holds, never their sinks or bodies" do
-    inst = start_stalled_edge()
-    batcher = Ankusa.whereis(inst, {:batcher, 0})
-    writer = Ankusa.whereis(inst, :queue_writer)
-    :ok = :sys.suspend(writer)
-
-    sinks = [{Ankusa.Sink.Log, [token: "s3cr3t-canary"]}]
-    task_a = commit_in_task(inst, entry(1, sinks), 10_000)
-    eventually(fn -> inflight?(batcher) end)
-    task_b = commit_in_task(inst, entry(2, sinks), 10_000)
-    eventually(fn -> :sys.get_state(batcher).count == 1 end)
-
-    # The canary is in the state (one record in flight, one buffered): the
-    # redaction is what keeps it out of the status.
-    assert inspect(:sys.get_state(batcher), limit: :infinity) =~ "s3cr3t-canary"
-
-    status = inspect(:sys.get_status(batcher), limit: :infinity, printable_limit: :infinity)
-    refute status =~ "s3cr3t-canary"
-    assert %{buffer: 1, inflight: 1} = status_state(batcher)
-
-    :ok = :sys.resume(writer)
-    assert {:committed, _} = Task.await(task_a)
-    assert {:committed, _} = Task.await(task_b)
-  end
-
-  # The state `format_status/1` hands back, from `:sys.get_status/1`.
-  defp status_state(pid) do
-    {:status, _pid, _module, [_pdict, _sysstate, _parent, _dbg, misc]} = :sys.get_status(pid)
-    [state] = for {:data, data} <- misc, {~c"State", state} <- data, do: state
-    state
   end
 
   test "oversize payload is refused with 413" do

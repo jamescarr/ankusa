@@ -107,7 +107,16 @@ defmodule Ankusa.Verifier do
     # scheme.
     if Code.ensure_loaded?(mod) and function_exported?(mod, :scheme_name, 1),
       do: mod.scheme_name(opts),
-      else: inspect(mod)
+      else: module_label(mod)
+  end
+
+  # `inspect/1` of a module, without its cost for an alias (it runs on every hook
+  # of a source whose verifier has no scheme name).
+  defp module_label(mod) do
+    case Atom.to_string(mod) do
+      "Elixir." <> name -> name
+      _erlang -> inspect(mod)
+    end
   end
 
   @doc """

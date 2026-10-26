@@ -40,7 +40,7 @@ defmodule Ankusa.DrainHarness do
       port: Keyword.get(opts, :port, 0),
       roles: [:edge, :dispatch],
       listener: %{drain_delay_ms: 1_000},
-      batcher: %{partitions: 4, max_batch: 64},
+      batcher: %{partitions: 4},
       source_store:
         {Ankusa.SourceStore.Static,
          sources: %{

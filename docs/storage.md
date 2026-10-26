@@ -91,8 +91,8 @@ amendment 17). A failed fsync answers every group it covers `503`, reopens the
 store like a failed write, fences the writer and deletes the rows of those
 groups before it accepts work again, so a hook the provider was told `503` is
 never delivered and its retry is stored once. Everything that needs no seq is done before
-the writer is called, in the batcher's commit task: the hook's binary, its
-delivery rows, and a read of its dedupe keys. That read is a prefetch the
+the writer is called, in the request's own process (`Ankusa.Queue.enqueue/3`): the
+hook's binary, its delivery rows, and a read of its dedupe keys. That read is a prefetch the
 writer re-validates before it assigns seqs: the first occurrence of a key in
 the group wins, and a key it wrote since the caller read it (an earlier
 group, or one whose intake publish is still in flight) is answered from what

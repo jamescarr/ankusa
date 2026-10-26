@@ -1,27 +1,27 @@
 defmodule Ankusa.Edge.Batcher do
   @moduledoc """
-  Group-commit batcher, one process per partition. Requests hand it an envelope
-  and **block on the reply**. The batcher buffers callers, then flushes the whole
-  batch to the queue in one `enqueue`, which the queue writer merges with the
-  batches of the other partitions into one group commit (one fsync). Every
-  blocked caller is replied to *after* the commit returns — that is what makes the
-  ack honest.
+  The admission gate of one batcher partition, and the caller's way into the
+  queue writer. A request calls `commit/4` **from its own process**: the call
+  charges its record against the partition's bound, hands the hook to the queue
+  writer (`Ankusa.Queue.enqueue/3`) and blocks on the reply. The writer merges
+  the calls of every partition, whatever process made them, into one group
+  commit (one fsync), and every blocked caller is replied to *after* the
+  commit is durable — that is what makes the ack honest.
 
-  The append itself runs in a `Task`, so the batcher keeps accepting requests
-  while commits are in flight, up to `batcher.max_commits` of them (64 by
-  default): a request that finds a free slot is handed to the writer at once, one
-  that does not accumulates behind the commits ahead and goes the instant one
-  finishes. Keeping a second commit queued at the writer is what lets it merge
-  the batches of every partition into one group, and what keeps a caller waiting
-  for one commit rather than for the one ahead of it and then its own. Nothing
-  waits on a commit except the callers whose own records are in it — with
-  `max_delay_ms: 0` that is the steady state, and the batch is naturally as
-  large as concurrency allows.
+  There is no process between the request and the writer: the hops a hook
+  makes are the request process, the writer and the syncer (`Ankusa.Queue.Syncer`).
+  The partition's process only owns the counters and registers them; the work a
+  batcher process used to do per hook (buffer the record, start a supervised
+  task, answer the caller from the task's result) cost about as much CPU as the
+  writer's own work at 10 KB bodies.
 
-  The queue is bounded, and the bound counts buffered *and* in-flight records.
-  When it is reached the batcher sheds load: the caller gets `{:error,
-  :overload}`, which the edge turns into a `503` with `Retry-After`. Never ack
-  what you haven't saved.
+  The bound counts the records the partition holds: from the moment `commit/4`
+  admits one until it returns. When the count reaches `batcher.max_queue`, or
+  the bodies held would pass `batcher.max_queue_bytes`, the gate sheds load: the
+  caller gets `{:error, :overload}`, which the edge turns into a `503` with
+  `Retry-After`. Never ack what you haven't saved. A record bigger than the byte
+  bound on its own is still admitted into an empty partition: `max_body_bytes`
+  is the per-record limit, this one bounds how much a partition holds.
 
   The bound is the partition's, so on its own one tenant could fill it and every
   other tenant would be shed with it. A tenant whose limit sets `max_queue` or
@@ -34,18 +34,16 @@ defmodule Ankusa.Edge.Batcher do
   ## Deadlines
 
   Every record carries a deadline: the latest moment its batch may *start*
-  committing. A record still buffered at its deadline (a commit ahead of it is
-  stalled) is answered `{:error, :store_unavailable}` and dropped, and the
-  writer refuses a batch whose earliest deadline passed while it queued behind
-  other work (`Ankusa.Queue.enqueue/3`). A batch the writer has started is never
-  abandoned: its callers wait for the commit's outcome, however long the disk
-  takes. A stall therefore never turns into a `503` for a hook that is then
-  committed. The one way a `503` can still cover a durable hook is a process
-  dying while the writer is mid-commit (the commit task killed, the batcher
-  crashing and taking its tasks down, or the writer crashing after the sync but
-  before it replies); the provider's retry then stores the hook a second time.
-  The commit task is supervised, not linked: a task that dies takes only its own
-  batch's callers with it, never the batcher or the records buffered behind it.
+  committing. The writer refuses a call whose deadline passed while it queued
+  behind other work (`Ankusa.Queue.enqueue/3`), and the caller is answered
+  `{:error, :store_unavailable}`: nothing is written and no seq is consumed. A
+  batch the writer has started is never abandoned: its callers wait for the
+  commit's outcome, however long the disk takes. A stall therefore never turns
+  into a `503` for a hook that is then committed. The one way a `503` can still
+  cover a durable hook is a process dying while the writer is mid-commit (the
+  writer crashing after the sync but before it replies, or the caller killed:
+  its own provider connection is gone then); the provider's retry stores the
+  hook a second time.
   """
 
   use GenServer
@@ -54,6 +52,9 @@ defmodule Ankusa.Edge.Batcher do
 
   alias Ankusa.Edge.RateLimiter
   alias Ankusa.Queue
+
+  @count 1
+  @bytes 2
 
   # ── api ───────────────────────────────────────────────────────────────────
 
@@ -82,13 +83,16 @@ defmodule Ankusa.Edge.Batcher do
   def record_deadline_ms, do: @record_deadline_ms
 
   @doc """
-  How many records the partition holds, buffered and in flight. A drain waits
-  for every partition to report `0` (`Ankusa.Instance.Drain`): each of those
-  records belongs to a request that has not been answered yet.
+  How many records the partition holds. A drain waits for every partition to
+  report `0` (`Ankusa.Instance.Drain`): each of those records belongs to a
+  request that has not been answered yet. Exits `:noproc` when the partition is
+  not running.
   """
   @spec queued(atom(), non_neg_integer()) :: non_neg_integer()
-  def queued(instance, partition),
-    do: GenServer.call(Ankusa.via(instance, {:batcher, partition}), :queued, 5_000)
+  def queued(instance, partition) do
+    {counters, _max_queue, _max_bytes} = gate!(instance, partition)
+    :atomics.get(counters, @count)
+  end
 
   @doc """
   Submit a record and block until it is durably committed (or shed).
@@ -108,9 +112,11 @@ defmodule Ankusa.Edge.Batcher do
   call: a failed commit (or a dead writer process) is reported as
   `:store_unavailable`, which the edge maps to `503`.
 
-  The record's tenant share is counted before the call and given back when the
-  call returns or exits, whatever the outcome, so a batcher that crashes with
-  records buffered leaks nothing.
+  The record's tenant share and its place in the partition are counted before
+  the call and given back when it returns or exits, whatever the outcome, so a
+  caller that crashes mid-commit leaks nothing. (A caller killed with `:kill`
+  runs no cleanup and keeps its place until the partition restarts; nothing on
+  the request path sends one.)
 
   `timeout` (milliseconds, or `:infinity`) bounds how long the record may wait
   before its batch *starts* committing. Once it has started the call waits for
@@ -129,11 +135,7 @@ defmodule Ankusa.Edge.Batcher do
     case acquire(instance, record) do
       {:ok, lease} ->
         try do
-          GenServer.call(
-            Ankusa.via(instance, {:batcher, partition}),
-            {:enqueue, record, deadline(timeout)},
-            :infinity
-          )
+          admit(instance, partition, record, timeout)
         after
           RateLimiter.release_queue(instance, lease)
         end
@@ -154,324 +156,87 @@ defmodule Ankusa.Edge.Batcher do
     end
   end
 
-  # `:infinity` stays an atom all the way to the writer. Atoms sort above every
-  # integer, so it is never `<= now`, never the minimum of a batch that holds a
-  # real deadline, and never earlier than an armed one.
-  defp deadline(:infinity), do: :infinity
-  defp deadline(timeout_ms), do: System.monotonic_time(:millisecond) + timeout_ms
-
-  # ── server ────────────────────────────────────────────────────────────────
-
-  @impl true
-  def init(opts) do
-    instance = Keyword.fetch!(opts, :instance)
-    b = Ankusa.config(instance).batcher
-
-    # Linked on purpose, like `Dispatch.Pipeline`: the commit tasks must not
-    # outlive the batcher.
-    {:ok, task_sup} = Task.Supervisor.start_link()
-
-    {:ok,
-     %{
-       instance: instance,
-       max_batch: b.max_batch,
-       max_commits: b.max_commits,
-       max_delay_ms: b.max_delay_ms,
-       max_queue: b.max_queue,
-       max_queue_bytes: b.max_queue_bytes,
-       task_sup: task_sup,
-       # newest-first: [{from, record, deadline}]
-       buffer: [],
-       count: 0,
-       # the body bytes in `buffer`
-       bytes: 0,
-       # commit task ref => %{entries: [{from, record, deadline}], bytes: n}, at
-       # most `max_commits` of them
-       inflight: %{},
-       # the records and body bytes in `inflight`, kept as totals: summing the
-       # batches on every request cost about a thousand reductions each at
-       # `max_commits` 64
-       inflight_count: 0,
-       inflight_bytes: 0,
-       timer: nil,
-       # The timer that answers buffered records at their deadline, and the
-       # deadline it was armed for.
-       expire_timer: nil,
-       expire_at: nil
-     }}
-  end
-
-  # A crash report prints the state and the last message, and every record —
-  # buffered, in flight, or the `{:enqueue, record, deadline}` being handled —
-  # carries its source's `{module, opts}` sinks (credentials) and the hook's
-  # body: report how many, not what.
-  @impl true
-  def format_status(status) do
-    Map.new(status, fn
-      {:state, %{buffer: _, inflight: _} = state} ->
-        {:state, %{state | buffer: state.count, inflight: state.inflight_count}}
-
-      {:message, {:enqueue, _record, deadline}} ->
-        {:message, {:enqueue, :redacted, deadline}}
-
-      other ->
-        other
-    end)
-  end
-
-  @impl true
-  def handle_call({:enqueue, record, deadline}, from, state) do
+  # The partition's place is taken before the call and given back after it, on
+  # every path: a counter that is not released would shed hooks for good.
+  defp admit(instance, partition, record, timeout) do
+    {counters, max_queue, max_bytes} = gate!(instance, partition)
     size = record_bytes(record)
-    queued = state.count + state.inflight_count
-    queued_bytes = state.bytes + state.inflight_bytes
+    count = :atomics.add_get(counters, @count, 1)
+    bytes = :atomics.add_get(counters, @bytes, size)
 
-    # A record bigger than the byte bound on its own is still admitted into an
-    # empty batcher: `max_body_bytes` is the per-record limit, this one bounds
-    # how much a partition holds.
-    over_bytes? = queued > 0 and queued_bytes + size > state.max_queue_bytes
+    if count > max_queue or (count > 1 and bytes > max_bytes) do
+      :atomics.sub(counters, @count, 1)
+      :atomics.sub(counters, @bytes, size)
 
-    if queued >= state.max_queue or over_bytes? do
-      Ankusa.Telemetry.emit([:load_shed], %{queue: queued, bytes: queued_bytes}, %{
-        instance: state.instance
+      Ankusa.Telemetry.emit([:load_shed], %{queue: count - 1, bytes: bytes - size}, %{
+        instance: instance
       })
 
-      {:reply, {:error, :overload}, state}
+      {:error, :overload}
     else
-      state = %{
-        state
-        | buffer: [{from, record, deadline} | state.buffer],
-          count: state.count + 1,
-          bytes: state.bytes + size
-      }
-
-      {:noreply, state |> maybe_flush() |> ensure_expiry(from, deadline)}
+      try do
+        enqueue(instance, record, deadline(timeout))
+      after
+        :atomics.sub(counters, @count, 1)
+        :atomics.sub(counters, @bytes, size)
+      end
     end
   end
 
-  # Records this partition holds: buffered and in flight. `queued/2` is the
-  # caller's view of it; nothing else reads it, so the hot path pays one more
-  # clause, not one more counter.
-  def handle_call(:queued, _from, state),
-    do: {:reply, state.count + state.inflight_count, state}
-
-  @impl true
-  def handle_info(:flush, state) do
-    state = %{state | timer: nil}
-
-    if map_size(state.inflight) < state.max_commits and state.count > 0 do
-      {:noreply, start_commit(state)}
-    else
-      {:noreply, state}
+  # The writer's answer to one hook. A store that is down, a writer that is gone
+  # and a batch the writer refused (its deadline passed, or its caller was
+  # already dead) are all `:store_unavailable`, nothing acked: the failures that
+  # matter are logged where they happen (`Ankusa.Queue.Writer`,
+  # `Ankusa.Queue.Syncer`), once per group, not once per request.
+  defp enqueue(instance, record, deadline) do
+    case Queue.enqueue(instance, [record], deadline) do
+      {:ok, [reply]} -> reply
+      {:error, _reason} -> {:error, :store_unavailable}
     end
+  rescue
+    error ->
+      Logger.error("[ankusa] queue enqueue raised: #{Exception.format_banner(:error, error)}")
+      {:error, :store_unavailable}
+  catch
+    :exit, _reason -> {:error, :store_unavailable}
   end
 
-  def handle_info(:expire, state) do
-    state = cancel_expiry(state)
-    {expired, state} = drop_expired(state)
-
-    if expired > 0 do
-      Logger.warning(
-        "[ankusa] #{expired} hook(s) passed their commit deadline behind a stalled commit; " <>
-          "answered 503, nothing committed"
-      )
+  defp gate!(instance, partition) do
+    case Registry.lookup(Ankusa.Registry, {instance, {:batcher_queue, partition}}) do
+      [{_pid, gate}] -> gate
+      [] -> exit({:noproc, {__MODULE__, :gate, [instance, partition]}})
     end
-
-    {:noreply, rearm_expiry(state)}
-  end
-
-  def handle_info({ref, result}, %{inflight: inflight} = state) when is_map_key(inflight, ref) do
-    Process.demonitor(ref, [:flush])
-    {%{entries: entries, bytes: batch_bytes}, inflight} = Map.pop!(inflight, ref)
-    state = settle(state, inflight, entries, batch_bytes)
-
-    case result do
-      {:ok, results} ->
-        entries
-        |> Enum.zip(results)
-        |> Enum.each(fn {{from, _record, _deadline}, replied} ->
-          GenServer.reply(from, replied)
-        end)
-
-      {:error, reason} ->
-        # Nothing was acked: every caller in the batch gets a 503-mapped error.
-        Logger.warning("[ankusa] store commit failed: #{inspect(reason)}")
-
-        Enum.each(entries, fn {from, _record, _deadline} ->
-          GenServer.reply(from, {:error, :store_unavailable})
-        end)
-    end
-
-    {:noreply, if(state.count > 0, do: start_commit(state), else: state)}
-  end
-
-  def handle_info({:DOWN, ref, :process, _pid, reason}, %{inflight: inflight} = state)
-      when is_map_key(inflight, ref) do
-    # The commit task died without delivering a result (killed from outside;
-    # `safe_enqueue/3` turns every error it could catch into a value). The task
-    # is not linked, so the batcher and the records buffered behind this batch
-    # carry on. Fail the batch's callers instead of leaving them blocked
-    # forever. If the task's call is still waiting in the writer's mailbox the
-    # writer sees its caller is gone and commits nothing. If the writer is
-    # already mid-commit, that batch is durable and its callers were told 503.
-    Logger.warning("[ankusa] store commit task died: #{inspect(reason)}")
-
-    {%{entries: entries, bytes: batch_bytes}, inflight} = Map.pop!(inflight, ref)
-
-    Enum.each(entries, fn {from, _record, _deadline} ->
-      GenServer.reply(from, {:error, :store_unavailable})
-    end)
-
-    state = settle(state, inflight, entries, batch_bytes)
-    {:noreply, if(state.count > 0, do: start_commit(state), else: state)}
-  end
-
-  # A stray message (a DOWN from a task we already demonitored, say) must not
-  # take down a process with blocked callers on it.
-  def handle_info(_message, state), do: {:noreply, state}
-
-  # ── commits ───────────────────────────────────────────────────────────────
-
-  # A batch is out of `inflight`: its records and bytes leave the totals.
-  defp settle(state, inflight, entries, batch_bytes) do
-    %{
-      state
-      | inflight: inflight,
-        inflight_count: state.inflight_count - length(entries),
-        inflight_bytes: state.inflight_bytes - batch_bytes
-    }
   end
 
   defp record_bytes(%{envelope: %{body: body}}) when is_binary(body), do: byte_size(body)
   defp record_bytes(_record), do: 0
 
-  defp entries_bytes(entries),
-    do:
-      Enum.reduce(entries, 0, fn {_from, record, _deadline}, acc -> acc + record_bytes(record) end)
+  # `:infinity` stays an atom all the way to the writer. Atoms sort above every
+  # integer, so it is never `<= now` and never the minimum of a group that holds
+  # a real deadline.
+  defp deadline(:infinity), do: :infinity
+  defp deadline(timeout_ms), do: System.monotonic_time(:millisecond) + timeout_ms
 
-  # Every commit slot taken: the new record waits in `buffer` and the next
-  # completion flushes it immediately.
-  defp maybe_flush(%{inflight: inflight, max_commits: max} = state)
-       when map_size(inflight) >= max,
-       do: state
+  # ── server ────────────────────────────────────────────────────────────────
 
-  defp maybe_flush(state) do
-    cond do
-      state.count >= state.max_batch -> start_commit(state)
-      state.max_delay_ms == 0 -> start_commit(state)
-      state.timer == nil -> arm_timer(state)
-      true -> state
-    end
-  end
+  # The process exists to own the registration: the counters and the bounds are
+  # the Registry value of `{instance, {:batcher_queue, partition}}`, so a request
+  # reads them with one ETS lookup and no message. A restart starts at zero;
+  # callers that charged the old counters give back to them, not to the new ones.
+  @impl true
+  def init(opts) do
+    instance = Keyword.fetch!(opts, :instance)
+    partition = Keyword.fetch!(opts, :partition)
+    b = Ankusa.config(instance).batcher
+    counters = :atomics.new(2, signed: true)
 
-  defp start_commit(state) do
-    state = cancel_timer(state)
-    {_expired, state} = drop_expired(state)
+    {:ok, _} =
+      Registry.register(
+        Ankusa.Registry,
+        {instance, {:batcher_queue, partition}},
+        {counters, b.max_queue, b.max_queue_bytes}
+      )
 
-    if state.count == 0 do
-      state
-    else
-      {entries, remainder} = split_batch(state.buffer, state.max_batch)
-      records = Enum.map(entries, fn {_from, record, _deadline} -> record end)
-      deadline = entries |> Enum.map(fn {_from, _record, deadline} -> deadline end) |> Enum.min()
-      instance = state.instance
-
-      task =
-        Task.Supervisor.async_nolink(state.task_sup, fn ->
-          safe_enqueue(instance, records, deadline)
-        end)
-
-      batch_bytes = entries_bytes(entries)
-
-      %{
-        state
-        | buffer: remainder,
-          count: length(remainder),
-          bytes: state.bytes - batch_bytes,
-          inflight: Map.put(state.inflight, task.ref, %{entries: entries, bytes: batch_bytes}),
-          inflight_count: state.inflight_count + length(entries),
-          inflight_bytes: state.inflight_bytes + batch_bytes
-      }
-    end
-  end
-
-  # The commit runs in a Task, so a failing store has to come back as a value.
-  # The task is not linked, but a value is still better than a `:DOWN`: it says
-  # why, and the batch's callers get their answer in one message.
-  defp safe_enqueue(instance, records, deadline) do
-    Queue.enqueue(instance, records, deadline)
-  rescue
-    error -> {:error, error}
-  catch
-    :exit, reason -> {:error, reason}
-  end
-
-  # `buffer` is newest-first; commit is oldest-first.
-  defp split_batch(buffer, max_batch) do
-    {entries, remainder} = buffer |> Enum.reverse() |> Enum.split(max_batch)
-    {entries, Enum.reverse(remainder)}
-  end
-
-  defp arm_timer(state) do
-    %{state | timer: Process.send_after(self(), :flush, state.max_delay_ms)}
-  end
-
-  defp cancel_timer(%{timer: nil} = state), do: state
-
-  defp cancel_timer(%{timer: ref} = state) do
-    Process.cancel_timer(ref)
-    %{state | timer: nil}
-  end
-
-  # ── deadlines ─────────────────────────────────────────────────────────────
-
-  defp now, do: System.monotonic_time(:millisecond)
-
-  # Answers and drops every buffered record past its deadline. Returns how many.
-  defp drop_expired(%{count: 0} = state), do: {0, state}
-
-  defp drop_expired(state) do
-    now = now()
-    {expired, live} = Enum.split_with(state.buffer, fn {_from, _record, d} -> d <= now end)
-
-    Enum.each(expired, fn {from, _record, _deadline} ->
-      GenServer.reply(from, {:error, :store_unavailable})
-    end)
-
-    {length(expired),
-     %{state | buffer: live, count: length(live), bytes: state.bytes - entries_bytes(expired)}}
-  end
-
-  # Only a record that is still buffered (it is the newest entry) needs the
-  # timer: one that went straight into a commit is the writer's to refuse.
-  defp ensure_expiry(%{buffer: [{from, _record, _deadline} | _]} = state, from, deadline) do
-    cond do
-      state.expire_timer == nil -> arm_expiry(state, deadline)
-      deadline < state.expire_at -> state |> cancel_expiry() |> arm_expiry(deadline)
-      true -> state
-    end
-  end
-
-  defp ensure_expiry(state, _from, _deadline), do: state
-
-  defp rearm_expiry(%{buffer: []} = state), do: state
-
-  defp rearm_expiry(state) do
-    deadline = state.buffer |> Enum.map(fn {_from, _record, d} -> d end) |> Enum.min()
-    arm_expiry(state, deadline)
-  end
-
-  # A record with no deadline never expires: no timer to arm.
-  defp arm_expiry(state, :infinity), do: state
-
-  defp arm_expiry(state, deadline) do
-    ref = Process.send_after(self(), :expire, max(deadline - now(), 0))
-    %{state | expire_timer: ref, expire_at: deadline}
-  end
-
-  defp cancel_expiry(%{expire_timer: nil} = state), do: state
-
-  defp cancel_expiry(%{expire_timer: ref} = state) do
-    Process.cancel_timer(ref)
-    %{state | expire_timer: nil, expire_at: nil}
+    {:ok, %{instance: instance, partition: partition}}
   end
 end

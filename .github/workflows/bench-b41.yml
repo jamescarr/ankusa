@@ -1,0 +1,113 @@
+name: bench b41
+
+# Throwaway measurement for bullet 41 of ANKUSA_HARDENING_PLAN.md (DUR-4.b.b.b:
+# "10 KB ingest at least 2x the F1 baseline", judged on the CI runner class).
+# Deleted before the PR is opened. Not a gate: no baseline, no failure on a slow
+# runner; the numbers are in the job log.
+#
+# One runner, one job: the 10240B cell of `bench:gate` (N=20000, CONCURRENCY=256,
+# SINK_LATENCY_MS=5) on this branch, on origin/main and on the F1 code
+# (b25506f6), all three under this tree's `bench/core_bench.exs`, interleaved run
+# by run, 5 runs each; then the process-level profile of this branch's cell.
+# A push that touches this file runs it again.
+
+on:
+  push:
+    branches: [plan/ANKUSA_HARDENING_PLAN-b41]
+    paths: [.github/workflows/bench-b41.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: 10 KB cell: this branch, main, F1
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.12
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - run: mix local.hex --force && mix local.rebar --force
+
+      - name: the runner
+        run: |
+          set -euo pipefail
+          uname -a
+          nproc
+          free -m
+          df -h /
+          grep 'model name' /proc/cpuinfo | head -1
+          dd if=/dev/zero of="$RUNNER_TEMP/fsync-probe" bs=4k count=64 conv=fsync 2>&1 | tail -1
+
+      - name: build the three trees
+        run: |
+          set -euo pipefail
+          git log --oneline -1
+          git worktree add --detach "$RUNNER_TEMP/main" origin/main
+          git worktree add --detach "$RUNNER_TEMP/f1" b25506f6
+          for tree in "$GITHUB_WORKSPACE" "$RUNNER_TEMP/main" "$RUNNER_TEMP/f1"; do
+            if [ "$tree" != "$GITHUB_WORKSPACE" ]; then
+              cp packages/ankusa/bench/core_bench.exs "$tree/packages/ankusa/bench/core_bench.exs"
+            fi
+            (
+              cd "$tree/packages/ankusa"
+              git log --oneline -1
+              export MIX_ENV=test
+              mix deps.get
+              mix compile
+            )
+          done
+
+      - name: the 10240B cell, interleaved, 5 runs each
+        run: |
+          set -euo pipefail
+          for run in 1 2 3 4 5; do
+            for tree in head main f1; do
+              case "$tree" in
+                head) dir="$GITHUB_WORKSPACE" ;;
+                main) dir="$RUNNER_TEMP/main" ;;
+                f1) dir="$RUNNER_TEMP/f1" ;;
+              esac
+              (
+                cd "$dir/packages/ankusa"
+                out=$(N=20000 CONCURRENCY=256 SINK_LATENCY_MS=5 BODY_BYTES=10240 MIX_ENV=test \
+                  mix run bench/core_bench.exs | grep '^{')
+                echo "run $run $tree $out"
+              )
+            done
+          done | tee "$RUNNER_TEMP/cells.txt"
+          echo "== medians (ingest/s)"
+          for tree in head main f1; do
+            grep " $tree " "$RUNNER_TEMP/cells.txt" \
+              | sed -E 's/.*"ingest_per_s":([0-9.]+).*/\1/' | sort -n \
+              | awk -v t="$tree" '{a[NR]=$1} END {printf "%s median %s of %d\n", t, a[int((NR+1)/2)], NR}'
+          done
+
+      - name: process-level profile of this branch's cell
+        run: |
+          set -euo pipefail
+          cd packages/ankusa
+          export MIX_ENV=test ELIXIR_ERL_OPTIONS="+sbwt none +sbwtdcpu none +sbwtdio none"
+          for g in 1 0 1 0; do
+            echo "== group_commit_delay_ms=$g"
+            GC_DELAY=$g mix run bench/b41_profile.exs 2>&1 | grep -v '^\s*$' | grep -v '0.00%  100.00%' | head -45
+          done
+          echo "== with the compactor"
+          COMPACT=1 mix run bench/b41_profile.exs 2>&1 | grep -E '^(acked|compactor|commits|scheduler_busy)'
+          echo "== compactor eprof"
+          COMPACT=1 EPROF_COMPACT=1 N=8000 mix run bench/b41_profile.exs 2>&1 \
+            | awk '/^FUNCTION/{p=1} p&&/^compactor:/{p=0} p' | sort -k4 -n -r | head -30
+          echo "== writer eprof"
+          N=8000 EPROF=1 EPROF_TARGET=writer mix run bench/b41_profile.exs 2>&1 \
+            | awk '/^FUNCTION/{p=1} p&&/^acked=/{p=0} p' | sort -k4 -n -r | head -30
+          echo "== request-process eprof"
+          N=8000 EPROF=1 EPROF_TARGET=client mix run bench/b41_profile.exs 2>&1 \
+            | awk '/^FUNCTION/{p=1} p&&/^acked=/{p=0} p' | sort -k4 -n -r | head -40

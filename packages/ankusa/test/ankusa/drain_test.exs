@@ -186,7 +186,7 @@ defmodule Ankusa.DrainTest do
       assert Drain.run(:"no_such_instance_#{System.unique_integer([:positive])}") == :ok
     end
 
-    test "Batcher.queued/2 counts the records a partition holds, buffered or in flight" do
+    test "Batcher.queued/2 counts the records a partition holds, from admission to the answer" do
       config = start_edge()
       inst = config.instance
       assert held(inst) == 0

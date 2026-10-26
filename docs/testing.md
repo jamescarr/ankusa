@@ -320,14 +320,11 @@ The always-on tests cover:
   another tenant still gets `201`, counters never go negative, and 200
   concurrent charges admit exactly the share.
   A commit is never
-  abandoned: a record still buffered at its deadline behind a stuck commit is
-  answered `503` and never stored, the writer refuses a batch whose deadline
-  passed before it could start, a commit stuck longer than the old 5 s writer
-  timeout is waited out and every `201` is stored, a commit task killed from
-  outside while its call waits for the writer fails only its own batch and
-  leaves nothing of it stored, and an `:infinity` timeout never expires while a
-  finite one beside it does. The batcher's status shows how many records it
-  holds, never their sinks. `edge_direct_test.exs`
+  abandoned: a deadline that passes while the writer is stalled is refused once
+  it resumes and the hook is never stored (an `:infinity` one and a live one
+  beside it commit), a commit stuck longer than the old 5 s writer timeout is
+  waited out and every `201` is stored, and a caller that dies while its call
+  waits for the writer leaves nothing of it stored. `edge_direct_test.exs`
   covers the other ack path (`wal: :none`): the `201` body is exactly
   `{id, status}`, a sink sees the envelope before the response, a refusing,
   raising or bad-returning sink is `503` with `Retry-After` and is called
@@ -1296,8 +1293,8 @@ since the last backup, so the drill proves the difference. See
 WAL fsync cost 1, 5 and 10 ms (a telemetry handler on `[:ankusa, :wal_sync, :start]`
 sleeps in the syncer before its `sync_wal`). Throughput: 256 closed-loop clients,
 grouped against ungrouped
-(`group_commit_max_records: 1, max_commits: 1, group_commit_delay_ms: 0`: one write
-per partition batch), printing records/s, groups applied/s, fsyncs/s, mean group,
+(`group_commit_max_records: 1, group_commit_delay_ms: 0`: one write
+per hook), printing records/s, groups applied/s, fsyncs/s, mean group,
 groups per fsync, the writer's mean apply time and ack p50/p99. Burst: 1 000 req/s
 open loop, the writer stalled for one second, then drained while arrivals continue.
 It passes only if grouped is at least 1.5 x ungrouped at 5 ms, the writer applies at

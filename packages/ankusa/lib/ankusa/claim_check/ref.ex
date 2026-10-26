@@ -56,7 +56,6 @@ defmodule Ankusa.ClaimCheck.Ref do
   @prefix "urn:ankusa:claim:v1:"
   @prefix_v2 "urn:ankusa:claim:v2:"
   @claims_prefix "claims/"
-  @tenant_regex ~r/\A[A-Za-z0-9_-]{1,64}\z/
   # Seconds since the epoch, canonical decimal: no sign, no leading zero, and
   # at most 12 digits (year 33658), so every SDK can hold it in an int.
   @exp_regex ~r/\A[1-9][0-9]{0,11}\z/
@@ -283,10 +282,22 @@ defmodule Ankusa.ClaimCheck.Ref do
   @doc "`:ok` if `tenant_id` is a valid tenant name."
   @spec validate_tenant(term()) :: :ok | {:error, :invalid_tenant}
   def validate_tenant(tenant_id) when is_binary(tenant_id) do
-    if Regex.match?(@tenant_regex, tenant_id), do: :ok, else: {:error, :invalid_tenant}
+    if byte_size(tenant_id) in 1..64 and tenant_chars?(tenant_id),
+      do: :ok,
+      else: {:error, :invalid_tenant}
   end
 
   def validate_tenant(_), do: {:error, :invalid_tenant}
+
+  # `[A-Za-z0-9_-]` byte by byte: the name of a tenant is checked on every hook, and
+  # a regular expression run costs more than the rest of the lookup.
+  defp tenant_chars?(<<>>), do: true
+
+  defp tenant_chars?(<<c, rest::binary>>)
+       when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c == ?_ or c == ?-,
+       do: tenant_chars?(rest)
+
+  defp tenant_chars?(_), do: false
 
   @doc "Is `tenant_id` a valid tenant name?"
   @spec valid_tenant?(term()) :: boolean()

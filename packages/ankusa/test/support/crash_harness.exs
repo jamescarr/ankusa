@@ -57,7 +57,7 @@ defmodule Ankusa.CrashHarness do
         roles: [:edge],
         source_store:
           {Ankusa.SourceStore.Static, sources: Map.new(sources(Keyword.get(opts, :tenants, 1)))},
-        batcher: %{partitions: 4, max_batch: 64, max_delay_ms: 5, max_queue: 100_000}
+        batcher: %{partitions: 4, max_queue: 100_000}
       ] ++ dual(Keyword.get(opts, :log)) ++ metrics(Keyword.get(opts, :metrics_port, 0))
     )
   end

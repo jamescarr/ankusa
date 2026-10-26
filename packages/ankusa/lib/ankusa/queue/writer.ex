@@ -658,7 +658,9 @@ defmodule Ankusa.Queue.Writer do
     {built, batch_size, bytes} =
       build_ops(checked.fresh, state.next_seq, now, state.archive?, admission.ords)
 
-    ops = Deliveries.coalesce(checked.dedupe_ops ++ built ++ admission.ops ++ extra_ops)
+    # `built` is folded already (`build_ops/5`): only what the group's other
+    # parts add is coalesced.
+    ops = Deliveries.coalesce(checked.dedupe_ops ++ admission.ops ++ extra_ops) ++ built
     published = if state.dual, do: published_records(state, checked.fresh, ops), else: []
 
     cx = %{
@@ -1207,8 +1209,25 @@ defmodule Ankusa.Queue.Writer do
   # adds none. A call that carries `extra_ops` (a quarantine release) is never
   # refused: its hooks were acked long ago.
   defp dedupe_check(state, items, now, ords, enforce?, prefetch) do
-    instance = state.instance
     keyed = Enum.filter(items, fn {env, _bin, _rows, ttl, _replay_id} -> dedupe?(env, ttl) end)
+
+    # No keyed item (and no dual size or pending check to make): every item is
+    # fresh, and there is no key to read and no quota to count.
+    if keyed == [] and not state.dual do
+      {:ok,
+       %{
+         results: Enum.map(items, &{:fresh, &1}),
+         fresh: items,
+         dedupe_ops: [],
+         fresh_count: length(items)
+       }}
+    else
+      dedupe_check(state, items, keyed, now, ords, enforce?, prefetch)
+    end
+  end
+
+  defp dedupe_check(state, items, keyed, now, ords, enforce?, prefetch) do
+    instance = state.instance
 
     keys =
       keyed
@@ -1546,38 +1565,49 @@ defmodule Ankusa.Queue.Writer do
 
   # ── batch construction ───────────────────────────────────────────────────
 
+  # The whole group's ops in one pass: the puts of every hook, one active marker
+  # per tenant (every row of the group is due at `now`), and the counter deltas
+  # of every row folded into one merge per tenant and field (`Counters.ops/1`
+  # once, not per row): at 10 KB bodies the ops per hook were a larger share of
+  # the writer's time than the store's own write.
   defp build_ops(items, first_seq, now, archive?, ords) do
-    items
-    |> Enum.with_index(first_seq)
-    |> Enum.reduce({[], 0, 0}, fn {{env, bin, rows, _ttl, _replay_id}, seq},
-                                  {ops, count, bytes} ->
-      size = byte_size(bin)
-      ord = Map.fetch!(ords, Tenants.normalize(env.tenant_id))
+    {puts, deltas, active, count, bytes} =
+      items
+      |> Enum.with_index(first_seq)
+      |> Enum.reduce({[], [], %{}, 0, 0}, fn {{env, bin, rows, _ttl, _replay_id}, seq},
+                                             {puts, deltas, active, count, bytes} ->
+        size = byte_size(bin)
+        ord = Map.fetch!(ords, Tenants.normalize(env.tenant_id))
 
-      # `rows` are the `{delivery row, lane or nil}` `Ankusa.Queue` encoded, one per sink
-      row_ops =
-        rows
-        |> Enum.with_index()
-        |> Enum.flat_map(fn {{row, lane}, i} ->
-          Deliveries.new_ops(ord, now, seq, i, size, row, lane)
-        end)
+        # `rows` are the `{delivery row, lane or nil}` `Ankusa.Queue` encoded, one per sink
+        {row_puts, row_deltas} =
+          rows
+          |> Enum.with_index()
+          |> Enum.reduce({[], []}, fn {{row, lane}, i}, {row_puts, row_deltas} ->
+            {entry_puts, entry_deltas} = Deliveries.new_entry(ord, now, seq, i, size, row, lane)
+            {entry_puts ++ row_puts, entry_deltas ++ row_deltas}
+          end)
 
-      archive_ops = if archive?, do: Deliveries.archive_ops(ord, seq, size), else: []
+        {archive_puts, archive_deltas} =
+          if archive?, do: Deliveries.archive_entry(ord, seq, size), else: {[], []}
 
-      # A hook with no obligations (no sinks, archive off) consumes a seq but
-      # writes nothing.
-      ops =
-        if row_ops == [] and archive_ops == [] do
-          ops
+        # A hook with no obligations (no sinks, archive off) consumes a seq but
+        # writes nothing.
+        if row_puts == [] and archive_puts == [] do
+          {puts, deltas, active, count + 1, bytes + size}
         else
-          [{:put, :hooks, Keys.hook(seq), bin} | row_ops] ++ archive_ops ++ ops
-        end
+          active =
+            if row_puts == [],
+              do: active,
+              else: Map.put_new_lazy(active, ord, fn -> Deliveries.active_op(ord, now) end)
 
-      {ops, count + 1, bytes + size}
-    end)
-    |> then(fn {ops, count, bytes} ->
-      {[{:put, :default, Keys.meta("next_seq"), <<first_seq + count::64>>} | ops], count, bytes}
-    end)
+          {[{:put, :hooks, Keys.hook(seq), bin} | row_puts] ++ archive_puts ++ puts,
+           row_deltas ++ archive_deltas ++ deltas, active, count + 1, bytes + size}
+        end
+      end)
+
+    next_seq = {:put, :default, Keys.meta("next_seq"), <<first_seq + count::64>>}
+    {[next_seq | Map.values(active) ++ Counters.ops(deltas) ++ puts], count, bytes}
   end
 
   # ── commit ───────────────────────────────────────────────────────────────

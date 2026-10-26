@@ -49,11 +49,22 @@ defmodule Ankusa.Queue.Deliveries.Lanes do
   @spec member_ops(pos_integer(), integer(), pos_integer(), integer(), integer(), lane()) ::
           [Store.op()]
   def member_ops(ord, at, seq, sink, size, lane) do
-    [
-      {:put, :index, Keys.lane_member(ord, lane, seq, sink), <<size::32>>},
-      {:put, :index, Keys.lane_marker(ord, lane), <<>>},
-      {:put, :index, Keys.active(div(at, 1000), ord), <<>>}
-    ] ++ Counters.ops([{ord, :lane_members, 1}])
+    {puts, deltas} = member_entry(ord, seq, sink, size, lane)
+    puts ++ [Ankusa.Queue.Deliveries.active_op(ord, at)] ++ Counters.ops(deltas)
+  end
+
+  @doc """
+  `member_ops/6` in pieces (see `Ankusa.Queue.Deliveries.new_entry/7`): the `?O`
+  key and the `?P` marker, and the `lane_members` delta, without the tenant's
+  active marker.
+  """
+  @spec member_entry(pos_integer(), pos_integer(), integer(), integer(), lane()) ::
+          {[Store.op()], [Counters.delta()]}
+  def member_entry(ord, seq, sink, size, lane) do
+    {[
+       {:put, :index, Keys.lane_member(ord, lane, seq, sink), <<size::32>>},
+       {:put, :index, Keys.lane_marker(ord, lane), <<>>}
+     ], [{ord, :lane_members, 1}]}
   end
 
   @doc """
