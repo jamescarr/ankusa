@@ -356,6 +356,56 @@ defmodule Ankusa.QueueTest do
       assert {:ok, [%{seq: ^seq}]} = Queue.hooks(inst, 0, 10)
       assert Syncer.durable_seq(inst) == seq
     end
+
+    test "a failed fsync deletes only the groups no fsync covered: an acked group keeps its rows" do
+      config = config(roles: [:edge])
+      inst = config.instance
+      start_supervised!({Ankusa.Instance, config})
+      hold_syncs(inst)
+
+      # group 1 is applied, its fsync held
+      first = Task.async(fn -> Queue.enqueue(inst, [entry(1)]) end)
+      assert_receive {:syncing, first_sync}, 5_000
+
+      # group 2 is applied while group 1's fsync is still running, so the writer
+      # tracks it ahead of group 1, which no fsync has covered yet
+      second = Task.async(fn -> Queue.enqueue(inst, [entry(2)]) end)
+      eventually(fn -> match?({:ok, [_, _]}, Queue.hooks(inst, 0, 10)) end)
+
+      # group 1's fsync lands: group 1 is acked, and still sits in the untrimmed
+      # tail of the groups applied since the last fsync
+      send(first_sync, :release)
+      assert {:ok, [{:committed, %{seq: 1}}]} = Task.await(first)
+      assert Syncer.durable_seq(inst) == 1
+
+      # the next fsync fails, as a disk that starts failing does
+      assert_receive {:syncing, second_sync}, 5_000
+      instance_sup = Ankusa.via(inst, :instance)
+      :ok = Supervisor.terminate_child(instance_sup, {Ankusa.Store, inst})
+      send(second_sync, :release)
+
+      assert {:error, _reason} = Task.await(second)
+
+      # the fence deletes group 2's rows and no others: group 1 was acked, so its
+      # rows are durable and a hook a provider was answered 2xx for never
+      # disappears from the store
+      {:ok, _pid} = Supervisor.restart_child(instance_sup, {Ankusa.Store, inst})
+
+      now = System.system_time(:millisecond)
+      eventually(fn -> Syncer.visible(inst, now) == now end)
+
+      assert {:ok, [%{seq: 1}]} = Queue.hooks(inst, 0, 10)
+
+      # the watermark moved past the deleted group: the next hook is stored once
+      third = Task.async(fn -> Queue.enqueue(inst, [entry(3)]) end)
+      assert_receive {:syncing, third_sync}, 5_000
+      send(third_sync, :release)
+
+      assert {:ok, [{:committed, %{seq: seq}}]} = Task.await(third)
+      assert seq > 2
+      assert {:ok, [%{seq: 1}, %{seq: ^seq}]} = Queue.hooks(inst, 0, 10)
+      assert Syncer.durable_seq(inst) == seq
+    end
   end
 
   test "a stored hook that does not decode is a corrupt_value error, not a crash" do
