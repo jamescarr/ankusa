@@ -96,6 +96,55 @@ defmodule Ankusa.Sink.BatcherTest do
 
   defp item(n, extra), do: Map.merge(%{n: n}, extra)
 
+  # The pids the registry names for the destination's batcher. A killed batcher's
+  # name outlives it by a moment, so `[pid]` may be a dead pid.
+  defp named(instance) do
+    Registry.select(Ankusa.Registry, [
+      {{{instance, {:sink_batcher, :_, :_}}, :"$1", :_}, [], [:"$1"]}
+    ])
+  end
+
+  defp batcher(instance) do
+    case named(instance) do
+      [pid] -> pid
+      other -> flunk("expected one batcher, found #{inspect(other)}")
+    end
+  end
+
+  # The window the stale-name test is about: the name still names the batcher
+  # that is gone.
+  defp stale?(instance) do
+    case named(instance) do
+      [pid] -> not Process.alive?(pid)
+      _ -> false
+    end
+  end
+
+  # Waits until the batcher holds `queued` entries: an entry is admitted when its
+  # call is handled, which is the order a batch must keep.
+  defp await_queued(instance, queued) do
+    wait_until(
+      fn -> Batcher.stats(instance).queued == queued end,
+      "the batcher to hold #{queued} entries"
+    )
+  end
+
+  defp wait_until(fun, what, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("waited 2 s for #{what}")
+
+      true ->
+        Process.sleep(1)
+        wait_until(fun, what, deadline)
+    end
+  end
+
   # Lets every batch that is held, or arrives, finish.
   defp release_all do
     receive do
@@ -194,18 +243,23 @@ defmodule Ankusa.Sink.BatcherTest do
     instance: instance,
     name: name
   } do
-    o = opts(name, batch_linger_ms: 100)
+    # nothing leaves on the linger: the tenth admission fills the batch, so what
+    # the codec is handed is exactly what was admitted
+    o = Keyword.put(opts(name), :batch_linger_ms, 30_000)
 
     tasks =
-      for n <- 1..4 do
+      for n <- 1..9 do
         task = async(instance, o, entry(n, %{group: "g"}))
-        # admission order is the order the calls arrive
-        Process.sleep(5)
+        # admission order is the order the calls reach the batcher
+        await_queued(instance, n)
         task
       end
 
-    assert_receive {:batch, [1, 2, 3, 4], _}, 1_000
-    Enum.each(tasks, &Task.await/1)
+    # the tenth admission flushes the queue, so it is never counted as queued
+    tenth = async(instance, o, entry(10, %{group: "g"}))
+
+    assert_receive {:batch, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], _}, 1_000
+    Enum.each([tenth | tasks], &Task.await/1)
   end
 
   test "a batch takes entries round-robin across tenants", %{instance: instance, name: name} do
@@ -326,10 +380,7 @@ defmodule Ankusa.Sink.BatcherTest do
       waiting = async(instance, o, entry(1))
       assert_receive {:batch, [1], task}, 1_000
 
-      [{pid, _}] =
-        Registry.select(Ankusa.Registry, [
-          {{{instance, {:sink_batcher, :_, :_}}, :"$1", :_}, [], [{{:"$1", 0}}]}
-        ])
+      pid = batcher(instance)
 
       Process.exit(pid, :kill)
 
@@ -341,6 +392,33 @@ defmodule Ankusa.Sink.BatcherTest do
       later = async(instance, Keyword.put(o, :gate, false), entry(2))
       assert_receive {:batch, [2], _}, 1_000
       assert Task.await(later) == :ok
+    end
+
+    test "a delivery that lands while a dead batcher still holds its name starts the next one", %{
+      instance: instance,
+      name: name
+    } do
+      # A killed batcher is gone from its supervisor at once, but the registry
+      # reaps the name it held a moment later (measured: 1-9 us). A delivery that
+      # lands in that window belongs to a healthy destination: it waits for the
+      # name and starts the next batcher instead of answering the attempt with
+      # `{:error, {:batcher_down, _}}`.
+      o = opts(name, batch_max_entries: 1)
+
+      results =
+        for _ <- 1..100 do
+          assert :ok = Batcher.deliver(Codec, instance, o, entry(1))
+
+          Process.exit(batcher(instance), :kill)
+
+          if stale?(instance), do: {:in_window, Batcher.deliver(Codec, instance, o, entry(2))}
+        end
+
+      in_window = for {:in_window, result} <- results, do: result
+
+      # the deliveries that raced a dead name, every one of which must succeed
+      assert length(in_window) > 20
+      assert Enum.uniq(in_window) == [:ok]
     end
 
     test "an entry whose caller died before its batch left is not sent", %{

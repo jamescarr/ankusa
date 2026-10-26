@@ -979,7 +979,11 @@ instance) and goes out in a `SendMessageBatch` with up to nine others, 20 ms
 after the first arrived or at once when the batch is full (10 entries,
 256 KiB). The hook's row stays claimed until its own entry is answered, so a
 batcher that dies or an attempt that times out loses nothing; the retry carries
-the same deduplication id. The reply is read per entry:
+the same deduplication id. A delivery that arrives while the previous batcher is
+stopping starts the next one: it waits for the dead batcher's registered name to
+be reaped (microseconds; bounded at 250 ms) instead of failing on `:noproc`, and
+only a call the dead batcher was already holding fails, which the dispatch
+attempt retries. The reply is read per entry:
 
 | Entry | Result |
 | --- | --- |

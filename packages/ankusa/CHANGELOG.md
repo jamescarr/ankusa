@@ -261,6 +261,19 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `(drain_delay_ms + drain_timeout_ms) / 1000 + 10`
   ([`deployment.md`](../../docs/deployment.md)).
 
+### Fixed
+
+- **A delivery that races a batcher's death no longer fails.** A batcher that
+  stops (idle, or killed) leaves its registry name behind for a moment — the
+  partition that owns the key reaps it when it handles the monitor, measured at
+  1-9 µs — and a delivery that landed in that window was answered
+  `{:error, {:batcher_down, :noproc}}` about a healthy destination, because both
+  the lookup and the one immediate retry read the same stale name.
+  `Ankusa.Sink.Batcher.deliver/4` now waits for the name to go (at most 250 ms, in
+  2 ms steps) and starts the next batcher; the call a dead batcher was already
+  holding still fails with `{:error, {:batcher_down, reason}}`, so the dispatch
+  attempt retries it as before.
+
 ## [0.7.0] - 2026-10-24
 
 ### Added
