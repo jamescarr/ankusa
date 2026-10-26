@@ -1,0 +1,96 @@
+name: bench 10kb ceiling
+
+# Throwaway measurement for bullet 41 of ANKUSA_HARDENING_PLAN.md
+# (DUR-4.b.b.b: "10 KB ingest at least 2x the F1 baseline" *on the CI runner
+# class*). It answers one question the plan needs before DUR-4.b.b.b is
+# implemented or declared unreachable: on `ubuntu-latest`, is 2x the F1 code's
+# 10240B ingest rate above or below what this store's RocksDB can absorb at all?
+#
+# Three measurements, all on the same runner in one job:
+#   1. `bench/rocksdb_ceiling.exs`: 10 KB hook rows through `Ankusa.Store`'s own
+#      database options (the real `queue.rocksdb` tunables, 4 partitions), with
+#      `sync: false` and with `Ankusa.Queue.Syncer`'s fsync cadence;
+#   2. the 10240B cell of `bench:gate` on this branch's HEAD (the same
+#      invocation `bench/gate.exs` makes: N=20000, CONCURRENCY=256,
+#      SINK_LATENCY_MS=5, three runs);
+#   3. the same cell, with this tree's `bench/core_bench.exs`, on the F1 code
+#      commit `b25506f6` (docs/testing.md "Perf gate": a detached worktree of
+#      the commit, the current script copied over the old one).
+#
+# Not a gate: `workflow_dispatch` only, no baseline comparison, no failure on a
+# slow runner. The numbers are in the job log.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ceiling:
+    name: 10 KB ceiling and F1 comparison
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the F1 commit's objects, for the detached worktree
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.12
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - run: mix local.hex --force && mix local.rebar --force
+
+      - name: the runner this is measured on
+        run: |
+          set -euo pipefail
+          uname -a
+          nproc
+          free -m
+          df -h /
+          grep 'model name' /proc/cpuinfo | head -1
+          # fsync cost on this runner: the number the syncer cadence divides by
+          dd if=/dev/zero of="$RUNNER_TEMP/fsync-probe" bs=4k count=64 conv=fsync 2>&1 | tail -1
+
+      - name: compile this branch
+        run: |
+          set -euo pipefail
+          cd packages/ankusa
+          export MIX_ENV=test
+          mix deps.get --check-locked
+          mix compile
+
+      - name: "raw ceiling: 10 KB puts, sync: false and syncer cadence"
+        run: |
+          set -euo pipefail
+          cd packages/ankusa
+          export MIX_ENV=test
+          mix run bench/rocksdb_ceiling.exs
+
+      - name: 10240B cell of bench:gate on this branch, 3 runs
+        run: |
+          set -euo pipefail
+          cd packages/ankusa
+          for run in 1 2 3; do
+            echo "== run $run"
+            N=20000 CONCURRENCY=256 SINK_LATENCY_MS=5 BODY_BYTES=10240 MIX_ENV=test \
+              mix run bench/core_bench.exs | grep '^{'
+          done
+
+      - name: 10240B cell of bench:gate on the F1 code (b25506f6), this harness, 3 runs
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/f1" b25506f6
+          cp packages/ankusa/bench/core_bench.exs \
+            "$RUNNER_TEMP/f1/packages/ankusa/bench/core_bench.exs"
+          cd "$RUNNER_TEMP/f1/packages/ankusa"
+          export MIX_ENV=test
+          mix deps.get
+          mix compile
+          for run in 1 2 3; do
+            echo "== run $run"
+            N=20000 CONCURRENCY=256 SINK_LATENCY_MS=5 BODY_BYTES=10240 \
+              mix run bench/core_bench.exs | grep '^{'
+          done
