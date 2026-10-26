@@ -1363,7 +1363,11 @@ empty one, with `next_cursor` set: ask again with it until it is `null`.
 tenant (or none), and the count of the matches when a filtered scan reached the
 end of the DLQ inside that first page. Otherwise it is `null`.
 The bound and the paging are proved by `GET /v1/dlq is bounded` and
-`GET /v1/dlq cursor page` in `admin/router_test.exs`.
+`GET /v1/dlq cursor page` in `admin/router_test.exs`. `bench/dlq_page_bench.exs`
+(`MIX_ENV=test mix run bench/dlq_page_bench.exs`) seeds a 10-million-row DLQ and
+calls the route through the router, first page and mid-cursor page, with and
+without a tenant filter (and the `sink` and `error_class` predicates): it exits
+1 unless every case's p99 is under 100 ms.
 
 ### Replaying across a fleet
 
