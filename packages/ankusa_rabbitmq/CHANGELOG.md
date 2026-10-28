@@ -6,17 +6,15 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added
-
-- `Sink.RabbitMQ`: a hook of an `ordered: true` sink carries the lane's key as the
-  `ankusa_ordering_key` AMQP header (consumer-side ordering, ADR 0004).
-## [0.7.0] - 2026-10-24
+## [0.7.0] - 2026-10-28
 
 ### Added
 
 - `:max_message_bytes` (default 128 MiB, RabbitMQ's `max_message_size`; DEL-5):
   the size preflight of `Ankusa.Sink.Messaging`. Requires an `ankusa` release
   with the `max_message_bytes` sink callback; publish core first.
+- `Sink.RabbitMQ`: a hook of an `ordered: true` sink carries the lane's key as the
+  `ankusa_ordering_key` AMQP header (consumer-side ordering, ADR 0004).
 
 ### Changed
 

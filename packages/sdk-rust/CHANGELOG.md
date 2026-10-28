@@ -6,25 +6,7 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added
-
-- **Delivery metadata (CON-4).** `HookHeaders::received_at` (when the edge accepted the hook, unix milliseconds, from `x-ankusa-received-at`) and `HookHeaders::body_sha256` (the lowercase hex SHA-256 of the body sent, from `x-ankusa-body-sha256`): `None` when the header is absent, empty or malformed, never an error. `HookHeaders` gained two public fields.
-
-- **Wire-format evolution path (CON-2).** `decode_message` accepts every `v`
-  from `MIN_SUPPORTED_VERSION` to `MAX_SUPPORTED_VERSION` (1 and 2, both
-  exported) into the one `Message`, with `v` as the wire said it: a `v: 2`
-  message is a `v: 1` message plus additive fields, so the keys it does not know
-  are ignored. `Message::instance` and `Message::region`: the name of the Ankusa
-  instance that published the message and the region it is configured with
-  (`None` when null or absent). `decode_lifecycle` and `LifecycleEvent` decode
-  the CloudEvents lifecycle events of the instance's lifecycle sinks.
-
-- `Message::is_trusted`, `HookHeaders::is_trusted` and `Verification::is_trusted`:
-  `true` only when the node verified the hook at ingest (status `ok`) and did
-  not flag it. A flagged, `failed` or `skipped` hook and one with no
-  verification are untrusted.
-
-## [0.6.0] - 2026-10-24
+## [0.6.0] - 2026-10-28
 
 ### Added
 
@@ -54,6 +36,21 @@ this project follows [Semantic Versioning](https://semver.org/).
 - `AdminClient::list_audit`: `GET /v1/audit`, the audit trail (newest first,
   paged by `cursor`/`limit`, filtered by `since`, `until`, `actor`, `action`,
   `tenant`).
+- **Delivery metadata (CON-4).** `HookHeaders::received_at` (when the edge accepted the hook, unix milliseconds, from `x-ankusa-received-at`) and `HookHeaders::body_sha256` (the lowercase hex SHA-256 of the body sent, from `x-ankusa-body-sha256`): `None` when the header is absent, empty or malformed, never an error. `HookHeaders` gained two public fields.
+
+- **Wire-format evolution path (CON-2).** `decode_message` accepts every `v`
+  from `MIN_SUPPORTED_VERSION` to `MAX_SUPPORTED_VERSION` (1 and 2, both
+  exported) into the one `Message`, with `v` as the wire said it: a `v: 2`
+  message is a `v: 1` message plus additive fields, so the keys it does not know
+  are ignored. `Message::instance` and `Message::region`: the name of the Ankusa
+  instance that published the message and the region it is configured with
+  (`None` when null or absent). `decode_lifecycle` and `LifecycleEvent` decode
+  the CloudEvents lifecycle events of the instance's lifecycle sinks.
+
+- `Message::is_trusted`, `HookHeaders::is_trusted` and `Verification::is_trusted`:
+  `true` only when the node verified the hook at ingest (status `ok`) and did
+  not flag it. A flagged, `failed` or `skipped` hook and one with no
+  verification are untrusted.
 
 ## [0.5.0] - 2026-10-14
 

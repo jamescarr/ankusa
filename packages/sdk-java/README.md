@@ -15,27 +15,20 @@ immutable and safe to share across threads.
 
 ## Install
 
-Not on Maven Central until its first Maven Central release. Until then, build it
-into your local Maven repository and depend on version `0.0.0`:
-
-```sh
-cd packages/sdk-java && sbt --server --batch publishM2
-```
-
 Maven:
 
 ```xml
 <dependency>
   <groupId>io.github.jamescarr</groupId>
   <artifactId>ankusa-sdk</artifactId>
-  <version>0.0.0</version> <!-- the Maven Central version once released -->
+  <version>0.2.0</version>
 </dependency>
 ```
 
-Gradle (with `mavenLocal()` in `repositories` until the release):
+Gradle:
 
 ```kotlin
-implementation("io.github.jamescarr:ankusa-sdk:0.0.0") // the Maven Central version once released
+implementation("io.github.jamescarr:ankusa-sdk:0.2.0")
 ```
 
 On the module path the jar is the automatic module `io.github.jamescarr.ankusa`.

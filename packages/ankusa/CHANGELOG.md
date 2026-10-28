@@ -11,290 +11,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
-### Added
-
-- **Bounded, cursor-paged DLQ listing and filtered replay (DEL-6).**
-  `GET /v1/dlq` / `Ankusa.Queue.dead/2` no longer folds the whole dead family: a
-  page is a reverse range scan of `limit + 1` keys (no scan examines more than
-  10 000), returned with a `next_cursor` to pass back as `cursor` (`null` on the
-  last page; a selective filter can give a short page with the cursor set, so
-  keep asking until it is `null`). `total` is a counter read when the only filter
-  is the tenant, the match count when a filtered scan reached the end inside the
-  first page, and `null` otherwise (it was always exact before, at the price of
-  the full scan). New filters `sink` and `error_class` (`permanent`,
-  `throttled`, `transient`: `Ankusa.Sink.error_class/1`), which every entry now
-  also carries beside `sink`; a dead row records its class (`error_class` in the
-  delivery row: additive, a row without one lists `null` and matches no class
-  filter). `POST /v1/replays` takes `sink` and `error_class` for a `dlq` job
-  (a row of another class stays dead) and, for every kind, a `job_id`: the same
-  id with the same kind and filter answers that job whatever its state, another
-  filter on it is `400 invalid_filter` (`job_id`), which is what lets a fleet
-  command start one job on every node and again after a failure. The server
-  image's `replay` command is that client; see its changelog.
-  `Ankusa.Queue.dead/2` now returns `next_cursor` beside `total` and `entries`.
-  Proofs: `replay_test.exs` ("tenant filter", "sink filter", "error_class
-  filter", "job_id"), `admin/router_test.exs` ("cursor page", "is bounded"),
-  `examples/fleet-e2e/run.sh --replay-drill`.
-- **Alert rules, dashboard and runbooks (OPS-7).** Two series the shipped alerts
-  read: `ankusa_instance_subtree_down_total{domain}` (from
-  `[:ankusa, :instance, :subtree_down]`: a failure domain out of restart budget)
-  and `ankusa_vm_memory_bytes` (`:erlang.memory(:total)`, a new
-  `[:ankusa, :vm, :state]` gauge event, sampled with the other gauges every
-  `admin.gauge_interval_ms`). The rules, a `promtool` unit test for each, the
-  Grafana dashboard and twelve runbooks are in the repository under
-  `deploy/monitoring/` and `docs/runbooks/`, checked by
-  `mise run check:monitoring`; see
-  [`architecture.md`](../../docs/architecture.md#alerts-dashboard-and-runbooks).
-- **Allocation cuts on the request path (PERF-1).** A signature is verified
-  without a second copy of the body: `Ankusa.Verifier.Template` compiles a
-  scheme's `signed` template once (`compile/1`; a preset's at build time) and
-  `Hmac` feeds the pieces to the MAC one at a time (`signed_iodata/3`), the body
-  by reference, where `Regex.replace` used to build the whole signed message
-  again for every hook. `Envelope.header/2` folds ASCII header names byte by
-  byte instead of downcasing every header of the request
-  (`Envelope.header_downcased/2` for a name already lowercase). A `json` dedupe
-  source reads no body past the new `dedupe.max_json_bytes` (1 MiB by default,
-  an integer >= 1): it is stored with no dedupe key and never decoded. The rate
-  limiter's bucket table is 16 tables sharded by `phash2(tenant, 16)`, and each
-  60 s sweep is 16 ticks of one shard, not one `select_delete` over every row.
-  Tests: `verifier_test.exs` "allocations per verify", `dedupe_test.exs`
-  "dedupe.max_json_bytes", `edge_rate_limit_test.exs` "the bucket sweep".
-- **Wire-format evolution path and producer conformance (CON-2).** Every queue
-  message (`Ankusa.Sink.Message`) carries `instance` (the instance's name) and
-  `region` (`dispatch.region`, `null` for none), and `Ankusa.AsyncApi` documents
-  both in `SinkMessageV1` and publishes the region as the document's
-  `x-ankusa-region` extension. `v` stays `1`: the SDKs now accept
-  `min_supported <= v <= max_supported` (1 to 2, `v: 2` being `v: 1` plus
-  additive fields), so a later additive `v: 2` does not break a deployed
-  consumer; a field that changes meaning needs `v: 3`. New task
-  `mix ankusa.conformance.gen` writes `conformance/cases/producer.json` from
-  `Sink.Message.encode/3`, and `mise run check:conformance` fails when the
-  checked-in file differs, so a field added to the encoder fails the gate until
-  the vectors (and so every SDK) follow.
-
-- **Config reload (OPS-6).** `Ankusa.Reload`: the seam a loader reloads an
-  instance through. `register/2` / `run/2` hold the instance's reload function;
-  `apply_config/3` takes the reloadable fields of a validated `%Ankusa.Config{}`
-  (`rate_limits` but `scope`, `dispatch.concurrency`, `dispatch.sink_concurrency`,
-  `dispatch.tenants`, `metrics.detail`, `admin.gauge_interval_ms`, `routes.seed`,
-  static sources) and applies them to the running instance atomically, after the
-  checks the instance boots under, with one `config.reload` audit row
-  (`result: ok | failed`). `POST /v1/config/reload` (scope `config:write` +
-  `tenant:*`) runs it: `200` with the keys and source ids that changed, `409
-  not_reloadable` naming the keys that need a restart, `409 reload_unavailable`
-  for an instance with no reload registered, `422 invalid_config`, `503
-  audit_backlog` / `store_unavailable`. `Ankusa.Dispatch.Pipeline.reconfigure/1`
-  takes new dispatch limits without dropping a claimed or running delivery;
-  `Ankusa.SourceStore.Static.with_sources/2` is what `publish/2` now builds on.
-- **A Salesforce dedupe preset and a boot warning for a source with no dedupe
-  (CON-3).** `dedupe: :salesforce` is `{:json, ["id"]}`: Salesforce stamps no
-  delivery-id header and documents no JSON delivery id on any outbound mechanism
-  (Outbound Messages are SOAP/XML; Flow/Apex callouts and Data 360 webhook
-  targets send a body the org builds), so the preset keys on the top-level `"id"`
-  the callout sets, and `configuration.md` says so. An `:edge` instance logs
-  `source <id> has no dedupe:` once per source it declares without `dedupe`
-  (`Ankusa.Dedupe.warn_undeduped/1`), and the gauge
-  `ankusa_sources_without_dedupe` (`[:ankusa, :sources, :state]`,
-  `:without_dedupe`) counts them. Tests: `salesforce preset`, `warns without
-  dedupe`.
-
-- **SLI metrics (OPS-3).** `[:ankusa, :dispatch, :stop]` now measures `attempt_ms`
-  (the final attempt) and `since_received_ms` (the hook's age when the delivery
-  settled; absent for a replayed delivery), and a new `[:ankusa, :dispatch,
-  :attempt]` event (`attempt_ms`; `result` `ok`, `error` or `timeout`) fires per
-  attempt, in direct mode too. New on `/metrics`:
-  `ankusa_delivery_latency_seconds{sink,result}` (buckets to 60 s; `tenant_id` and
-  `source_id` only at `metrics.detail: source`, like the ingest histogram),
-  `ankusa_dispatch_attempt_duration_seconds{sink,result}`,
-  `ankusa_compact_failures_total{stage}` (`segment`, `retention`, `reclaim`; from
-  the new `[:ankusa, :compact, :failure]`), `ankusa_claim_check_failures_total{op}`
-  (`check_in`, `redeem`; from `[:ankusa, :claim_check, :failure]`, only for a
-  claim store's fault) and `ankusa_backup_failures_total`. The SLO table is in
-  [`architecture.md`](../../docs/architecture.md#slis-and-slos).
-- **Opt-in ordering lanes (DEL-1.b, ADR 0004).** A sink entry with
-  `ordered: true` and an `ordering_key` (`{:header, name}`, `{:json, "a.b"}`,
-  `{mod, fun, args}`) delivers the hooks of one lane (`{tenant, source, sink,
-  key}`) one at a time in `seq` order; a retry blocks its lane only, a dead head
-  releases it, and lane state is in the store (store format 8: index families
-  `?O`/`?H`/`?P`, due kinds 2/3, counters `lanes`, `lanes_blocked`,
-  `lane_members`). `ctx.ordering_key` and `ctx.lane` reach the sink; SQS sends
-  the key as `MessageGroupId`, Pub/Sub as `orderingKey`, `Sink.Http` as
-  `x-ankusa-ordering-key`; queue sinks carry `ankusa_ordering_key`. New gauges
-  `ankusa_dispatch_lanes` and `ankusa_dispatch_lanes_blocked`, counter
-  `ankusa_dispatch_lane_key_missing_total{sink}`. Format 8 is a one-way door at
-  its first start.
-- **Log correlation and a runtime log level (OPS-2).** The process that handles a
-  hook carries its correlation as `Logger` metadata: `Ankusa.Edge.Router` clears
-  it per request and sets `instance`; `Ankusa.Edge.Ingest` sets `source_id`,
-  `tenant_id`, `trace_id` (`Ankusa.Trace.trace_id/1`) and `hook_id`;
-  `Ankusa.Sink.attempt/5` sets them, with `sink`, `attempt` and `replay_id`, for
-  every delivery attempt (dispatch, lifecycle events, `wal.type: none`
-  publishes); a replay step sets `replay_id`; the breaker, `wal.type: none` sink
-  refusal and lifecycle give-up lines name their source, tenant and sink. The
-  console format is unchanged; the server image's `log.format: json` prints them.
-  `Ankusa.LogLevel` (`levels/0`, `get/0`, `parse/1`, `set/1`) and
-  `PUT /v1/log-level` (`{"level": "debug"}`; scope `config:write` plus `tenant:*`)
-  change the VM's log level at once, without a restart, with an audit row
-  (`log_level.put`, written first: a node whose store cannot take the row keeps
-  its level). `config:write`, reserved until now, is the scope of that route.
-
-- **`Sink.SQS` and `Sink.GooglePubSub` batch (DEL-4).** Dispatch's deliveries to
-  one queue or topic wait in an `Ankusa.Sink.Batcher` (one per destination and set
-  of credentials, under `Ankusa.Instance`) and go out as one `SendMessageBatch`
-  (10 entries, 256 KiB) or `topics.publish` (1 000 messages, 7.5 MB of data), 20 ms
-  after the first arrived or when the batch is full: about 10× and 1 000× fewer
-  requests at 10 k messages a second (`mix run bench/sqs_batch_bench.exs`). A
-  delivery is answered when *its* entry is: an SQS `Failed` entry is classified
-  alone (`InvalidParameterValue`, `MissingParameter`, … permanent; throttling a
-  jittered `{:retry_after, ms, _}`; the rest transient), and the entry `Id` is the
-  position in the request, never the hook id, so a hook twice in a batch is fine.
-  Pub/Sub's `publish` has no per-message results, so `INVALID_ARGUMENT` bisects the
-  request (at most `2 · (⌈log₂ n⌉ + 1)` splits) until the one refused message is
-  `{:permanent, _}` and the rest are delivered. A FIFO `MessageGroupId` or Pub/Sub
-  `ordering_key` has one request in flight and keeps admission order. The queue
-  is bounded (`batch_queue_max` 4 096, `batch_queue_max_bytes` 128 MiB,
-  `batch_queue_tenant_max` 1 024; a delivery past one is
-  `{:retry_after, ms, {:batch_queue_full, reason}}`) and entries are taken
-  round-robin across tenants. New sink options `batch`, `batch_linger_ms`,
-  `batch_max_entries`, `batch_max_bytes`, `batch_queue_max`,
-  `batch_queue_max_bytes`, `batch_queue_tenant_max`, `batch_max_inflight`; new
-  optional callback `c:Ankusa.Sink.batched?/1` and `Sink.batched?/2`; new
-  `Ankusa.Sink.SQS.classify_error/4` and `Ankusa.Sink.GooglePubSub.classify_error/4`
-  (the DEL-2 classes, shared by a whole request and one entry of a batch), and
-  `validate_opts!/1` on both (range checks of the `batch_*` options; the server
-  image runs them at load, a delivery that meets a bad one is a permanent
-  `{:config, {:batch_options, _}}`). SQS's `MissingParameter`,
-  `InvalidAttributeName`, `InvalidAttributeValue` and `KmsThrottled` are now
-  classified (permanent and throttled). New series
-  `ankusa_sink_batch_{requests,entries,bisections,refused}_total` and
-  `ankusa_sink_batch_{batchers,queued,queued_bytes}`; events
-  `[:ankusa, :sink_batch, :flush | :refused | :state]`. **Behaviour change:** for a
-  batching sink dispatch no longer counts an attempt against
-  `dispatch.sink_concurrency`, a tenant's `concurrency` or `dispatch.concurrency`
-  (those would cap a batch at 8); the claimed-row windows bound the attempts and
-  `sink_concurrency` counts the batcher's requests. `batch: false` restores the
-  old one-request-per-message behaviour for a sink.
-- **OpenTelemetry tracing end to end (OPS-1).** `Ankusa.Trace` reads the
-  request's W3C `traceparent`/`tracestate` into the new `Envelope.trace` field
-  (additive: a node that predates it ignores it) and every sink carries it to
-  the consumer: the `traceparent` (and `tracestate`) header on `Sink.Http`, the
-  `traceparent`/`tracestate` fields of `Sink.Message` (`null` for a hook with no
-  trace) plus the same pair in `Message.headers/2` and `attributes/2`, and the
-  CloudEvents `traceparent` extension on lifecycle events. Core depends on
-  `opentelemetry_api` only: with no SDK started the request's context reaches
-  the consumer byte for byte and no span exists. With an SDK, spans
-  `ankusa.ingest` (a child of the provider's), `ankusa.verify`, `ankusa.commit`,
-  `ankusa.dispatch.attempt` (a child of, and linked to, the stored context),
-  `ankusa.claim_check`, `ankusa.replay` and `ankusa.lifecycle.event` make a
-  hook one trace. New `Ankusa.Sink.attempt/5` and `Ankusa.Lifecycle.traced_envelope/4`.
-
-- **Readiness thresholds (OPS-5).** `listener.ready_sink_error_window_ms` (5000):
-  under `wal: :none`, a sink whose last publish failed within this long ago makes
-  `/ready` `503` with `sinks: "failing"`; a sink that publishes again clears
-  itself at once (`Ankusa.Health.SinkErrors`, one ETS write per publish in the
-  request process, bounded at 10 000 entries and swept every window).
-  `listener.ready_min_free_bytes` (`nil`): below it `disk` is failing and the node
-  unready, measured by `:disksup` (`:os_mon`; with none running the reason is
-  `unmeasured`). `queue.max_oldest_due_ms` (`nil`): past it `backlog` is failing,
-  a label that never makes the node unready. All range-checked, and shown by
-  `/v1/config` (none is a secret). They live in existing sections, so
-  `Ankusa.Config` keeps its 31 struct fields.
-
-- **Drain keys (OPS-4).** `listener.drain_delay_ms` (5000, an integer >= 0): how
-  long the node keeps serving after `/ready` flips to `draining`.
-  `listener.drain_timeout_ms` (30000, an integer >= 1): the bound on closing the
-  ingress listener and waiting for the batchers. Both range-checked, shown by
-  `/v1/config` (neither is a secret), and in the existing `listener` section, so
-  `Ankusa.Config` keeps its 31 struct fields.
-
-### Changed
-
-- **`bench/core_bench.exs` no longer caps the 10 KB cell (DUR-4.b.b.a).** Every
-  request, body included, is built once before the clock starts and
-  `CONCURRENCY` long-lived client processes claim the next one off a shared
-  counter, where each item used to build its body and start a `Task` inside the
-  timed section (about 60 µs of CPU per hook, enough to hold the cell to ~1.6×
-  the F1 code's rate however cheap ingest got). The cell matrix, `N`,
-  `CONCURRENCY` and the JSON line are unchanged; `STUB_INGEST=1` answers each
-  request at once and reports what the harness itself can drive (11.3 M/s at
-  10 KB on the laptop that measured it, against 78.9 k/s for the F1 code).
-  `bench/baseline.json` is re-recorded under the new harness (a
-  `perf: rebaseline` change) with an `f1_code` block that holds the F1
-  baseline's code measured in the same session; `bench/gate.exs` ignores the
-  block and carries it over when it rewrites the file.
-- **`/ready` lists every readiness check (OPS-5).** `Ankusa.Health.ready/1` runs
-  each `Ankusa.Health.Check` that applies to the node (`store`, `intake` under
-  `wal: :dual`, `sinks` under `wal: :none`, `disk`, `backlog`, `backup`) and the
-  body carries one key per check with its state, `"ok"`, `"failing"` or
-  `"draining"`, plus `reasons` (a fixed set of atoms per check) while one is not
-  `"ok"`. It answers `503` when a check that gates is not ok: `store`, `intake`,
-  `sinks` and `disk` always, `backup` with `backup.require_fresh`, never
-  `backlog`. **Wire change:** `store` is now `"ok"`/`"failing"` (it was `"ok"`,
-  `"none"`, `"store_unavailable"`, `"write_failed"`) and the failure class moved
-  from the top-level `reason` to `reasons.store`; a node with no store has no
-  `store` key; `backup` is `"ok"`/`"failing"` (it was `"fresh"`/`"stale"`) and
-  `intake` is `"ok"`/`"failing"` with `reasons.intake` `down` or `recovering` (it
-  was `up`/`down`/`recovering`). The status codes are unchanged, and so are the
-  gating rules of `store`, `intake` and `backup`. Both OpenAPI documents describe
-  the new body.
-- **A stop drains before it closes anything (OPS-4).** Core's application and
-  `AnkusaServer.Application` define `prep_stop/1`, which runs
-  `Ankusa.Instance.Drain` when the VM is told to stop (SIGTERM, `docker stop`):
-  `/ready` answers `503` with `"status": "draining"` and a `drain` check
-  (`Ankusa.Health.Check.Drain`, `Ankusa.Health.drain/1`) at once, the ingress
-  listener keeps serving for `listener.drain_delay_ms`, then closes and waits for
-  the requests it is serving, then every batcher is waited on until it holds
-  nothing (`Ankusa.Edge.Batcher.queued/2`), all within `listener.drain_timeout_ms`.
-  Dispatch's outcomes and the backup's final checkpoint run as the tree stops.
-  **Wire change:** `/ready`'s `status` is `"draining"` (was `"unavailable"`) while
-  a check reports `draining`; both OpenAPI documents and the TypeScript admin
-  types follow. The ingest Bandit child is `id: :ingress`, and its Thousand Island
-  `shutdown_timeout` is `Ankusa.Listener.ingress_shutdown_timeout_ms/1` (22 s;
-  13 s under `wal: :none`, 24 s under `wal: :dual`), no longer Thousand Island's
-  15 s default, which was the batcher's own record deadline, so a commit that
-  started late was killed mid-fsync and the provider saw a reset for a committed
-  hook. `Ankusa.Listener.bandit_options/3` takes extra Thousand Island options.
-  A node with the `:edge` role refuses a `listener.drain_timeout_ms` below that
-  wait at `Ankusa.Config.new/1`. `Ankusa.Edge.Batcher.record_deadline_ms/0` is the
-  one definition of the 15 s record deadline (the `intake.publish_timeout_ms`
-  bound reads it). Set `terminationGracePeriodSeconds` to at least
-  `(drain_delay_ms + drain_timeout_ms) / 1000 + 10`
-  ([`deployment.md`](../../docs/deployment.md)).
-- Requires `bandit ~> 1.14` (was `~> 1.13`): 1.13.1 is affected by
-  EEF-CVE-2026-115269 (High: a WINDOW_UPDATE or empty SETTINGS frame restarted
-  the HTTP/2 request-body read timeout, so a trickle of them held a stream and
-  its handler open indefinitely) and ten more advisories 1.14.0 closes (HTTP/2
-  flow control, HPACK and SETTINGS limits; HTTP/1.1 chunked bodies, one of them
-  a request-smuggling vector; WebSocket framing); `mix hex.audit` fails on it.
-- Requires `jose ~> 1.11 and >= 1.11.13` (was `~> 1.11`): 1.11.12 has eight
-  advisories fixed in 1.11.13, EEF-CVE-2026-65625 to EEF-CVE-2026-65632
-  (High: EEF-CVE-2026-65629). One reaches `Ankusa.Admin.Auth.JWT`'s check of a
-  presented token: an ECDSA signature's length was not validated, so an `ES*`
-  token's signature was malleable; RSA JWK parsing (a crafted modulus was
-  factored, CPU exhaustion) reaches only the configured keys and the issuer's
-  `jwt.jwks_url`.
-
-### Fixed
-
-- **A delivery that races a batcher's death no longer fails.** A batcher that
-  stops (idle, or killed) leaves its registry name behind for a moment — the
-  partition that owns the key reaps it when it handles the monitor, measured at
-  1-9 µs — and a delivery that landed in that window was answered
-  `{:error, {:batcher_down, :noproc}}` about a healthy destination, because both
-  the lookup and the one immediate retry read the same stale name.
-  `Ankusa.Sink.Batcher.deliver/4` now waits for the name to go (at most 250 ms, in
-  2 ms steps) and starts the next batcher; the call a dead batcher was already
-  holding still fails with `{:error, {:batcher_down, reason}}`, so the dispatch
-  attempt retries it as before.
-- **Dispatch under a backlog (soak).** A synced commit's wake ran a full store
-  scan, one per commit, even when every tenant's window was full; at 200 req/s
-  the scans outran the pipeline, the attempts' outcomes queued behind them, and
-  nothing freed the window: the nightly soak lost 694 704 of 720 000 hooks to a
-  `log` sink. Wakes are now coalesced into one scan per mailbox round
-  (`Ankusa.Dispatch.Pipeline`). Test: `isolation_test.exs` "wakes are
-  coalesced".
-
-## [0.7.0] - 2026-10-24
+## [0.7.0] - 2026-10-28
 
 ### Added
 
@@ -1142,6 +859,199 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   lifecycle HTTP sink (`Egress.validate_config!/1`, `Sink.Http.validate_opts!/1`).
   `castore ~> 1.0` is now a locked dependency (Mint's fallback bundle).
 - `Ankusa.fetch_config/1`, `Ankusa.HttpClient.validate!/2` (public).
+- **Bounded, cursor-paged DLQ listing and filtered replay (DEL-6).**
+  `GET /v1/dlq` / `Ankusa.Queue.dead/2` no longer folds the whole dead family: a
+  page is a reverse range scan of `limit + 1` keys (no scan examines more than
+  10 000), returned with a `next_cursor` to pass back as `cursor` (`null` on the
+  last page; a selective filter can give a short page with the cursor set, so
+  keep asking until it is `null`). `total` is a counter read when the only filter
+  is the tenant, the match count when a filtered scan reached the end inside the
+  first page, and `null` otherwise (it was always exact before, at the price of
+  the full scan). New filters `sink` and `error_class` (`permanent`,
+  `throttled`, `transient`: `Ankusa.Sink.error_class/1`), which every entry now
+  also carries beside `sink`; a dead row records its class (`error_class` in the
+  delivery row: additive, a row without one lists `null` and matches no class
+  filter). `POST /v1/replays` takes `sink` and `error_class` for a `dlq` job
+  (a row of another class stays dead) and, for every kind, a `job_id`: the same
+  id with the same kind and filter answers that job whatever its state, another
+  filter on it is `400 invalid_filter` (`job_id`), which is what lets a fleet
+  command start one job on every node and again after a failure. The server
+  image's `replay` command is that client; see its changelog.
+  `Ankusa.Queue.dead/2` now returns `next_cursor` beside `total` and `entries`.
+  Proofs: `replay_test.exs` ("tenant filter", "sink filter", "error_class
+  filter", "job_id"), `admin/router_test.exs` ("cursor page", "is bounded"),
+  `examples/fleet-e2e/run.sh --replay-drill`.
+- **Alert rules, dashboard and runbooks (OPS-7).** Two series the shipped alerts
+  read: `ankusa_instance_subtree_down_total{domain}` (from
+  `[:ankusa, :instance, :subtree_down]`: a failure domain out of restart budget)
+  and `ankusa_vm_memory_bytes` (`:erlang.memory(:total)`, a new
+  `[:ankusa, :vm, :state]` gauge event, sampled with the other gauges every
+  `admin.gauge_interval_ms`). The rules, a `promtool` unit test for each, the
+  Grafana dashboard and twelve runbooks are in the repository under
+  `deploy/monitoring/` and `docs/runbooks/`, checked by
+  `mise run check:monitoring`; see
+  [`architecture.md`](../../docs/architecture.md#alerts-dashboard-and-runbooks).
+- **Allocation cuts on the request path (PERF-1).** A signature is verified
+  without a second copy of the body: `Ankusa.Verifier.Template` compiles a
+  scheme's `signed` template once (`compile/1`; a preset's at build time) and
+  `Hmac` feeds the pieces to the MAC one at a time (`signed_iodata/3`), the body
+  by reference, where `Regex.replace` used to build the whole signed message
+  again for every hook. `Envelope.header/2` folds ASCII header names byte by
+  byte instead of downcasing every header of the request
+  (`Envelope.header_downcased/2` for a name already lowercase). A `json` dedupe
+  source reads no body past the new `dedupe.max_json_bytes` (1 MiB by default,
+  an integer >= 1): it is stored with no dedupe key and never decoded. The rate
+  limiter's bucket table is 16 tables sharded by `phash2(tenant, 16)`, and each
+  60 s sweep is 16 ticks of one shard, not one `select_delete` over every row.
+  Tests: `verifier_test.exs` "allocations per verify", `dedupe_test.exs`
+  "dedupe.max_json_bytes", `edge_rate_limit_test.exs` "the bucket sweep".
+- **Wire-format evolution path and producer conformance (CON-2).** Every queue
+  message (`Ankusa.Sink.Message`) carries `instance` (the instance's name) and
+  `region` (`dispatch.region`, `null` for none), and `Ankusa.AsyncApi` documents
+  both in `SinkMessageV1` and publishes the region as the document's
+  `x-ankusa-region` extension. `v` stays `1`: the SDKs now accept
+  `min_supported <= v <= max_supported` (1 to 2, `v: 2` being `v: 1` plus
+  additive fields), so a later additive `v: 2` does not break a deployed
+  consumer; a field that changes meaning needs `v: 3`. New task
+  `mix ankusa.conformance.gen` writes `conformance/cases/producer.json` from
+  `Sink.Message.encode/3`, and `mise run check:conformance` fails when the
+  checked-in file differs, so a field added to the encoder fails the gate until
+  the vectors (and so every SDK) follow.
+
+- **Config reload (OPS-6).** `Ankusa.Reload`: the seam a loader reloads an
+  instance through. `register/2` / `run/2` hold the instance's reload function;
+  `apply_config/3` takes the reloadable fields of a validated `%Ankusa.Config{}`
+  (`rate_limits` but `scope`, `dispatch.concurrency`, `dispatch.sink_concurrency`,
+  `dispatch.tenants`, `metrics.detail`, `admin.gauge_interval_ms`, `routes.seed`,
+  static sources) and applies them to the running instance atomically, after the
+  checks the instance boots under, with one `config.reload` audit row
+  (`result: ok | failed`). `POST /v1/config/reload` (scope `config:write` +
+  `tenant:*`) runs it: `200` with the keys and source ids that changed, `409
+  not_reloadable` naming the keys that need a restart, `409 reload_unavailable`
+  for an instance with no reload registered, `422 invalid_config`, `503
+  audit_backlog` / `store_unavailable`. `Ankusa.Dispatch.Pipeline.reconfigure/1`
+  takes new dispatch limits without dropping a claimed or running delivery;
+  `Ankusa.SourceStore.Static.with_sources/2` is what `publish/2` now builds on.
+- **A Salesforce dedupe preset and a boot warning for a source with no dedupe
+  (CON-3).** `dedupe: :salesforce` is `{:json, ["id"]}`: Salesforce stamps no
+  delivery-id header and documents no JSON delivery id on any outbound mechanism
+  (Outbound Messages are SOAP/XML; Flow/Apex callouts and Data 360 webhook
+  targets send a body the org builds), so the preset keys on the top-level `"id"`
+  the callout sets, and `configuration.md` says so. An `:edge` instance logs
+  `source <id> has no dedupe:` once per source it declares without `dedupe`
+  (`Ankusa.Dedupe.warn_undeduped/1`), and the gauge
+  `ankusa_sources_without_dedupe` (`[:ankusa, :sources, :state]`,
+  `:without_dedupe`) counts them. Tests: `salesforce preset`, `warns without
+  dedupe`.
+
+- **SLI metrics (OPS-3).** `[:ankusa, :dispatch, :stop]` now measures `attempt_ms`
+  (the final attempt) and `since_received_ms` (the hook's age when the delivery
+  settled; absent for a replayed delivery), and a new `[:ankusa, :dispatch,
+  :attempt]` event (`attempt_ms`; `result` `ok`, `error` or `timeout`) fires per
+  attempt, in direct mode too. New on `/metrics`:
+  `ankusa_delivery_latency_seconds{sink,result}` (buckets to 60 s; `tenant_id` and
+  `source_id` only at `metrics.detail: source`, like the ingest histogram),
+  `ankusa_dispatch_attempt_duration_seconds{sink,result}`,
+  `ankusa_compact_failures_total{stage}` (`segment`, `retention`, `reclaim`; from
+  the new `[:ankusa, :compact, :failure]`), `ankusa_claim_check_failures_total{op}`
+  (`check_in`, `redeem`; from `[:ankusa, :claim_check, :failure]`, only for a
+  claim store's fault) and `ankusa_backup_failures_total`. The SLO table is in
+  [`architecture.md`](../../docs/architecture.md#slis-and-slos).
+- **Opt-in ordering lanes (DEL-1.b, ADR 0004).** A sink entry with
+  `ordered: true` and an `ordering_key` (`{:header, name}`, `{:json, "a.b"}`,
+  `{mod, fun, args}`) delivers the hooks of one lane (`{tenant, source, sink,
+  key}`) one at a time in `seq` order; a retry blocks its lane only, a dead head
+  releases it, and lane state is in the store (store format 8: index families
+  `?O`/`?H`/`?P`, due kinds 2/3, counters `lanes`, `lanes_blocked`,
+  `lane_members`). `ctx.ordering_key` and `ctx.lane` reach the sink; SQS sends
+  the key as `MessageGroupId`, Pub/Sub as `orderingKey`, `Sink.Http` as
+  `x-ankusa-ordering-key`; queue sinks carry `ankusa_ordering_key`. New gauges
+  `ankusa_dispatch_lanes` and `ankusa_dispatch_lanes_blocked`, counter
+  `ankusa_dispatch_lane_key_missing_total{sink}`. Format 8 is a one-way door at
+  its first start.
+- **Log correlation and a runtime log level (OPS-2).** The process that handles a
+  hook carries its correlation as `Logger` metadata: `Ankusa.Edge.Router` clears
+  it per request and sets `instance`; `Ankusa.Edge.Ingest` sets `source_id`,
+  `tenant_id`, `trace_id` (`Ankusa.Trace.trace_id/1`) and `hook_id`;
+  `Ankusa.Sink.attempt/5` sets them, with `sink`, `attempt` and `replay_id`, for
+  every delivery attempt (dispatch, lifecycle events, `wal.type: none`
+  publishes); a replay step sets `replay_id`; the breaker, `wal.type: none` sink
+  refusal and lifecycle give-up lines name their source, tenant and sink. The
+  console format is unchanged; the server image's `log.format: json` prints them.
+  `Ankusa.LogLevel` (`levels/0`, `get/0`, `parse/1`, `set/1`) and
+  `PUT /v1/log-level` (`{"level": "debug"}`; scope `config:write` plus `tenant:*`)
+  change the VM's log level at once, without a restart, with an audit row
+  (`log_level.put`, written first: a node whose store cannot take the row keeps
+  its level). `config:write`, reserved until now, is the scope of that route.
+
+- **`Sink.SQS` and `Sink.GooglePubSub` batch (DEL-4).** Dispatch's deliveries to
+  one queue or topic wait in an `Ankusa.Sink.Batcher` (one per destination and set
+  of credentials, under `Ankusa.Instance`) and go out as one `SendMessageBatch`
+  (10 entries, 256 KiB) or `topics.publish` (1 000 messages, 7.5 MB of data), 20 ms
+  after the first arrived or when the batch is full: about 10× and 1 000× fewer
+  requests at 10 k messages a second (`mix run bench/sqs_batch_bench.exs`). A
+  delivery is answered when *its* entry is: an SQS `Failed` entry is classified
+  alone (`InvalidParameterValue`, `MissingParameter`, … permanent; throttling a
+  jittered `{:retry_after, ms, _}`; the rest transient), and the entry `Id` is the
+  position in the request, never the hook id, so a hook twice in a batch is fine.
+  Pub/Sub's `publish` has no per-message results, so `INVALID_ARGUMENT` bisects the
+  request (at most `2 · (⌈log₂ n⌉ + 1)` splits) until the one refused message is
+  `{:permanent, _}` and the rest are delivered. A FIFO `MessageGroupId` or Pub/Sub
+  `ordering_key` has one request in flight and keeps admission order. The queue
+  is bounded (`batch_queue_max` 4 096, `batch_queue_max_bytes` 128 MiB,
+  `batch_queue_tenant_max` 1 024; a delivery past one is
+  `{:retry_after, ms, {:batch_queue_full, reason}}`) and entries are taken
+  round-robin across tenants. New sink options `batch`, `batch_linger_ms`,
+  `batch_max_entries`, `batch_max_bytes`, `batch_queue_max`,
+  `batch_queue_max_bytes`, `batch_queue_tenant_max`, `batch_max_inflight`; new
+  optional callback `c:Ankusa.Sink.batched?/1` and `Sink.batched?/2`; new
+  `Ankusa.Sink.SQS.classify_error/4` and `Ankusa.Sink.GooglePubSub.classify_error/4`
+  (the DEL-2 classes, shared by a whole request and one entry of a batch), and
+  `validate_opts!/1` on both (range checks of the `batch_*` options; the server
+  image runs them at load, a delivery that meets a bad one is a permanent
+  `{:config, {:batch_options, _}}`). SQS's `MissingParameter`,
+  `InvalidAttributeName`, `InvalidAttributeValue` and `KmsThrottled` are now
+  classified (permanent and throttled). New series
+  `ankusa_sink_batch_{requests,entries,bisections,refused}_total` and
+  `ankusa_sink_batch_{batchers,queued,queued_bytes}`; events
+  `[:ankusa, :sink_batch, :flush | :refused | :state]`. **Behaviour change:** for a
+  batching sink dispatch no longer counts an attempt against
+  `dispatch.sink_concurrency`, a tenant's `concurrency` or `dispatch.concurrency`
+  (those would cap a batch at 8); the claimed-row windows bound the attempts and
+  `sink_concurrency` counts the batcher's requests. `batch: false` restores the
+  old one-request-per-message behaviour for a sink.
+- **OpenTelemetry tracing end to end (OPS-1).** `Ankusa.Trace` reads the
+  request's W3C `traceparent`/`tracestate` into the new `Envelope.trace` field
+  (additive: a node that predates it ignores it) and every sink carries it to
+  the consumer: the `traceparent` (and `tracestate`) header on `Sink.Http`, the
+  `traceparent`/`tracestate` fields of `Sink.Message` (`null` for a hook with no
+  trace) plus the same pair in `Message.headers/2` and `attributes/2`, and the
+  CloudEvents `traceparent` extension on lifecycle events. Core depends on
+  `opentelemetry_api` only: with no SDK started the request's context reaches
+  the consumer byte for byte and no span exists. With an SDK, spans
+  `ankusa.ingest` (a child of the provider's), `ankusa.verify`, `ankusa.commit`,
+  `ankusa.dispatch.attempt` (a child of, and linked to, the stored context),
+  `ankusa.claim_check`, `ankusa.replay` and `ankusa.lifecycle.event` make a
+  hook one trace. New `Ankusa.Sink.attempt/5` and `Ankusa.Lifecycle.traced_envelope/4`.
+
+- **Readiness thresholds (OPS-5).** `listener.ready_sink_error_window_ms` (5000):
+  under `wal: :none`, a sink whose last publish failed within this long ago makes
+  `/ready` `503` with `sinks: "failing"`; a sink that publishes again clears
+  itself at once (`Ankusa.Health.SinkErrors`, one ETS write per publish in the
+  request process, bounded at 10 000 entries and swept every window).
+  `listener.ready_min_free_bytes` (`nil`): below it `disk` is failing and the node
+  unready, measured by `:disksup` (`:os_mon`; with none running the reason is
+  `unmeasured`). `queue.max_oldest_due_ms` (`nil`): past it `backlog` is failing,
+  a label that never makes the node unready. All range-checked, and shown by
+  `/v1/config` (none is a secret). They live in existing sections, so
+  `Ankusa.Config` keeps its 31 struct fields.
+
+- **Drain keys (OPS-4).** `listener.drain_delay_ms` (5000, an integer >= 0): how
+  long the node keeps serving after `/ready` flips to `draining`.
+  `listener.drain_timeout_ms` (30000, an integer >= 1): the bound on closing the
+  ingress listener and waiting for the batchers. Both range-checked, shown by
+  `/v1/config` (neither is a secret), and in the existing `listener` section, so
+  `Ankusa.Config` keeps its 31 struct fields.
 
 ### Changed
 
@@ -1299,6 +1209,70 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   client's connection pool cannot hand out a connection within its checkout
   timeout, instead of letting that raise out of the adapter: the retry and
   the breaker see it as the transport failure it is.
+- **`bench/core_bench.exs` no longer caps the 10 KB cell (DUR-4.b.b.a).** Every
+  request, body included, is built once before the clock starts and
+  `CONCURRENCY` long-lived client processes claim the next one off a shared
+  counter, where each item used to build its body and start a `Task` inside the
+  timed section (about 60 µs of CPU per hook, enough to hold the cell to ~1.6×
+  the F1 code's rate however cheap ingest got). The cell matrix, `N`,
+  `CONCURRENCY` and the JSON line are unchanged; `STUB_INGEST=1` answers each
+  request at once and reports what the harness itself can drive (11.3 M/s at
+  10 KB on the laptop that measured it, against 78.9 k/s for the F1 code).
+  `bench/baseline.json` is re-recorded under the new harness (a
+  `perf: rebaseline` change) with an `f1_code` block that holds the F1
+  baseline's code measured in the same session; `bench/gate.exs` ignores the
+  block and carries it over when it rewrites the file.
+- **`/ready` lists every readiness check (OPS-5).** `Ankusa.Health.ready/1` runs
+  each `Ankusa.Health.Check` that applies to the node (`store`, `intake` under
+  `wal: :dual`, `sinks` under `wal: :none`, `disk`, `backlog`, `backup`) and the
+  body carries one key per check with its state, `"ok"`, `"failing"` or
+  `"draining"`, plus `reasons` (a fixed set of atoms per check) while one is not
+  `"ok"`. It answers `503` when a check that gates is not ok: `store`, `intake`,
+  `sinks` and `disk` always, `backup` with `backup.require_fresh`, never
+  `backlog`. **Wire change:** `store` is now `"ok"`/`"failing"` (it was `"ok"`,
+  `"none"`, `"store_unavailable"`, `"write_failed"`) and the failure class moved
+  from the top-level `reason` to `reasons.store`; a node with no store has no
+  `store` key; `backup` is `"ok"`/`"failing"` (it was `"fresh"`/`"stale"`) and
+  `intake` is `"ok"`/`"failing"` with `reasons.intake` `down` or `recovering` (it
+  was `up`/`down`/`recovering`). The status codes are unchanged, and so are the
+  gating rules of `store`, `intake` and `backup`. Both OpenAPI documents describe
+  the new body.
+- **A stop drains before it closes anything (OPS-4).** Core's application and
+  `AnkusaServer.Application` define `prep_stop/1`, which runs
+  `Ankusa.Instance.Drain` when the VM is told to stop (SIGTERM, `docker stop`):
+  `/ready` answers `503` with `"status": "draining"` and a `drain` check
+  (`Ankusa.Health.Check.Drain`, `Ankusa.Health.drain/1`) at once, the ingress
+  listener keeps serving for `listener.drain_delay_ms`, then closes and waits for
+  the requests it is serving, then every batcher is waited on until it holds
+  nothing (`Ankusa.Edge.Batcher.queued/2`), all within `listener.drain_timeout_ms`.
+  Dispatch's outcomes and the backup's final checkpoint run as the tree stops.
+  **Wire change:** `/ready`'s `status` is `"draining"` (was `"unavailable"`) while
+  a check reports `draining`; both OpenAPI documents and the TypeScript admin
+  types follow. The ingest Bandit child is `id: :ingress`, and its Thousand Island
+  `shutdown_timeout` is `Ankusa.Listener.ingress_shutdown_timeout_ms/1` (22 s;
+  13 s under `wal: :none`, 24 s under `wal: :dual`), no longer Thousand Island's
+  15 s default, which was the batcher's own record deadline, so a commit that
+  started late was killed mid-fsync and the provider saw a reset for a committed
+  hook. `Ankusa.Listener.bandit_options/3` takes extra Thousand Island options.
+  A node with the `:edge` role refuses a `listener.drain_timeout_ms` below that
+  wait at `Ankusa.Config.new/1`. `Ankusa.Edge.Batcher.record_deadline_ms/0` is the
+  one definition of the 15 s record deadline (the `intake.publish_timeout_ms`
+  bound reads it). Set `terminationGracePeriodSeconds` to at least
+  `(drain_delay_ms + drain_timeout_ms) / 1000 + 10`
+  ([`deployment.md`](../../docs/deployment.md)).
+- Requires `bandit ~> 1.14` (was `~> 1.13`): 1.13.1 is affected by
+  EEF-CVE-2026-115269 (High: a WINDOW_UPDATE or empty SETTINGS frame restarted
+  the HTTP/2 request-body read timeout, so a trickle of them held a stream and
+  its handler open indefinitely) and ten more advisories 1.14.0 closes (HTTP/2
+  flow control, HPACK and SETTINGS limits; HTTP/1.1 chunked bodies, one of them
+  a request-smuggling vector; WebSocket framing); `mix hex.audit` fails on it.
+- Requires `jose ~> 1.11 and >= 1.11.13` (was `~> 1.11`): 1.11.12 has eight
+  advisories fixed in 1.11.13, EEF-CVE-2026-65625 to EEF-CVE-2026-65632
+  (High: EEF-CVE-2026-65629). One reaches `Ankusa.Admin.Auth.JWT`'s check of a
+  presented token: an ECDSA signature's length was not validated, so an `ES*`
+  token's signature was malleable; RSA JWK parsing (a crafted modulus was
+  factored, CPU exhaustion) reaches only the configured keys and the issuer's
+  `jwt.jwks_url`.
 
 ### Fixed
 
@@ -1320,6 +1294,23 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   end record, which standard readers (Erlang's `:zip`: `{:error, :bad_eocd}`)
   refuse to open. `Ankusa.ClaimCheck` already split packs at 65,000 claims, so
   only a direct caller of `Pack.build/1` could reach it.
+- **A delivery that races a batcher's death no longer fails.** A batcher that
+  stops (idle, or killed) leaves its registry name behind for a moment — the
+  partition that owns the key reaps it when it handles the monitor, measured at
+  1-9 µs — and a delivery that landed in that window was answered
+  `{:error, {:batcher_down, :noproc}}` about a healthy destination, because both
+  the lookup and the one immediate retry read the same stale name.
+  `Ankusa.Sink.Batcher.deliver/4` now waits for the name to go (at most 250 ms, in
+  2 ms steps) and starts the next batcher; the call a dead batcher was already
+  holding still fails with `{:error, {:batcher_down, reason}}`, so the dispatch
+  attempt retries it as before.
+- **Dispatch under a backlog (soak).** A synced commit's wake ran a full store
+  scan, one per commit, even when every tenant's window was full; at 200 req/s
+  the scans outran the pipeline, the attempts' outcomes queued behind them, and
+  nothing freed the window: the nightly soak lost 694 704 of 720 000 hooks to a
+  `log` sink. Wakes are now coalesced into one scan per mailbox round
+  (`Ankusa.Dispatch.Pipeline`). Test: `isolation_test.exs` "wakes are
+  coalesced".
 
 ## [0.6.0] - 2026-10-14
 

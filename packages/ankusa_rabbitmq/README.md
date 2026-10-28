@@ -11,8 +11,8 @@ deployments that opt into a RabbitMQ sink need this package.
 ```elixir
 def deps do
   [
-    {:ankusa, "~> 0.6"},
-    {:ankusa_rabbitmq, "~> 0.6"}
+    {:ankusa, "~> 0.7"},
+    {:ankusa_rabbitmq, "~> 0.7"}
   ]
 end
 ```

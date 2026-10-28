@@ -11,8 +11,8 @@ deployments that opt into a NATS sink need this package.
 ```elixir
 def deps do
   [
-    {:ankusa, "~> 0.6"},
-    {:ankusa_nats, "~> 0.6"}
+    {:ankusa, "~> 0.7"},
+    {:ankusa_nats, "~> 0.7"}
   ]
 end
 ```

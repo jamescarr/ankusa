@@ -32,7 +32,7 @@ Queue sinks   Ankusa --> your consumer --> Message.decode/1       +--> MyApp.Hoo
 # mix.exs
 def deps do
   [
-    {:ankusa_sdk, "~> 0.5"}
+    {:ankusa_sdk, "~> 0.6"}
   ]
 end
 ```
