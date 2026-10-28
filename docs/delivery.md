@@ -1394,8 +1394,9 @@ docker run --rm -e ANKUSA_ADMIN_TOKEN jamescarr/ankusa replay \
 ```
 
 `--nodes` takes `[scheme://]host[:port]` entries (port `4002`), or one DNS name
-that resolves to every node (a headless service; the chart's publishes a pod's
-address whether or not it is ready, so a draining node is still found). A name
+that resolves to every node (a headless service; the chart's headless Service
+publishes a pod's address whether or not it is ready, so a draining node is
+still found). A name
 with several addresses is one node per address, each pinned to its address,
 over `http`; a name with one is requested by name. Names are resolved once, at
 start, IPv4 first and IPv6 when a name has no IPv4 address. `--expect-nodes N`
