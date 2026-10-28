@@ -117,7 +117,7 @@ key Ankusa computed and shipped in `x-ankusa-idempotency-key`, and
 lookup is always case-insensitive, regardless of whether the mapping passed in
 already is.
 
-[`examples/quickstart/worker.py`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/worker.py)
+[`examples/http-consumer/worker.py`](https://github.com/jamescarr/ankusa/tree/main/examples/http-consumer/worker.py)
 uses this.
 
 ### Verifying signed deliveries
@@ -238,6 +238,9 @@ def consume(raw: str | bytes) -> None:
 - `message.headers` holds the forwarded provider request headers (lowercased);
   `message.dedupe_key` / `message.replay_id` / `message.idempotency_key` are
   `None` when absent.
+
+[`examples/quickstart/worker.py`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/worker.py)
+uses this against an SQS FIFO queue.
 
 A webhook receiver can take the same shortcut straight off the HTTP sink's
 headers with `parse_headers` + `idempotency_key(hook)`, which reads

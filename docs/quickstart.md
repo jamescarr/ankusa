@@ -1,10 +1,10 @@
 # Quickstart
 
-Run Ankusa and a worker you own, send webhooks, then stop the worker and watch
-what happens to the hooks already acknowledged. You need Docker with Compose v2
-and `curl`; nothing else.
+Run Ankusa, a broker, and a worker you own, send webhooks, then stop the
+worker and the broker and watch what happens to the hooks already
+acknowledged. You need Docker with Compose v2 and `curl`; nothing else.
 
-## 1. Start Ankusa and a worker
+## 1. Start Ankusa, a broker, and a worker
 
 ```sh
 git clone https://github.com/jamescarr/ankusa
@@ -16,17 +16,26 @@ docker compose up --build -d --wait
 flowchart LR
     P[Provider / curl] -->|POST /webhooks/demo :4000| A[ankusa]
     A -->|written to disk, then 201| P
-    A -->|POST /hooks + x-ankusa-id| W[worker.py]
-    O[You] -->|/health /ready /metrics /v1/dlq :4002| A
+    A -->|produce ankusa.events, acks=all| T[(Redpanda topic)]
+    T -->|consumer group| B[bridge]
+    B -->|SendMessage, group = key| Q[(SQS FIFO, floci)]
+    Q -->|long poll| W[worker.py]
+    W -.->|large body: redeem claim :4001| A
+    O[You] -->|/health /metrics /v1/dlq :4002| A
 ```
 
 [`ankusa.yml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/ankusa.yml)
-declares one source (`demo`) with one HTTP sink pointed at the worker, and an
-`egress` block that lets that sink reach the worker: a sink may not connect to a
-private address (or use plain `http`) unless the config says so.
+declares one source (`demo`) with one Kafka sink producing to the
+`ankusa.events` topic, which
+[`docker-compose.yml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/docker-compose.yml)
+creates before Ankusa starts: the sink never creates a topic. A Redpanda
+Connect bridge
+([`bridge/bridge.yaml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/bridge/bridge.yaml))
+carries each record into an SQS FIFO queue in floci, with the record key
+(tenant and source) as the FIFO group, so one source's hooks stay in order.
 [`worker.py`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py)
-is a small [FastAPI](https://fastapi.tiangolo.com/) app that prints what it
-receives.
+polls that queue with `boto3`, decodes each message with the `ankusa` Python
+SDK, and prints what it receives.
 
 ## 2. Send a webhook
 
@@ -34,15 +43,26 @@ receives.
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
 # => {"id":"01a0...","status":"accepted"}
 
-sleep 1 && docker compose logs worker
-# received id=01a0... source=demo bytes=36 body={"id":"evt_1","type":"invoice.paid"}
+sleep 2 && docker compose logs worker
+# received id=01a0... source=demo via=inline bytes=36 body={"id":"evt_1","type":"invoice.paid"}
+```
+
+A body over the sink's `inline_max_bytes` (8 KiB here) is checked in on the
+node instead, and the message carries a claim ref the worker redeems from the
+claim-check gateway, so the broker never carries a large payload:
+
+```sh
+printf '{"id":"evt_2","pad":"%s"}' "$(head -c 20000 /dev/zero | tr '\0' x)" |
+  curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' --data-binary @-
+sleep 2 && docker compose logs worker | grep evt_2
+# received id=01a0... source=demo via=claim bytes=20023 body={"id":"evt_2","pad":"xxxx...
 ```
 
 The `201` returns only after the hook is durably accepted — here, after the
 node's store has fsynced it. That is
-[the core invariant](architecture.md#the-core-invariant), not a formality: the
-worker is not on the request path, and a hook the provider was told about
-cannot be lost to a slow or dead worker.
+[the core invariant](architecture.md#the-core-invariant), not a formality:
+neither the broker nor the worker is on the request path, and a hook the
+provider was told about cannot be lost to a slow or dead worker.
 
 ## 3. A provider retry is a new hook
 
@@ -64,35 +84,49 @@ whose provider sends a stable event id, and the second request answers `201
 
 ## 4. When your worker goes down
 
-### Short outage: retried until it comes back
-
-```sh
-docker compose stop worker
-curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_2"}'
-docker compose start worker
-sleep 10 && docker compose logs worker | grep evt_2
-```
-
-The provider still got its `201`: Ankusa holds the hook and retries delivery
-until the worker answers or the retry budget runs out.
-
-### Long outage: dead-lettered, then replayed
-
 ```sh
 docker compose stop worker
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_3"}'
-sleep 20
 curl -s localhost:4002/v1/dlq
-# => {"total":1,"entries":[{"id":"01a0...","source_id":"demo",...}]}
+# => {"total":0,"entries":[],"next_cursor":null}
 docker compose start worker
-curl -XPOST localhost:4002/v1/replays -d '{"kind":"dlq","source_id":"demo","rate":100}'
-# => 202 {"id":"01a0...","kind":"dlq","state":"running","filter":{"source_id":"demo"},...}
-sleep 1 && docker compose logs worker | grep evt_3
+until docker compose logs worker | grep evt_3; do sleep 2; done
 ```
 
-`ankusa.yml` caps retries at 6 attempts (roughly 8–15 s, jitter included) so
+Nothing was retried and nothing dead-lettered. The hook was produced to the
+topic and carried into the FIFO queue while the worker was away, and the queue
+held it until the worker came back: a worker outage is the queue's to absorb.
+It can take about 30 s to show up: the long poll the stopped worker left open
+may already have received the message, and SQS hides a received message for
+the queue's visibility timeout (30 s here) whether or not its receiver lives to
+process it, then hands it to the next poll.
+
+## 5. When the broker goes down
+
+### Dead-lettered, then replayed
+
+```sh
+docker compose stop redpanda
+curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_4"}'
+# => {"id":"01a0...","status":"accepted"}
+until curl -s localhost:4002/v1/dlq | grep -q '"total":1'; do sleep 2; done
+curl -s localhost:4002/v1/dlq
+# => {"total":1,"entries":[{"id":"01a0...",...,"source_id":"demo",...}],"next_cursor":null}
+docker compose up -d --wait redpanda    # back, and healthy
+curl -XPOST localhost:4002/v1/replays -d '{"kind":"dlq","source_id":"demo","rate":100}'
+# => 202 {"id":"01a0...","kind":"dlq","state":"running","filter":{"source_id":"demo"},...}
+until docker compose logs worker | grep evt_4; do sleep 2; done
+```
+
+The provider still got its `201` with the broker gone, because the ack never
+depended on it: Ankusa held the hook, retried the produce until the retry
+budget ran out, and dead-lettered it. `ankusa.yml` caps retries at 6 attempts
+(roughly 8–15 s, jitter included) and turns off the sink's circuit breaker so
 this drill takes seconds; the default retries for 24 hours
-(`dispatch.retry.max_elapsed_ms`), backing off to 5 min.
+(`dispatch.retry.max_elapsed_ms`), backing off to 5 min, and after 5 failures
+in a row parks the sink's hooks behind an open breaker without spending
+attempts ([A slow or dead sink](delivery.md#a-slow-or-dead-sink)). With the
+defaults, a broker outage this short is simply retried and never dead-letters.
 
 ### Replay is safe
 
@@ -110,17 +144,17 @@ curl -XPATCH localhost:4002/v1/replays/<job-id> -d '{"state":"cancelled"}'
 ```
 
 Redelivery is still at-least-once, so the receiver stays idempotent: a hook
-that reached the sink before it failed is delivered again with the same
-`x-ankusa-id` and the same `x-ankusa-idempotency-key`, and the worker dedupes
-on the latter — here with an in-memory set, which a real worker replaces with a
-unique key in its database. In this drill the worker was down for every
-attempt, so replay delivers `evt_3` once and never again.
+that reached the sink before it failed is delivered again as a message with
+the same `id` and the same `idempotency_key`, and the worker dedupes on the
+latter — here with an in-memory set, which a real worker replaces with a
+unique key in its database. In this drill the broker was down for every
+attempt, so replay delivers `evt_4` once and never again.
 
-## 5. Inspect the node
+## 6. Inspect the node
 
 ```sh
 curl localhost:4002/health
-# => {"status":"ok","instance":"default","version":"…","roles":["dispatch","edge","storage"]}
+# => {"status":"ok","instance":"default","version":"…","roles":["claim_check","dispatch","edge","storage"]}
 curl localhost:4002/ready
 # => {"status":"ready","instance":"default","store":"ok"}
 curl -s localhost:4002/metrics | grep ankusa_ingest_requests_total
@@ -140,7 +174,7 @@ reach it. A real deployment sets `admin.auth` (a token, your OIDC provider, or
 client certificates; see
 [Control-plane authentication](configuration.md#control-plane-authentication)).
 
-## 6. Point a real provider at it
+## 7. Point a real provider at it
 
 Add the provider as a second source under `sources:` in `ankusa.yml`:
 
@@ -149,9 +183,10 @@ Add the provider as a second source under `sources:` in `ankusa.yml`:
     verify: {type: stripe, secret: "${STRIPE_WHSEC}", tolerance_seconds: 300}
     on_verify_failure: quarantine
     sinks:
-      - type: http
-        url: "http://worker:8080/hooks"
-        allow_unsigned: true   # the demo worker does not verify; a real receiver sets secret:
+      - type: kafka
+        brokers: [redpanda:9092]
+        topic: ankusa.events     # the same topic; keyed by source, so its own partition and FIFO group
+        inline_max_bytes: 8192
 ```
 
 Pass the secret in as an environment variable by adding `environment:
@@ -159,7 +194,7 @@ Pass the secret in as an environment variable by adding `environment:
 
 ```sh
 STRIPE_WHSEC=whsec_... docker compose run --rm ankusa check-config
-# config OK: roles=[:edge, :dispatch, :storage] sources=demo,stripe ...
+# config OK: roles=[:edge, :dispatch, :storage, :claim_check] sources=demo,stripe ...
 STRIPE_WHSEC=whsec_... docker compose up -d
 ```
 
