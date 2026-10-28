@@ -7,7 +7,8 @@
 #   version       print the server and core versions
 #   recover [--node ID] [--from backup|earliest|N] [--dry-run] [--allow-gap]
 #                 wal.type: dual: replay this node's intake log into its stopped store
-#   replay --nodes <dns-or-list> [--kind dlq] [--filter k=v,…] [--job-id UUID] [--timeout S]
+#   replay --nodes <dns-or-list> [--kind dlq] [--filter k=v,…] [--job-id UUID]
+#                 [--expect-nodes N] [--timeout S]
 #                 one replay job on every node of a fleet (POST /v1/replays with one job id to
 #                 each), followed until each is done; the admin token is ANKUSA_ADMIN_TOKEN
 #   healthcheck   exit 0 when the node is ready (GET /ready), the image's HEALTHCHECK

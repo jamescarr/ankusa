@@ -1394,13 +1394,24 @@ docker run --rm -e ANKUSA_ADMIN_TOKEN jamescarr/ankusa replay \
 ```
 
 `--nodes` takes `[scheme://]host[:port]` entries (port `4002`), or one DNS name
-that resolves to every node (a headless service): each address is a node. A node
+that resolves to every node (a headless service; the chart's headless Service
+publishes a pod's address whether or not it is ready, so a draining node is
+still found). A name
+with several addresses is one node per address, each pinned to its address,
+over `http`; a name with one is requested by name. Names are resolved once, at
+start, IPv4 first and IPv6 when a name has no IPv4 address. `--expect-nodes N`
+turns that resolution into a check: when `--nodes` comes to any other number of
+nodes, the command sends nothing and fails, naming the nodes it found. A node
 that does not answer is asked again every second until `--timeout` (default
 3600 s); a node that was killed resumes its job from the cursor it committed,
 and one that comes back with an empty store is given the job again under the
-same id. Started again with the same `--job-id` after the command itself died,
-it finds the jobs where they are. It exits `0` when every node is `done`, `1`
-otherwise, and prints the totals either way. `--filter` takes `tenant`,
+same id. A pinned address that stops answering and is no longer in the name's
+DNS answer (its pod was replaced or removed) is `gone` at once instead of
+polled until the timeout; the replacement is not adopted mid-run, so run the
+command again with the same `--job-id` to reach it. Started again with the same
+`--job-id` after the command itself died, it finds the jobs where they are. It
+exits `0` when every node is `done`, `1` otherwise, and prints the totals
+either way. `--filter` takes `tenant`,
 `source_id`, `id`, `error_class`, `sink`, `since`, `until` (and `from`, `to`,
 `sinks=0+2` for an `archive` job); `--kind`, `--rate`, `--max-lag-ms`, `--token`
 (default `ANKUSA_ADMIN_TOKEN`) and `--cacertfile` as in the admin API. The
