@@ -7,11 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `Sink.NATS`: a hook of an `ordered: true` sink carries the lane's key as the
-  `ankusa_ordering_key` header (consumer-side ordering, ADR 0004).
-## [0.7.0] - 2026-10-24
+## [0.7.0] - 2026-10-28
 
 ### Added
 
@@ -21,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{:permanent, {:message_too_large, size, max}}` without a server call.
   Requires an `ankusa` release with the `max_message_bytes` sink callback;
   publish core first.
+- `Sink.NATS`: a hook of an `ordered: true` sink carries the lane's key as the
+  `ankusa_ordering_key` header (consumer-side ordering, ADR 0004).
 
 ### Changed
 

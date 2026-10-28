@@ -15,19 +15,11 @@ across threads. It is a native Clojure library, not a wrapper over the Java SDK.
 
 ## Install
 
-Not on Clojars until its first release, so depend on the git tree until then:
+From Clojars, `io.github.jamescarr/ankusa-clj`:
 
 ```clojure
 ;; deps.edn
-{:deps {io.github.jamescarr/ankusa {:git/url "https://github.com/jamescarr/ankusa"
-                                    :git/sha "<a commit sha>"
-                                    :deps/root "packages/sdk-clojure"}}}
-```
-
-Once released, the Clojars coordinate is `io.github.jamescarr/ankusa-clj`:
-
-```clojure
-{:deps {io.github.jamescarr/ankusa-clj {:mvn/version "0.0.0"}}} ; the Clojars version once released
+{:deps {io.github.jamescarr/ankusa-clj {:mvn/version "0.1.0"}}}
 ```
 
 (It is `ankusa-clj`, not `ankusa-sdk`: Maven Central already has

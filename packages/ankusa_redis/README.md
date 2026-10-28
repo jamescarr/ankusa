@@ -18,8 +18,8 @@ Redis pub/sub channel.
 ```elixir
 def deps do
   [
-    {:ankusa, "~> 0.6"},
-    {:ankusa_redis, "~> 0.5"}
+    {:ankusa, "~> 0.7"},
+    {:ankusa_redis, "~> 0.6"}
   ]
 end
 ```

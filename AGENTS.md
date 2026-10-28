@@ -118,17 +118,42 @@ until they pass too.
 | What changed | Run |
 | --- | --- |
 | a package under `packages/` | `mise run check:package <pkg>` for every touched package (all of them for a core change) |
-| `examples/*`, `deploy/helm/*` | `mise run check:examples` (the chart: also `mise run e2e fleet` when the pod spec, probes or values change) |
+| `examples/*`, `deploy/helm/*` | `mise run check:examples` (the chart's kind drill is CI's, see [below](#long-drills-run-in-ci-not-here)) |
 | `tools/*` | `mise run check:tools` |
 | `deploy/monitoring/*`, `docs/runbooks/*`, or a metric an alert reads (`metrics.ex`) | `mise run check:monitoring` (and `mix test test/ankusa/metrics_test.exs` in core: the rules and the dashboard may name only series `Ankusa.Metrics` defines) |
 | an SDK (`packages/sdk-*`) or `conformance/` | `mise run check:conformance` (also part of `mise run check`) |
 | core's object-store adapters | `mise run test:integration` |
 | a hot-path file (`edge/`, `queue/`, `store/`, `dispatch/`, `verifier/`, `routes/`, `store.ex`, `queue.ex`, `dedupe.ex`, `envelope.ex`, `http.ex`, `route_resolver.ex`, `sink/message.ex`, `sink/http.ex` under `packages/ankusa/lib/ankusa/`) | `mise run bench:gate`; put before/after numbers in the PR |
-| the ack path (`queue/writer.ex`, `store.ex`, `edge/batcher.ex`) | `mise run test:crash`, and `scripts/drills/flakey.sh` where Docker can run `--privileged` |
-| the claim check, route or source stores, or anything a second node shares | `examples/fleet-e2e/run.sh` (`mise run e2e` before a release) |
-| the ack path under `wal.type: dual`, the intake log or its recovery | `examples/fleet-e2e/run.sh --wal dual --kill-node` (and `--wal disk --kill-node`, which must still lose hooks), `mise run check:package ankusa_kafka` |
-| anything, before tagging a release | `mise run e2e` |
+| the ack path (`queue/writer.ex`, `store.ex`, `edge/batcher.ex`) | `ci.yml`'s two crash drills on the PR (ENOSPC/`kill -9`, and the device-mapper power cut); cite them, don't run them ([below](#long-drills-run-in-ci-not-here)) |
+| the claim check, route or source stores, or anything a second node shares | `e2e.yml`'s compose fleet run: on the PR when it touches its paths, otherwise the next nightly ([below](#long-drills-run-in-ci-not-here)) |
+| the ack path under `wal.type: dual`, the intake log or its recovery | `mise run check:package ankusa_kafka`; the `--kill-node` fleet drills are `e2e.yml`'s ([below](#long-drills-run-in-ci-not-here)) |
+| anything, before tagging a release | green `ci.yml` on the commit (its power-loss job is what `release:preflight` reads for `ankusa`); `e2e.yml` runs on the tag itself, and the latest nightly `e2e.yml`/`soak.yml` on `main` is read, not rerun |
 | everything | `mise run check` |
+
+### Long drills run in CI, not here
+
+`mise run e2e`, `examples/fleet-e2e/run.sh` (any flags), `mise run bench:soak`,
+`mise run test:crash` and `scripts/drills/flakey.sh` take 10 to 70 minutes
+each. Don't run them locally, and don't dispatch one and wait on it. CI runs
+every one of them:
+
+| Drill | Where CI runs it |
+| --- | --- |
+| `test:crash`, `scripts/drills/flakey.sh` | `ci.yml`'s two `crash drill` jobs: every PR, every push to `main` |
+| `examples/fleet-e2e/run.sh` (`--replay-drill`, `--wal dual\|disk --kill-node`) | `e2e.yml`'s `fleet end to end (compose)`: nightly, every release tag, and PRs that touch `examples/fleet-e2e/**`, `tools/loadgen/**` or the server `Dockerfile` |
+| `mise run e2e` (kind: the Oban consumer, the Helm fleet) | `e2e.yml`'s `kind end to end`: nightly, every release tag |
+| `bench:soak` (3600 s) | `soak.yml`: nightly |
+
+A drill's evidence is the CI run on the commit, or the latest nightly on
+`main`; link it in the PR, and that counts as "ran in this session". When the
+run that covers a change is a nightly that hasn't happened yet, say so in the
+PR and move on: it is pending, not skipped. Diagnose a red run from its log
+(`gh run view <id> --log-failed`); `gh run rerun <id> --failed` only when the
+log can't tell a flake from a regression. A red nightly on `main` blocks a tag
+until its log is diagnosed: it stops blocking when the cause is fixed in the
+commit being tagged (cite the fix's PR and its CI run) or is shown to be the
+drill's own fault rather than the shipped code's (say which, in the release
+PR).
 
 Changing core's dependencies touches every package that path-depends on it, so
 after adding or removing one, run `mise run deps` and commit every `mix.lock`
@@ -148,10 +173,11 @@ Two rules that follow from all of the above:
 
 - **Never report a check as passing unless it ran in this session.** "It
   should work", "the code looks right", and a hand-written log line are not
-  evidence.
+  evidence. For the long drills, the CI run you link is the run.
 - **Never mark a task done while its own acceptance criteria fail** — a
-  step that crashed, or a drill that was never run, is not done. Say what
-  failed and what's still open.
+  step that crashed, or a check that was never run, is not done; a red CI drill
+  counts as a failure. Say what failed and what's still open (a nightly that
+  hasn't run yet is open, and reported as pending).
 
 ## Dependencies
 

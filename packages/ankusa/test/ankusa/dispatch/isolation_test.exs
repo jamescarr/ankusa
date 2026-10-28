@@ -628,8 +628,9 @@ defmodule Ankusa.Dispatch.IsolationTest do
 
       # one scan (its `active_tenants` fold and `schedule_next`'s `next_due_at`
       # fold), one fold per `:pressure` call, and a housekeeping tick at most;
-      # a scan per wake is two folds per commit, about 400
-      assert active_folds(pid, 0) <= 8
+      # a scan per wake is two folds per commit, about 400. The two `:pressure`
+      # folds are the floor: fewer means the trace caught nothing.
+      assert active_folds(pid, 0) in 2..8
 
       Agent.update(agent, fn _ -> :open end)
       assert {:ok, _} = Pipeline.tick(inst)

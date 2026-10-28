@@ -9,7 +9,7 @@
 ;; Column-0 on purpose: .mise/lib/pkg.sh and .mise/lib/release.exs read these
 ;; two forms with regexes.
 (def lib 'io.github.jamescarr/ankusa-clj)
-(def version "0.0.0")
+(def version "0.1.0")
 
 (def class-dir "target/classes")
 (def jar-file (format "target/%s-%s.jar" (name lib) version))

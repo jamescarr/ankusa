@@ -7,6 +7,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-28
+
 ### Added
 
 - **Delivery metadata (CON-4).** `HookHeaders.receivedAt()` (when the edge accepted the hook, unix milliseconds, from `x-ankusa-received-at`) and `HookHeaders.bodySha256()` (the lowercase hex SHA-256 of the body sent, from `x-ankusa-body-sha256`): null when the header is absent, empty or malformed, never an error. The `HookHeaders` record gained two components.
@@ -116,5 +118,6 @@ this project follows [Semantic Versioning](https://semver.org/).
 - The language-neutral conformance runner (JUnit Jupiter, `ConformanceTest`), passing
   every vector in `conformance/cases`.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-java-v0.1.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-java-v0.2.0...HEAD
+[0.2.0]: https://github.com/jamescarr/ankusa/compare/sdk-java-v0.1.0...sdk-java-v0.2.0
 [0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-java-v0.1.0

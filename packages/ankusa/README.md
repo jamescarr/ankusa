@@ -8,7 +8,7 @@ pluggable verification/storage/delivery, multi-tenant catch-URL routing.
 ```elixir
 def deps do
   [
-    {:ankusa, "~> 0.6"}
+    {:ankusa, "~> 0.7"}
   ]
 end
 ```

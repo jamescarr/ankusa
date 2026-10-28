@@ -6,145 +6,7 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
-### Added
-
-- **`docker-entrypoint replay` (DEL-6).** One replay job on every node of a fleet:
-  `replay --nodes <dns-or-list> [--kind dlq] [--filter tenant=acme,error_class=transient]
-  [--rate N] [--job-id UUID] [--timeout S]`. It sends the same `POST /v1/replays`,
-  with one `job_id`, to every node's admin API (a name that resolves to several
-  addresses is one node per address), follows each job, asks a node that does not
-  answer again every second, starts the job again on a node that restarted with
-  an empty store, and prints one summary line (`replay <id> kind=dlq nodes=3
-  done=3 … moved=… dead=…`); exit `0` when every node is `done`, `1` otherwise,
-  `64` for a bad option. The admin token is `ANKUSA_ADMIN_TOKEN`. It is a client
-  of the admin APIs: no clustering, no config file. See
-  [`delivery.md`](../../docs/delivery.md#replaying-across-a-fleet).
-- **`dedupe.max_json_bytes` (PERF-1).** The biggest body a `json` dedupe source
-  decodes (default 1048576, an integer >= 1); a larger body is stored with no
-  dedupe key and never decoded. See the `ankusa` changelog.
-- **`node.region` (`ANKUSA_REGION`) (CON-2).** The region the node runs in: a
-  non-empty string of at most 64 bytes. Every queue message carries it as
-  `region` (beside `instance`, the instance's name) and `GET /asyncapi.json`
-  carries it as the document's `x-ankusa-region` extension. Unset, `region` is
-  `null` and the extension is absent. Core keeps it in `dispatch.region`.
-
-- **Config reload and `config_version` (OPS-6).** `SIGHUP` and
-  `POST /v1/config/reload` (scope `config:write` + `tenant:*`) re-read the file,
-  resolve its `${file:}` / `${sm:}` references again and apply the keys that may
-  change while the node runs: `log` (level and format, when the file changed
-  them), `rate_limits` (not `scope`), static `sources`, the `routes` seed,
-  `dispatch.concurrency`, `dispatch.sink_concurrency`, `dispatch.tenants`,
-  `metrics.detail` and `admin.gauge_interval_ms`. A change to any other key is
-  refused with `409` naming it and nothing is applied; each reload writes one
-  `config.reload` audit row. The root key `config_version` (`1`, the default
-  when absent) versions the file format: an older file is migrated on load by the
-  loader's migration map, a newer one is refused. `AnkusaServer.Reload`
-  replaces `AnkusaServer.Secrets.reload/2` (`remember/2` and `recall/1` go with it);
-  `AnkusaServer.Config.load!/1` also answers the substituted document as `doc`.
-  `log.format` changes back to `text` at a reload now restore the text formatter.
-- **Helm chart (OPS-8).** `deploy/helm/ankusa` runs the image on Kubernetes in all
-  three durability modes: a StatefulSet with a PVC per pod for `wal.type: disk` and
-  `dual` (`intake.node_id` = the pod name), a Deployment behind an HPA for `none`.
-  The pod spec is the `restricted` Pod Security Standard (uid 100/gid 101, read-only
-  root file system with `RELEASE_TMP=/tmp`, `drop: [ALL]`, seccomp `RuntimeDefault`);
-  `/health` is the startup and liveness probe and `/ready` the readiness probe;
-  `terminationGracePeriodSeconds` is `(listener.drain_delay_ms + drain_timeout_ms) /
-  1000 + 10` (plus `backup.final_timeout_ms` when backing up); PodDisruptionBudget
-  (`maxUnavailable: 1`), zone and node topology spread, a NetworkPolicy that opens
-  4000 and limits 4001-4004 to the operator namespaces, an optional claim-check
-  gateway. `mise run check:examples` lints and renders every mode and validates the
-  manifests with `kubeconform`; `mise run e2e fleet` runs the fleet drill from the
-  chart on kind. The guide, the PVC sizing table and the multi-region topology are in
-  `docs/deployment.md`. The example manifests' `terminationGracePeriodSeconds: 30`
-  (the Oban example and the jetstream-k8s chart's ankusa pods) are now 60, to cover the
-  drain, and the Oban example's readiness probe is `/ready`.
-
-- **`dedupe: salesforce` (CON-3).** A source's `dedupe` accepts the preset
-  `salesforce` (`json: id`; see `configuration.md` for why it is a convention and
-  not a Salesforce-documented delivery id). A source with no `dedupe` logs one
-  boot warning and counts in `ankusa_sources_without_dedupe`. See the `ankusa`
-  changelog.
-- **SLI metrics (OPS-3).** `/metrics` gains `ankusa_delivery_latency_seconds{sink,result}`
-  (a delivery's age when it settled, buckets to 60 s), `ankusa_dispatch_attempt_duration_seconds{sink,result}`,
-  `ankusa_compact_failures_total{stage}`, `ankusa_claim_check_failures_total{op}` and
-  `ankusa_backup_failures_total`. No new config key; `metrics.detail: source` also puts
-  `tenant_id` and `source_id` on the delivery latency histogram. The SLO table is in
-  [`architecture.md`](../../docs/architecture.md#slis-and-slos).
-- `ordered` and `ordering_key` (`{header: name}` / `{json: path}`) on every sink
-  but `log` (ordering lanes, ADR 0004).
-
-- **Structured JSON logs (OPS-2).** `log.format: json` (`ANKUSA_LOG_FORMAT`;
-  default `text`, the output as before) writes one JSON object per line:
-  `time`, `level`, `msg`, `instance`, `hook_id`, `tenant_id`, `source_id`,
-  `sink`, `trace_id` (the keys a line has) and any other log metadata, with the
-  value of every key named `secret`, `token`, `password`, `authorization` or
-  `cookie` replaced by `"[REDACTED]"` (`AnkusaServer.LogFormatter`). The ASCII
-  banner is not printed under `json`. `log.level` is the level the node starts
-  at; `PUT /v1/log-level` (scope `config:write` + `tenant:*`, audited) changes
-  it while the node runs. `AnkusaServer.Config.load!/1` now answers
-  `log: %{format, level}` where it answered `log_level`.
-
-- **`sqs` and `google_pubsub` sinks batch (DEL-4).** Up to 10 (SQS
-  `SendMessageBatch`) or 1 000 (Pub/Sub `publish`) deliveries to one queue or topic
-  are one request. New sink keys, all optional: `batch` (`false` sends one request
-  per delivery), `batch_linger_ms` (20), `batch_max_entries`, `batch_max_bytes`,
-  `batch_queue_max` (4096), `batch_queue_max_bytes` (134217728),
-  `batch_queue_tenant_max` (1024) and `batch_max_inflight` (default
-  `dispatch.sink_concurrency`). New on `/metrics`:
-  `ankusa_sink_batch_{requests,entries,bisections,refused}_total` and
-  `ankusa_sink_batch_{batchers,queued,queued_bytes}`. A batching sink's attempts are
-  no longer counted against `dispatch.sink_concurrency`, a tenant's `concurrency` or
-  `dispatch.concurrency`. See the `ankusa` changelog and
-  [`delivery.md`](../../docs/delivery.md#sinksqs-queue-delivery).
-- **OpenTelemetry tracing (OPS-1).** `tracing: {enabled, otlp_endpoint,
-  sample_ratio}` (off by default; `http://localhost:4318`; `1.0`) starts the
-  OpenTelemetry SDK and the OTLP/HTTP exporter before the instance, with a
-  parent-based sampler over `sample_ratio`. The endpoint may not carry
-  `user:password`; collector credentials are the standard
-  `OTEL_EXPORTER_OTLP_HEADERS`. With it off, only core's no-op API runs and a
-  hook's `traceparent` still reaches the consumer unchanged. Not part of
-  `/v1/config`: it configures the image, not an instance, and holds no secret.
-- **Readiness keys (OPS-5).** `node.min_free_bytes` (unset): `/ready` answers `503`
-  with `disk: failing` while `data_dir`'s file system has fewer bytes free.
-  `health.sink_error_window_ms` (5000): under `wal.type: none`, a sink whose last
-  publish failed within this long ago makes `/ready` `503` with `sinks: failing`.
-  `queue.max_oldest_due_ms` (unset): past it `/ready` carries `backlog: failing`,
-  a label that never makes the node unready. See `config-examples/reference.yml`.
-  `/ready`'s body now lists every check with `ok`/`failing`/`draining` and
-  `reasons` (see the `ankusa` changelog for the wire change).
-
-- **Graceful drain on SIGTERM (OPS-4).** `docker stop` (and a pod deletion) now
-  drains the node before it stops: `/ready` answers `503` with `"status":
-  "draining"` at once, the ingest port keeps serving for `listener.drain_delay_ms`
-  (5000, an integer >= 0), then closes after the requests it is serving, then
-  every batcher is waited on, all within `listener.drain_timeout_ms` (30000, an
-  integer >= 1; on a node with the `edge` role at least the ingest listener's
-  wait, 22 s by default). The ingest listener waits 22 s (13 s under
-  `wal.type: none`, 24 s under `dual`) for requests in flight instead of Thousand
-  Island's 15 s, so a commit that starts late is no longer killed mid-fsync and
-  no provider sees a reset for a committed hook. Set `terminationGracePeriodSeconds`
-  (and `docker stop -t`) to at least `(drain_delay_ms + drain_timeout_ms) / 1000 +
-  10`, plus `backup.final_timeout_ms` when the node backs up. See
-  `config-examples/reference.yml` and `docs/deployment.md`.
-
-### Changed
-
-- The image's HTTP server is `bandit 1.14.0` (was `1.13.1`, affected by
-  EEF-CVE-2026-115269, High: a WINDOW_UPDATE or empty SETTINGS frame restarted
-  the HTTP/2 request-body read timeout, so a trickle of them held a stream and
-  its handler open indefinitely; and by ten more advisories 1.14.0 closes,
-  among them an HTTP/1.1 chunked-body request-smuggling vector). `mix hex.audit`
-  fails on 1.13.1.
-- The image's JOSE library is `jose 1.11.13` (was `1.11.12`, which has eight
-  advisories, EEF-CVE-2026-65625 to EEF-CVE-2026-65632; one, an unchecked ECDSA
-  signature length, reaches the admin API's JWT authentication).
-
-### Fixed
-
-- Dispatch no longer stalls under a sustained backlog (the soak's lost hooks);
-  see the `ankusa` changelog.
-
-## [0.7.0] - 2026-10-24
+## [0.7.0] - 2026-10-28
 
 ### Added
 
@@ -435,6 +297,124 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `allow_insecure_tls`: where `type: http` sinks (sources' and
   `lifecycle.sinks`) may connect, and how their TLS is verified. See the
   `ankusa` changelog and [`configuration.md#egress`](../../docs/configuration.md#egress).
+- **`docker-entrypoint replay` (DEL-6).** One replay job on every node of a fleet:
+  `replay --nodes <dns-or-list> [--kind dlq] [--filter tenant=acme,error_class=transient]
+  [--rate N] [--job-id UUID] [--timeout S]`. It sends the same `POST /v1/replays`,
+  with one `job_id`, to every node's admin API (a name that resolves to several
+  addresses is one node per address), follows each job, asks a node that does not
+  answer again every second, starts the job again on a node that restarted with
+  an empty store, and prints one summary line (`replay <id> kind=dlq nodes=3
+  done=3 … moved=… dead=…`); exit `0` when every node is `done`, `1` otherwise,
+  `64` for a bad option. The admin token is `ANKUSA_ADMIN_TOKEN`. It is a client
+  of the admin APIs: no clustering, no config file. See
+  [`delivery.md`](../../docs/delivery.md#replaying-across-a-fleet).
+- **`dedupe.max_json_bytes` (PERF-1).** The biggest body a `json` dedupe source
+  decodes (default 1048576, an integer >= 1); a larger body is stored with no
+  dedupe key and never decoded. See the `ankusa` changelog.
+- **`node.region` (`ANKUSA_REGION`) (CON-2).** The region the node runs in: a
+  non-empty string of at most 64 bytes. Every queue message carries it as
+  `region` (beside `instance`, the instance's name) and `GET /asyncapi.json`
+  carries it as the document's `x-ankusa-region` extension. Unset, `region` is
+  `null` and the extension is absent. Core keeps it in `dispatch.region`.
+
+- **Config reload and `config_version` (OPS-6).** `SIGHUP` and
+  `POST /v1/config/reload` (scope `config:write` + `tenant:*`) re-read the file,
+  resolve its `${file:}` / `${sm:}` references again and apply the keys that may
+  change while the node runs: `log` (level and format, when the file changed
+  them), `rate_limits` (not `scope`), static `sources`, the `routes` seed,
+  `dispatch.concurrency`, `dispatch.sink_concurrency`, `dispatch.tenants`,
+  `metrics.detail` and `admin.gauge_interval_ms`. A change to any other key is
+  refused with `409` naming it and nothing is applied; each reload writes one
+  `config.reload` audit row. The root key `config_version` (`1`, the default
+  when absent) versions the file format: an older file is migrated on load by the
+  loader's migration map, a newer one is refused. `AnkusaServer.Reload`
+  replaces `AnkusaServer.Secrets.reload/2` (`remember/2` and `recall/1` go with it);
+  `AnkusaServer.Config.load!/1` also answers the substituted document as `doc`.
+  `log.format` changes back to `text` at a reload now restore the text formatter.
+- **Helm chart (OPS-8).** `deploy/helm/ankusa` runs the image on Kubernetes in all
+  three durability modes: a StatefulSet with a PVC per pod for `wal.type: disk` and
+  `dual` (`intake.node_id` = the pod name), a Deployment behind an HPA for `none`.
+  The pod spec is the `restricted` Pod Security Standard (uid 100/gid 101, read-only
+  root file system with `RELEASE_TMP=/tmp`, `drop: [ALL]`, seccomp `RuntimeDefault`);
+  `/health` is the startup and liveness probe and `/ready` the readiness probe;
+  `terminationGracePeriodSeconds` is `(listener.drain_delay_ms + drain_timeout_ms) /
+  1000 + 10` (plus `backup.final_timeout_ms` when backing up); PodDisruptionBudget
+  (`maxUnavailable: 1`), zone and node topology spread, a NetworkPolicy that opens
+  4000 and limits 4001-4004 to the operator namespaces, an optional claim-check
+  gateway. `mise run check:examples` lints and renders every mode and validates the
+  manifests with `kubeconform`; `mise run e2e fleet` runs the fleet drill from the
+  chart on kind. The guide, the PVC sizing table and the multi-region topology are in
+  `docs/deployment.md`. The example manifests' `terminationGracePeriodSeconds: 30`
+  (the Oban example and the jetstream-k8s chart's ankusa pods) are now 60, to cover the
+  drain, and the Oban example's readiness probe is `/ready`.
+
+- **`dedupe: salesforce` (CON-3).** A source's `dedupe` accepts the preset
+  `salesforce` (`json: id`; see `configuration.md` for why it is a convention and
+  not a Salesforce-documented delivery id). A source with no `dedupe` logs one
+  boot warning and counts in `ankusa_sources_without_dedupe`. See the `ankusa`
+  changelog.
+- **SLI metrics (OPS-3).** `/metrics` gains `ankusa_delivery_latency_seconds{sink,result}`
+  (a delivery's age when it settled, buckets to 60 s), `ankusa_dispatch_attempt_duration_seconds{sink,result}`,
+  `ankusa_compact_failures_total{stage}`, `ankusa_claim_check_failures_total{op}` and
+  `ankusa_backup_failures_total`. No new config key; `metrics.detail: source` also puts
+  `tenant_id` and `source_id` on the delivery latency histogram. The SLO table is in
+  [`architecture.md`](../../docs/architecture.md#slis-and-slos).
+- `ordered` and `ordering_key` (`{header: name}` / `{json: path}`) on every sink
+  but `log` (ordering lanes, ADR 0004).
+
+- **Structured JSON logs (OPS-2).** `log.format: json` (`ANKUSA_LOG_FORMAT`;
+  default `text`, the output as before) writes one JSON object per line:
+  `time`, `level`, `msg`, `instance`, `hook_id`, `tenant_id`, `source_id`,
+  `sink`, `trace_id` (the keys a line has) and any other log metadata, with the
+  value of every key named `secret`, `token`, `password`, `authorization` or
+  `cookie` replaced by `"[REDACTED]"` (`AnkusaServer.LogFormatter`). The ASCII
+  banner is not printed under `json`. `log.level` is the level the node starts
+  at; `PUT /v1/log-level` (scope `config:write` + `tenant:*`, audited) changes
+  it while the node runs. `AnkusaServer.Config.load!/1` now answers
+  `log: %{format, level}` where it answered `log_level`.
+
+- **`sqs` and `google_pubsub` sinks batch (DEL-4).** Up to 10 (SQS
+  `SendMessageBatch`) or 1 000 (Pub/Sub `publish`) deliveries to one queue or topic
+  are one request. New sink keys, all optional: `batch` (`false` sends one request
+  per delivery), `batch_linger_ms` (20), `batch_max_entries`, `batch_max_bytes`,
+  `batch_queue_max` (4096), `batch_queue_max_bytes` (134217728),
+  `batch_queue_tenant_max` (1024) and `batch_max_inflight` (default
+  `dispatch.sink_concurrency`). New on `/metrics`:
+  `ankusa_sink_batch_{requests,entries,bisections,refused}_total` and
+  `ankusa_sink_batch_{batchers,queued,queued_bytes}`. A batching sink's attempts are
+  no longer counted against `dispatch.sink_concurrency`, a tenant's `concurrency` or
+  `dispatch.concurrency`. See the `ankusa` changelog and
+  [`delivery.md`](../../docs/delivery.md#sinksqs-queue-delivery).
+- **OpenTelemetry tracing (OPS-1).** `tracing: {enabled, otlp_endpoint,
+  sample_ratio}` (off by default; `http://localhost:4318`; `1.0`) starts the
+  OpenTelemetry SDK and the OTLP/HTTP exporter before the instance, with a
+  parent-based sampler over `sample_ratio`. The endpoint may not carry
+  `user:password`; collector credentials are the standard
+  `OTEL_EXPORTER_OTLP_HEADERS`. With it off, only core's no-op API runs and a
+  hook's `traceparent` still reaches the consumer unchanged. Not part of
+  `/v1/config`: it configures the image, not an instance, and holds no secret.
+- **Readiness keys (OPS-5).** `node.min_free_bytes` (unset): `/ready` answers `503`
+  with `disk: failing` while `data_dir`'s file system has fewer bytes free.
+  `health.sink_error_window_ms` (5000): under `wal.type: none`, a sink whose last
+  publish failed within this long ago makes `/ready` `503` with `sinks: failing`.
+  `queue.max_oldest_due_ms` (unset): past it `/ready` carries `backlog: failing`,
+  a label that never makes the node unready. See `config-examples/reference.yml`.
+  `/ready`'s body now lists every check with `ok`/`failing`/`draining` and
+  `reasons` (see the `ankusa` changelog for the wire change).
+
+- **Graceful drain on SIGTERM (OPS-4).** `docker stop` (and a pod deletion) now
+  drains the node before it stops: `/ready` answers `503` with `"status":
+  "draining"` at once, the ingest port keeps serving for `listener.drain_delay_ms`
+  (5000, an integer >= 0), then closes after the requests it is serving, then
+  every batcher is waited on, all within `listener.drain_timeout_ms` (30000, an
+  integer >= 1; on a node with the `edge` role at least the ingest listener's
+  wait, 22 s by default). The ingest listener waits 22 s (13 s under
+  `wal.type: none`, 24 s under `dual`) for requests in flight instead of Thousand
+  Island's 15 s, so a commit that starts late is no longer killed mid-fsync and
+  no provider sees a reset for a committed hook. Set `terminationGracePeriodSeconds`
+  (and `docker stop -t`) to at least `(drain_delay_ms + drain_timeout_ms) / 1000 +
+  10`, plus `backup.final_timeout_ms` when the node backs up. See
+  `config-examples/reference.yml` and `docs/deployment.md`.
 
 ### Changed
 
@@ -474,11 +454,22 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - The image's dependencies are relocked to their latest releases: `brod
   4.7.0` (Kafka), `amqp 4.3.0` (RabbitMQ), `req 0.7.5` on `finch 0.24.0`, and
   `ed25519`/`kcl 1.5.2` (NATS nkeys).
+- The image's HTTP server is `bandit 1.14.0` (was `1.13.1`, affected by
+  EEF-CVE-2026-115269, High: a WINDOW_UPDATE or empty SETTINGS frame restarted
+  the HTTP/2 request-body read timeout, so a trickle of them held a stream and
+  its handler open indefinitely; and by ten more advisories 1.14.0 closes,
+  among them an HTTP/1.1 chunked-body request-smuggling vector). `mix hex.audit`
+  fails on 1.13.1.
+- The image's JOSE library is `jose 1.11.13` (was `1.11.12`, which has eight
+  advisories, EEF-CVE-2026-65625 to EEF-CVE-2026-65632; one, an unchecked ECDSA
+  signature length, reaches the admin API's JWT authentication).
 
 ### Fixed
 
 - The image's NATS client is `gnat 1.18.1`: no gnat process holds the NATS
   password, token or nkey seed in the clear. See the `ankusa_nats` changelog.
+- Dispatch no longer stalls under a sustained backlog (the soak's lost hooks);
+  see the `ankusa` changelog.
 
 ## [0.6.0] - 2026-10-14
 

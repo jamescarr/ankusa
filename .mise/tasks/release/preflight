@@ -65,22 +65,26 @@ for p in "${pkgs[@]}"; do
 done
 
 # A core tag ships the ack path. The device-mapper drill is the one check that
-# catches a hook acked before its fsync, and CI's tmpfs drill cannot. It needs
-# a privileged Docker host: where there is none (exit 2, or no docker at all)
-# it stays the manual pre-release step docs/testing.md describes.
+# catches a hook acked before its fsync, and CI's tmpfs drill cannot. ci.yml's
+# `crash drill (power-loss cut, device-mapper)` job runs it on every push to
+# main, so this reads that job's verdict for HEAD instead of running it here. A
+# runner without device-mapper skips the drill and still passes the job, so the
+# drill's own summary line in the log is what counts, not the job's conclusion.
 for p in "${pkgs[@]}"; do
   if [ "$p" = ankusa ]; then
-    echo "  crash drill on device-mapper (scripts/drills/flakey.sh)"
-    rc=0
-    if command -v docker >/dev/null 2>&1; then
-      scripts/drills/flakey.sh || rc=$?
-    else
-      rc=2
-    fi
-    case $rc in
-      0) ;;
-      2) echo "  SKIPPED: no privileged Docker host here; run scripts/drills/flakey.sh on one before tagging ankusa" >&2 ;;
-      *) fail "the crash drill on device-mapper failed (exit $rc): an acked hook is not safe" ;;
-    esac
+    head=$(git rev-parse HEAD)
+    run=$(gh run list --workflow ci.yml --commit "$head" --event push --json databaseId --jq '.[0].databaseId // empty')
+    [ -n "$run" ] || fail "no ci.yml push run for $head yet: wait for it, then retry"
+    job=$(gh run view "$run" --json jobs \
+      --jq '.jobs[] | select(.name == "crash drill (power-loss cut, device-mapper)") | "\(.databaseId) \(.status) \(.conclusion)"')
+    read -r job_id status conclusion <<<"$job"
+    [ -n "${job_id:-}" ] || fail "ci.yml run $run has no device-mapper crash drill job"
+    [ "$status" = completed ] || fail "ci.yml run $run: the device-mapper crash drill is still $status: wait for it, then retry"
+    [ "${conclusion:-}" = success ] ||
+      fail "ci.yml run $run: the device-mapper crash drill is '${conclusion:-missing}', not success: an acked hook may not be safe"
+    verdict=$(gh run view --job "$job_id" --log | grep -oE 'acked=[0-9]+ recovered=[0-9]+ missing=0 eio_503=[0-9]+ resumed=true' | tail -n 1 || true)
+    [ -n "$verdict" ] ||
+      fail "ci.yml run $run: the device-mapper crash drill was skipped (no privileged runner); run scripts/drills/flakey.sh on a host that has one before tagging ankusa"
+    echo "  crash drill on device-mapper: ci.yml run $run, $verdict"
   fi
 done

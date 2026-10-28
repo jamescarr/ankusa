@@ -71,14 +71,17 @@ mise run release:verify ankusa_nats
 5. **`release:watch <pkg>`** follows that run; **`release:verify <pkgs>…`**
    confirms the version is live on its registry.
 
-The pre-tag gate is `mise run e2e` (the kind + Oban end-to-end proof,
-[`examples/oban-consumer/run.sh`](https://github.com/jamescarr/ankusa/blob/main/examples/oban-consumer/run.sh))
-passing locally. Tagging `ankusa` also runs the power-loss crash drill
+Nobody runs the long drills locally to release
+([`AGENTS.md`](https://github.com/jamescarr/ankusa/blob/main/AGENTS.md#long-drills-run-in-ci-not-here)).
+The pre-tag gate is a green `ci.yml` on the commit being tagged. `e2e.yml` (the
+kind + Oban end-to-end proof, and the compose fleet drills) runs on every tag
+push, and the latest nightly `e2e.yml` and `soak.yml` runs on `main` are read
+before tagging, not rerun. Tagging `ankusa` checks the power-loss crash drill
 (`scripts/drills/flakey.sh`, [`testing.md`](testing.md#crash-consistency-drill-mise-run-testcrash))
-from `release:preflight`: it needs a Docker host that allows `--privileged`
-containers with loop and device-mapper devices, and where there is none the
-preflight prints `SKIPPED` and the drill is a manual step, run on such a host
-before tagging.
+from `release:preflight` by reading the `crash drill (power-loss cut,
+device-mapper)` job of `ci.yml`'s push run for `HEAD`: it fails when that run
+is missing, red, or skipped the drill (a runner without device-mapper), and then
+the drill is a manual step, run on a privileged Docker host before tagging.
 
 ### Ordering: core first
 

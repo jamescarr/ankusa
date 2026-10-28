@@ -6,38 +6,7 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added
-
-- **Delivery metadata (CON-4).** `HookHeaders.receivedAt` (when the edge accepted the hook, unix milliseconds, from `x-ankusa-received-at`) and `HookHeaders.bodySha256` (the lowercase hex SHA-256 of the body sent, from `x-ankusa-body-sha256`): `null` when the header is absent, empty or malformed, never an error.
-
-- **Wire-format evolution path (CON-2).** `decodeMessage` accepts every `v`
-  from `MIN_SUPPORTED_VERSION` to `MAX_SUPPORTED_VERSION` (1 and 2, both
-  exported) into the one `Message`, with `v` as the wire said it (now `number`,
-  not the literal `1`): a `v: 2` message is a `v: 1` message plus additive
-  fields, so the keys it does not know are ignored. `Message.instance` and
-  `Message.region`: the name of the Ankusa instance that published the message
-  and the region it is configured with (`null` when null or absent).
-  `decodeLifecycle(data)` and the `LifecycleEvent` type decode the CloudEvents
-  lifecycle events of the instance's lifecycle sinks.
-
-- `isTrusted(hook)`: `true` only when the node verified the hook at ingest
-  (`status === "ok"`) and did not flag it (`flagged` false); works on a decoded
-  `Message` or the `HookHeaders` of a delivery. A flagged, `failed` or
-  `skipped` hook and one with no `verification` are untrusted. The
-  `Verification` type is now exported.
-
-### Changed
-
-- The generated admin types (`src/admin/admin-schema.d.ts`) follow the server's new
-  `GET /ready` body (OPS-5): `Readiness` lists one `CheckState` (`ok`, `failing`
-  or `draining`) per readiness check (`store`, `intake`, `sinks`, `disk`,
-  `backlog`, `backup`) and `reasons`; `store` is no longer `none`,
-  `store_unavailable` or `write_failed`, and `backup` no longer `fresh`/`stale`.
-- The generated admin types follow the drain (OPS-4): `Readiness.status` may be
-  `draining` while the node is being stopped, with a `drain` check state and
-  `reasons.drain` (`shutting_down`).
-
-## [0.6.0] - 2026-10-24
+## [0.6.0] - 2026-10-28
 
 ### Added
 
@@ -82,10 +51,35 @@ this project follows [Semantic Versioning](https://semver.org/).
   none and no `allowUnsigned: true` it throws `InvalidSignatureError`
   (`invalid_secret`). The signature is judged before the hook id. Returns the
   parsed headers plus `verified`.
+- **Delivery metadata (CON-4).** `HookHeaders.receivedAt` (when the edge accepted the hook, unix milliseconds, from `x-ankusa-received-at`) and `HookHeaders.bodySha256` (the lowercase hex SHA-256 of the body sent, from `x-ankusa-body-sha256`): `null` when the header is absent, empty or malformed, never an error.
+
+- **Wire-format evolution path (CON-2).** `decodeMessage` accepts every `v`
+  from `MIN_SUPPORTED_VERSION` to `MAX_SUPPORTED_VERSION` (1 and 2, both
+  exported) into the one `Message`, with `v` as the wire said it (now `number`,
+  not the literal `1`): a `v: 2` message is a `v: 1` message plus additive
+  fields, so the keys it does not know are ignored. `Message.instance` and
+  `Message.region`: the name of the Ankusa instance that published the message
+  and the region it is configured with (`null` when null or absent).
+  `decodeLifecycle(data)` and the `LifecycleEvent` type decode the CloudEvents
+  lifecycle events of the instance's lifecycle sinks.
+
+- `isTrusted(hook)`: `true` only when the node verified the hook at ingest
+  (`status === "ok"`) and did not flag it (`flagged` false); works on a decoded
+  `Message` or the `HookHeaders` of a delivery. A flagged, `failed` or
+  `skipped` hook and one with no `verification` are untrusted. The
+  `Verification` type is now exported.
 
 ### Changed
 
 - Depends on `openapi-fetch ^0.17.0` (was `^0.13.0`).
+- The generated admin types (`src/admin/admin-schema.d.ts`) follow the server's new
+  `GET /ready` body (OPS-5): `Readiness` lists one `CheckState` (`ok`, `failing`
+  or `draining`) per readiness check (`store`, `intake`, `sinks`, `disk`,
+  `backlog`, `backup`) and `reasons`; `store` is no longer `none`,
+  `store_unavailable` or `write_failed`, and `backup` no longer `fresh`/`stale`.
+- The generated admin types follow the drain (OPS-4): `Readiness.status` may be
+  `draining` while the node is being stopped, with a `drain` check state and
+  `reasons.drain` (`shutting_down`).
 
 ## [0.5.0] - 2026-10-14
 

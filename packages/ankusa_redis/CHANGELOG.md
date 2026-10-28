@@ -6,12 +6,7 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added
-
-- `Sink.Redis`: a hook of an `ordered: true` sink carries the lane's key as
-  `ordering_key` in the message JSON (consumer-side ordering, ADR 0004).
-
-## [0.6.0] - 2026-10-24
+## [0.6.0] - 2026-10-28
 
 ### Added
 
@@ -68,6 +63,8 @@ follows [Semantic Versioning](https://semver.org/).
   mirror. `Ankusa.SourceStore.Redis.rewrap/1` moves plaintext and
   previous-key entries to the current key, compare-and-set in batches, safe
   beside other nodes. Requires the `ankusa` release with `secrets`.
+- `Sink.Redis`: a hook of an `ordered: true` sink carries the lane's key as
+  `ordering_key` in the message JSON (consumer-side ordering, ADR 0004).
 
 ### Changed
 

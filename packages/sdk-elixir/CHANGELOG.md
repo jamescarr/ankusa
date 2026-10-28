@@ -6,32 +6,7 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added
-
-- **Delivery metadata (CON-4).** `Webhook.Headers.received_at` (when the edge accepted the hook, unix milliseconds, from `x-ankusa-received-at`) and `Webhook.Headers.body_sha256` (the lowercase hex SHA-256 of the body sent, from `x-ankusa-body-sha256`): `nil` when the header is absent, empty or malformed, never an error. `Receiver` now sets `Hook.received_at` from the header (it was always `nil` over HTTP).
-
-- **Wire-format evolution path (CON-2).** `Ankusa.SDK.Message.decode/1` accepts
-  every `v` from `Message.min_supported_version/0` to
-  `Message.max_supported_version/0` (1 and 2) into the one `Message`, with `v`
-  as the wire said it: a `v: 2` message is a `v: 1` message plus additive
-  fields, so the keys it does not know are ignored. `Message.instance` and
-  `Message.region`: the name of the Ankusa instance that published the message
-  and the region it is configured with (`nil` when null or absent).
-  `Ankusa.SDK.LifecycleEvent.decode/1` decodes the CloudEvents lifecycle events
-  of the instance's lifecycle sinks.
-
-- `Ankusa.SDK.Hook.trusted?/1`: `true` only when the node verified the hook at
-  ingest (`status: "ok"`) and did not flag it (`flagged: false`). Works on a
-  `Hook`, a decoded `Message` or the parsed `Webhook.Headers`; a flagged,
-  `failed` or `skipped` hook and one with no `verification` are untrusted.
-
-### Fixed
-
-- `Ankusa.SDK.Receiver` now sets `verification` on the `Hook` it hands to the
-  handler (it was always `nil` over HTTP, so a hook accepted after a failed
-  signature looked the same as a verified one).
-
-## [0.6.0] - 2026-10-24
+## [0.6.0] - 2026-10-28
 
 ### Added
 
@@ -52,6 +27,22 @@ follows [Semantic Versioning](https://semver.org/).
 - `verification` on parsed headers, decoded messages and received deliveries: how Ankusa verified the hook at ingest (`{status, flagged}`, `null` from a node older than the field).
 - `scope` on `AdminRejectedError` and `RoutesRejectedError`: the scope a `403 forbidden` says the credential lacks (control planes require a credential since Ankusa 0.6).
 - `Ankusa.SDK.Admin.list_audit/2`: `GET /v1/audit`, the audit trail (newest first, paged by `cursor`/`limit`, filtered by `since`, `until`, `actor`, `action`, `tenant`).
+- **Delivery metadata (CON-4).** `Webhook.Headers.received_at` (when the edge accepted the hook, unix milliseconds, from `x-ankusa-received-at`) and `Webhook.Headers.body_sha256` (the lowercase hex SHA-256 of the body sent, from `x-ankusa-body-sha256`): `nil` when the header is absent, empty or malformed, never an error. `Receiver` now sets `Hook.received_at` from the header (it was always `nil` over HTTP).
+
+- **Wire-format evolution path (CON-2).** `Ankusa.SDK.Message.decode/1` accepts
+  every `v` from `Message.min_supported_version/0` to
+  `Message.max_supported_version/0` (1 and 2) into the one `Message`, with `v`
+  as the wire said it: a `v: 2` message is a `v: 1` message plus additive
+  fields, so the keys it does not know are ignored. `Message.instance` and
+  `Message.region`: the name of the Ankusa instance that published the message
+  and the region it is configured with (`nil` when null or absent).
+  `Ankusa.SDK.LifecycleEvent.decode/1` decodes the CloudEvents lifecycle events
+  of the instance's lifecycle sinks.
+
+- `Ankusa.SDK.Hook.trusted?/1`: `true` only when the node verified the hook at
+  ingest (`status: "ok"`) and did not flag it (`flagged: false`). Works on a
+  `Hook`, a decoded `Message` or the parsed `Webhook.Headers`; a flagged,
+  `failed` or `skipped` hook and one with no `verification` are untrusted.
 
 ### Changed
 
@@ -61,6 +52,12 @@ follows [Semantic Versioning](https://semver.org/).
   `allow_unsigned: true` to accept unsigned deliveries (a configured `:secret`
   is never weakened by it). The signature is judged before `x-ankusa-id`: a
   request with neither is `401`, not `400`.
+
+### Fixed
+
+- `Ankusa.SDK.Receiver` now sets `verification` on the `Hook` it hands to the
+  handler (it was always `nil` over HTTP, so a hook accepted after a failed
+  signature looked the same as a verified one).
 
 ## [0.5.0] - 2026-10-14
 
