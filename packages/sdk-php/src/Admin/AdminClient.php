@@ -69,8 +69,13 @@ final class AdminClient
     /**
      * `GET /v1/dlq` -> a page of dead-lettered hooks, newest first.
      *
-     * `$params` may carry `source_id`, `since` and `limit`; `null` values are
-     * omitted from the query string rather than sent as `=null`.
+     * `$params` may carry `source_id`, `tenant`, `sink`, `error_class`
+     * (`permanent`, `throttled` or `transient`), `since`, `limit` and `cursor`;
+     * they go out in the order given, and absent values are left out of the
+     * query string. The page is `{total, entries, next_cursor}`: `total` is
+     * null when the node cannot count matches without a scan (any filter but
+     * `tenant`), and while `next_cursor` is set, pass it back as `cursor` for
+     * the next page — a page can be short, or empty, before the last.
      *
      * @param array<string, scalar|null> $params
      *
@@ -89,7 +94,10 @@ final class AdminClient
      * filter keys, and the optional `rate`/`max_lag_ms`. Posting the same spec
      * twice while the job is running or paused returns that job, so a proxy
      * retry is idempotent. The body always goes out as the spec object, never
-     * `[]`.
+     * `[]`. For `dlq`, the spec also takes `sink` (an index into the source's
+     * sinks) and `error_class`; every kind also takes `tenant` and `job_id` (a
+     * lowercase UUID: posting the same `job_id`, kind and filter again answers
+     * that job instead of starting another).
      *
      * @param array<string, mixed> $spec
      *

@@ -19,7 +19,9 @@ type AdminHealth struct {
 
 // DLQEntry is one dead-lettered hook. Seq is the source-local sequence number
 // Ankusa assigned at ingest; TenantID, Seq, and ContentType are nil when the
-// hook had none.
+// hook had none. Sink and ErrorClass are nil from a node older than 0.7, and
+// ErrorClass is also nil for a row dead-lettered before the node recorded a
+// class.
 type DLQEntry struct {
 	ID             string  `json:"id"`
 	SourceID       string  `json:"source_id"`
@@ -29,14 +31,20 @@ type DLQEntry struct {
 	DeadLetteredAt int64   `json:"dead_lettered_at"`
 	Size           int64   `json:"size"`
 	ContentType    *string `json:"content_type"`
+	Sink           *int    `json:"sink"`
+	ErrorClass     *string `json:"error_class"`
 	Reason         string  `json:"reason"`
 }
 
-// DLQPage is a page of dead letters. Total is the size of the whole
-// (filtered) dead-letter queue, not of Entries.
+// DLQPage is a page of dead letters. Total is nil when the node cannot count
+// matches without a scan (any filter except Tenant); otherwise it is the size
+// of the whole filtered queue, not of Entries. NextCursor is nil on the last
+// page; pass it as ListDeadLettersParams.Cursor to fetch the next one. A page
+// can be short, or empty, while NextCursor is set.
 type DLQPage struct {
-	Total   int        `json:"total"`
-	Entries []DLQEntry `json:"entries"`
+	Total      *int       `json:"total"`
+	Entries    []DLQEntry `json:"entries"`
+	NextCursor *string    `json:"next_cursor"`
 }
 
 // QuarantineEntry is one quarantined hook.
@@ -72,6 +80,15 @@ type ReplaySpec struct {
 	To   int64 `json:"to,omitempty"`
 	// Sinks lists indexes into the source's current sinks, archive only.
 	Sinks []int `json:"sinks,omitempty"`
+	// Tenant replays only this tenant's rows.
+	Tenant string `json:"tenant,omitempty"`
+	// Sink is the index of the sink to replay to, dlq only.
+	Sink *int `json:"sink,omitempty"`
+	// ErrorClass replays only rows in this error class, dlq only.
+	ErrorClass string `json:"error_class,omitempty"`
+	// JobID is a lowercase UUID naming the job: posting the same JobID, Kind
+	// and filter again answers that job instead of starting another.
+	JobID string `json:"job_id,omitempty"`
 	// Rate is items per second (1..100000; server default 1000).
 	Rate int `json:"rate,omitempty"`
 	// MaxLagMS is the dispatch-lag ceiling before the job throttles
@@ -115,11 +132,16 @@ type ReplayList struct {
 	Replays []Replay `json:"replays"`
 }
 
-// ListDeadLettersParams filters a DLQ listing. Zero values mean "no filter".
+// ListDeadLettersParams filters a DLQ listing. Zero values mean "no filter";
+// Sink is a pointer because 0 is the first sink.
 type ListDeadLettersParams struct {
-	SourceID string `json:"source_id"`
-	Since    int64  `json:"since"`
-	Limit    int    `json:"limit"`
+	SourceID   string `json:"source_id"`
+	Tenant     string `json:"tenant"`
+	Sink       *int   `json:"sink"`
+	ErrorClass string `json:"error_class"`
+	Since      int64  `json:"since"`
+	Limit      int    `json:"limit"`
+	Cursor     string `json:"cursor"`
 }
 
 // ListQuarantinedParams filters a quarantine listing. Zero means "no filter".
@@ -220,17 +242,29 @@ func (c *AdminClient) Config(ctx context.Context) (map[string]any, error) {
 }
 
 // ListDeadLetters lists the dead-letter queue. Query parameters go out in a
-// fixed order: source_id, since, limit.
+// fixed order: source_id, tenant, sink, error_class, since, limit, cursor.
 func (c *AdminClient) ListDeadLetters(ctx context.Context, p ListDeadLettersParams) (*DLQPage, error) {
 	var pairs [][2]string
 	if p.SourceID != "" {
 		pairs = append(pairs, [2]string{"source_id", p.SourceID})
+	}
+	if p.Tenant != "" {
+		pairs = append(pairs, [2]string{"tenant", p.Tenant})
+	}
+	if p.Sink != nil {
+		pairs = append(pairs, [2]string{"sink", strconv.Itoa(*p.Sink)})
+	}
+	if p.ErrorClass != "" {
+		pairs = append(pairs, [2]string{"error_class", p.ErrorClass})
 	}
 	if p.Since > 0 {
 		pairs = append(pairs, [2]string{"since", strconv.FormatInt(p.Since, 10)})
 	}
 	if p.Limit > 0 {
 		pairs = append(pairs, [2]string{"limit", strconv.Itoa(p.Limit)})
+	}
+	if p.Cursor != "" {
+		pairs = append(pairs, [2]string{"cursor", p.Cursor})
 	}
 
 	resp, err := c.call(ctx, http.MethodGet, appendQuery("/v1/dlq", pairs), nil)

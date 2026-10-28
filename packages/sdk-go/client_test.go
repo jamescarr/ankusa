@@ -123,8 +123,12 @@ func TestQueryStrings(t *testing.T) {
 	if _, err := admin.ListDeadLetters(ctx, ankusa.ListDeadLettersParams{SourceID: "demo", Since: 1720000000000}); err != nil {
 		t.Fatalf("list dead letters: %v", err)
 	}
+	zero := 0
+	if _, err := admin.ListDeadLetters(ctx, ankusa.ListDeadLettersParams{Sink: &zero}); err != nil {
+		t.Fatalf("list dead letters by sink: %v", err)
+	}
 
-	want := []string{"/admin/routes", "/v1/dlq?source_id=demo&since=1720000000000"}
+	want := []string{"/admin/routes", "/v1/dlq?source_id=demo&since=1720000000000", "/v1/dlq?sink=0"}
 	if !reflect.DeepEqual(seen, want) {
 		t.Errorf("request URIs:\n got: %q\nwant: %q", seen, want)
 	}

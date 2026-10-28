@@ -56,8 +56,13 @@ defmodule Ankusa.SDK.Admin do
   @doc """
   A page of dead-lettered hooks, newest first: `GET /v1/dlq`.
 
-  `params` may carry `source_id`, `since` and `limit`; `nil` values are left out
-  of the query string rather than sent as `=`.
+  `params` may carry `source_id`, `tenant`, `sink`, `error_class`
+  (`permanent`, `throttled` or `transient`), `since`, `limit` and `cursor`;
+  they go out in the order given, and absent values are left out of the query
+  string. The page is `{total, entries, next_cursor}`: `total` is nil when the
+  node cannot count matches without a scan (any filter but `tenant`), and while
+  `next_cursor` is set, pass it back as `cursor` for the next page — a page can
+  be short, or empty, before the last.
   """
   @spec list_dead_letters(t(), term()) :: {:ok, term()} | {:error, Exception.t()}
   def list_dead_letters(%__MODULE__{} = client, params \\ []),
@@ -72,6 +77,10 @@ defmodule Ankusa.SDK.Admin do
   `from`/`to`/`sinks` for `archive`) and the optional `rate` and
   `max_lag_ms`. The response is the full Replay object; a retry of the same
   spec answers the existing running/paused job instead of creating a second.
+  For `dlq`, the spec also takes `sink` (an index into the source's sinks) and
+  `error_class`; every kind also takes `tenant` and `job_id` (a lowercase UUID:
+  posting the same `job_id`, kind and filter again answers that job instead of
+  starting another).
   """
   @spec create_replay(t(), term()) :: {:ok, term()} | {:error, Exception.t()}
   def create_replay(%__MODULE__{} = client, spec),

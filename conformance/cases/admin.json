@@ -161,9 +161,12 @@
                   "dead_lettered_at": 1720000001000,
                   "size": 12,
                   "content_type": "application/json",
+                  "sink": 0,
+                  "error_class": "transient",
                   "reason": "{:sink, :status, 503}"
                 }
-              ]
+              ],
+              "next_cursor": null
             }
           }
         }
@@ -181,14 +184,143 @@
               "dead_lettered_at": 1720000001000,
               "size": 12,
               "content_type": "application/json",
+              "sink": 0,
+              "error_class": "transient",
               "reason": "{:sink, :status, 503}"
             }
-          ]
+          ],
+          "next_cursor": null
         },
         "requests": [
           {
             "method": "GET",
             "path": "/v1/dlq"
+          }
+        ]
+      }
+    },
+    {
+      "id": "admin.dlq.list.filters_in_input_order",
+      "feature": "admin.operations",
+      "operation": "admin_dlq_list",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "json": {
+              "total": null,
+              "entries": [],
+              "next_cursor": null
+            }
+          }
+        },
+        "params": {
+          "source_id": "demo",
+          "tenant": "acme",
+          "sink": 1,
+          "error_class": "throttled",
+          "since": 1720000000000,
+          "limit": 10,
+          "cursor": "c1"
+        }
+      },
+      "expect": {
+        "ok": {
+          "total": null,
+          "entries": [],
+          "next_cursor": null
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/v1/dlq?source_id=demo&tenant=acme&sink=1&error_class=throttled&since=1720000000000&limit=10&cursor=c1"
+          }
+        ]
+      }
+    },
+    {
+      "id": "admin.dlq.list.unknown_total_and_next_page",
+      "feature": "admin.operations",
+      "operation": "admin_dlq_list",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "json": {
+              "total": null,
+              "entries": [
+                {
+                  "id": "0194f4a0-0000-7000-8000-000000000001",
+                  "source_id": "demo",
+                  "tenant_id": "acme",
+                  "seq": 6,
+                  "received_at": 1720000000000,
+                  "dead_lettered_at": 1720000002000,
+                  "size": 12,
+                  "content_type": "application/json",
+                  "sink": 1,
+                  "error_class": "throttled",
+                  "reason": "{:retry_horizon, Ankusa.Sink.Http}"
+                },
+                {
+                  "id": "0194f4a0-0000-7000-8000-000000000002",
+                  "source_id": "demo",
+                  "tenant_id": null,
+                  "seq": 7,
+                  "received_at": 1720000000000,
+                  "dead_lettered_at": 1720000001000,
+                  "size": 3,
+                  "content_type": null,
+                  "sink": null,
+                  "error_class": null,
+                  "reason": "{:sink, :status, 503}"
+                }
+              ],
+              "next_cursor": "c2"
+            }
+          }
+        },
+        "params": {
+          "source_id": "demo"
+        }
+      },
+      "expect": {
+        "ok": {
+          "total": null,
+          "entries": [
+            {
+              "id": "0194f4a0-0000-7000-8000-000000000001",
+              "source_id": "demo",
+              "tenant_id": "acme",
+              "seq": 6,
+              "received_at": 1720000000000,
+              "dead_lettered_at": 1720000002000,
+              "size": 12,
+              "content_type": "application/json",
+              "sink": 1,
+              "error_class": "throttled",
+              "reason": "{:retry_horizon, Ankusa.Sink.Http}"
+            },
+            {
+              "id": "0194f4a0-0000-7000-8000-000000000002",
+              "source_id": "demo",
+              "tenant_id": null,
+              "seq": 7,
+              "received_at": 1720000000000,
+              "dead_lettered_at": 1720000001000,
+              "size": 3,
+              "content_type": null,
+              "sink": null,
+              "error_class": null,
+              "reason": "{:sink, :status, 503}"
+            }
+          ],
+          "next_cursor": "c2"
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/v1/dlq?source_id=demo"
           }
         ]
       }
@@ -396,6 +528,86 @@
           {
             "method": "POST",
             "path": "/v1/replays"
+          }
+        ]
+      }
+    },
+    {
+      "id": "admin.replay.create.dlq_filters_and_job_id",
+      "feature": "admin.operations",
+      "operation": "admin_replay_create",
+      "input": {
+        "gateway": {
+          "status": 202,
+          "body": {
+            "json": {
+              "id": "0194f4a0-0000-7000-8000-0000000000bb",
+              "kind": "dlq",
+              "state": "running",
+              "filter": {
+                "tenants": [
+                  "acme"
+                ],
+                "sink": 1,
+                "error_class": "throttled"
+              },
+              "rate": 1000,
+              "max_lag_ms": 2000,
+              "created_at": 1720000000000,
+              "updated_at": 1720000000000,
+              "finished_at": null,
+              "moved": 0,
+              "scanned": 0,
+              "skipped": 0,
+              "delivered": 0,
+              "dead": 0,
+              "error": null
+            }
+          }
+        },
+        "spec": {
+          "kind": "dlq",
+          "tenant": "acme",
+          "sink": 1,
+          "error_class": "throttled",
+          "job_id": "0194f4a0-0000-7000-8000-0000000000bb"
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "0194f4a0-0000-7000-8000-0000000000bb",
+          "kind": "dlq",
+          "state": "running",
+          "filter": {
+            "tenants": [
+              "acme"
+            ],
+            "sink": 1,
+            "error_class": "throttled"
+          },
+          "rate": 1000,
+          "max_lag_ms": 2000,
+          "created_at": 1720000000000,
+          "updated_at": 1720000000000,
+          "finished_at": null,
+          "moved": 0,
+          "scanned": 0,
+          "skipped": 0,
+          "delivered": 0,
+          "dead": 0,
+          "error": null
+        },
+        "requests": [
+          {
+            "method": "POST",
+            "path": "/v1/replays",
+            "body": {
+              "kind": "dlq",
+              "tenant": "acme",
+              "sink": 1,
+              "error_class": "throttled",
+              "job_id": "0194f4a0-0000-7000-8000-0000000000bb"
+            }
           }
         ]
       }
