@@ -82,7 +82,11 @@ for p in "${pkgs[@]}"; do
     [ "$status" = completed ] || fail "ci.yml run $run: the device-mapper crash drill is still $status: wait for it, then retry"
     [ "${conclusion:-}" = success ] ||
       fail "ci.yml run $run: the device-mapper crash drill is '${conclusion:-missing}', not success: an acked hook may not be safe"
-    verdict=$(gh run view --job "$job_id" --log | grep -oE 'acked=[0-9]+ recovered=[0-9]+ missing=0 eio_503=[0-9]+ resumed=true' | tail -n 1 || true)
+    # `gh run view --job --log` refuses until the whole run has finished; the
+    # jobs API serves a finished job's log at once.
+    log=$(gh api --allow-escape-sequences "repos/{owner}/{repo}/actions/jobs/$job_id/logs") ||
+      fail "ci.yml run $run: could not fetch the device-mapper crash drill's log (job $job_id)"
+    verdict=$(printf '%s\n' "$log" | grep -oE 'acked=[0-9]+ recovered=[0-9]+ missing=0 eio_503=[0-9]+ resumed=true' | tail -n 1 || true)
     [ -n "$verdict" ] ||
       fail "ci.yml run $run: the device-mapper crash drill was skipped (no privileged runner); run scripts/drills/flakey.sh on a host that has one before tagging ankusa"
     echo "  crash drill on device-mapper: ci.yml run $run, $verdict"
