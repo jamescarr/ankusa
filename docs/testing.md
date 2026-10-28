@@ -1123,10 +1123,12 @@ mise run test:crash
   still reports `missing=0`); this variant can: the same patch gives
   `acked=9344 recovered=5600 missing=3744` and exit status 1. It needs `docker run
   --privileged` with loop and device-mapper support in the Docker host's
-  kernel and exits `2` where it has neither. `release:preflight` runs it
-  before a core tag; CI runs it as the job `crash-powerloss` (GitHub's
+  kernel and exits `2` where it has neither. CI runs it as the job
+  `crash-powerloss` on every PR and every push to `main` (GitHub's
   `ubuntu-latest` allows it; on a runner that does not, the job reports a
-  skip). Where no privileged Docker host exists, it is a manual pre-release step.
+  skip), and `release:preflight` reads that job's result line for the commit
+  being tagged before a core tag, instead of running the drill. When the job
+  skipped the drill, it is a manual pre-release step on a privileged Docker host.
   The windows use device-mapper's `error` target rather than `dm-flakey`, a
   module some kernels lack; the fault is the same, I/O errors for 2 s.
   A window fails the file data area, not the whole device: the volume is made
