@@ -32,7 +32,11 @@ creates before Ankusa starts: the sink never creates a topic. A Redpanda
 Connect bridge
 ([`bridge/bridge.yaml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/bridge/bridge.yaml))
 carries each record into an SQS FIFO queue in floci, with the record key
-(tenant and source) as the FIFO group, so one source's hooks stay in order.
+(tenant and source) as the FIFO group, so a source's hooks reach the worker in
+the order Ankusa produced them. That is not the order they arrived in: dispatch
+runs attempts concurrently and a retried hook goes out after later ones. For
+per-key order, set `ordered: true` and an `ordering_key` on the sink
+([Ordering lanes](delivery.md#ordering-lanes)).
 [`worker.py`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py)
 polls that queue with `boto3`, decodes each message with the `ankusa` Python
 SDK, and prints what it receives.

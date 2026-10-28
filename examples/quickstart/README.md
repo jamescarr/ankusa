@@ -3,10 +3,14 @@
 The published Ankusa image receives webhooks and produces each one to a Kafka
 topic on Redpanda. A Redpanda Connect bridge carries the records into an SQS
 FIFO queue in floci, with `MessageGroupId` set from the record key (tenant and
-source), so one source's hooks stay in order. A small Python worker polls the
-queue with `boto3` and decodes each message with the `ankusa` Python SDK
-([`packages/sdk-python`](../../packages/sdk-python)). No object store, and the
-worker holds no storage credentials.
+source), so a source's hooks reach the worker in the order Ankusa produced them.
+That is not the order they arrived in: dispatch runs attempts concurrently and a
+retried hook goes out after later ones. For per-key order, set `ordered: true`
+and an `ordering_key` on the sink
+([Ordering lanes](../../docs/delivery.md#ordering-lanes)). A small Python
+worker polls the queue with `boto3` and decodes each message with the `ankusa`
+Python SDK ([`packages/sdk-python`](../../packages/sdk-python)). No object
+store, and the worker holds no storage credentials.
 
 ```mermaid
 flowchart LR
