@@ -58,7 +58,7 @@ Why the package split (and when a new adapter earns its own package):
 
 | Doc | Read it when |
 | --- | --- |
-| [`quickstart.md`](docs/quickstart.md) | run it with a worker, break the worker, replay |
+| [`quickstart.md`](docs/quickstart.md) | run it with a queue worker, break the worker and the broker, replay |
 | [`configuration.md`](docs/configuration.md) | every YAML key, and the Elixir config |
 | [`deployment.md`](docs/deployment.md) | roles, the container, fleets |
 | [`architecture.md`](docs/architecture.md) | the guarantees, the request path |

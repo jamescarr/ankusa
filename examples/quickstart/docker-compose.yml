@@ -1,24 +1,122 @@
-# Ankusa + a worker you own, wired together by one HTTP sink.
+# Ankusa producing to a Kafka topic (Redpanda), a Redpanda Connect bridge carrying
+# the records into an SQS FIFO queue (floci), and a Python worker polling the queue.
 #   docker compose up --build -d --wait
 #   curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
 #   docker compose logs worker
 services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.5
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # The topic belongs to ops, never to the sink: partition count is an ordering
+  # and capacity decision, so Ankusa.Sink.Kafka never creates one. Idempotent:
+  # compose re-runs it whenever a dependent service (re)starts.
+  redpanda-bootstrap:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.5
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - rpk topic create ankusa.events -X brokers=redpanda:9092 -p 6 -r 1
+        || rpk topic describe ankusa.events -X brokers=redpanda:9092 >/dev/null
+
+  # SQS, emulated. `persistent` storage into a named volume (the image defaults
+  # to memory): queued messages survive a floci restart; `down -v` drops them.
+  floci:
+    image: floci/floci:latest
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+      FLOCI_STORAGE_MODE: persistent
+      FLOCI_STORAGE_PERSISTENT_PATH: /app/data
+    volumes:
+      - floci-data:/app/data
+
+  # The worker's FIFO queue and its dead-letter queue. Consumer-owned: Ankusa
+  # never knows they exist.
+  aws-bootstrap:
+    image: amazon/aws-cli:2.38.1
+    depends_on: [floci]
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://floci:4566
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        until aws sqs list-queues >/dev/null 2>&1; do echo "waiting for floci..."; sleep 1; done
+        aws sqs create-queue --queue-name ankusa-worker-dlq.fifo --attributes FifoQueue=true >/dev/null
+        dlq_arn=$$(aws sqs get-queue-attributes \
+          --queue-url http://floci:4566/000000000000/ankusa-worker-dlq.fifo \
+          --attribute-names QueueArn --query Attributes.QueueArn --output text)
+        cat > /tmp/attrs.json <<EOF
+        {
+          "FifoQueue": "true",
+          "ContentBasedDeduplication": "false",
+          "VisibilityTimeout": "30",
+          "RedrivePolicy": "{\"deadLetterTargetArn\":\"$$dlq_arn\",\"maxReceiveCount\":\"5\"}"
+        }
+        EOF
+        aws sqs create-queue --queue-name ankusa-worker.fifo --attributes file:///tmp/attrs.json
+        echo "queues ready"
+
+  # Kafka topic -> SQS FIFO. Owned by the consumer side, like the queues.
+  bridge:
+    image: docker.redpanda.com/redpandadata/connect:4.114.0
+    depends_on:
+      redpanda-bootstrap:
+        condition: service_completed_successfully
+      aws-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - ./bridge/bridge.yaml:/connect.yaml:ro
+    command: ["run", "/connect.yaml"]
+
   ankusa:
     image: ${ANKUSA_IMAGE:-jamescarr/ankusa:edge}
     ports:
       - "4000:4000"            # ingest: the only port providers need
       - "127.0.0.1:4002:4002"  # admin API: health, metrics, dead letters, replay
+      # 4001, the claim-check gateway, stays on the compose network: it serves
+      # hook bodies without authentication.
     volumes:
       - ./ankusa.yml:/etc/ankusa/ankusa.yml:ro
       - ankusa-data:/var/lib/ankusa
     depends_on:
-      - worker
+      redpanda-bootstrap:
+        condition: service_completed_successfully
 
+  # SQS credentials only (fake, floci). A large body is redeemed through
+  # Ankusa's claim-check gateway, so the worker holds no storage credentials.
   worker:
     build:
       context: ../..                       # repo root: worker.py's pyproject.toml
       dockerfile: examples/quickstart/Dockerfile  # path-depends on ../../packages/sdk-python
     init: true                 # tini as PID 1, so `docker compose stop worker` is instant
+    depends_on:
+      aws-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      SQS_QUEUE_URL: http://floci:4566/000000000000/ankusa-worker.fifo
+      SQS_DLQ_URL: http://floci:4566/000000000000/ankusa-worker-dlq.fifo
+      SQS_ENDPOINT: http://floci:4566
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      CLAIM_CHECK_URL: http://ankusa:4001
 
 volumes:
   ankusa-data:
+  floci-data:
