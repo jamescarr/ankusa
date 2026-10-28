@@ -359,9 +359,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          # A release tag runs this workflow on a commit its PR and its push to
+          # main already gated. A new tag has no `before` commit to measure, so
+          # the gate would compare a hosted runner with the checked-in laptop
+          # baseline, which fails on any runner (the 0.7.0 tags did, 11 times).
+          if [ "$REF_TYPE" = tag ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "a release tag: its commit was gated on its pull request and its push to main"
+            exit 0
+          fi
           if [ "$EVENT" != pull_request ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             echo "not a pull request: gate runs"
