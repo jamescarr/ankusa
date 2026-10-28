@@ -83,6 +83,9 @@ fi
 mkdir -p "$OUT_DIR"
 OUT_ABS="$(pwd)/$OUT_DIR"
 
+echo "==> installing loadgen deps"
+(cd tools/loadgen && mix deps.get >/dev/null)
+
 echo "==> phase 1/3: steady"
 (cd tools/loadgen && mix loadgen.run \
   --url http://localhost:8080/webhooks/demo \

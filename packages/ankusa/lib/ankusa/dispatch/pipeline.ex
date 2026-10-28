@@ -396,6 +396,8 @@ defmodule Ankusa.Dispatch.Pipeline do
        window_full?: false,
        # a failed scan backs off instead of spinning
        holdoff?: false,
+       # a :scan is in the mailbox: wakes until it runs only lower the cursors
+       scan_queued?: false,
        # The default share of the global windows and each named tenant's (a named
        # tenant inherits the default's other keys), see `dispatch.tenants`
        default_limits: default_limits,
@@ -589,14 +591,28 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
-  def handle_info(:wake, state) do
-    state = %{state | holdoff?: false} |> fill() |> start_jobs() |> schedule_next()
+  # Every synced commit wakes this process (`Ankusa.Queue.Syncer.wake_dispatch/2`),
+  # so under load wakes arrive faster than a scan runs. One scan serves every
+  # wake in the mailbox: the first queues `:scan` behind what is already there,
+  # the rest only lower the cursors, and the scan reads the store once they are
+  # all in. A scan per wake starved the attempts' outcomes behind the wakes of a
+  # 200 req/s backlog (the soak lost 694 704 of 720 000 hooks).
+  def handle_info(:wake, state), do: {:noreply, queue_scan(state)}
+
+  # The stamp is the batch's: its rows became visible only now (the fsync in
+  # between), and a scan may already have gone past that stamp.
+  def handle_info({:wake, at}, state),
+    do: {:noreply, state |> lower_cursors(at) |> queue_scan()}
+
+  def handle_info(:scan, state) do
+    state =
+      %{state | scan_queued?: false, holdoff?: false}
+      |> fill()
+      |> start_jobs()
+      |> schedule_next()
+
     maybe_reply_waiters(state)
   end
-
-  # A commit's rows became visible only now, though they were stamped before it
-  # (the fsync in between): a scan may already have gone past that stamp.
-  def handle_info({:wake, at}, state), do: handle_info(:wake, lower_cursors(state, at))
 
   # A flush makes retries and expansions visible, and the capacity the outcomes
   # freed is claimed here, once, rather than once per outcome.
@@ -1074,6 +1090,13 @@ defmodule Ankusa.Dispatch.Pipeline do
 
         {:error, state}
     end
+  end
+
+  defp queue_scan(%{scan_queued?: true} = state), do: state
+
+  defp queue_scan(state) do
+    send(self(), :scan)
+    %{state | scan_queued?: true}
   end
 
   defp holdoff(state) do

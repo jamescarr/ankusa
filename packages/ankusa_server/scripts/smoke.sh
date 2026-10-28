@@ -65,9 +65,17 @@ case "$IMAGE" in
 esac
 if [ -n "$cosign_target" ]; then
   command -v cosign >/dev/null || fail "cosign is not installed, so $cosign_target cannot be verified"
-  cosign verify --certificate-identity-regexp "$COSIGN_IDENTITY" \
-    --certificate-oidc-issuer "$COSIGN_ISSUER" "$cosign_target" >"$WORK/cosign" 2>&1 ||
-    fail "cosign verify failed for $cosign_target: $(cat "$WORK/cosign")"
+  # Docker Hub served a just-pushed signature tag late: four `main` runs in a row
+  # saw `no signatures found` one second after `cosign sign`, and the same digest
+  # verified minutes later. So: up to 30 attempts, 10 s apart.
+  attempt=1
+  until cosign verify --certificate-identity-regexp "$COSIGN_IDENTITY" \
+    --certificate-oidc-issuer "$COSIGN_ISSUER" "$cosign_target" >"$WORK/cosign" 2>&1; do
+    [ "$attempt" -lt 30 ] || fail "cosign verify failed for $cosign_target: $(cat "$WORK/cosign")"
+    echo "cosign verify: attempt $attempt/30 failed: $(tail -n 1 "$WORK/cosign"); retrying in 10 s" >&2
+    attempt=$((attempt + 1))
+    sleep 10
+  done
   echo "cosign verify: OK ($cosign_target)"
 else
   echo "cosign verify: skipped (a locally built image is unsigned; pass a repo@sha256: reference or SMOKE_COSIGN_IMAGE)"

@@ -127,6 +127,23 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   10`, plus `backup.final_timeout_ms` when the node backs up. See
   `config-examples/reference.yml` and `docs/deployment.md`.
 
+### Changed
+
+- The image's HTTP server is `bandit 1.14.0` (was `1.13.1`, affected by
+  EEF-CVE-2026-115269, High: a WINDOW_UPDATE or empty SETTINGS frame restarted
+  the HTTP/2 request-body read timeout, so a trickle of them held a stream and
+  its handler open indefinitely; and by ten more advisories 1.14.0 closes,
+  among them an HTTP/1.1 chunked-body request-smuggling vector). `mix hex.audit`
+  fails on 1.13.1.
+- The image's JOSE library is `jose 1.11.13` (was `1.11.12`, which has eight
+  advisories, EEF-CVE-2026-65625 to EEF-CVE-2026-65632; one, an unchecked ECDSA
+  signature length, reaches the admin API's JWT authentication).
+
+### Fixed
+
+- Dispatch no longer stalls under a sustained backlog (the soak's lost hooks);
+  see the `ankusa` changelog.
+
 ## [0.7.0] - 2026-10-24
 
 ### Added

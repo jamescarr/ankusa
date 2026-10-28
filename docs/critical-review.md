@@ -1338,6 +1338,17 @@ app on 1.12.x), and the ten lockfiles that lock it now lock `1.13.1` (it reverts
 a stale-conn check that 1.13.0 added), moved with `mix deps.update bandit`; that
 pulls `thousand_island 1.6.0`, and `hpax 1.1.0` in `oban-consumer/consumer_app`.
 
+**Status (2026-10-28).** The gate fired again, on two libraries at once. `bandit
+1.13.1` is affected by EEF-CVE-2026-115269 (High: a `WINDOW_UPDATE` or an empty
+`SETTINGS` frame restarted the HTTP/2 request-body read timeout, so a trickle of
+them held a stream and its handler open indefinitely) and ten more advisories,
+all fixed in `bandit 1.14.0`; `jose 1.11.12`, the admin API's JWT library, has
+eight (EEF-CVE-2026-65625 to EEF-CVE-2026-65632), fixed in `1.11.13`. Core
+requires `bandit ~> 1.14` and `jose ~> 1.11 and >= 1.11.13`; the eleven
+lockfiles that lock bandit and the nine that lock jose moved with
+`mix deps.update bandit` and `mix deps.update jose`, one line each, nothing
+else.
+
 <a id="c4"></a>
 ### C4 · Low · Code — Refs are bearer capabilities with partly derivable ids
 
