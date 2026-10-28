@@ -133,7 +133,7 @@ defmodule Ankusa.MixProject do
   defp deps do
     [
       async_api_spex_dep(),
-      {:bandit, "~> 1.14"},
+      {:bandit, "~> 1.14 and >= 1.14.1"},
       {:plug, "~> 1.18"},
       # CIDR parsing and range membership for the route-management IP rules and
       # trusted proxies (`Ankusa.Routes`, `Ankusa.Net.ClientIP`). `Ankusa.Net`
