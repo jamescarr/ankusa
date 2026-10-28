@@ -9,7 +9,7 @@
 
 organization := "io.github.jamescarr"
 name := "ankusa-sdk"
-version := "0.1.0"
+version := "0.2.0"
 
 description := "Client SDK for Ankusa, the self-hosted webhook receiver: claim-check redemption, delivery headers, and the routes, admin, and sources APIs."
 homepage := Some(uri("https://github.com/jamescarr/ankusa/tree/main/packages/sdk-java"))
