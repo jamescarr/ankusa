@@ -260,6 +260,19 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   bound reads it). Set `terminationGracePeriodSeconds` to at least
   `(drain_delay_ms + drain_timeout_ms) / 1000 + 10`
   ([`deployment.md`](../../docs/deployment.md)).
+- Requires `bandit ~> 1.14` (was `~> 1.13`): 1.13.1 is affected by
+  EEF-CVE-2026-115269 (High: a WINDOW_UPDATE or empty SETTINGS frame restarted
+  the HTTP/2 request-body read timeout, so a trickle of them held a stream and
+  its handler open indefinitely) and ten more advisories 1.14.0 closes (HTTP/2
+  flow control, HPACK and SETTINGS limits; HTTP/1.1 chunked bodies, one of them
+  a request-smuggling vector; WebSocket framing); `mix hex.audit` fails on it.
+- Requires `jose ~> 1.11 and >= 1.11.13` (was `~> 1.11`): 1.11.12 has eight
+  advisories fixed in 1.11.13, EEF-CVE-2026-65625 to EEF-CVE-2026-65632
+  (High: EEF-CVE-2026-65629). One reaches `Ankusa.Admin.Auth.JWT`'s check of a
+  presented token: an ECDSA signature's length was not validated, so an `ES*`
+  token's signature was malleable; RSA JWK parsing (a crafted modulus was
+  factored, CPU exhaustion) reaches only the configured keys and the issuer's
+  `jwt.jwks_url`.
 
 ### Fixed
 

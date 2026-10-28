@@ -133,7 +133,7 @@ defmodule Ankusa.MixProject do
   defp deps do
     [
       async_api_spex_dep(),
-      {:bandit, "~> 1.13"},
+      {:bandit, "~> 1.14"},
       {:plug, "~> 1.18"},
       # CIDR parsing and range membership for the route-management IP rules and
       # trusted proxies (`Ankusa.Routes`, `Ankusa.Net.ClientIP`). `Ankusa.Net`
@@ -163,7 +163,7 @@ defmodule Ankusa.MixProject do
       # JWT/JWS verification for `Ankusa.Admin.Auth.JWT` (OIDC bearer tokens on
       # the control planes). Every deployment that exposes an admin port beyond
       # loopback wants real authentication, so it lives in core.
-      {:jose, "~> 1.11"},
+      {:jose, "~> 1.11 and >= 1.11.13"},
       # Built-in Prometheus mapping of Ankusa.Telemetry (Ankusa.Metrics).
       # Every deployment wants metrics, so they live in core rather than an
       # adapter package.
