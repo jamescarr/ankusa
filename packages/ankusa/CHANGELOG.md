@@ -11,6 +11,14 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Fixed
+
+- **A row parked behind a breaker that a throttling sink opened is dead-lettered as
+  `throttled`.** At its retry horizon such a row was filed as `transient`, so
+  `GET /v1/dlq?error_class=throttled` and an `error_class: throttled` replay missed it.
+  A key's breaker now records the `Ankusa.Sink.error_class/1` of each failure it counts,
+  and a row that dies behind it is filed under the class of the last one.
+
 ## [0.7.0] - 2026-10-28
 
 ### Added
