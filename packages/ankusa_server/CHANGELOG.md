@@ -6,6 +6,13 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+### Changed
+
+- The image's HTTP server is `bandit 1.14.1` (was `1.14.0`, affected by
+  EEF-CVE-2026-116078, High: an HTTP/2 request body sent as 1-byte DATA frames
+  amplified memory use). The 0.7.0 image ships 1.14.0; the advisory was
+  published after it was built.
+
 ## [0.7.0] - 2026-10-28
 
 ### Added
