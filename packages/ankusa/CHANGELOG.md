@@ -286,6 +286,13 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   2 ms steps) and starts the next batcher; the call a dead batcher was already
   holding still fails with `{:error, {:batcher_down, reason}}`, so the dispatch
   attempt retries it as before.
+- **Dispatch under a backlog (soak).** A synced commit's wake ran a full store
+  scan, one per commit, even when every tenant's window was full; at 200 req/s
+  the scans outran the pipeline, the attempts' outcomes queued behind them, and
+  nothing freed the window: the nightly soak lost 694 704 of 720 000 hooks to a
+  `log` sink. Wakes are now coalesced into one scan per mailbox round
+  (`Ankusa.Dispatch.Pipeline`). Test: `isolation_test.exs` "wakes are
+  coalesced".
 
 ## [0.7.0] - 2026-10-24
 

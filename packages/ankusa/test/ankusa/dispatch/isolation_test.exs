@@ -596,6 +596,53 @@ defmodule Ankusa.Dispatch.IsolationTest do
       assert {:ok, _} = Pipeline.tick(inst)
       assert_receive {:tenant_inflight, "capped", 0}, 3_000
     end
+
+    test "wakes are coalesced: commits against a full window cost one scan per mailbox round, not one each" do
+      {:ok, agent} = Agent.start_link(fn -> :closed end)
+
+      inst =
+        start(
+          %{"s" => %{sinks: [{HoldSink, pid: self(), agent: agent}]}},
+          %{concurrency: 8, max_inflight: 64, tenants: %{:default => %{max_inflight: 2}}}
+        )
+
+      # the tenant's window is full: every scan from here on claims nothing
+      enqueue_many!(inst, for(_ <- 1..2, do: build_env("s")))
+      for _ <- 1..2, do: assert_receive({:held, _}, 5_000)
+
+      pid = Ankusa.whereis(inst, :dispatch)
+      :erlang.trace_pattern({Ankusa.Store, :fold, 6}, true, [:local])
+      on_exit(fn -> :erlang.trace_pattern({Ankusa.Store, :fold, 6}, false, [:local]) end)
+      1 = :erlang.trace(pid, true, [:call, {:tracer, self()}])
+
+      # 200 commits, one wake each, all in the mailbox before dispatch runs again
+      # (an ack does not wait on dispatch)
+      :ok = :sys.suspend(pid)
+      for _ <- 1..200, do: enqueue!(inst, build_env("s"))
+      :ok = :sys.resume(pid)
+
+      # the first call queues behind the 200 wakes, the second behind the scan
+      # they queued
+      {:ok, _} = GenServer.call(pid, :pressure)
+      {:ok, _} = GenServer.call(pid, :pressure)
+
+      # one scan (its `active_tenants` fold and `schedule_next`'s `next_due_at`
+      # fold), one fold per `:pressure` call, and a housekeeping tick at most;
+      # a scan per wake is two folds per commit, about 400
+      assert active_folds(pid, 0) <= 8
+
+      Agent.update(agent, fn _ -> :open end)
+      assert {:ok, _} = Pipeline.tick(inst)
+    end
+
+    defp active_folds(pid, n) do
+      receive do
+        {:trace, ^pid, :call, {Ankusa.Store, :fold, [_instance, :active | _]}} ->
+          active_folds(pid, n + 1)
+      after
+        100 -> n
+      end
+    end
   end
 
   describe "circuit breaker" do

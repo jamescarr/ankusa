@@ -139,6 +139,11 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   advisories, EEF-CVE-2026-65625 to EEF-CVE-2026-65632; one, an unchecked ECDSA
   signature length, reaches the admin API's JWT authentication).
 
+### Fixed
+
+- Dispatch no longer stalls under a sustained backlog (the soak's lost hooks);
+  see the `ankusa` changelog.
+
 ## [0.7.0] - 2026-10-24
 
 ### Added
