@@ -185,7 +185,7 @@ Add the provider as a second source under `sources:` in `ankusa.yml`:
     sinks:
       - type: kafka
         brokers: [redpanda:9092]
-        topic: ankusa.events     # the same topic; keyed by source, so its own partition and FIFO group
+        topic: ankusa.events     # the same topic; keyed by tenant/source, so its own FIFO group
         inline_max_bytes: 8192
 ```
 
