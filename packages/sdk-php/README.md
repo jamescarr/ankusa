@@ -296,7 +296,7 @@ use Ankusa\Admin\AdminClient;
 $admin = new AdminClient(getenv('ADMIN_URL') ?: 'http://localhost:4002');
 
 $admin->health();                          // ['status' => 'ok', 'instance' => ..., 'roles' => [...]]
-$admin->listDeadLetters(['limit' => 10]);  // ['total' => ..., 'entries' => [...]]
+$admin->listDeadLetters(['limit' => 10]);  // ['total' => ..., 'entries' => [...], 'next_cursor' => ...]
 $admin->listQuarantined();
 
 // Replay jobs. A job is node-local, so a fleet replay is one job per node:

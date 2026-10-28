@@ -342,8 +342,8 @@ defmodule Ankusa.SDK.ConformanceTest do
     with_admin(input, base_url, recorder, &unwrap!(Admin.config(&1)))
   end
 
-  defp run("admin_dlq_list", _case, _params_by_id, input, base_url, recorder) do
-    params = input["params"]
+  defp run("admin_dlq_list", test_case, params_by_id, input, base_url, recorder) do
+    params = Map.get(params_by_id, test_case["id"], input["params"])
 
     with_admin(input, base_url, recorder, &unwrap!(Admin.list_dead_letters(&1, params)))
   end

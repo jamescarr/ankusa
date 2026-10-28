@@ -148,7 +148,7 @@ public final class AdminClient {
   /**
    * Lists a filtered page of the dead-letter queue.
    *
-   * @param params the source, lower bound, and page size to list with
+   * @param params the filters and page to list with
    * @return one page of dead letters
    * @throws RoleNotEnabledError when the listener refuses the call for a missing role
    * @throws AdminRejectedError when the listener refuses the call with another 4xx
@@ -160,11 +160,23 @@ public final class AdminClient {
     if (params.sourceId() != null) {
       query.put("source_id", params.sourceId());
     }
+    if (params.tenant() != null) {
+      query.put("tenant", params.tenant());
+    }
+    if (params.sink() != null) {
+      query.put("sink", params.sink().toString());
+    }
+    if (params.errorClass() != null) {
+      query.put("error_class", params.errorClass());
+    }
     if (params.since() != null) {
       query.put("since", params.since().toString());
     }
     if (params.limit() != null) {
       query.put("limit", params.limit().toString());
+    }
+    if (params.cursor() != null) {
+      query.put("cursor", params.cursor());
     }
     return decode(send("GET", HttpCore.withQuery("/v1/dlq", query), null), DlqPage.class);
   }

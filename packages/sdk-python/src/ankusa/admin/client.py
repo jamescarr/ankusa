@@ -74,8 +74,14 @@ class AdminClient:
     ) -> dict[str, Any]:
         """``GET /v1/dlq`` -> a page of dead-lettered hooks, newest first.
 
-        ``params`` may carry ``source_id``, ``since`` and ``limit``; absent keys
-        are omitted from the query string rather than sent as ``=undefined``.
+        ``params`` may carry ``source_id``, ``tenant``, ``sink``, ``error_class``
+        (``permanent``, ``throttled`` or ``transient``), ``since``, ``limit`` and
+        ``cursor``; they go out in the order given, and absent values are left out
+        of the query string. The page is ``{total, entries, next_cursor}``:
+        ``total`` is null when the node cannot count matches without a scan (any
+        filter but ``tenant``), and while ``next_cursor`` is set, pass it back as
+        ``cursor`` for the next page — a page can be short, or empty, before the
+        last.
         """
         return self._json(self._request("GET", "/v1/dlq", params=_query(params)))
 
@@ -86,7 +92,11 @@ class AdminClient:
 
         ``spec`` is the request body verbatim: ``kind`` (``"dlq"``,
         ``"archive"`` or ``"quarantine"``) plus that kind's bounds and any
-        optional ``rate`` / ``max_lag_ms``.
+        optional ``rate`` / ``max_lag_ms``. For ``dlq``, the spec also takes
+        ``sink`` (an index into the source's sinks) and ``error_class``; every
+        kind also takes ``tenant`` and ``job_id`` (a lowercase UUID: posting the
+        same ``job_id``, kind and filter again answers that job instead of
+        starting another).
         """
         return self._json(self._request("POST", "/v1/replays", json=dict(spec)))
 
