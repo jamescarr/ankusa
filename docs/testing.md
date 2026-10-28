@@ -1361,7 +1361,10 @@ scripts), then gates the change against that. When the pull request changes
 measurement (the branch's are restored afterwards), so a dependency change is
 also measured base-against-branch on one runner rather than against a baseline
 recorded on another one. It falls back to the checked-in `baseline.json` only
-when there is no base commit to measure. `baseline.json` is the reference for
+when there is no base commit to measure. A release tag skips the gate: its
+commit was gated on its pull request and its push to `main`, and a new tag has
+no base commit, so the fallback would judge a hosted runner against a laptop.
+`baseline.json` is the reference for
 local runs on a comparable machine; a run on another runner class prints a
 `WARN`. The checked-in one was recorded (DUR-4.b.b.a, `runner:
 local-darwin-aarch64`) on an Apple-silicon laptop with the bench's data
