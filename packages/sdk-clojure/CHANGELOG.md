@@ -7,6 +7,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-28
+
 ### Added
 
 - **Delivery metadata (CON-4).** `parse-headers` and `receive-delivery` return `:received-at` (when the edge accepted the hook, unix milliseconds, from `x-ankusa-received-at`) and `:body-sha256` (the lowercase hex SHA-256 of the body sent, from `x-ankusa-body-sha256`): `nil` when the header is absent, empty or malformed, never an error.
@@ -104,3 +106,6 @@ this project follows [Semantic Versioning](https://semver.org/).
 - `:scope` on the admin and routes rejected-error ex-data: the scope a `403
   forbidden` says the credential lacks (control planes require a credential
   since Ankusa 0.6).
+
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-clojure-v0.1.0...HEAD
+[0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-clojure-v0.1.0
