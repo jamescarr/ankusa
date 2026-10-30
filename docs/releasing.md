@@ -167,22 +167,21 @@ Repository secrets, under Settings → Secrets and variables → Actions.
   the Hex.pm dashboard (Keys).
 - **Docker Hub:** `DOCKERHUB_USERNAME`, and `DOCKERHUB_TOKEN`: a Docker Hub
   personal access token with Read & Write.
-- **npm:** `NPM_TOKEN`, an npmjs.com **Automation** access token (Account →
-  Access Tokens → Generate New Token → Automation: this type bypasses
-  2FA-on-publish, which a personal "Publish" token does not), scoped to the
-  `ankusa` package once it exists, or unscoped for the first publish.
-  `release-npm.yml` also supports Trusted Publishing (OIDC): a trusted
-  publisher is already configured on npmjs.com (GitHub Actions, repo
-  `jamescarr/ankusa`, workflow `release-npm.yml`, `main`), but it can't be
-  switched on yet — npm's registry rejects this repo's immutable OIDC
-  subject claim with a misleading "package not found"
-  ([npm/cli#9969](https://github.com/npm/cli/issues/9969), open,
-  untriaged). The repository **variable** `NPM_AUTH` (Settings → Secrets
-  and variables → Actions → Variables, not Secrets) picks the path: unset,
-  or anything other than `oidc`, uses `NPM_TOKEN`; set to `oidc` to drop
-  the token and publish via the trusted publisher instead. Flip it once
-  #9969 is fixed, confirm one release through it, then delete the
-  `NPM_TOKEN` secret.
+- **npm:** no repository secret while the repository **variable** `NPM_AUTH`
+  (Settings → Secrets and variables → Actions → Variables) is `oidc`, as it
+  is: `release-npm.yml` publishes through npm
+  [Trusted Publishing](https://docs.npmjs.com/trusted-publishers/) (OIDC).
+  The trusted publisher lives on npmjs.com (`ankusa` → Settings → Trusted
+  publishing: GitHub Actions, user `jamescarr`, repo `ankusa`, workflow
+  `release-npm.yml`, no environment) and must have **`npm publish`** ticked
+  under Allowed actions. An entry created after 2026-09-03 allows only `npm
+  stage publish` by default, and the job's direct `npm publish` then fails
+  with `403 … OIDC permission denied for this action`. Entries can't be
+  edited: delete and recreate one. A new entry must complete its first publish
+  within 2 days or it expires. With `NPM_AUTH` unset (or any other value) the
+  job falls back to an `NPM_TOKEN` secret, a granular token with publish rights
+  on `ankusa` that bypasses 2FA; npm is restricting those for direct
+  publishing, so treat it as a stopgap.
 - **PyPI:** no repository secret — publishing uses
   [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (OIDC). The
   one-time setup lives on PyPI, not here: see
