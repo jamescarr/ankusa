@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-30
+
 ### Changed
 
 - Version aligned with `ankusa` 0.7: the Elixir packages (`ankusa`, the
@@ -213,7 +215,8 @@ follows [Semantic Versioning](https://semver.org/).
 - Depends on `ankusa` `~> 0.2`, which introduced `Ankusa.Routes.Store` and
   `Ankusa.Routes.Snapshot`.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.6.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.7.0...HEAD
+[0.7.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.6.0...ankusa_redis-v0.7.0
 [0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.5.0...ankusa_redis-v0.6.0
 [0.5.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.4.0...ankusa_redis-v0.5.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.3.0...ankusa_redis-v0.4.0
