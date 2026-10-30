@@ -12,7 +12,7 @@ follows [Semantic Versioning](https://semver.org/).
 
 - Version aligned with `ankusa` 0.7: the Elixir packages (`ankusa`, the
   adapters, the server image) now share major.minor
-  ([`docs/releasing.md`](../../docs/releasing.md)). No code change since
+  ([`docs/releasing.md`](https://github.com/jamescarr/ankusa/blob/main/docs/releasing.md#versions-the-elixir-family-shares-majorminor)). No code change since
   0.6.0, which already requires `ankusa ~> 0.7`.
 
 ## [0.6.0] - 2026-10-28
