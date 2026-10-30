@@ -6,6 +6,13 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Version aligned with `ankusa` 0.7: the Elixir packages (`ankusa`, the
+  adapters, the server image) now share major.minor
+  ([`docs/releasing.md`](../../docs/releasing.md)). No code change since
+  0.6.0, which already requires `ankusa ~> 0.7`.
+
 ## [0.6.0] - 2026-10-28
 
 ### Added

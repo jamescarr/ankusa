@@ -1,8 +1,9 @@
 # Changelog
 
-All notable changes to the Ankusa server image are documented here. This
-project is versioned independently of the `ankusa` Hex packages: it is the
-`jamescarr/ankusa` Docker image, tagged `ankusa_server-vX.Y.Z`.
+All notable changes to the Ankusa server image are documented here. It is the
+`jamescarr/ankusa` Docker image, tagged `ankusa_server-vX.Y.Z`, and shares its
+major.minor with the `ankusa` Hex packages it bundles; patch versions are its
+own ([`docs/releasing.md`](../../docs/releasing.md)).
 
 ## [Unreleased]
 
