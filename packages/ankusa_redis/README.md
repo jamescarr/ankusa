@@ -19,7 +19,7 @@ Redis pub/sub channel.
 def deps do
   [
     {:ankusa, "~> 0.7"},
-    {:ankusa_redis, "~> 0.6"}
+    {:ankusa_redis, "~> 0.7"}
   ]
 end
 ```
