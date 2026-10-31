@@ -2062,6 +2062,108 @@ defmodule Ankusa.Admin.RouterTest do
       assert Enum.map(first ++ rest, & &1["id"]) == ids.(acme ++ globex)
     end
 
+    # `merge_scans/1` cuts the merged page at the highest unfinished scan's
+    # frontier when several tenant indexes are scanned at once: hits below it
+    # are dropped from the page and re-found on the next one. Here acme's scan
+    # runs out on every page (4 000 rows: under its half of the split budget)
+    # while globex's stops at its share (30 000 rows), so globex's frontier
+    # drops acme's hits again and again until the cursor passes them — and
+    # later pages must find each wanted row exactly once.
+    test "a two-tenant filtered walk where one scan runs out and the other stops at its budget" do
+      config = start_tenant_instance(failing_sources())
+      inst = config.instance
+      at = System.system_time(:millisecond) - 60_000
+
+      # acme: odd seqs 1..7 999 (4 000 rows); globex: even seqs 2..60 000
+      # (30 000 rows). Every row's owner is "other" except three per tenant
+      # ("wanted"), so the sparse `source_id` predicate walks each scan to its
+      # budget instead of stopping at `limit + 1`, and a matched row needs the
+      # deferred owner read.
+      wanted = %{"acme" => [7_999, 3_997, 1], "globex" => [60_000, 40_000, 2]}
+
+      for {tenant, seqs} <- [
+            {"acme", Enum.take_every(1..7_999, 2)},
+            {"globex", Enum.take_every(2..60_000, 2)}
+          ],
+          chunk <- Enum.chunk_every(seqs, 5_000) do
+        ops =
+          Enum.flat_map(chunk, fn seq ->
+            source_id = if(seq in wanted[tenant], do: "wanted", else: "other")
+
+            # A listed entry needs its row and hook; the `source_id` predicate
+            # keeps only the wanted rows on a page, so only they get them.
+            dead_index_ops(
+              inst,
+              seq,
+              0,
+              at + seq,
+              source_id,
+              "#{tenant}-#{seq}",
+              tenant
+            ) ++
+              if source_id == "wanted" do
+                [
+                  {:put, :deliveries, Keys.delivery(seq, 0),
+                   Deliveries.encode_row(%{
+                     module: Ankusa.Sink.Log,
+                     state: :dead,
+                     at: at + seq,
+                     error: "sink returned an error",
+                     attempts: 3,
+                     size: 2,
+                     source_id: source_id,
+                     id: "#{tenant}-#{seq}"
+                   })},
+                  {:put, :hooks, Keys.hook(seq),
+                   Ankusa.Envelope.to_binary(%Ankusa.Envelope{
+                     id: "#{tenant}-#{seq}",
+                     source_id: source_id,
+                     received_at: at + seq,
+                     method: "POST",
+                     path: "/hooks/#{source_id}",
+                     headers: [{"content-type", "application/json"}],
+                     content_type: "application/json",
+                     body: "{}",
+                     size: 2,
+                     seq: seq
+                   })}
+                ]
+              else
+                []
+              end
+          end)
+
+        :ok = Store.write(inst, ops)
+      end
+
+      walk = fn walk, cursor, acc ->
+        {:ok, %{entries: entries, next_cursor: next}} =
+          Ankusa.Queue.dead(inst,
+            tenants: ["acme", "globex"],
+            source_id: "wanted",
+            limit: 10,
+            cursor: cursor
+          )
+
+        acc = acc ++ Enum.map(entries, & &1.envelope.id)
+
+        if next, do: walk.(walk, next, acc), else: acc
+      end
+
+      # Every wanted row, exactly once, in the merged order: acme's rows sit
+      # below globex's frontier until the cursor passes them, and the pages
+      # where they are dropped (and some empty pages) must not lose or repeat
+      # anything.
+      assert walk.(walk, nil, []) == [
+               "globex-60000",
+               "globex-40000",
+               "acme-7999",
+               "acme-3997",
+               "globex-2",
+               "acme-1"
+             ]
+    end
+
     test "a listing for more than eight tenants scans the global family with the tenants as a predicate" do
       tenants = for i <- 1..10, do: "t#{i}"
 

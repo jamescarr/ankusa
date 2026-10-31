@@ -1308,8 +1308,11 @@ defmodule Ankusa.Queue.Deliveries do
     {[], n}
   end
 
-  # The most dead keys one scan of `dead/2` examines, whatever the DLQ holds: a
-  # page costs this much at worst, not the size of the DLQ.
+  # The most dead keys one call of `dead/2` examines, whatever the DLQ holds: a
+  # page costs this much at worst, not the size of the DLQ. A tenant-scoped
+  # listing splits the budget across the tenant indexes it scans
+  # (`scan_sources/5`), so a page is this many keys and row reads at most
+  # whatever the filters and the tenants.
   @list_max_scan 10_000
   # Candidate keys a filtered listing checks per batch of store reads.
   @list_chunk 1_000
@@ -1327,9 +1330,10 @@ defmodule Ankusa.Queue.Deliveries do
   and `:tenants` (only rows of hooks owned by one of these tenants, read from the
   by-tenant index with no hook read; `nil` is every tenant).
 
-  No scan examines more than #{@list_max_scan} dead keys. A filter that matches
-  little can therefore make a page short, or empty, with `next_cursor` set: keep
-  asking until it is `nil`. `next_cursor` is `nil` on the last page.
+  A call examines at most #{@list_max_scan} dead keys, split across the tenant
+  indexes a tenant-scoped listing scans. A filter that matches little can
+  therefore make a page short, or empty, with `next_cursor` set: keep asking
+  until it is `nil`. `next_cursor` is `nil` on the last page.
 
   `total` is the number of matching rows when that is known without a scan: no
   filter but `:tenants` (a counter read), or a filter whose scan reached the end
@@ -1393,18 +1397,32 @@ defmodule Ankusa.Queue.Deliveries do
   end
 
   defp scan_sources(instance, :all, filter, cursor, limit) do
-    with {:ok, scan} <- scan_dead(instance, :dead, nil, filter, cursor, limit), do: {:ok, [scan]}
+    with {:ok, scan} <- scan_dead(instance, :dead, nil, filter, cursor, limit, @list_max_scan),
+         do: {:ok, [scan]}
   end
 
   defp scan_sources(instance, {:filtered, ords}, filter, cursor, limit) do
     with {:ok, scan} <-
-           scan_dead(instance, :dead, nil, Map.put(filter, :ords, ords), cursor, limit),
+           scan_dead(
+             instance,
+             :dead,
+             nil,
+             Map.put(filter, :ords, ords),
+             cursor,
+             limit,
+             @list_max_scan
+           ),
          do: {:ok, [scan]}
   end
 
   defp scan_sources(instance, {:index, ords}, filter, cursor, limit) do
+    # The call's budget, split evenly: a page across several tenant indexes
+    # costs `@list_max_scan` keys and row reads at most, not one budget per
+    # index.
+    budget = div(@list_max_scan, max(length(ords), 1))
+
     Enum.reduce_while(ords, {:ok, []}, fn ord, {:ok, scans} ->
-      case scan_dead(instance, :dead_by_tenant, ord, filter, cursor, limit) do
+      case scan_dead(instance, :dead_by_tenant, ord, filter, cursor, limit, budget) do
         {:ok, scan} -> {:cont, {:ok, [scan | scans]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -1412,11 +1430,11 @@ defmodule Ankusa.Queue.Deliveries do
   end
 
   # One reverse range scan, newest first, that stops at `limit + 1` matches (the
-  # extra one proves there is a next page) or at the scan budget. Returns
-  # `{hits, status}`: the hits as `{at, seq, sink, owner_source}` and `:exhausted`
-  # when the range ended, or `{:more, {at, seq, sink}}`: every key at or above
-  # that one was examined, nothing below it was.
-  defp scan_dead(instance, family, ord, filter, cursor, limit) do
+  # extra one proves there is a next page) or at `budget` keys examined.
+  # Returns `{hits, status}`: the hits as `{at, seq, sink, owner_source}` and
+  # `:exhausted` when the range ended, or `{:more, {at, seq, sink}}`: every key
+  # at or above that one was examined, nothing below it was.
+  defp scan_dead(instance, family, ord, filter, cursor, limit, budget) do
     acc = %{
       scanned: 0,
       chunk: [],
@@ -1436,7 +1454,7 @@ defmodule Ankusa.Queue.Deliveries do
         dead_range(family, ord, filter, cursor),
         acc,
         fn key, value, acc ->
-          dead_step(instance, {family, filter, deferred?, limit}, key, value, acc)
+          dead_step(instance, {family, filter, deferred?, limit, budget}, key, value, acc)
         end,
         reverse: true
       )
@@ -1471,7 +1489,7 @@ defmodule Ankusa.Queue.Deliveries do
       (family == :dead_by_tenant and Map.has_key?(filter, :source_id))
   end
 
-  defp dead_step(instance, {family, filter, deferred?, limit}, key, value, acc) do
+  defp dead_step(instance, {family, filter, deferred?, limit, budget}, key, value, acc) do
     {at, seq, sink} = decode_dead_key(family, key)
     cand = {at, seq, sink, if(family == :dead, do: {:value, value}, else: nil)}
     acc = %{acc | scanned: acc.scanned + 1, last: {at, seq, sink}}
@@ -1489,14 +1507,14 @@ defmodule Ankusa.Queue.Deliveries do
       end
 
     acc =
-      if acc.chunk_n >= @list_chunk or (deferred? and acc.scanned >= @list_max_scan),
+      if acc.chunk_n >= @list_chunk or (deferred? and acc.scanned >= budget),
         do: flush_dead(instance, family, filter, acc),
         else: acc
 
     cond do
       not is_map(acc) -> {:halt, acc}
       acc.hit_n > limit -> {:halt, %{acc | stop: :limit}}
-      acc.scanned >= @list_max_scan -> {:halt, %{acc | stop: :budget}}
+      acc.scanned >= budget -> {:halt, %{acc | stop: :budget}}
       true -> {:cont, acc}
     end
   end

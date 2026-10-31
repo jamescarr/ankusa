@@ -1413,10 +1413,13 @@ them back from the `OPTIONS-*` file.
 [`bench/dlq_page_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/dlq_page_bench.exs)
 is the DEL-6 proof, run by hand (`MIX_ENV=test mix run bench/dlq_page_bench.exs`,
 about a minute and 3.3 GB of disk at the default `ROWS=10000000`): it writes
-10⁷ dead-letter rows straight to the store over 4 tenants and 3 sinks, then
-calls `GET /v1/dlq` through `Ankusa.Admin.Router` 30 times for the first page
-and a mid-cursor page, with and without a tenant filter, and for the `sink` and
-`error_class` predicates, and exits 1 unless every case's p99 is under 100 ms.
+10⁷ dead-letter rows straight to the store over `TENANTS` tenants and `SINKS`
+sinks, then calls `GET /v1/dlq` through `Ankusa.Admin.Router` 30 times for the
+first page and a mid-cursor page, with and without a tenant filter, for the
+`sink` and `error_class` predicates, for a class no row has (every page scans
+the full 10 000-key budget, `error_class=throttled`), and for every tenant
+index at once with it (`Ankusa.Queue.dead/2` directly, `TENANTS=8` is the
+bound), and exits 1 unless every case's p99 is under 100 ms.
 
 `mise run bench:gate` also runs four self-asserting scripts first, with no
 baseline entry (the fourth, [`bench/intake_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/intake_bench.exs), is under [Dual commit](#dual-commit-wal-type-dual)):

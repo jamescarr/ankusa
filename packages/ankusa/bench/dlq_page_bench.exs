@@ -16,6 +16,15 @@
 #   ?sink=<n>                the sink predicate
 #   ?error_class=transient   the deferred predicate (a delivery row read per
 #                            candidate)
+#   ?error_class=throttled   the same predicate against a DLQ where nothing
+#                            matches: every page scans the full key budget and
+#                            reads a delivery row per candidate
+#   all tenants              the first page across every by-tenant index
+#                            (`Ankusa.Queue.dead/2` directly: the router's
+#                            `tenant` parameter narrows to one tenant)
+#   all tenants, throttled   the worst page shape: the call's 10 000-key budget
+#                            is split across the tenant indexes (`TENANTS=8` is
+#                            the bound) and a delivery row is read per candidate
 #
 # Rows are written straight to the store, in batches: the dead index keys (the
 # global and the by-tenant one), the delivery row and the hook a commit would
@@ -246,6 +255,36 @@ defmodule Bench.DlqPage do
     Float.round(elem(sorted, idx) / 1000, 3)
   end
 
+  @doc """
+  `calls` timings of `fun` after `warmup` unmeasured calls, for a direct
+  `Ankusa.Queue.dead/2` call (a case the router cannot express): `fun` returns
+  `%{entries: n, total: t}`.
+  """
+  def measure_fun(fun, calls, warmup) do
+    for _ <- 1..warmup, do: fun.()
+
+    results =
+      for _ <- 1..calls do
+        started = System.monotonic_time(:microsecond)
+        result = fun.()
+        {System.monotonic_time(:microsecond) - started, result}
+      end
+
+    latencies = Enum.map(results, &elem(&1, 0))
+    last = results |> List.last() |> elem(1)
+
+    %{
+      p50: percentile_ms(latencies, 0.50),
+      p99: percentile_ms(latencies, 0.99),
+      max: percentile_ms(latencies, 1.0),
+      status: 200,
+      entries: last.entries,
+      total: last.total,
+      body_bytes: 0,
+      ok?: Enum.all?(results, fn {_us, r} -> is_map(r) end)
+    }
+  end
+
   @doc "A cursor in the middle of the DLQ, for a row of tenant `tenant` (an index, or nil)."
   def mid_cursor(info, rows, tenants, sinks, tenant_index) do
     mid = div(rows, 2)
@@ -329,19 +368,56 @@ tenant_cursor = info |> B.mid_cursor(rows, tenants, sinks, 1) |> B.cursor_param(
 
 Process.sleep(settle_ms)
 
+# `{:path, path}` goes through the router; `{:dead, names, filter}` calls
+# `Ankusa.Queue.dead/2` directly with every tenant, which the router cannot
+# express (its `tenant` parameter names one tenant).
+measure_case = fn
+  instance, {:path, path}, calls, warmup ->
+    B.measure(instance, path, calls, warmup)
+
+  instance, {:dead, names, filter}, calls, warmup ->
+    B.measure_fun(
+      fn ->
+        opts = [tenants: names, limit: page_limit] ++ Map.to_list(filter)
+        {:ok, %{total: total, entries: entries}} = Ankusa.Queue.dead(instance, opts)
+        %{entries: length(entries), total: total}
+      end,
+      calls,
+      warmup
+    )
+end
+
+case_path = fn
+  {:path, path} ->
+    path
+
+  {:dead, names, filter} ->
+    "dead(tenants: #{Enum.join(names, ",")})#{inspect(Map.to_list(filter))}"
+end
+
 cases = [
-  {"no filter, first page", "/v1/dlq?limit=#{page_limit}"},
-  {"no filter, mid cursor", "/v1/dlq?limit=#{page_limit}&cursor=#{any_cursor}"},
-  {"tenant, first page", "/v1/dlq?limit=#{page_limit}&tenant=#{tenant}"},
-  {"tenant, mid cursor", "/v1/dlq?limit=#{page_limit}&tenant=#{tenant}&cursor=#{tenant_cursor}"},
-  {"sink filter", "/v1/dlq?limit=#{page_limit}&sink=1"},
-  {"error_class filter", "/v1/dlq?limit=#{page_limit}&error_class=transient"}
+  {"no filter, first page", {:path, "/v1/dlq?limit=#{page_limit}"}},
+  {"no filter, mid cursor", {:path, "/v1/dlq?limit=#{page_limit}&cursor=#{any_cursor}"}},
+  {"tenant, first page", {:path, "/v1/dlq?limit=#{page_limit}&tenant=#{tenant}"}},
+  {"tenant, mid cursor",
+   {:path, "/v1/dlq?limit=#{page_limit}&tenant=#{tenant}&cursor=#{tenant_cursor}"}},
+  {"sink filter", {:path, "/v1/dlq?limit=#{page_limit}&sink=1"}},
+  {"error_class filter", {:path, "/v1/dlq?limit=#{page_limit}&error_class=transient"}},
+  {"error_class=throttled (none match)",
+   {:path, "/v1/dlq?limit=#{page_limit}&error_class=throttled"}},
+  {"all tenants", {:dead, info.names, %{}}},
+  {"all tenants, error_class=throttled", {:dead, info.names, %{error_class: :throttled}}}
 ]
 
 results =
-  for {label, path} <- cases do
-    result = B.measure(instance, path, calls, warmup)
-    Map.merge(result, %{case: label, path: path, pass?: result.ok? and result.p99 < limit_ms})
+  for {label, case} <- cases do
+    result = measure_case.(instance, case, calls, warmup)
+
+    Map.merge(result, %{
+      case: label,
+      path: case_path.(case),
+      pass?: result.ok? and result.p99 < limit_ms
+    })
   end
 
 report = %{
