@@ -276,7 +276,7 @@ let page = admin
         ..ListDeadLettersParams::default()
     })
     .await?;
-println!("{} of {} dead letters", page.entries.len(), page.total);
+println!("{} dead letters (of {:?}), next page: {:?}", page.entries.len(), page.total, page.next_cursor);
 # Ok(())
 # }
 ```

@@ -87,7 +87,7 @@ if err != nil {
 
 health, err := admin.Health(ctx)                             // {Status, Instance, Roles}
 metrics, err := admin.Metrics(ctx)                           // Prometheus text
-dlq, err := admin.ListDeadLetters(ctx, ankusa.ListDeadLettersParams{Limit: 10})
+dlq, err := admin.ListDeadLetters(ctx, ankusa.ListDeadLettersParams{Limit: 10}) // {Total, Entries, NextCursor}
 quarantine, err := admin.ListQuarantined(ctx, ankusa.ListQuarantinedParams{})
 audit, err := admin.ListAudit(ctx, ankusa.ListAuditParams{Tenant: "acme", Limit: 50}) // {Entries, NextCursor}
 
