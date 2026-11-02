@@ -1739,3 +1739,4 @@ enough at the exact moment a cursor reader passes the tail. The earlier
 documented run of the same harness did lose 12 of 1581 acked hooks in chaos
 (with a 301.7 s verify timeout), and the `ankusa_postgres` regression test
 reproduced the mechanism deterministically rather than by luck.
+
