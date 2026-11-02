@@ -1123,11 +1123,44 @@ defmodule Ankusa.DispatchTest do
     assert {:ok, %{total: 1, entries: [entry]}} = Ankusa.Queue.dead(inst, limit: 10)
     assert entry.envelope.id == old.id
     assert entry.reason == inspect({:retry_horizon, AlwaysFail})
+    assert entry.error_class == :transient
     assert %{state: :dead, attempts: 4} = row!(inst, 8)
 
     # inside it: parked, attempts unchanged, but due no later than the horizon
     assert %{state: :pending, attempts: 2, at: at} = row!(inst, 9)
     assert at == near + 24 * @hour
+  end
+
+  test "a row parked behind a breaker a throttling sink opened is dead-lettered as throttled at its horizon" do
+    inst =
+      start(%{"src1" => %{sinks: [{ThrottleSink, ms: 60_000}]}},
+        dispatch: %{
+          breaker_failures: 1,
+          breaker_open_ms: 60_000,
+          breaker_max_open_ms: 60_000,
+          retry: retry(base_ms: 60_000, max_attempts: nil)
+        }
+      )
+
+    now = System.system_time(:millisecond)
+    write_row!(inst, 7, build_env("src1"), ThrottleSink, now, %{})
+    assert {:ok, _} = Pipeline.tick(inst)
+    # one throttled answer opened the breaker
+    assert %{state: :pending, attempts: 1} = row!(inst, 7)
+
+    old = build_env("src1")
+
+    write_row!(inst, 8, old, ThrottleSink, now, %{
+      attempts: 4,
+      first_attempt_at: now - 25 * @hour
+    })
+
+    assert {:ok, _} = Pipeline.tick(inst)
+
+    assert {:ok, %{entries: [entry]}} = Ankusa.Queue.dead(inst, limit: 10)
+    assert entry.envelope.id == old.id
+    assert entry.reason == inspect({:retry_horizon, ThrottleSink})
+    assert entry.error_class == :throttled
   end
 
   test "DEL-2: auth and config errors dead-letter at once and are counted per sink" do

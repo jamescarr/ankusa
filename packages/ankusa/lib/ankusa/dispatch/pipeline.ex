@@ -1163,7 +1163,7 @@ defmodule Ankusa.Dispatch.Pipeline do
       source_id: source_id
     }
 
-    dead(%{item | row: row}, reason, acc, now)
+    dead(%{item | row: row}, reason, :permanent, acc, now)
   end
 
   # The same for a hook this node cannot decode, e.g. an envelope version newer
@@ -1175,7 +1175,7 @@ defmodule Ankusa.Dispatch.Pipeline do
         "dead-lettering its delivery row #{item.sink}"
     )
 
-    dead(item, reason, acc, now)
+    dead(item, reason, :permanent, acc, now)
   end
 
   defp resolve_one(item, {state, ops, pairs, jobs, sources}, now) do
@@ -1183,7 +1183,13 @@ defmodule Ankusa.Dispatch.Pipeline do
 
     cond do
       source == :error ->
-        dead(item, {:source_gone, item.env.source_id}, {state, ops, pairs, jobs, sources}, now)
+        dead(
+          item,
+          {:source_gone, item.env.source_id},
+          :permanent,
+          {state, ops, pairs, jobs, sources},
+          now
+        )
 
       # The source store could not answer: neither a delivery nor a verdict.
       # The row waits a moment and keeps its attempt count.
@@ -1222,7 +1228,10 @@ defmodule Ankusa.Dispatch.Pipeline do
             # parked again.
             if now >= deadline do
               reason = {:retry_horizon, item.row.module}
-              dead(item, reason, {state, ops, pairs, jobs, sources}, now)
+              # `admit/2` parks only for a key whose breaker is `:open` or
+              # `:half_open`, so the entry exists.
+              %{class: class} = Map.fetch!(state.breakers, key)
+              dead(item, reason, class, {state, ops, pairs, jobs, sources}, now)
             else
               state = bump_replay(state, item.row, :parked)
               {state, park_ops(item, min(at, deadline)) ++ ops, pairs, jobs, sources}
@@ -1252,7 +1261,7 @@ defmodule Ankusa.Dispatch.Pipeline do
 
               :error ->
                 reason = {:sink_gone, item.sink, item.row.module}
-                dead(item, reason, {state, ops, pairs, jobs, sources}, now)
+                dead(item, reason, :permanent, {state, ops, pairs, jobs, sources}, now)
             end
         end
     end
@@ -1292,7 +1301,7 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
-  defp dead(item, reason, {state, ops, pairs, jobs, sources}, now) do
+  defp dead(item, reason, class, {state, ops, pairs, jobs, sources}, now) do
     error = inspect(reason, limit: 50, printable_limit: 4096)
 
     dead_ops =
@@ -1303,7 +1312,7 @@ defmodule Ankusa.Dispatch.Pipeline do
         item.sink,
         item.row,
         now,
-        {dead_class(reason), error},
+        {class, error},
         item.env
       )
 
@@ -1315,15 +1324,8 @@ defmodule Ankusa.Dispatch.Pipeline do
     {state, dead_ops ++ ops, pairs, jobs, sources}
   end
 
-  # The class a dead letter is filed under (`Ankusa.Sink.error_class/0`): a
-  # delivery that ran out of time behind an open breaker was still retryable;
-  # everything else `dead/4` sees (a source or sink that is gone, a hook this
-  # node cannot decode) will never succeed as it is.
-  defp dead_class({:retry_horizon, _module}), do: :transient
-  defp dead_class(_reason), do: :permanent
-
   # Pending rows of a source being deleted (`dead_letter_source/2`): the same
-  # dead row, dead key, telemetry and replay count as `dead/4`, from the due
+  # dead row, dead key, telemetry and replay count as `dead/5`, from the due
   # index instead of a claim, in one synced batch. A row whose hook is missing
   # is dropped, as `resolve_one/3` drops it.
   defp dead_letter_rows(state, rows, now, error) do
@@ -1681,6 +1683,8 @@ defmodule Ankusa.Dispatch.Pipeline do
   # Every attempt's outcome moves its key's breaker. `:ok` closes it. A failure
   # that is not `{:permanent, _}` counts; the `breaker_failures`-th in a row, or
   # a failed probe, opens it, and whatever of the key is still queued is parked.
+  # A counted failure also records its `Sink.error_class/1`, and that is the
+  # class a row parked behind the breaker is dead-lettered as at its horizon.
   # A `{:permanent, _}` answer to a probe closes it: the destination answered,
   # it just refused that one hook (and leaving the probe slot set would park
   # the key forever).
@@ -1700,15 +1704,16 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   defp trip(state, job, {:error, reason}, probe?) do
     dispatch = state.config.dispatch
+    class = Sink.classify(reason)
 
     cond do
       dispatch.breaker_failures == 0 ->
         state
 
-      match?({:permanent, _}, Sink.classify(reason)) and probe? ->
+      match?({:permanent, _}, class) and probe? ->
         trip(state, job, :ok, probe?)
 
-      match?({:permanent, _}, Sink.classify(reason)) ->
+      match?({:permanent, _}, class) ->
         state
 
       true ->
@@ -1718,10 +1723,11 @@ defmodule Ankusa.Dispatch.Pipeline do
             failures: 0,
             opens: 0,
             until: 0,
-            probe: nil
+            probe: nil,
+            class: :transient
           })
 
-        breaker = %{breaker | failures: breaker.failures + 1}
+        breaker = %{breaker | failures: breaker.failures + 1, class: Sink.error_class(class)}
 
         open? =
           probe? or (breaker.state == :closed and breaker.failures >= dispatch.breaker_failures)
