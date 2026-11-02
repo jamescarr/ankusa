@@ -373,7 +373,8 @@ priority, ID order.
   ran (`in_progress`). `cancel-in-progress: ${{ github.event_name ==
   'pull_request' }}` leaves `push` — and therefore every `main` push and release
   tag — at `false`, so the record for a commit is never cancelled.
-  `mise run lint:workflows` passes. This PR's run: PENDING.
+  `mise run lint:workflows` passes. This PR's run: 41523967650 (all 25 jobs
+  green; the follow-up commit that updates this line touches only this file).
 
 - [ ] **CI-5 — A `changes` job that skips the package jobs a diff cannot have touched, with `main` always running everything** · P2 · Deps: CI-1, CI-3, CI-4
   *Why:* every run executes 25 jobs regardless of the diff; **15 of the 25
