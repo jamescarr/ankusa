@@ -120,7 +120,7 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 4/6 done · last updated: 2026-11-02
+Status: 5/6 done · last updated: 2026-11-02
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
