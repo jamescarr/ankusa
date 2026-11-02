@@ -74,6 +74,30 @@ load_tars() {
   done
 }
 
+# A cold run still pulls (there is no other source on a runner), and Docker Hub
+# rate-limits by IP: four package jobs, the integration job and both drills
+# pull at the same moment, and Hub answers a burst with
+# `429 toomanyrequests`. That refusal is transient where a missing manifest or
+# a bad credential is not, so retry it a couple of times and fail anything else
+# at once. A warm run never reaches this.
+pull_ref() {
+  local attempt=1 out
+  while true; do
+    if out=$(docker pull "$1" 2>&1); then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    printf '%s\n' "$out" >&2
+    case "$out" in
+      *toomanyrequests*) ;;
+      *) return 1 ;;
+    esac
+    [ "$attempt" -lt 3 ] || return 1
+    sleep $((attempt * 15))
+    attempt=$((attempt + 1))
+  done
+}
+
 # Drop tars for refs this run does not use: a `restore-keys` prefix hit hands
 # back the previous digest's tars, and the next save would otherwise copy them
 # into the new entry.
@@ -187,7 +211,7 @@ case "$cmd" in
       if present "$ref"; then
         loaded=$((loaded + 1))
       else
-        docker pull "$ref"
+        pull_ref "$ref"
         pulled=$((pulled + 1))
         pulled_now=1
       fi
