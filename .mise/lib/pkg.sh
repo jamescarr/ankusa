@@ -260,8 +260,8 @@ pkg_secrets() {
   case "$(pkg_kind "$1")" in
     hex) echo HEX_API_KEY ;;
     docker) echo DOCKERHUB_USERNAME DOCKERHUB_TOKEN ;;
-    # npm trusted publishing (OIDC) can't be used yet — npm/cli#9969 — so
-    # NPM_TOKEN is required unless the NPM_AUTH repo variable is "oidc".
+    # npm publishes via Trusted Publishing (OIDC) while the NPM_AUTH repo
+    # variable is "oidc"; otherwise the token fallback needs NPM_TOKEN.
     npm)
       if [ "$(gh variable get NPM_AUTH --repo "$GITHUB_REPO" 2>/dev/null)" != oidc ]; then
         echo NPM_TOKEN

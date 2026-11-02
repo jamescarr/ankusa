@@ -92,7 +92,9 @@ impl<T: Transport> AdminClient<T> {
         decode(response.body()).map_err(AdminError::Unavailable)
     }
 
-    /// `GET /v1/dlq`: one page of the dead-letter queue.
+    /// `GET /v1/dlq`: one page of the dead-letter queue. The params go out in
+    /// a fixed order: `source_id`, `tenant`, `sink`, `error_class`, `since`,
+    /// `limit`, `cursor`.
     ///
     /// # Errors
     ///
@@ -105,11 +107,23 @@ impl<T: Transport> AdminClient<T> {
         if let Some(source_id) = params.source_id.as_deref() {
             query.push_str("source_id", source_id);
         }
+        if let Some(tenant) = params.tenant.as_deref() {
+            query.push_str("tenant", tenant);
+        }
+        if let Some(sink) = params.sink {
+            query.push_display("sink", sink);
+        }
+        if let Some(error_class) = params.error_class.as_deref() {
+            query.push_str("error_class", error_class);
+        }
         if let Some(since) = params.since {
             query.push_display("since", since);
         }
         if let Some(limit) = params.limit {
             query.push_display("limit", limit);
+        }
+        if let Some(cursor) = params.cursor.as_deref() {
+            query.push_str("cursor", cursor);
         }
         let response = self.get(&format!("/v1/dlq{}", query.finish())).await?;
         decode(response.body()).map_err(AdminError::Unavailable)
@@ -329,6 +343,15 @@ pub struct DlqEntry {
     pub size: u64,
     /// The captured content type, when the sender set one.
     pub content_type: Option<String>,
+    /// The index of the sink that was due this row in the source's `sinks`
+    /// list, `0` being the first. `None` from a node older than 0.7.
+    #[serde(default)]
+    pub sink: Option<u64>,
+    /// The class the row dead-lettered under: `"permanent"`, `"throttled"` or
+    /// `"transient"`. `None` for a row dead-lettered before the node recorded
+    /// a class.
+    #[serde(default)]
+    pub error_class: Option<String>,
     /// The give-up reason, as the node inspected it.
     pub reason: String,
 }
@@ -337,10 +360,17 @@ pub struct DlqEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct DlqPage {
-    /// Number of matching entries, before `limit`.
-    pub total: u64,
+    /// The number of matching entries before `limit`, when the node knows it
+    /// without a scan (that is, when the only filter is `tenant`); `None`
+    /// otherwise.
+    pub total: Option<u64>,
     /// The entries on this page.
     pub entries: Vec<DlqEntry>,
+    /// The cursor to pass as [`ListDeadLettersParams::cursor`] for the next
+    /// page; `None` on the last one. A page can be short, or empty, while it
+    /// is set.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }
 
 /// One quarantined hook.
@@ -492,6 +522,19 @@ pub struct ReplaySpec {
     /// Sink indexes into the source's current `sinks` (`archive`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sinks: Option<Vec<u64>>,
+    /// Replay only this tenant's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    /// The index of the sink to replay to (`dlq` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sink: Option<u64>,
+    /// Replay only rows in this error class (`dlq` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
+    /// A lowercase UUID naming the job: posting the same `job_id`, kind and
+    /// filter again answers that job instead of starting a second one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
     /// Items per second. The node defaults to `1000`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate: Option<u64>,
@@ -521,12 +564,24 @@ pub struct ListDeadLettersParams {
     /// Exact source id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
+    /// Exact tenant. A caller limited to some tenants is held to them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    /// Only the rows due to this sink, by its index in the source's `sinks`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sink: Option<u64>,
+    /// Only rows in this error class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
     /// Inclusive lower bound on the dead-letter timestamp, unix milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
     /// Page size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// The previous page's `next_cursor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// The filters `GET /v1/quarantine` accepts.
@@ -619,13 +674,19 @@ mod tests {
         let client = client(transport);
         let params = ListDeadLettersParams {
             source_id: Some("a b".to_owned()),
+            tenant: Some("acme".to_owned()),
+            sink: Some(1),
+            error_class: Some("throttled".to_owned()),
             since: Some(1_720_000_000_000),
             limit: Some(50),
+            cursor: Some("c1".to_owned()),
         };
         client.list_dead_letters(&params).await.expect("listed");
         assert_eq!(
             targets.lock().expect("not poisoned").as_slice(),
-            ["/v1/dlq?source_id=a%20b&since=1720000000000&limit=50"]
+            [
+                "/v1/dlq?source_id=a%20b&tenant=acme&sink=1&error_class=throttled&since=1720000000000&limit=50&cursor=c1"
+            ]
         );
     }
 

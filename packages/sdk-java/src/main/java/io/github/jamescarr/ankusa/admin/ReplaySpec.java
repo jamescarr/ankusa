@@ -39,6 +39,12 @@ import org.jspecify.annotations.Nullable;
  * @param from the earliest {@code receivedAt} to replay, inclusive, or null
  * @param to the latest {@code receivedAt} to replay, inclusive, or null
  * @param sinks the sink indexes to redrive archive hooks to, or null for every current sink
+ * @param tenant replay only this tenant's rows, or null for every tenant
+ * @param sink the index of the sink to replay to ({@code dlq} only), or null for every sink
+ * @param errorClass replay only rows in this error class ({@code dlq} only), or null for every
+ *     class
+ * @param jobId a lowercase UUID naming the job: posting the same id, kind and filter again answers
+ *     that job instead of starting another
  * @param rate the target items per second, or null for the listener's default
  * @param maxLagMs the dispatcher lag in milliseconds above which to pause, or null for the default
  */
@@ -51,6 +57,10 @@ public record ReplaySpec(
     @Nullable Long from,
     @Nullable Long to,
     @Nullable List<Integer> sinks,
+    @Nullable String tenant,
+    @Nullable Integer sink,
+    @Nullable String errorClass,
+    @Nullable String jobId,
     @Nullable Integer rate,
     @Nullable Integer maxLagMs) {
 
@@ -74,6 +84,10 @@ public record ReplaySpec(
     private @Nullable Long from;
     private @Nullable Long to;
     private @Nullable List<Integer> sinks;
+    private @Nullable String tenant;
+    private @Nullable Integer sink;
+    private @Nullable String errorClass;
+    private @Nullable String jobId;
     private @Nullable Integer rate;
     private @Nullable Integer maxLagMs;
 
@@ -169,6 +183,53 @@ public record ReplaySpec(
     }
 
     /**
+     * Replays only one tenant's rows.
+     *
+     * @param tenant the tenant id, or null for every tenant
+     * @return this builder
+     */
+    public Builder tenant(@Nullable String tenant) {
+      this.tenant = tenant;
+      return this;
+    }
+
+    /**
+     * Sets the sink index to replay to.
+     *
+     * @param sink the sink's index in the source's {@code sinks} ({@code dlq} only), or null for
+     *     every sink
+     * @return this builder
+     */
+    public Builder sink(@Nullable Integer sink) {
+      this.sink = sink;
+      return this;
+    }
+
+    /**
+     * Replays only one error class.
+     *
+     * @param errorClass {@code "permanent"}, {@code "throttled"} or {@code "transient"} ({@code
+     *     dlq} only), or null for every class
+     * @return this builder
+     */
+    public Builder errorClass(@Nullable String errorClass) {
+      this.errorClass = errorClass;
+      return this;
+    }
+
+    /**
+     * Names the job.
+     *
+     * @param jobId a lowercase UUID; posting the same id, kind and filter again answers that job
+     *     instead of starting another, or null to let the listener name it
+     * @return this builder
+     */
+    public Builder jobId(@Nullable String jobId) {
+      this.jobId = jobId;
+      return this;
+    }
+
+    /**
      * Sets the target items per second.
      *
      * @param rate the rate, or null for the listener's default
@@ -196,7 +257,21 @@ public record ReplaySpec(
      * @return the spec
      */
     public ReplaySpec build() {
-      return new ReplaySpec(kind, sourceId, id, since, until, from, to, sinks, rate, maxLagMs);
+      return new ReplaySpec(
+          kind,
+          sourceId,
+          id,
+          since,
+          until,
+          from,
+          to,
+          sinks,
+          tenant,
+          sink,
+          errorClass,
+          jobId,
+          rate,
+          maxLagMs);
     }
   }
 }

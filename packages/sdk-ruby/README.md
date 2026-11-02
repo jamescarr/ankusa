@@ -302,7 +302,7 @@ require "ankusa/sdk"
 admin = Ankusa::AdminClient.new(ENV.fetch("ADMIN_URL", "http://localhost:4002"))
 
 admin.health                          # {"status" => "ok", "instance" => ..., "roles" => [...]}
-admin.list_dead_letters({"limit" => 10})  # {"total" => ..., "entries" => [...]}
+admin.list_dead_letters({"limit" => 10})  # {"total" => ..., "entries" => [...], "next_cursor" => ...}
 admin.list_quarantined
 admin.list_audit({"tenant" => "acme", "limit" => 50})  # {"entries" => [...], "next_cursor" => ...}
 

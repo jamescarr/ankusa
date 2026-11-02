@@ -28,6 +28,13 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `event_type`. `Sink.SQS` leaves `ankusa_event_type` off a message that would
   pass SQS's 10 attributes (the body carries it too).
 
+### Fixed
+
+- **A row parked behind a breaker that a throttling sink opened is dead-lettered as
+  `throttled`.** At its retry horizon such a row was filed as `transient`, so
+  `GET /v1/dlq?error_class=throttled` and an `error_class: throttled` replay missed it.
+  A key's breaker now records the `Ankusa.Sink.error_class/1` of each failure it counts,
+  and a row that dies behind it is filed under the class of the last one.
 ### Changed
 
 - **`Ankusa.Routing` takes over resolving a hook at ingest.** One capped JSON
