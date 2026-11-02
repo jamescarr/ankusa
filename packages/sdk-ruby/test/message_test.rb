@@ -20,4 +20,23 @@ class MessageTest < Minitest::Test
     assert_equal "invalid_field", error.code
     assert_equal "verification", error.field
   end
+
+  def test_decode_message_event_type_is_nil_when_absent_or_null
+    assert_nil Ankusa.decode_message(JSON.generate(BASE)).event_type
+    assert_nil Ankusa.decode_message(JSON.generate(BASE.merge(event_type: nil))).event_type
+  end
+
+  def test_decode_message_event_type_is_the_providers_event_name
+    message = Ankusa.decode_message(JSON.generate(BASE.merge(event_type: "invoice.paid")))
+
+    assert_equal "invoice.paid", message.event_type
+  end
+
+  def test_decode_message_event_type_must_be_a_string
+    error = assert_raises(Ankusa::InvalidMessageError) do
+      Ankusa.decode_message(JSON.generate(BASE.merge(event_type: 7)))
+    end
+    assert_equal "invalid_field", error.code
+    assert_equal "event_type", error.field
+  end
 end

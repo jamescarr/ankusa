@@ -39,7 +39,9 @@ defmodule Ankusa.SDK.Message do
   whose `v` it does not speak (`unsupported_version`, permanent: dead-letter
   it, never retry). `instance` and `region` name the Ankusa instance that
   published the message and the region it is configured with (`nil` when the
-  message says `null` or predates the fields).
+  message says `null` or predates the fields). `event_type` is the provider's
+  event name (for example `invoice.paid`) as the source's `event_type` key read
+  it (`nil` when none).
 
   ## Integrity
 
@@ -76,6 +78,7 @@ defmodule Ankusa.SDK.Message do
           tracestate: String.t() | nil,
           instance: String.t() | nil,
           region: String.t() | nil,
+          event_type: String.t() | nil,
           headers: %{String.t() => String.t()}
         }
 
@@ -98,6 +101,7 @@ defmodule Ankusa.SDK.Message do
     :tracestate,
     :instance,
     :region,
+    :event_type,
     headers: %{}
   ]
 
@@ -210,6 +214,7 @@ defmodule Ankusa.SDK.Message do
          {:ok, tracestate} <- optional_string(raw, "tracestate"),
          {:ok, instance} <- optional_string(raw, "instance"),
          {:ok, region} <- optional_string(raw, "region"),
+         {:ok, event_type} <- optional_string(raw, "event_type"),
          {:ok, headers} <- headers(raw),
          {:ok, sha256} <- sha256(raw),
          {:ok, verification} <- verification(raw) do
@@ -231,7 +236,8 @@ defmodule Ankusa.SDK.Message do
          traceparent: traceparent,
          tracestate: tracestate,
          instance: instance,
-         region: region
+         region: region,
+         event_type: event_type
        }}
     end
   end

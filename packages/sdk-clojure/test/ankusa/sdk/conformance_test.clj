@@ -188,7 +188,8 @@
                       "traceparent" (:traceparent result)
                       "tracestate" (:tracestate result)
                       "instance" (:instance result)
-                      "region" (:region result)}
+                      "region" (:region result)
+                      "event_type" (:event-type result)}
     "idempotency_key" {"key" result}
     "trusted" {"trusted" result}
     "redeem" {"body" {"base64" (base64 result)}}

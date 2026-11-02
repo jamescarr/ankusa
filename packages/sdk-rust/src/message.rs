@@ -78,6 +78,10 @@ pub struct Message {
     /// The region that instance is configured with; `None` when it has none or
     /// comes from a node older than the field.
     pub region: Option<String>,
+    /// The provider's event name (for example `invoice.paid`), as the source's
+    /// `event_type` key read it; `None` when the source has none, the hook
+    /// carries none, or the message comes from a node older than the field.
+    pub event_type: Option<String>,
 }
 
 impl Message {
@@ -227,6 +231,7 @@ pub fn decode_message(data: &[u8]) -> Result<Message, InvalidMessageError> {
     let tracestate = optional_string(&map, "tracestate")?;
     let instance = optional_string(&map, "instance")?;
     let region = optional_string(&map, "region")?;
+    let event_type = optional_string(&map, "event_type")?;
     let headers = headers_field(&map)?;
     let sha256 = sha256_field(&map)?;
     let verification = verification_field(&map)?;
@@ -244,22 +249,7 @@ pub fn decode_message(data: &[u8]) -> Result<Message, InvalidMessageError> {
     let mut body = None;
     let mut claim = None;
     if has_body {
-        let encoded = map
-            .get("body_base64")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("invalid_body_base64", None))?;
-        let decoded = BASE64
-            .decode(encoded)
-            .map_err(|_| invalid("invalid_body_base64", None))?;
-        if decoded.len() as u64 != size {
-            return Err(invalid("size_mismatch", None));
-        }
-        if let Some(expected) = &sha256 {
-            if &hex::encode(Sha256::digest(&decoded)) != expected {
-                return Err(invalid("integrity", None));
-            }
-        }
-        body = Some(decoded);
+        body = Some(inline_body(&map, size, sha256.as_deref())?);
     } else {
         let claim_ref = map
             .get("claim")
@@ -298,7 +288,33 @@ pub fn decode_message(data: &[u8]) -> Result<Message, InvalidMessageError> {
         tracestate,
         instance,
         region,
+        event_type,
     })
+}
+
+/// The decoded inline body: valid base64, `size` bytes long, and (when the
+/// message carries one) matching `sha256`.
+fn inline_body(
+    map: &serde_json::Map<String, Value>,
+    size: u64,
+    sha256: Option<&str>,
+) -> Result<Vec<u8>, InvalidMessageError> {
+    let encoded = map
+        .get("body_base64")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("invalid_body_base64", None))?;
+    let decoded = BASE64
+        .decode(encoded)
+        .map_err(|_| invalid("invalid_body_base64", None))?;
+    if decoded.len() as u64 != size {
+        return Err(invalid("size_mismatch", None));
+    }
+    if let Some(expected) = sha256 {
+        if hex::encode(Sha256::digest(&decoded)) != expected {
+            return Err(invalid("integrity", None));
+        }
+    }
+    Ok(decoded)
 }
 
 fn invalid(code: &'static str, field: Option<&'static str>) -> InvalidMessageError {
@@ -428,6 +444,30 @@ mod tests {
                 "body_base64":"aGVsbG8=","instance":7,"region":1}"#,
         );
         assert_eq!((bad.code, bad.field), ("invalid_field", Some("instance")));
+    }
+
+    #[test]
+    fn event_type_is_an_optional_string() {
+        let inline = |extra: &str| {
+            format!(
+                r#"{{"v":1,"id":"01a0","source_id":"s","received_at":1,"size":5,
+                    "body_base64":"aGVsbG8="{extra}}}"#
+            )
+        };
+
+        let absent = decode_message(inline("").as_bytes()).expect("valid message");
+        assert_eq!(absent.event_type, None);
+
+        let null =
+            decode_message(inline(r#","event_type":null"#).as_bytes()).expect("valid message");
+        assert_eq!(null.event_type, None);
+
+        let present = decode_message(inline(r#","event_type":"invoice.paid""#).as_bytes())
+            .expect("valid message");
+        assert_eq!(present.event_type.as_deref(), Some("invoice.paid"));
+
+        let bad = err(&inline(r#","event_type":7"#));
+        assert_eq!((bad.code, bad.field), ("invalid_field", Some("event_type")));
     }
 
     #[test]

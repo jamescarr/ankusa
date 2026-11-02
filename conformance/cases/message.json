@@ -29,7 +29,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": null,
-          "region": null
+          "region": null,
+          "event_type": null
         }
       }
     },
@@ -60,7 +61,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": null,
-          "region": null
+          "region": null,
+          "event_type": null
         }
       }
     },
@@ -91,7 +93,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": null,
-          "region": null
+          "region": null,
+          "event_type": null
         }
       }
     },
@@ -122,7 +125,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": null,
-          "region": null
+          "region": null,
+          "event_type": null
         }
       }
     },
@@ -153,7 +157,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": null,
-          "region": null
+          "region": null,
+          "event_type": null
         }
       }
     },
@@ -184,7 +189,8 @@
           "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
           "tracestate": "vendor=value,other=thing",
           "instance": null,
-          "region": null
+          "region": null,
+          "event_type": null
         }
       }
     },
@@ -215,7 +221,8 @@
           "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
           "tracestate": null,
           "instance": null,
-          "region": null
+          "region": null,
+          "event_type": null
         }
       }
     },
@@ -726,7 +733,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": null,
-          "region": null
+          "region": null,
+          "event_type": null
         }
       }
     },
@@ -757,7 +765,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": null,
-          "region": null
+          "region": null,
+          "event_type": null
         }
       }
     },
@@ -793,7 +802,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": "ankusa-eu-1",
-          "region": "eu-west-1"
+          "region": "eu-west-1",
+          "event_type": null
         }
       }
     },
@@ -842,7 +852,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": "ankusa-eu-1",
-          "region": "eu-west-1"
+          "region": "eu-west-1",
+          "event_type": null
         }
       }
     },
@@ -875,7 +886,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": null,
-          "region": null
+          "region": null,
+          "event_type": null
         }
       }
     },
@@ -908,7 +920,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": "default",
-          "region": null
+          "region": null,
+          "event_type": null
         }
       }
     },
@@ -957,6 +970,140 @@
           "retryable": false,
           "code": "invalid_field",
           "field": "instance"
+        }
+      }
+    },
+    {
+      "id": "message.decode.event_type",
+      "feature": "message.event_type",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01c0\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"content_type\":\"application/json\",\"size\":5,\"sha256\":\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\",\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\",\"replay_id\":null,\"idempotency_key\":\"acme:demo:evt_1\",\"headers\":{\"x-github-event\":\"push\"},\"event_type\":\"invoice.paid\"}"
+      },
+      "expect": {
+        "ok": {
+          "v": 1,
+          "id": "01c0",
+          "source_id": "demo",
+          "tenant_id": "acme",
+          "received_at": 1720000000000,
+          "content_type": "application/json",
+          "size": 5,
+          "body_base64": "aGVsbG8=",
+          "claim": null,
+          "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "dedupe_key": "evt_1",
+          "replay_id": null,
+          "idempotency_key": "acme:demo:evt_1",
+          "headers": {
+            "x-github-event": "push"
+          },
+          "verification": null,
+          "traceparent": null,
+          "tracestate": null,
+          "instance": null,
+          "region": null,
+          "event_type": "invoice.paid"
+        }
+      }
+    },
+    {
+      "id": "message.decode.event_type_null",
+      "feature": "message.event_type",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01c1\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"content_type\":\"application/json\",\"size\":5,\"sha256\":\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\",\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\",\"replay_id\":null,\"idempotency_key\":\"acme:demo:evt_1\",\"headers\":{\"x-github-event\":\"push\"},\"event_type\":null}"
+      },
+      "expect": {
+        "ok": {
+          "v": 1,
+          "id": "01c1",
+          "source_id": "demo",
+          "tenant_id": "acme",
+          "received_at": 1720000000000,
+          "content_type": "application/json",
+          "size": 5,
+          "body_base64": "aGVsbG8=",
+          "claim": null,
+          "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "dedupe_key": "evt_1",
+          "replay_id": null,
+          "idempotency_key": "acme:demo:evt_1",
+          "headers": {
+            "x-github-event": "push"
+          },
+          "verification": null,
+          "traceparent": null,
+          "tracestate": null,
+          "instance": null,
+          "region": null,
+          "event_type": null
+        }
+      }
+    },
+    {
+      "id": "message.decode.event_type_absent",
+      "feature": "message.event_type",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01c2\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"content_type\":\"application/json\",\"size\":5,\"sha256\":\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\",\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\",\"replay_id\":null,\"idempotency_key\":\"acme:demo:evt_1\",\"headers\":{\"x-github-event\":\"push\"}}"
+      },
+      "expect": {
+        "ok": {
+          "v": 1,
+          "id": "01c2",
+          "source_id": "demo",
+          "tenant_id": "acme",
+          "received_at": 1720000000000,
+          "content_type": "application/json",
+          "size": 5,
+          "body_base64": "aGVsbG8=",
+          "claim": null,
+          "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "dedupe_key": "evt_1",
+          "replay_id": null,
+          "idempotency_key": "acme:demo:evt_1",
+          "headers": {
+            "x-github-event": "push"
+          },
+          "verification": null,
+          "traceparent": null,
+          "tracestate": null,
+          "instance": null,
+          "region": null,
+          "event_type": null
+        }
+      }
+    },
+    {
+      "id": "message.reject.bad_event_type",
+      "feature": "message.event_type",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01c3\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"content_type\":\"application/json\",\"size\":5,\"sha256\":\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\",\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\",\"replay_id\":null,\"idempotency_key\":\"acme:demo:evt_1\",\"headers\":{\"x-github-event\":\"push\"},\"event_type\":7}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "event_type"
+        }
+      }
+    },
+    {
+      "id": "message.reject.bad_region_before_event_type",
+      "feature": "message.event_type",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01c4\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"content_type\":\"application/json\",\"size\":5,\"sha256\":\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\",\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\",\"replay_id\":null,\"idempotency_key\":\"acme:demo:evt_1\",\"headers\":{\"x-github-event\":\"push\"},\"region\":1,\"event_type\":true}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "invalid_field",
+          "field": "region"
         }
       }
     }

@@ -231,7 +231,9 @@ every `v` from `message/min-supported-version` to `message/max-supported-version
 message is a `v: 1` message plus additive fields, so a consumer reads it the
 same way; any other `v` is `unsupported_version` (permanent: dead-letter it).
 `:instance` and `:region` are the Ankusa instance that published the message and
-the region it is configured with (`nil` for none). A message from the
+the region it is configured with (`nil` for none). `:event-type` is the
+provider's event name as the source's `event_type` key read it, for example
+`invoice.paid` (`nil` for none). A message from the
 instance's lifecycle sinks carries a CloudEvents event as its body:
 `ankusa.sdk.lifecycle/decode` on the body.
 
