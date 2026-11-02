@@ -11,11 +11,32 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Fixed
+
+- **A row parked behind a breaker that a throttling sink opened is dead-lettered as
+  `throttled`.** At its retry horizon such a row was filed as `transient`, so
+  `GET /v1/dlq?error_class=throttled` and an `error_class: throttled` replay missed it.
+  A key's breaker now records the `Ankusa.Sink.error_class/1` of each failure it counts,
+  and a row that dies behind it is filed under the class of the last one.
 ### Changed
 
 - Requires `bandit ~> 1.14 and >= 1.14.1` (was `~> 1.14`): 1.14.0 is affected
   by EEF-CVE-2026-116078 (High: an HTTP/2 request body sent as 1-byte DATA
   frames amplified memory use), fixed in 1.14.1; `mix hex.audit` fails on it.
+
+### Fixed
+
+- **A tenant-scoped DLQ page is bounded by the call's budget, not one per
+  tenant index.** The bounded listing of DEL-6 gave each by-tenant scan the
+  full 10 000-key budget, so a page across 8 tenant indexes with a sparse
+  `error_class` filter examined 8 × 10 000 keys and read 8 × 10 000 delivery
+  rows (178 ms p99 at 50 000 rows, already past the 100 ms *Done when*). The
+  budget is now split evenly across the indexes a call scans, so no call
+  examines more than 10 000 keys or reads more than 10 000 rows; the same
+  worst page measures 43 ms p99 at 10 million rows over 8 tenants
+  (`bench/dlq_page_bench.exs`, new `error_class=throttled` and all-tenants
+  cases; `admin/router_test.exs` "a two-tenant filtered walk where one scan
+  runs out and the other stops at its budget").
 
 ## [0.7.0] - 2026-10-28
 
