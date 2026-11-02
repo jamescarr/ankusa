@@ -1,12 +1,11 @@
 [project]
 name = "ankusa-quickstart-worker"
 version = "0.1.0"
-description = "Quickstart example worker: receives Ankusa's HTTP sink deliveries."
+description = "Quickstart example worker: consumes Ankusa's queue messages from an SQS FIFO queue."
 requires-python = ">=3.13"
 dependencies = [
     "ankusa",
-    "fastapi>=0.141.1",
-    "uvicorn>=0.54.0",
+    "boto3>=1.35",
 ]
 
 [tool.uv.sources]

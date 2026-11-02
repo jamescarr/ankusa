@@ -1,0 +1,48 @@
+# The http-consumer config: one open `demo` source delivering to the worker.
+# Every key, at its default: https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/reference.yml
+
+node:
+  data_dir: /var/lib/ankusa
+
+admin:
+  enabled: true
+  port: 4002
+  # the other containers and the host's published port reach it
+  ip: 0.0.0.0
+  # Demo: the host's published port is bound to 127.0.0.1 in docker-compose.yml.
+  # Real deployments set auth.mode to token, jwt or mtls (docs/configuration.md).
+  auth: {mode: none, allow_insecure: true}
+
+# Short on purpose, so the dead-letter drill takes seconds, not minutes:
+# 6 attempts over roughly 8-15s. The default retries for 24 hours (`max_elapsed_ms`), backing off to 5 min.
+dispatch:
+  # Off for the same reason: by default 5 failures in a row open the sink's
+  # circuit breaker, which parks its hooks for 30 s (doubling, up to 5 min)
+  # without spending attempts, so the drill would take minutes.
+  breaker_failures: 0
+  retry:
+    base_ms: 1000
+    max_ms: 4000
+    max_attempts: 6
+
+# The worker is plain http on the compose network, at a private address, which
+# the egress policy refuses by default: a sink may not reach the private network
+# unless you name where. A production sink is an https:// URL on a public name
+# and needs none of this; see docs/configuration.md#egress.
+egress:
+  allow_insecure_http: true
+  allow_hosts: [worker]
+
+sources:
+  demo:
+    # Accepts anything, so it works before you have provider credentials.
+    verify: {type: none}
+    on_verify_failure: accept_flag
+    sinks:
+      - type: http
+        url: http://worker:8080/hooks
+        timeout_ms: 5000
+        # Demo only: the worker below does not verify. A real sink sets
+        # `secret: ${WORKER_WHSEC}` and its receiver verifies the signature
+        # (docs/integrations.md#signed-deliveries).
+        allow_unsigned: true

@@ -8,7 +8,7 @@ If you want to run it first, start with [quickstart.md](quickstart.md).
 
 | Doc | What it answers |
 | --- | --- |
-| [quickstart.md](quickstart.md) | How do I run it with a worker, break the worker, and replay? |
+| [quickstart.md](quickstart.md) | How do I run it with a queue worker, break the worker and the broker, and replay? |
 | [configuration.md](configuration.md) | What does every YAML key (and the Elixir config) mean, and what is its default? |
 | [deployment.md](deployment.md) | Which roles and topologies exist, and how do I run the container? |
 | [architecture.md](architecture.md) | What is the guarantee, and what happens on the request path when a component fails? |

@@ -1,6 +1,6 @@
 # Examples
 
-Seven runnable demonstrations of the same receiver with a different last hop.
+Eight runnable demonstrations of the same receiver with a different last hop.
 Each one ends in a worker you could replace with your own service; read the
 [quickstart](quickstart/) first, then pick the transport you actually run.
 
@@ -21,7 +21,8 @@ flowchart LR
 
 | Example | Delivers via | Worker | Needs | Run |
 | --- | --- | --- | --- | --- |
-| [quickstart](quickstart/) | HTTP | Python (FastAPI, uv) | docker | `docker compose up --build -d --wait` |
+| [quickstart](quickstart/) | Kafka → SQS FIFO | Python (boto3, uv) | docker | `docker compose up --build -d --wait` |
+| [http-consumer](http-consumer/) | HTTP | Python (FastAPI, uv) | docker | `docker compose up --build -d --wait` |
 | [rabbitmq-consumer](rabbitmq-consumer/) | RabbitMQ | TypeScript | docker | `docker compose up --build` |
 | [kafka-sqs-consumer](kafka-sqs-consumer/) | Kafka → SQS FIFO | TypeScript | docker | `docker compose up --build -d --wait` |
 | [nats-consumer](nats-consumer/) | NATS JetStream | Rust | docker | `docker compose up --build -d --wait` |
@@ -29,15 +30,37 @@ flowchart LR
 | [fleet-e2e](fleet-e2e/) | RabbitMQ, two nodes behind nginx (or, from the Helm chart, on kind) | TypeScript (Postgres) | docker (kind, kubectl, helm for `./kind.sh`) | `./run.sh` |
 | [jetstream-k8s](jetstream-k8s/) | NATS JetStream, two autoscaling fleets (kind + Helm + Istio) | TypeScript | docker, kind, kubectl, helm | `./run.sh` |
 
-`quickstart` and `nats-consumer` run the published image. `rabbitmq-consumer`,
-`kafka-sqs-consumer`, and `oban-consumer` build their ingest app from this
-repo's Elixir source, so you can see the library in use. `fleet-e2e` builds the
-server image from this checkout; `jetstream-k8s` does too unless you set
-`ANKUSA_IMAGE` to a published tag.
+`quickstart`, `http-consumer`, and `nats-consumer` run the published image.
+`rabbitmq-consumer`, `kafka-sqs-consumer`, and `oban-consumer` build their
+ingest app from this repo's Elixir source, so you can see the library in use.
+`fleet-e2e` builds the server image from this checkout; `jetstream-k8s` does
+too unless you set `ANKUSA_IMAGE` to a published tag.
 
 ## quickstart
 
-The smallest complete deployment: the published image receives a hook and POSTs
+The published image produces each hook to a Kafka topic on Redpanda, a
+Redpanda Connect bridge carries the records into an SQS FIFO queue in floci,
+and a Python worker polls the queue with `boto3`, using the `ankusa` Python SDK
+([`packages/sdk-python`](../packages/sdk-python)) to decode each message and
+redeem a large body from the node's claim-check gateway. No object store. Keep
+it as the shape to copy when your workers consume from a queue.
+
+```mermaid
+flowchart LR
+    C[curl] -->|POST /webhooks/demo| A[ankusa :4000]
+    A -->|produce| T[(Redpanda: ankusa.events)]
+    T --> B[bridge]
+    B -->|group = key| Q[(SQS FIFO: floci)]
+    Q -->|long poll| W[worker.py]
+    W -.->|large body| CC[claim-check :4001]
+    Y[You] -->|/health /metrics /v1/dlq| AD[admin :4002]
+```
+
+[`quickstart/`](quickstart/)
+
+## http-consumer
+
+The smallest HTTP deployment: the published image receives a hook and POSTs
 it to a small [FastAPI](https://fastapi.tiangolo.com/) worker built with `uv`,
 using the `ankusa` Python SDK ([`packages/sdk-python`](../packages/sdk-python))
 to parse the delivery's headers. No broker, no object store. Keep it as the
@@ -50,7 +73,7 @@ flowchart LR
     Y[You] -->|/health /metrics /v1/dlq| AD[admin :4002]
 ```
 
-[`quickstart/`](quickstart/)
+[`http-consumer/`](http-consumer/)
 
 ## rabbitmq-consumer
 
