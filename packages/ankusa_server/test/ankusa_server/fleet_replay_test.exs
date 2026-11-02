@@ -45,15 +45,22 @@ defmodule AnkusaServer.FleetReplayTest do
       auth: Plug.Conn.get_req_header(conn, "authorization")
     }
 
-    {status, payload} =
+    answer =
       Agent.get_and_update(agent, fn state ->
         state = %{state | calls: [call | state.calls]}
         next(state, {conn.method, conn.host}, body)
       end)
 
-    conn
-    |> Plug.Conn.put_resp_content_type("application/json")
-    |> Plug.Conn.send_resp(status, JSON.encode!(payload))
+    case answer do
+      # A bare atom in a script is a transport error, not an HTTP answer.
+      reason when is_atom(reason) ->
+        Req.Test.transport_error(conn, reason)
+
+      {status, payload} ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(status, JSON.encode!(payload))
+    end
   end
 
   defp next(state, {method, _host} = key, body) do
@@ -144,7 +151,7 @@ defmodule AnkusaServer.FleetReplayTest do
     # the summary: both nodes done, the counters added up
     assert FleetReplay.format_summary(result) ==
              "replay #{@job_id} kind=dlq nodes=2 done=2 running=0 paused=0 cancelled=0 " <>
-               "failed=0 unreachable=0 rejected=0 pending=0 moved=17 scanned=34 skipped=0 " <>
+               "failed=0 unreachable=0 gone=0 rejected=0 pending=0 moved=17 scanned=34 skipped=0 " <>
                "delivered=17 dead=0"
 
     assert Enum.any?(lines, &(&1 =~ "b.test:4002: unreachable"))
@@ -188,7 +195,7 @@ defmodule AnkusaServer.FleetReplayTest do
     assert FleetReplay.exit_code(result) == 1
 
     assert FleetReplay.format_summary(result) =~
-             "done=1 running=0 paused=0 cancelled=0 failed=0 unreachable=0 rejected=1"
+             "done=1 running=0 paused=0 cancelled=0 failed=0 unreachable=0 gone=0 rejected=1"
 
     assert Enum.find(result.nodes, &(&1.state == :rejected)).detail == "403 forbidden"
   end
@@ -247,6 +254,144 @@ defmodule AnkusaServer.FleetReplayTest do
     assert calls(agent) == []
   end
 
+  test "--expect-nodes fails a fleet of another size before anything is sent" do
+    {agent, plug} =
+      stub_fleet(%{
+        {"GET", "10.0.0.1"} => [job("done", 1)],
+        {"GET", "10.0.0.2"} => [job("done", 1)]
+      })
+
+    two = fn "ankusa" -> {:ok, [{10, 0, 0, 1}, {10, 0, 0, 2}]} end
+
+    {:ok, options} =
+      FleetReplay.parse_args(["--nodes", "ankusa", "--expect-nodes", "3", "--job-id", @job_id])
+
+    assert {:error,
+            "--nodes resolved to 2 node(s) (ankusa@10.0.0.1:4002 " <>
+              "ankusa@10.0.0.2:4002), --expect-nodes is 3"} =
+             FleetReplay.run(options, resolver: two, http: [plug: plug])
+
+    assert calls(agent) == []
+
+    {:ok, options} =
+      FleetReplay.parse_args(["--nodes", "ankusa", "--expect-nodes", "2", "--job-id", @job_id])
+
+    {result, _lines} = run(options, plug, resolver: two)
+    assert FleetReplay.exit_code(result) == 0
+  end
+
+  test "a pinned address that leaves the DNS answer is gone at once, not polled to the timeout" do
+    {agent, plug} =
+      stub_fleet(%{
+        {"GET", "10.0.0.1"} => [job("done", 1)],
+        {"POST", "10.0.0.2"} => [:econnrefused]
+      })
+
+    {:ok, answers} = Agent.start_link(fn -> 0 end)
+
+    resolver = fn "ankusa" ->
+      n = Agent.get_and_update(answers, fn n -> {n, n + 1} end)
+
+      if n == 0,
+        do: {:ok, [{10, 0, 0, 1}, {10, 0, 0, 2}]},
+        else: {:ok, [{10, 0, 0, 1}, {10, 0, 0, 3}]}
+    end
+
+    {:ok, options} =
+      FleetReplay.parse_args(["--nodes", "ankusa", "--job-id", @job_id, "--timeout", "60"])
+
+    {micros, {result, _lines}} = :timer.tc(fn -> run(options, plug, resolver: resolver) end)
+
+    assert state_of(result, "ankusa@10.0.0.2:4002") == :gone
+    assert state_of(result, "ankusa@10.0.0.1:4002") == :done
+    assert FleetReplay.exit_code(result) == 1
+    assert FleetReplay.format_summary(result) =~ " gone=1 "
+    assert micros < 10_000_000
+    refute Enum.any?(calls(agent), &(&1.host == "10.0.0.3"))
+  end
+
+  test "an IPv6 answer is one bracketed node per address" do
+    {agent, plug} = stub_fleet(%{})
+
+    {:ok, options} =
+      FleetReplay.parse_args(["--nodes", "ankusa", "--job-id", @job_id, "--timeout", "1"])
+
+    resolver = fn "ankusa" ->
+      {:ok, [{0xFD00, 0, 0, 0, 0, 0, 0, 1}, {0xFD00, 0, 0, 0, 0, 0, 0, 2}]}
+    end
+
+    {result, _lines} = run(options, plug, resolver: resolver, interval_ms: 100)
+
+    assert Enum.map(result.nodes, & &1.label) == [
+             "ankusa@[fd00::1]:4002",
+             "ankusa@[fd00::2]:4002"
+           ]
+
+    assert calls(agent) != []
+  end
+
+  defmodule V6Node do
+    @moduledoc false
+
+    def init(opts), do: opts
+
+    def call(conn, _opts) do
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      job_id = JSON.decode!(body)["job_id"]
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(
+        202,
+        JSON.encode!(%{
+          "id" => job_id,
+          "state" => "done",
+          "moved" => 1,
+          "scanned" => 2,
+          "skipped" => 0,
+          "delivered" => 1,
+          "dead" => 0,
+          "error" => nil
+        })
+      )
+    end
+  end
+
+  describe "a pinned IPv6 node over a real socket" do
+    @tag :ipv6
+    test "the bracketed URL with inet6 connects and finishes the job" do
+      loopback = {0, 0, 0, 0, 0, 0, 0, 1}
+
+      pid =
+        start_supervised!(
+          {Bandit, plug: V6Node, scheme: :http, ip: loopback, port: 0, startup_log: false}
+        )
+
+      {:ok, {_ip, port}} = ThousandIsland.listener_info(pid)
+
+      {:ok, options} =
+        FleetReplay.parse_args([
+          "--nodes",
+          "v6.test:#{port}",
+          "--job-id",
+          @job_id,
+          "--timeout",
+          "5"
+        ])
+
+      {result, _lines} =
+        run(options, nil,
+          resolver: fn "v6.test" -> {:ok, [loopback, loopback]} end,
+          interval_ms: 5,
+          http: []
+        )
+
+      assert [node] = result.nodes
+      assert node.label == "v6.test@[::1]:#{port}"
+      assert node.state == :done
+    end
+  end
+
   # ── the command line ────────────────────────────────────────────────────────
 
   describe "parse_args/1" do
@@ -302,6 +447,7 @@ defmodule AnkusaServer.FleetReplayTest do
             {["--nodes", "a", "--filter", "sinks=a+b"],
              "--filter: sinks must be integers joined by +, e.g. 0+2"},
             {["--nodes", "a", "--timeout", "0"], "--timeout must be at least 1"},
+            {["--nodes", "a", "--expect-nodes", "0"], "--expect-nodes must be at least 1"},
             {["--nodes", "a", "extra"], "unexpected argument \"extra\""},
             {["--nodes", "a", "--nope"], "unknown or malformed option --nope"}
           ] do

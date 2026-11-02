@@ -9,12 +9,14 @@ defmodule AnkusaServer.FleetReplay do
 
       docker-entrypoint replay --nodes <list> [--kind dlq] [--filter k=v[,k=v]]...
                                [--rate N] [--max-lag-ms N] [--job-id UUID]
-                               [--token T] [--timeout S] [--interval S]
-                               [--cacertfile PATH]
+                               [--expect-nodes N] [--token T] [--timeout S]
+                               [--interval S] [--cacertfile PATH]
 
     * `--nodes` — `[scheme://]host[:port][,…]` (port `4002`, scheme `http`). A name
       that resolves to several addresses (a headless service, a round-robin DNS
       name) is one node per address, over `http`; with `https` list the nodes.
+    * `--expect-nodes` — the number of nodes `--nodes` must resolve to; when it
+      resolves to another number, nothing is sent and the command fails.
     * `--kind` — `dlq` (default), `archive`, `quarantine` or `lifecycle`.
     * `--filter` — `key=value` pairs, comma-separated or repeated; the keys of the
       `POST /v1/replays` body: `tenant`, `source_id`, `id`, `error_class`
@@ -31,10 +33,12 @@ defmodule AnkusaServer.FleetReplay do
       `--interval` — seconds between polls (default `1`).
 
   A node that does not answer is asked again every interval until the timeout, and
-  a node that restarts resumes its job from the cursor it committed. When the
-  command stops it prints one line:
+  a node that restarts resumes its job from the cursor it committed. A pinned
+  address (one of a multi-address answer) that leaves DNS while being polled is
+  `gone` at once rather than polled until the timeout. When the command stops it
+  prints one line:
 
-      replay <id> kind=dlq nodes=3 done=3 running=0 paused=0 cancelled=0 failed=0 unreachable=0 rejected=0 moved=… scanned=… skipped=… delivered=… dead=…
+      replay <id> kind=dlq nodes=3 done=3 running=0 paused=0 cancelled=0 failed=0 unreachable=0 gone=0 rejected=0 moved=… scanned=… skipped=… delivered=… dead=…
 
   and exits `0` when every node is `done`, `1` otherwise (a `paused` job, which an
   operator or the auto-pause stopped, needs attention: `PATCH /v1/replays/<id>`),
@@ -56,6 +60,7 @@ defmodule AnkusaServer.FleetReplay do
     rate: :integer,
     max_lag_ms: :integer,
     job_id: :string,
+    expect_nodes: :integer,
     token: :string,
     timeout: :integer,
     interval: :integer,
@@ -72,6 +77,7 @@ defmodule AnkusaServer.FleetReplay do
           kind: String.t(),
           body: %{optional(String.t()) => term()},
           job_id: String.t(),
+          expect_nodes: pos_integer() | nil,
           token: String.t() | nil,
           timeout_s: pos_integer(),
           interval_s: pos_integer(),
@@ -88,6 +94,7 @@ defmodule AnkusaServer.FleetReplay do
             | :cancelled
             | :failed
             | :unreachable
+            | :gone
             | :rejected,
           job_id: String.t() | nil,
           counters: %{optional(String.t()) => integer()},
@@ -118,7 +125,8 @@ defmodule AnkusaServer.FleetReplay do
          :ok <- check(Regex.match?(@job_id_re, job_id), "--job-id must be a lowercase UUID"),
          {:ok, filter} <- parse_filters(Keyword.get_values(opts, :filter)),
          {:ok, timeout_s} <- positive(opts, :timeout, 3600),
-         {:ok, interval_s} <- positive(opts, :interval, 1) do
+         {:ok, interval_s} <- positive(opts, :interval, 1),
+         {:ok, expect_nodes} <- optional_positive(opts, :expect_nodes) do
       body =
         filter
         |> Map.merge(%{"kind" => kind, "job_id" => job_id})
@@ -131,6 +139,7 @@ defmodule AnkusaServer.FleetReplay do
          kind: kind,
          body: body,
          job_id: job_id,
+         expect_nodes: expect_nodes,
          token: Keyword.get(opts, :token) || System.get_env("ANKUSA_ADMIN_TOKEN"),
          timeout_s: timeout_s,
          interval_s: interval_s,
@@ -146,6 +155,21 @@ defmodule AnkusaServer.FleetReplay do
     value = Keyword.get(opts, key, default)
     flag = "--" <> String.replace(to_string(key), "_", "-")
     if value >= 1, do: {:ok, value}, else: {:error, "#{flag} must be at least 1"}
+  end
+
+  # Absent is `nil`, never a default: a flag that is not given checks nothing.
+  defp optional_positive(opts, key) do
+    case Keyword.fetch(opts, key) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, value} when value >= 1 ->
+        {:ok, value}
+
+      {:ok, _value} ->
+        flag = "--" <> String.replace(to_string(key), "_", "-")
+        {:error, "#{flag} must be at least 1"}
+    end
   end
 
   defp put_opt(map, _key, nil), do: map
@@ -265,16 +289,20 @@ defmodule AnkusaServer.FleetReplay do
   `Ankusa.HttpClient.request/6`, e.g. `plug:`), `:interval_ms`, `:report`.
 
   Returns `{:ok, %{job_id, kind, nodes: [node_status]}}`, or `{:error, message}`
-  when a node name does not resolve.
+  when a node name does not resolve or `--expect-nodes` does not match the
+  resolved fleet.
   """
   @spec run(options(), keyword()) :: {:ok, result()} | {:error, String.t()}
   def run(options, opts \\ []) do
     resolver = Keyword.get(opts, :resolver, &resolve/1)
 
-    with {:ok, targets} <- resolve_nodes(options.nodes, resolver) do
+    with {:ok, targets} <- resolve_nodes(options.nodes, resolver),
+         :ok <- check_node_count(targets, options.expect_nodes) do
       ctx = %{
         token: options.token,
         body: JSON.encode!(options.body),
+        job_id: options.job_id,
+        resolver: resolver,
         interval_ms: Keyword.get(opts, :interval_ms, options.interval_s * 1000),
         deadline: System.monotonic_time(:millisecond) + options.timeout_s * 1000,
         http:
@@ -300,6 +328,20 @@ defmodule AnkusaServer.FleetReplay do
     end
   end
 
+  # A fleet replay that quietly skipped a node would exit 0 on a partial fleet;
+  # `--expect-nodes` is the operator's check that every node answered DNS.
+  defp check_node_count(_targets, nil), do: :ok
+
+  defp check_node_count(targets, expected) do
+    if length(targets) == expected do
+      :ok
+    else
+      {:error,
+       "--nodes resolved to #{length(targets)} node(s) " <>
+         "(#{Enum.map_join(targets, " ", & &1.label)}), --expect-nodes is #{expected}"}
+    end
+  end
+
   # A name with one address is used as the name (so a node that restarts on
   # another address is still found); a name with several is one node per address.
   defp resolve_nodes(nodes, resolver) do
@@ -318,15 +360,11 @@ defmodule AnkusaServer.FleetReplay do
 
   defp expand("http", host, port, resolver) do
     case resolver.(host) do
-      {:ok, [_one]} ->
-        {:ok, [target("http", host, host, port)]}
+      {:ok, [one]} ->
+        {:ok, [named_target("http", host, port, one)]}
 
       {:ok, [_ | _] = addresses} ->
-        {:ok,
-         for address <- addresses do
-           ip = address |> :inet.ntoa() |> to_string()
-           target("http", "#{host}@#{ip}", ip, port)
-         end}
+        {:ok, Enum.map(addresses, &pinned_target(host, port, &1))}
 
       {:ok, []} ->
         {:error, "cannot resolve #{host}: no address"}
@@ -336,13 +374,56 @@ defmodule AnkusaServer.FleetReplay do
     end
   end
 
-  defp expand(scheme, host, port, _resolver), do: {:ok, [target(scheme, host, host, port)]}
+  # `https` is never expanded: TLS needs the certificate's name in the URL, so
+  # list the nodes instead.
+  defp expand(scheme, host, port, _resolver),
+    do: {:ok, [named_target(scheme, host, port, nil)]}
 
-  defp target(scheme, label, host, port),
-    do: %{label: "#{label}:#{port}", url: "#{scheme}://#{host}:#{port}"}
+  # A name with one address is requested by name, so a node that restarts on
+  # another address is still found.
+  defp named_target(scheme, host, port, address) do
+    %{
+      label: "#{host}:#{port}",
+      url: "#{scheme}://#{host}:#{port}",
+      source: host,
+      address: nil,
+      connect: connect(address)
+    }
+  end
 
+  # Each address of a multi-address answer is its own node, pinned to it: the
+  # request cannot be re-resolved, which is how a replaced pod is noticed.
+  defp pinned_target(host, port, address) do
+    h = ip_string(address)
+
+    %{
+      label: "#{host}@#{h}:#{port}",
+      url: "http://#{h}:#{port}",
+      source: host,
+      address: address,
+      connect: connect(address)
+    }
+  end
+
+  # An IPv6 pinned address needs the family stated: the URL host is a literal,
+  # and Req/Mint otherwise leaves the family to the OS. Same shape as the egress
+  # pin (`Ankusa.HttpClient.Egress`).
+  defp connect({_, _, _, _, _, _, _, _}), do: [connect_options: [transport_opts: [inet6: true]]]
+  defp connect(_address), do: []
+
+  defp ip_string(address) do
+    ip = address |> :inet.ntoa() |> to_string()
+    if tuple_size(address) == 8, do: "[#{ip}]", else: ip
+  end
+
+  # IPv4 first, so a dual-stack pod is one node, not two.
   defp resolve(host) do
-    :inet.getaddrs(String.to_charlist(host), :inet)
+    name = String.to_charlist(host)
+
+    case :inet.getaddrs(name, :inet) do
+      {:ok, [_ | _]} = addresses -> addresses
+      _no_ipv4 -> :inet.getaddrs(name, :inet6)
+    end
   end
 
   # ── one node ──────────────────────────────────────────────────────────────
@@ -372,7 +453,7 @@ defmodule AnkusaServer.FleetReplay do
   # No job on the node yet (or it lost it): `POST`, which answers the job that
   # has this id when there is one. Otherwise `GET` it.
   defp step(target, ctx, %{job_id: nil} = status) do
-    case call(ctx, :post, target.url <> "/v1/replays", ctx.body) do
+    case call(ctx, target, :post, "/v1/replays", ctx.body) do
       {:ok, code, job} when code in [200, 202] and is_map(job) ->
         job_status(status, job)
 
@@ -383,12 +464,12 @@ defmodule AnkusaServer.FleetReplay do
         {rejected(status, code, body), true}
 
       {:error, reason} ->
-        {unreachable(status, inspect(reason)), false}
+        transport_failure(target, ctx, status, reason)
     end
   end
 
   defp step(target, ctx, %{job_id: job_id} = status) do
-    case call(ctx, :get, target.url <> "/v1/replays/" <> job_id, nil) do
+    case call(ctx, target, :get, "/v1/replays/" <> job_id, nil) do
       {:ok, 200, job} when is_map(job) ->
         job_status(status, job)
 
@@ -404,8 +485,37 @@ defmodule AnkusaServer.FleetReplay do
         {rejected(status, code, body), true}
 
       {:error, reason} ->
+        transport_failure(target, ctx, status, reason)
+    end
+  end
+
+  # A transport failure on a pinned address asks DNS once whether that address is
+  # still in the name's answer. It is not: the pod was replaced or removed, and
+  # polling the dead address until the timeout hides that. An HTTP answer, even a
+  # 5xx, means the node is still there and is never `gone`.
+  defp transport_failure(%{address: nil}, _ctx, status, reason),
+    do: {unreachable(status, inspect(reason)), false}
+
+  defp transport_failure(target, ctx, status, reason) do
+    case ctx.resolver.(target.source) do
+      {:ok, addresses} when is_list(addresses) ->
+        if target.address in addresses,
+          do: {unreachable(status, inspect(reason)), false},
+          else: {gone(status, target, ctx), true}
+
+      _error ->
         {unreachable(status, inspect(reason)), false}
     end
+  end
+
+  defp gone(status, target, ctx) do
+    %{
+      status
+      | state: :gone,
+        detail:
+          "address #{ip_string(target.address)} is no longer in #{target.source}'s DNS answer " <>
+            "(pod replaced or removed); run again with --job-id #{ctx.job_id}"
+    }
   end
 
   defp job_status(status, job) do
@@ -443,13 +553,20 @@ defmodule AnkusaServer.FleetReplay do
   defp describe(%{"error" => error}), do: to_string(error)
   defp describe(_other), do: ""
 
-  defp call(ctx, method, url, body) do
+  defp call(ctx, target, method, path, body) do
     headers =
       [{"accept", "application/json"}] ++
         if(body, do: [{"content-type", "application/json"}], else: []) ++
         if(ctx.token, do: [{"authorization", "Bearer " <> ctx.token}], else: [])
 
-    case HttpClient.request(method, url, headers, body, @request_timeout_ms, ctx.http) do
+    case HttpClient.request(
+           method,
+           target.url <> path,
+           headers,
+           body,
+           @request_timeout_ms,
+           ctx.http ++ target.connect
+         ) do
       {:ok, code, response} -> {:ok, code, decode(response)}
       {:error, reason} -> {:error, reason}
     end
@@ -486,7 +603,17 @@ defmodule AnkusaServer.FleetReplay do
 
   # ── the summary ───────────────────────────────────────────────────────────
 
-  @states [:done, :running, :paused, :cancelled, :failed, :unreachable, :rejected, :pending]
+  @states [
+    :done,
+    :running,
+    :paused,
+    :cancelled,
+    :failed,
+    :unreachable,
+    :gone,
+    :rejected,
+    :pending
+  ]
 
   @doc "The one-line summary of `run/2`'s result."
   @spec format_summary(result()) :: String.t()

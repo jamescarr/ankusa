@@ -7,6 +7,23 @@ own ([`docs/releasing.md`](../../docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- **`replay --expect-nodes N`.** The number of nodes `--nodes` must resolve to; on any
+  other count the command sends nothing and exits `1`, naming the nodes it found
+  (`--nodes resolved to 2 node(s) (…), --expect-nodes is 3`).
+
+### Fixed
+
+- **Fleet replay no longer skips nodes or waits out a replaced pod.** The chart's
+  headless Service sets `publishNotReadyAddresses: true`, so a draining node, or one
+  failing a `/ready` check, is still in the name `docker-entrypoint replay --nodes`
+  resolves. A name with no IPv4 address is resolved over IPv6 (bracketed labels and
+  URLs, `inet6` connections). A pinned address (one of a multi-address answer) that
+  fails to connect and is no longer in the name's DNS answer ends as `gone` at once,
+  rather than being polled until `--timeout`; the summary line gains `gone=N` after
+  `unreachable=`, and the command exits `1`. Run it again with the same `--job-id` to
+  reach the replacement.
 ### Changed
 
 - The image's HTTP server is `bandit 1.14.1` (was `1.14.0`, affected by

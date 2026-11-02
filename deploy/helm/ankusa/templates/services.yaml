@@ -26,6 +26,8 @@ spec:
 ---
 # The StatefulSet's governing Service: a stable DNS name per pod
 # (<release>-0.<release>-headless), for scraping and for a replacement to keep its identity.
+# Names are published whether or not the pod is ready, so a scrape or a fleet replay
+# reaches a node that is draining or failing a /ready check.
 apiVersion: v1
 kind: Service
 metadata:
@@ -34,6 +36,7 @@ metadata:
     {{- include "ankusa.labels" . | nindent 4 }}
 spec:
   clusterIP: None
+  publishNotReadyAddresses: true
   selector:
     {{- include "ankusa.selector" (dict "ctx" . "component" "node") | nindent 4 }}
   ports:
