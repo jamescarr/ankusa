@@ -45,7 +45,7 @@ defmodule Ankusa.AsyncApi do
   | --- | --- | --- |
   | Kafka, NATS | record / message headers, `Ankusa.Sink.Message.headers/2` (NATS adds `Nats-Msg-Id`) | `""` |
   | SQS, Google Pub/Sub | message attributes, `Ankusa.Sink.Message.attributes/2` | absent (both refuse an empty value) |
-  | RabbitMQ | AMQP `message_id` and the `ankusa_idempotency_key`, `ankusa_dedupe_key`, `ankusa_replay_id`, `ankusa_ordering_key` headers; not described by the schema | not sent |
+  | RabbitMQ | AMQP `message_id` and the `ankusa_idempotency_key`, `ankusa_dedupe_key`, `ankusa_replay_id`, `ankusa_ordering_key`, `ankusa_event_type` headers; not described by the schema | not sent |
   | Redis pub/sub | none: the body is all there is | not sent |
   | HTTP | `x-ankusa-*` request headers (`Ankusa.Sink.Http`); not in this document, the body is the provider's | `x-ankusa-tenant` absent |
 

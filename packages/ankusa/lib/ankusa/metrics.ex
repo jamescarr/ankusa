@@ -169,6 +169,13 @@ defmodule Ankusa.Metrics do
         scoped(own, event_name: [:ankusa, :ingest, :refused], tags: [:instance, :reason])
       ),
       counter(
+        "ankusa.ingest.event_type_missing.total",
+        scoped(own,
+          event_name: [:ankusa, :ingest, :event_type_missing],
+          tags: [:instance] ++ ids
+        )
+      ),
+      counter(
         "ankusa.verify.failures.total",
         scoped(own,
           event_name: [:ankusa, :verify, :stop],

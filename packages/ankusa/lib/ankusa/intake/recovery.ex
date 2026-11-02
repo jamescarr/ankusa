@@ -524,7 +524,7 @@ defmodule Ankusa.Intake.Recovery do
         _unknown -> {nil, [], :unroutable}
       end
 
-    lanes = if source, do: Ankusa.Ordering.lanes(ctx.instance, source, env)
+    lanes = if source, do: recovery_lanes(ctx.instance, source, env)
 
     rows =
       sinks
@@ -544,6 +544,15 @@ defmodule Ankusa.Intake.Recovery do
         else: [{:put, :hooks, Keys.hook(seq), bin}]
 
     {hook ++ rows ++ archive ++ dedupe_ops(ctx, source, env, ord, hook != []), kind}
+  end
+
+  # The lanes of a recovered hook, resolved from the stored envelope as ingest
+  # did (`Ankusa.Routing`).
+  defp recovery_lanes(instance, source, env) do
+    decoded =
+      Ankusa.Routing.decode(source, env, Ankusa.Dedupe.max_json_bytes(instance))
+
+    Ankusa.Ordering.lanes(instance, source, env, decoded)
   end
 
   # The key the hook was admitted under, so a provider retry after recovery is

@@ -34,6 +34,7 @@ defmodule Ankusa.Dispatch.Replayer do
     Dedupe,
     Lifecycle,
     Ordering,
+    Routing,
     SourceStore,
     Store,
     Telemetry,
@@ -916,7 +917,9 @@ defmodule Ankusa.Dispatch.Replayer do
   # The lanes of the sinks an archive replay re-drives: the stored hook is the
   # envelope the lane is resolved from (ADR 0004, section 2).
   defp replay_lanes(instance, source, env, indexes) do
-    case Ordering.lanes(instance, source, env) do
+    decoded = Routing.decode(source, env, Dedupe.max_json_bytes(instance))
+
+    case Ordering.lanes(instance, source, env, decoded) do
       nil -> nil
       lanes -> Enum.map(indexes, fn {i, _mod} -> Enum.at(lanes, i) end)
     end
@@ -1036,16 +1039,13 @@ defmodule Ankusa.Dispatch.Replayer do
             }
 
             env = %{env | verification: verification, seq: nil}
+            r = Routing.resolve(instance, source, env, dedupe: true)
 
             {:ok,
              %{
-               envelope: %{
-                 env
-                 | dedupe_key:
-                     Dedupe.key(source.dedupe, env, :skip, Dedupe.max_json_bytes(instance))
-               },
+               envelope: %{env | dedupe_key: r.dedupe_key, event_type: r.event_type},
                sinks: source.sinks,
-               lanes: Ordering.lanes(instance, source, env),
+               lanes: r.lanes,
                dedupe_ttl_ms: source.dedupe && source.dedupe.ttl_ms
              }}
 

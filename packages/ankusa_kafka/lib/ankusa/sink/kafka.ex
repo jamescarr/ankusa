@@ -16,8 +16,9 @@ defmodule Ankusa.Sink.Kafka do
     * **headers** — `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
       `ankusa_message_version`, `content_type` (`application/json`) and
       `ankusa_idempotency_key` (the key consumers dedupe on, the message's
-      `idempotency_key`), plus `ankusa_dedupe_key`, `ankusa_replay_id` and, on a
-      hook of an ordered sink, `ankusa_ordering_key` when the hook carries them.
+      `idempotency_key`), plus `ankusa_dedupe_key`, `ankusa_replay_id`,
+      `ankusa_event_type` and, on a hook of an ordered sink, `ankusa_ordering_key`
+      when the hook carries them.
       Underscores, not hyphens, so they are usable unquoted as Redpanda
       Connect metadata and SQS attribute names.
     * **timestamp** — `env.received_at` (event time, not dispatch time).

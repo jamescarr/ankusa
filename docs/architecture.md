@@ -156,12 +156,20 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
    it is copied only when it is a slice of a larger binary), and runs the
    source's `Ankusa.Verifier`.
    - The request's headers are stored under the `store_headers` policy,
-     applied after verification (the verifier and the dedupe key read every
+     applied after verification (the verifier, the dedupe key and the event type read every
      header): `authorization`, `cookie`, `x-api-key` and the other credential
      headers are dropped by default, and a hashed one is kept as
      `sha256:<hex>`. What the policy removes is in no stored hook, archive
      segment, quarantine entry or sink message. See
      [`configuration.md#stored-headers`](configuration.md#stored-headers).
+   - The source's provider event name (`event_type`) is read from the
+     complete header list or the capped JSON body, beside the dedupe key (one
+     decode serves the dedupe key, the event type and the ordering lanes), stored
+     on the hook and carried to every sink (`x-ankusa-event-type`, the message's
+     `event_type`). A hook that carries none stores `null` and counts in
+     `ankusa_ingest_event_type_missing_total`; a flag-accepted hook still gets
+     its event type and still claims no dedupe key. Tested in `edge_test.exs`
+     (`event_type …`).
    - Verification failure follows the source's `on_verify_failure` policy:
      `:reject` (`401`, nothing stored), `:quarantine` (`202`, held in a
      durable pen with a per-source rate limit and a byte cap — `429` or `503`

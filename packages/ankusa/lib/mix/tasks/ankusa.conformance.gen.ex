@@ -31,7 +31,7 @@ defmodule Mix.Tasks.Ankusa.Conformance.Gen do
 
   # The keys of a `decode_message` result (conformance/README.md), in the order
   # the vectors list them. A key the message lacks decodes to `null`, `headers`
-  # to `{}`; the message's other keys (`ordering_key`, …) are not decoded.
+  # to `{}`; the message's other keys (`ordering_key`, `event_type`, …) are not decoded.
   @output_keys ~w(v id source_id tenant_id received_at content_type size body_base64 claim
                   sha256 dedupe_key replay_id idempotency_key headers verification
                   traceparent tracestate instance region)
@@ -101,6 +101,7 @@ defmodule Mix.Tasks.Ankusa.Conformance.Gen do
           body: ~s({"id":"evt_1"}),
           size: 14,
           dedupe_key: "evt_1",
+          event_type: "invoice.paid",
           verification: %Verification{status: :ok, provider: Ankusa.Verifier.Hmac},
           trace: %{traceparent: @traceparent, tracestate: "vendor=1"}
         }

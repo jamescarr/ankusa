@@ -70,7 +70,7 @@ defmodule Ankusa.Edge.Ingest do
     StoredHeaders
   }
 
-  alias Ankusa.{Envelope, Ordering, Source, Trace, Verification}
+  alias Ankusa.{Envelope, Routing, Source, Trace, Verification}
 
   @type result ::
           {:ok, Envelope.t()}
@@ -348,7 +348,9 @@ defmodule Ankusa.Edge.Ingest do
       # suppress the real event, so no key is extracted when the hook was flagged.
       case Quarantine.hit(instance, env.source_id, env.tenant_id) do
         :ok ->
-          commit_stored(instance, source, env, nil, Ordering.lanes(instance, source, env))
+          r = Routing.resolve(instance, source, env, dedupe: false)
+          env = %{env | event_type: r.event_type}
+          commit_stored(instance, source, env, nil, r.lanes)
 
         {:rate_limited, ms} ->
           {{:error, {:quarantine_rate_limited, ms}}, 0}
@@ -357,15 +359,16 @@ defmodule Ankusa.Edge.Ingest do
           {{:error, :store_unavailable}, 0}
       end
     else
-      # The dedupe key and the ordering lanes are read from the complete header
-      # list: a source may dedupe or order on a header the stored-header policy
-      # then removes. One JSON decode serves both (`Ankusa.Ordering.resolve/3`).
-      {dedupe_key, lanes} = Ordering.resolve(instance, source, env)
-      env = %{env | dedupe_key: dedupe_key}
+      # The dedupe key, the event type and the ordering lanes are read from the
+      # complete header list: a source may dedupe, name or order on a header the
+      # stored-header policy then removes. One JSON decode serves all three
+      # (`Ankusa.Routing.resolve/4`).
+      r = Routing.resolve(instance, source, env, dedupe: true)
+      env = %{env | dedupe_key: r.dedupe_key, event_type: r.event_type}
 
       case Fleet.admit(instance, source, env) do
         {:ok, claim} ->
-          commit_stored(instance, source, env, claim, lanes)
+          commit_stored(instance, source, env, claim, r.lanes)
 
         {:duplicate, hook_id} ->
           {{:duplicate, %{env | id: hook_id, seq: nil}}, 0}

@@ -465,10 +465,12 @@ and as `dedupe_key` when the source extracts it. `Sink.Http` adds its own
 `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-idempotency-key`,
 `x-ankusa-verification`, `x-ankusa-received-at` (unix milliseconds, the
 message's `received_at`), `x-ankusa-body-sha256` (the lowercase hex SHA-256 of
-the body sent) and (when set) `x-ankusa-tenant`, `x-ankusa-dedupe-key`
-and `x-ankusa-replay-id`; a message carries `id`, `source_id`, `tenant_id`,
-`received_at`, `content_type`, `size`, `sha256`, `dedupe_key`, `replay_id`,
-`idempotency_key`, `verification`, `headers` and the body (or claim).
+the body sent) and (when set) `x-ankusa-tenant`, `x-ankusa-dedupe-key`,
+`x-ankusa-replay-id` and `x-ankusa-event-type` (the hook's event type, when the
+source has an [`event_type`](configuration.md#sources) and the hook carries
+one); a message carries `id`, `source_id`, `tenant_id`,
+`received_at`, `content_type`, `size`, `sha256`, `dedupe_key`, `event_type`,
+`replay_id`, `idempotency_key`, `verification`, `headers` and the body (or claim).
 
 **Trace context travels with the hook.** A request's W3C `traceparent` (and
 `tracestate`) is stored on the hook and delivered by every sink: the
@@ -632,7 +634,9 @@ so a field added to the encoder without a vector update fails the build, and
 every SDK has to decode what the encoder writes.
 
 Every message carries `sha256` (lowercase hex, inline bodies too), the
-provider event `dedupe_key` (or `null`), the `replay_id` of the replay job when
+provider event `dedupe_key` (or `null`), the `event_type` the source reads from
+the hook (or `null`: the source has none, or the hook carries none; a
+consumer routes on it instead of re-parsing the headers or the body), the `replay_id` of the replay job when
 this delivery is a replay (else `null`), the `idempotency_key` (below), the
 `verification` result (see [Idempotent receivers](#idempotent-receivers) above),
 the forwarded provider request `headers` (lowercased; the source's
@@ -811,8 +815,8 @@ Raise `:max_message_bytes` together with the server's `max_payload`.
 **The subject is the address, the headers are the metadata.** Each message
 carries the same headers the Kafka sink sets — always `ankusa_id`,
 `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`,
-`ankusa_idempotency_key` and `content_type`, plus `ankusa_dedupe_key` and
-`ankusa_replay_id` when present — and `Nats-Msg-Id` (below), so a consumer
+`ankusa_idempotency_key` and `content_type`, plus `ankusa_dedupe_key`,
+`ankusa_replay_id` and `ankusa_event_type` when present — and `Nats-Msg-Id` (below), so a consumer
 parses one set of fields regardless of
 transport. Unlike Kafka, there is no separate record key: NATS has no
 partition-ordering contract to lean on and no partition count to change under
@@ -1021,8 +1025,11 @@ stub that answers in 20 ms.
 **The queue is the address, message attributes are the metadata.** Each
 message carries `String` attributes `ankusa_id`, `ankusa_source_id`,
 `ankusa_tenant_id`, `ankusa_message_version`, `ankusa_idempotency_key` and
-`content_type`, plus `ankusa_dedupe_key` and `ankusa_replay_id` when present:
-the Kafka header set, at most 8 of SQS's 10 attributes. `ankusa_tenant_id` is
+`content_type`, plus `ankusa_dedupe_key`, `ankusa_replay_id` and
+`ankusa_event_type` when present:
+the Kafka header set, within SQS's limit of 10 attributes (a hook that would pass
+10, say a replayed, traced one, is sent without `ankusa_event_type`: the body
+carries it too). `ankusa_tenant_id` is
 left out when the hook has no tenant, because SQS refuses an empty attribute
 value. SQS counts attributes toward the size limit, so `max_message_bytes`
 checks body plus attributes.
@@ -1133,7 +1140,7 @@ mode) publishes one message per request.
 **The topic is the address, message attributes are the metadata.** Each message
 carries attributes `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
 `ankusa_message_version`, `ankusa_idempotency_key` and `content_type`, plus
-`ankusa_dedupe_key` and `ankusa_replay_id` when present: the same set
+`ankusa_dedupe_key`, `ankusa_replay_id` and `ankusa_event_type` when present: the same set
 `Sink.SQS` sends (`Ankusa.Sink.Message.attributes/2`). `ankusa_tenant_id` is
 left out when the hook has no tenant. Pub/Sub counts attributes and the
 ordering key toward the size limit, so `max_message_bytes` checks all three
@@ -1158,7 +1165,7 @@ sinks: [{Ankusa.Sink.Http, url: "...", ordered: true, ordering_key: {:header, "x
 ```
 
 `ordered: true` and `ordering_key`: `{:header, name}`, `{:json, "data.object.customer"}`
-(a dot path into the JSON body, read up to 1 MiB) or `{mod, fun, args}` (called
+(a dot path into the JSON body, read up to `dedupe.max_json_bytes`, 1 MiB by default) or `{mod, fun, args}` (called
 as `apply(mod, fun, [envelope | args])`). In YAML: `ordered: true` and
 `ordering_key: {header: x-entity-id}` or `{json: data.object.customer}`.
 Without a key every hook of the sink is one lane. A hook whose key cannot be

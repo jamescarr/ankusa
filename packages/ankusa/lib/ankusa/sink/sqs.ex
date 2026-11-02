@@ -119,9 +119,12 @@ defmodule Ankusa.Sink.SQS do
       `ankusa_tenant_id`, `ankusa_message_version`, `ankusa_idempotency_key`,
       `content_type` (`application/json`) — the set `Ankusa.Sink.Kafka` sets
       as headers — plus `ankusa_dedupe_key` and `ankusa_replay_id` when the
-      hook carries them. `ankusa_tenant_id` is left out when the hook has no
-      tenant, because SQS refuses an empty attribute value. At most 8 of SQS's
-      10.
+      hook carries them, and `ankusa_ordering_key` (an ordered sink) and
+      `ankusa_event_type` (a source with an `event_type`). `ankusa_tenant_id` is
+      left out when the hook has no tenant, because SQS refuses an empty attribute
+      value. SQS accepts at most 10 attributes: the `traceparent` and `tracestate`
+      of a traced hook are two of them, and a hook that would pass 10 is sent
+      without `ankusa_event_type`, which the body's `event_type` carries too.
 
   ## opts
 
@@ -320,10 +323,23 @@ defmodule Ankusa.Sink.SQS do
     end)
   end
 
+  # SQS refuses a message with more than 10 attributes. The event type is the one
+  # attribute that is also a field of the body and is newer than the others, so
+  # it is what a hook that would pass the limit (replayed, traced, deduped and
+  # typed) goes without.
+  @max_attributes 10
+
   defp attributes(env, ctx) do
-    env
-    |> Message.attributes(ctx)
-    |> Map.new(fn {name, value} -> {name, %{"DataType" => "String", "StringValue" => value}} end)
+    pairs = Message.attributes(env, ctx)
+
+    pairs =
+      if length(pairs) > @max_attributes,
+        do: List.keydelete(pairs, "ankusa_event_type", 0),
+        else: pairs
+
+    Map.new(pairs, fn {name, value} ->
+      {name, %{"DataType" => "String", "StringValue" => value}}
+    end)
   end
 
   # What one message is, in a `SendMessage` request and as an entry of a
