@@ -83,50 +83,55 @@ works before you have any provider credentials. Done? `docker rm -f ankusa`.
 
 ## Deliver to your worker
 
-Ankusa POSTs each hook to your endpoint with the raw body intact, and delivery
-is signed by default: the receiver verifies the Standard Webhooks signature
-against the sink's `secret`. Short outages are retried; long ones land in a
-dead-letter queue you can replay with one call. To publish to a broker instead,
-give the source a `rabbitmq`, `kafka`, or `nats` sink; the
-[examples](#examples) below run each end to end.
+Give a source a `kafka`, `rabbitmq`, or `nats` sink and every hook becomes a
+message on the broker your workers already consume from. Ankusa publishes; the
+consumer owns its topic, queue, or stream. A broker outage is retried, and a
+long one lands in a dead-letter queue you can replay with one call. The
+quickstart produces to a Kafka topic on Redpanda, a Redpanda Connect bridge
+carries the records into an SQS FIFO queue (floci stands in for AWS), and a
+Python worker polls the queue:
 
 ```sh
 git clone https://github.com/jamescarr/ankusa
 cd ankusa/examples/quickstart
 docker compose up --build -d --wait
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
-sleep 1 && docker compose logs worker
-# received id=01a0... source=demo bytes=36 body={"id":"evt_1","type":"invoice.paid"}
+sleep 2 && docker compose logs worker
+# received id=01a0... source=demo via=inline bytes=36 body={"id":"evt_1","type":"invoice.paid"}
 ```
 
-The wiring is one sink in [`ankusa.yml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/ankusa.yml). The
-demo worker is plain `http://` at a private address, which sinks may not reach
-until `egress` says so; a production sink is an `https://` URL on a public name
-and needs no `egress` block:
+The wiring is one sink in [`ankusa.yml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/ankusa.yml).
+The topic, the bridge, and the queue belong to the consumer side, declared in
+[`docker-compose.yml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/docker-compose.yml),
+and Ankusa never touches them:
 
 ```yaml
-egress:
-  allow_insecure_http: true
-  allow_hosts: [worker]
-
 sources:
   demo:
     verify: {type: none}
     on_verify_failure: accept_flag
     sinks:
-      - type: http
-        url: http://worker:8080/hooks
-        timeout_ms: 5000
-        allow_unsigned: true   # demo only: this worker does not verify
+      - type: kafka
+        brokers: [redpanda:9092]
+        topic: ankusa.events     # exists before the first hook: the sink never creates a topic
+        inline_max_bytes: 8192   # a larger body travels by claim check
 ```
 
-A real sink sets `secret: ${WORKER_WHSEC}` and its receiver verifies the
-signature ([`docs/integrations.md`](docs/integrations.md#signed-deliveries)).
-The worker is [a small FastAPI app](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py) built with
-[`uv`](https://docs.astral.sh/uv/) using the `ankusa` Python SDK
-([`packages/sdk-python`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-python)); replace it with your own
-service. [`docs/quickstart.md`](docs/quickstart.md) breaks the worker, replays
-the dead letters, and points a real provider at it.
+Each record is one JSON message, keyed by tenant and source so a source's hooks
+share a partition and, through the bridge, a FIFO group: `id`, `source_id`,
+`idempotency_key`, `sha256`, and the body inline as `body_base64` or as a
+`claim` to redeem from the node's claim-check gateway. The worker is
+[a small Python consumer](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py)
+on [`boto3`](https://boto3.amazonaws.com/v1/documentation/api/latest/index.html),
+built with [`uv`](https://docs.astral.sh/uv/), that uses the `ankusa` Python SDK
+([`packages/sdk-python`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-python))
+to decode each message, dedupe on its idempotency key, and fetch a large body;
+replace it with your own service. RabbitMQ and NATS carry the same message, so
+the decoding carries over. Prefer HTTP? A `type: http` sink POSTs each hook,
+signed, to your endpoint instead:
+[`examples/http-consumer`](https://github.com/jamescarr/ankusa/tree/main/examples/http-consumer/).
+[`docs/quickstart.md`](docs/quickstart.md) stops the worker, stops the broker,
+replays the dead letters, and points a real provider at it.
 
 ## How it works
 
@@ -235,7 +240,8 @@ different transport.
 
 | Example | Delivers via | Worker | Shows |
 | --- | --- | --- | --- |
-| [quickstart](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/) | HTTP | Python | retries, dead letters, replay |
+| [quickstart](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/) | Kafka → SQS FIFO | Python | a consumer-owned FIFO queue fed from the topic, large payloads via the claim-check gateway, dead letters, replay |
+| [http-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/http-consumer/) | HTTP | Python | signed HTTP deliveries to your own service, retries, dead letters, replay |
 | [rabbitmq-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/) | RabbitMQ | TypeScript | consumer-owned queues, large payloads via the claim-check gateway |
 | [kafka-sqs-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/) | Kafka → SQS FIFO | TypeScript | SQS FIFO handoff, failure drills |
 | [nats-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/nats-consumer/) | NATS JetStream | Rust | a consumer-owned stream, claim-check redemption with the published Rust crate |

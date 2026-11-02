@@ -18,6 +18,11 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `GET /v1/dlq?error_class=throttled` and an `error_class: throttled` replay missed it.
   A key's breaker now records the `Ankusa.Sink.error_class/1` of each failure it counts,
   and a row that dies behind it is filed under the class of the last one.
+### Changed
+
+- Requires `bandit ~> 1.14 and >= 1.14.1` (was `~> 1.14`): 1.14.0 is affected
+  by EEF-CVE-2026-116078 (High: an HTTP/2 request body sent as 1-byte DATA
+  frames amplified memory use), fixed in 1.14.1; `mix hex.audit` fails on it.
 
 ## [0.7.0] - 2026-10-28
 

@@ -180,8 +180,12 @@ sources:
   collapses hooks that share the provider's event key within the TTL.
 
 A runnable version, the image plus a Python worker, one `docker compose up`, is
-[`examples/quickstart/`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/);
-the walkthrough with outages, dead letters, and replay is
+[`examples/http-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/http-consumer/);
+its README stops the worker and walks through retries, dead letters, and replay
+([When the worker is down](https://github.com/jamescarr/ankusa/tree/main/examples/http-consumer#when-the-worker-is-down)).
+The queue-worker version (Kafka → SQS FIFO) is
+[`examples/quickstart/`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/),
+walked through in
 [`docs/quickstart.md`](https://github.com/jamescarr/ankusa/blob/main/docs/quickstart.md).
 
 ## Ports
