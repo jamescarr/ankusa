@@ -7,19 +7,17 @@ name: Release (npm)
 # prefix would make the two releases ambiguous. Tagged by
 # `mise run release:tag sdk-typescript`.
 #
-# Requires an `NPM_TOKEN` repository secret: an npmjs.com Automation access
-# token (so it isn't blocked by 2FA-on-publish), scoped to publish. See
-# docs/releasing.md.
-#
-# npm also supports Trusted Publishing (OIDC), configured on npmjs.com for
-# this repo + workflow + `main`, but it can't be used yet: npm's registry
-# rejects this repo's immutable OIDC subject claim with a misleading
-# "package not found" (npm/cli#9969, open, untriaged). The repository
-# variable NPM_AUTH switches the auth path: unset or any value other than
-# "oidc" uses NPM_TOKEN (the default, below); "oidc" drops the token and
-# publishes via the configured trusted publisher. Flip it once npm fixes
-# #9969 — no other change is needed — then remove NPM_TOKEN's secret and
-# this comment.
+# Authenticates through npm Trusted Publishing (OIDC) when the repository
+# variable NPM_AUTH is "oidc" (it is: sdk-typescript-v0.6.0 was the first
+# publish through it). The trusted publisher on npmjs.com (repo
+# jamescarr/ankusa, workflow release-npm.yml, no environment) must allow
+# `npm publish` under Allowed actions: entries created after 2026-09-03 allow
+# only `npm stage publish` by default, and this job's direct `npm publish` then
+# fails with "403 … OIDC permission denied for this action". A new entry also
+# expires unless its first publish lands within 2 days. Unset NPM_AUTH (or any
+# other value) falls back to an `NPM_TOKEN` repository secret, a granular token
+# with publish rights that bypasses 2FA; npm is restricting those for direct
+# publishing, so the fallback is on its way out. See docs/releasing.md.
 
 on:
   push:

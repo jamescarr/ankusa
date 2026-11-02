@@ -1356,18 +1356,25 @@ Every entry carries `sink` and `error_class` beside `reason`. A row written
 before dead letters carried a class has `error_class: null` and matches no
 `error_class` filter.
 
-No scan examines more than 10 000 dead keys. A filter that matches little
+No call examines more than 10 000 dead keys, split evenly across the tenant
+indexes a tenant-scoped listing reads, plus at most one delivery-row read per
+candidate a deferred predicate (`source_id` from a tenant index, `error_class`)
+keeps. A filter that matches little
 (`source_id`, `sink`, `error_class`) can therefore return a short page, or an
 empty one, with `next_cursor` set: ask again with it until it is `null`.
 `total` is exact where it is free: a counter read when the only filter is the
 tenant (or none), and the count of the matches when a filtered scan reached the
 end of the DLQ inside that first page. Otherwise it is `null`.
 The bound and the paging are proved by `GET /v1/dlq is bounded` and
-`GET /v1/dlq cursor page` in `admin/router_test.exs`. `bench/dlq_page_bench.exs`
+`GET /v1/dlq cursor page` in `admin/router_test.exs`, and the multi-tenant cut
+that can drop a page's tail to the next cursor by `a two-tenant filtered walk
+where one scan runs out and the other stops at its budget`. `bench/dlq_page_bench.exs`
 (`MIX_ENV=test mix run bench/dlq_page_bench.exs`) seeds a 10-million-row DLQ and
 calls the route through the router, first page and mid-cursor page, with and
-without a tenant filter (and the `sink` and `error_class` predicates): it exits
-1 unless every case's p99 is under 100 ms.
+without a tenant filter, the `sink` and `error_class` predicates, and their
+worst shapes — a class no row has (every page scans the full key budget), and
+every tenant index at once with it (`TENANTS=8`): it exits 1 unless every
+case's p99 is under 100 ms.
 
 ### Replaying across a fleet
 
