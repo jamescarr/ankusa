@@ -431,6 +431,7 @@ defmodule Ankusa.Sink.Http do
         dedupe_header(env.dedupe_key) ++
         replay_header(ctx[:replay_id]) ++
         ordering_header(ctx[:ordering_key]) ++
+        event_type_header(env.event_type) ++
         trace_headers(env.trace) ++
         signature
 
@@ -575,6 +576,12 @@ defmodule Ankusa.Sink.Http do
     do: [{"x-ankusa-ordering-key", key}]
 
   defp ordering_header(_), do: []
+
+  # The provider's event name (`Ankusa.EventType`), when the source reads one.
+  defp event_type_header(event_type) when is_binary(event_type) and event_type != "",
+    do: [{"x-ankusa-event-type", event_type}]
+
+  defp event_type_header(_), do: []
 
   # The hook's W3C trace context (`Ankusa.Trace`), as the standard headers. Owned
   # like the identity headers: a provider's own `traceparent` is not forwarded

@@ -11,6 +11,23 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Added
+
+- **`event_type:` per source (CR-1).** `Ankusa.EventType` reads the provider's
+  event name at ingest, from a request header or a JSON path (presets `github`,
+  `shopify`, `stripe`, `standard_webhooks`, `svix`, `slack`; a value must be a
+  non-empty string of at most 128 bytes), and `Ankusa.Envelope.event_type`
+  stores it on the hook (additive: a node that predates it ignores it, a hook
+  stored before it decodes with `nil`). Every consumer gets it: `Sink.Http`
+  sends `x-ankusa-event-type`, a queue message carries `"event_type"` (always,
+  `null` without one; `SinkMessageV1` and the AsyncAPI document describe it),
+  `Message.headers/2` and `attributes/2` add `ankusa_event_type`, and
+  `Sink.Log` logs it. A source with an `event_type` whose hook carries none is
+  counted in `ankusa_ingest_event_type_missing_total`
+  (`[:ankusa, :ingest, :event_type_missing]`). The admin view of a source shows
+  `event_type`. `Sink.SQS` leaves `ankusa_event_type` off a message that would
+  pass SQS's 10 attributes (the body carries it too).
+
 ### Fixed
 
 - **A row parked behind a breaker that a throttling sink opened is dead-lettered as
@@ -19,6 +36,14 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   A key's breaker now records the `Ankusa.Sink.error_class/1` of each failure it counts,
   and a row that dies behind it is filed under the class of the last one.
 ### Changed
+
+- **`Ankusa.Routing` takes over resolving a hook at ingest.** One capped JSON
+  decode now serves a `dedupe` path, an `ordering_key` path and an `event_type`
+  path (`Ankusa.Routing.resolve/4`, `Ankusa.Routing.decode/3`). The old
+  `resolve` and three-argument `lanes` of `Ankusa.Ordering` are gone, and
+  `Ankusa.Ordering.lanes/4` takes the decoded body. The body cap of an
+  `ordering_key: {:json, _}` is now `dedupe.max_json_bytes` (1 MiB by default,
+  as before) instead of a fixed 1 MiB.
 
 - Requires `bandit ~> 1.14 and >= 1.14.1` (was `~> 1.14`): 1.14.0 is affected
   by EEF-CVE-2026-116078 (High: an HTTP/2 request body sent as 1-byte DATA

@@ -96,6 +96,16 @@ defmodule Ankusa.AsyncApiTest do
     assert properties["region"]["type"] == ["string", "null"]
   end
 
+  test "event_type: SinkMessageV1 describes it as an optional string or null" do
+    map = document_map(source_store: static(%{"stripe" => source(address: "ankusa.hooks")}))
+
+    assert %{"SinkMessageV1" => %{"properties" => properties, "required" => required}} =
+             map["components"]["schemas"]
+
+    assert properties["event_type"]["type"] == ["string", "null"]
+    refute "event_type" in required
+  end
+
   test "different addresses, brokers, and bindings are different channels and servers" do
     map =
       document_map(
@@ -231,6 +241,8 @@ defmodule Ankusa.AsyncApiTest do
       refute "ankusa_tenant_id" in schema["required"]
       assert schema["properties"]["ankusa_tenant_id"]["type"] == "string"
       assert schema["properties"]["ankusa_ordering_key"]["type"] == "string"
+      assert schema["properties"]["ankusa_event_type"]["type"] == "string"
+      refute "ankusa_event_type" in schema["required"]
     end
 
     test "every header set a described transport sends satisfies the required names" do

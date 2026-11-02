@@ -1041,6 +1041,111 @@ defmodule Ankusa.EdgeTest do
     end
   end
 
+  describe "event type" do
+    defp event_sources do
+      %{
+        "gh" => [verifier: {Ankusa.Verifier.None, []}, event_type: :github],
+        "stripe" => [
+          verifier: {Ankusa.Verifier.None, []},
+          event_type: %{json: "type"},
+          dedupe: %{json: "id", ttl_ms: 60_000}
+        ],
+        "flag" => [
+          verifier: {Ankusa.Verifier.Hmac, scheme: :standard_webhooks, secret: @secret},
+          on_verify_failure: :accept_flag,
+          event_type: :github,
+          dedupe: %{header: "x-github-delivery", ttl_ms: 60_000}
+        ],
+        "plain" => [verifier: {Ankusa.Verifier.None, []}]
+      }
+    end
+
+    test "event_type: a github source stores x-github-event, and the stored hook carries it" do
+      config = start_edge(event_sources())
+      req = request("gh", ~s({"zen":"x"}), [{"X-GitHub-Event", "push"}])
+
+      assert {:ok, env} = Ingest.ingest(config.instance, req)
+      assert env.event_type == "push"
+      assert {:ok, [stored]} = Ankusa.Queue.hooks(config.instance, 0, 10)
+      assert stored.event_type == "push"
+
+      # The stored row is what the dispatcher reads back: it round-trips.
+      assert {:ok, %Envelope{event_type: "push"}} =
+               stored |> Envelope.to_binary() |> Envelope.from_binary()
+    end
+
+    test "event_type: a json event type shares the body decode with a json dedupe key" do
+      config = start_edge(event_sources())
+      req = request("stripe", ~s({"id":"evt_1","type":"invoice.paid"}))
+
+      assert {:ok, env} = Ingest.ingest(config.instance, req)
+      assert {env.event_type, env.dedupe_key} == {"invoice.paid", "evt_1"}
+      assert {:duplicate, %Envelope{id: id}} = Ingest.ingest(config.instance, req)
+      assert id == env.id
+    end
+
+    test "event_type: a hook without one stores nil and counts ankusa_ingest_event_type_missing" do
+      handler = "edge-event-type-#{System.unique_integer([:positive])}"
+      test = self()
+
+      :telemetry.attach(
+        handler,
+        [:ankusa, :ingest, :event_type_missing],
+        fn _event, _measurements, metadata, _config -> send(test, {:missing, metadata}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      config = start_edge(event_sources())
+      inst = config.instance
+
+      assert {:ok, env} = Ingest.ingest(inst, request("gh", "{}"))
+      assert env.event_type == nil
+      assert_receive {:missing, %{instance: ^inst, source_id: "gh", tenant_id: "default"}}
+
+      assert {:ok, env} = Ingest.ingest(inst, request("stripe", ~s({"id":"e","type":5})))
+      assert env.event_type == nil
+      assert_receive {:missing, %{source_id: "stripe"}}
+
+      # A source that reads no event type has nothing to miss.
+      assert {:ok, %Envelope{event_type: nil}} = Ingest.ingest(inst, request("plain", "{}"))
+      refute_receive {:missing, _}
+    end
+
+    test "event_type: a 129-byte value is stored as nil, a 128-byte one is kept" do
+      config = start_edge(event_sources())
+      long = String.duplicate("e", 129)
+      kept = String.duplicate("e", 128)
+
+      assert {:ok, %Envelope{event_type: nil}} =
+               Ingest.ingest(config.instance, request("gh", "{}", [{"x-github-event", long}]))
+
+      assert {:ok, %Envelope{event_type: ^kept}} =
+               Ingest.ingest(config.instance, request("gh", "{}", [{"x-github-event", kept}]))
+    end
+
+    test "event_type: a flag-accepted hook gets its event type and still claims no dedupe key" do
+      config = start_edge(event_sources())
+
+      req =
+        request("flag", "forged", [
+          {"webhook-signature", "v1,nope"},
+          {"x-github-delivery", "d-1"},
+          {"x-github-event", "push"}
+        ])
+
+      assert {:ok, first} = Ingest.ingest(config.instance, req)
+      assert first.verification.flagged
+      assert first.event_type == "push"
+      assert first.dedupe_key == nil
+
+      # No claim was made, so the identical retry is a second hook, not a duplicate.
+      assert {:ok, second} = Ingest.ingest(config.instance, req)
+      assert second.id != first.id
+    end
+  end
+
   describe "verifier breadth" do
     @tls_dir Path.expand("../fixtures/tls", __DIR__)
 

@@ -55,7 +55,7 @@ defmodule Ankusa.Admin.Redact do
                  queue_url message_group_id client_name inbox_prefix username mechanism
                  type method exchange_type parse hash encoding secret_decode on_verify_failure
                  algorithm location param fingerprints subjects
-                 project ordering_key)
+                 project ordering_key event_type)
 
   @doc "A redacted, JSON-encodable view of the whole config."
   @spec config(Ankusa.Config.t()) :: map()
@@ -144,6 +144,14 @@ defmodule Ankusa.Admin.Redact do
       case Map.get(spec, "retry") do
         %{} = retry -> Map.put(entry, "retry", retry)
         _ -> entry
+      end
+
+    # The event type: a preset name, or the name of a header or a JSON path to
+    # read the provider's event name from. No secret in any of them.
+    entry =
+      case Map.get(spec, "event_type") do
+        nil -> entry
+        event_type -> Map.put(entry, "event_type", open(event_type))
       end
 
     # The source's change counter, for a store that keeps one.

@@ -23,6 +23,7 @@ defmodule Ankusa.ReplayTest do
     @impl true
     def deliver(env, ctx, opts) do
       send(Keyword.fetch!(opts, :pid), {:replayed, env.id, ctx[:replay_id]})
+      send(Keyword.fetch!(opts, :pid), {:event_type, env.id, env.event_type})
       :ok
     end
   end
@@ -693,6 +694,42 @@ defmodule Ankusa.ReplayTest do
     third = poll_job_state(inst, third.id, &(&1.state == :done))
     assert {third.moved, third.scanned} == {0, 0}
     refute_receive {:replayed, _, _}, 200
+  end
+
+  test "event_type: a released quarantine hook gets its event type from the current source" do
+    pid = self()
+
+    decoder = fn _source_id, spec ->
+      [
+        verifier: {Ankusa.Verifier.Hmac, scheme: :standard_webhooks, secret: spec["secret"]},
+        on_verify_failure: :quarantine,
+        event_type: %{json: "type"},
+        sinks: [{RecordSink, pid: pid}]
+      ]
+    end
+
+    config = start(%{}, source_store: {Ankusa.SourceStore.Persistent, decoder: decoder})
+    inst = config.instance
+    {old, new} = {swh_secret(), swh_secret()}
+
+    assert {:ok, _} = Ankusa.SourceStore.put(inst, "acme", "billing", %{"secret" => old}, :create)
+
+    body = ~s({"type":"invoice.paid"})
+    headers = standard_webhooks_headers("msg_1", body, new)
+
+    assert {:quarantined, :no_match} =
+             Ankusa.Edge.Ingest.ingest(inst, request("acme.billing", body, headers))
+
+    # Held, not resolved: the event type is read when the hook is released.
+    assert {:ok, [held]} = Ankusa.Edge.Quarantine.recent(inst, 10)
+
+    assert {:ok, _} = Ankusa.SourceStore.put(inst, "acme", "billing", %{"secret" => new}, :update)
+    assert {:ok, :created, job} = Replay.start(inst, kind: :quarantine)
+    job = poll_job_state(inst, job.id, &(&1.state == :done))
+    assert {job.moved, job.skipped} == {1, 0}
+
+    held_id = held.id
+    assert_receive {:event_type, ^held_id, "invoice.paid"}, 5_000
   end
 
   test "quarantine release judges the signature's timestamp at the hook's receive time" do

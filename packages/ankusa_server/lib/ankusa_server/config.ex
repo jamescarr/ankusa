@@ -173,7 +173,7 @@ defmodule AnkusaServer.Config do
   # A rotation window needs two keys; a handful covers any overlap a provider
   # forces. More is a misconfiguration (each key costs an HMAC per hook).
   @max_secrets 8
-  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers max_headers forward_headers_max_bytes store_headers trust_url_tenant retry)
+  @source_keys ~w(tenant on_verify_failure verify sinks dedupe event_type forward_headers max_headers forward_headers_max_bytes store_headers trust_url_tenant retry)
   @dedupe_keys ~w(preset header json ttl_seconds)
   @dedupe_presets %{
     "github" => :github,
@@ -182,6 +182,15 @@ defmodule AnkusaServer.Config do
     "shopify" => :shopify,
     "stripe" => :stripe,
     "salesforce" => :salesforce
+  }
+  @event_type_keys ~w(preset header json)
+  @event_type_presets %{
+    "github" => :github,
+    "shopify" => :shopify,
+    "stripe" => :stripe,
+    "standard_webhooks" => :standard_webhooks,
+    "svix" => :svix,
+    "slack" => :slack
   }
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
@@ -2206,6 +2215,7 @@ defmodule AnkusaServer.Config do
       |> put_opt(:verifier, verifier(source, path))
       |> Keyword.put(:sinks, sinks!(source, path))
       |> put_opt(:dedupe, dedupe(source, path))
+      |> put_opt(:event_type, event_type(source, path))
       |> put_opt(:forward_headers, forward_headers(source, path))
       |> put_opt(:max_headers, positive_int_opt(source, "max_headers", path))
       |> put_opt(
@@ -2303,6 +2313,68 @@ defmodule AnkusaServer.Config do
       end
 
     [from, ttl_ms] |> Enum.reject(&is_nil/1) |> Map.new()
+  end
+
+  # `nil`, a preset name (`github`, `stripe`, …), or a map with exactly one of
+  # preset/header/json: where the provider's event name is read from
+  # (`Ankusa.EventType`). Returns `%{preset: atom}`, `%{header: binary}` or
+  # `%{json: binary}`, which `Ankusa.EventType.new!/2` accepts.
+  defp event_type(source, path) do
+    path = path ++ ["event_type"]
+
+    spec =
+      case source["event_type"] do
+        nil ->
+          nil
+
+        preset when is_binary(preset) ->
+          %{
+            preset:
+              Map.fetch!(@event_type_presets, enum!(preset, Map.keys(@event_type_presets), path))
+          }
+
+        value ->
+          event_type_section!(value, path)
+      end
+
+    if spec, do: check_event_type!(spec, path)
+    spec
+  end
+
+  defp event_type_section!(value, path) do
+    spec = section!(value, @event_type_keys, path)
+
+    case {spec["preset"], spec["header"], spec["json"]} do
+      {nil, nil, nil} ->
+        raise ConfigError,
+          message: "#{render_path(path)}: set exactly one of preset, header, json"
+
+      {preset, nil, nil} ->
+        preset = enum!(preset, Map.keys(@event_type_presets), path ++ ["preset"])
+        %{preset: Map.fetch!(@event_type_presets, preset)}
+
+      {nil, _header, nil} ->
+        %{header: string_opt(spec, "header", path)}
+
+      {nil, nil, _json} ->
+        %{json: string_opt(spec, "json", path)}
+
+      _other ->
+        raise ConfigError,
+          message: "#{render_path(path)}: set exactly one of preset, header, json"
+    end
+  end
+
+  # The ranges (a header of at most 128 bytes, a dot path of 1 to 16 non-empty
+  # segments) are core's: a bad one is refused here, with the path, when the file
+  # is read or the API call arrives, not when the source is built.
+  defp check_event_type!(spec, path) do
+    Ankusa.EventType.new!(spec, path |> Enum.at(-2))
+    :ok
+  rescue
+    error in ArgumentError ->
+      message = String.replace(error.message, ~r/^source .*?: event_type: /, "")
+      reraise ConfigError, [message: "#{render_path(path)}: #{message}"], __STACKTRACE__
   end
 
   defp forward_headers(source, path) do
