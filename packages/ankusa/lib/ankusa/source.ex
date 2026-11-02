@@ -29,6 +29,9 @@ defmodule Ankusa.Source do
     ordering: nil,
     # %Ankusa.Dedupe{} or nil; the provider event key collapsed at ingest
     dedupe: nil,
+    # %Ankusa.EventType{} or nil; the provider's event name, read at ingest from a
+    # header or a JSON path and stored on the hook (`Ankusa.Routing`)
+    event_type: nil,
     # :default | [header names]; provider request headers forwarded to sinks
     forward_headers: :default,
     # caps on the forwarded headers per message: at most this many names, and
@@ -57,6 +60,7 @@ defmodule Ankusa.Source do
           sinks: [{module(), keyword()}],
           ordering: [Ankusa.Ordering.sink_ordering()] | nil,
           dedupe: Ankusa.Dedupe.t() | nil,
+          event_type: Ankusa.EventType.t() | nil,
           forward_headers: :default | [String.t()],
           max_headers: pos_integer(),
           forward_headers_max_bytes: pos_integer(),
@@ -97,6 +101,7 @@ defmodule Ankusa.Source do
       sinks: sinks,
       ordering: ordering,
       dedupe: Ankusa.Dedupe.new!(Map.get(opts, :dedupe)),
+      event_type: Ankusa.EventType.new!(Map.get(opts, :event_type), id),
       forward_headers: forward_headers(id, Map.get(opts, :forward_headers, :default)),
       max_headers:
         positive_integer!(

@@ -7,6 +7,17 @@ own ([`docs/releasing.md`](../../docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- **`sources.<id>.event_type` (CR-1).** Where the provider's event name is read
+  from: a preset (`github`, `shopify`, `stripe`, `standard_webhooks`, `svix`,
+  `slack`) or exactly one of `header` / `json` (a dot path). The admin API's
+  source routes read and show the same forms. The event type is stored on the
+  hook and reaches every consumer (`x-ankusa-event-type`, the message's
+  `event_type`); a hook that carries none counts in
+  `ankusa_ingest_event_type_missing_total`. Every rejected form names
+  `sources.<id>.event_type`.
+
 ### Changed
 
 - The image's HTTP server is `bandit 1.14.1` (was `1.14.0`, affected by

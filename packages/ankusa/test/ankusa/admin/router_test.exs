@@ -1182,6 +1182,31 @@ defmodule Ankusa.Admin.RouterTest do
       assert JSON.decode!(conn.resp_body) == created
     end
 
+    test "event_type: a source's view shows its event type, a preset name or a header/json map",
+         %{inst: inst} do
+      for {name, event_type} <- [
+            {"preset", "github"},
+            {"header", %{"header" => "X-Event"}},
+            {"json", %{"json" => "data.kind"}}
+          ] do
+        body = JSON.encode!(spec(%{"name" => name, "event_type" => event_type}))
+        conn = call(inst, :post, "/v1/tenants/acme/sources", body)
+        assert conn.status == 201
+        assert JSON.decode!(conn.resp_body)["event_type"] == event_type
+
+        conn = call(inst, :get, "/v1/tenants/acme/sources/#{name}")
+        assert conn.status == 200
+        assert JSON.decode!(conn.resp_body)["event_type"] == event_type
+      end
+
+      # A source with none shows none.
+      conn =
+        call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec(%{"name" => "bare"})))
+
+      assert conn.status == 201
+      refute Map.has_key?(JSON.decode!(conn.resp_body), "event_type")
+    end
+
     test "list is sorted by name and scoped to its tenant", %{inst: inst} do
       for name <- ~w(zebra apple mango) do
         assert call(

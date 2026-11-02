@@ -9,7 +9,9 @@ defmodule Ankusa.Sink.Message do
   carries its `Ankusa.ClaimCheck.Ref` as one string instead, plus the
   lowercase hex sha256 the reader checks the redeemed bytes against (see
   `docs/claim-check.md`). Every message carries `sha256`, `dedupe_key`,
-  `replay_id`, `idempotency_key` (the tenant-scoped key a consumer dedupes on:
+  `replay_id`, `event_type` (the provider's event name, as the source's
+  `event_type` reads it, or `null`: `Ankusa.EventType`), `idempotency_key` (the
+  tenant-scoped key a consumer dedupes on:
   `Ankusa.Envelope.idempotency_key/1`), `verification` (how the hook was
   verified at ingest: `status` is `"ok"`, `"failed"` or `"skipped"`, and
   `flagged` is `true` when a failed check was let through by the source's
@@ -21,7 +23,7 @@ defmodule Ankusa.Sink.Message do
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 245,
-       "dedupe_key": "evt_1", "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
+       "dedupe_key": "evt_1", "event_type": "push", "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
        "verification": {"status": "ok", "flagged": false},
        "headers": {"x-github-event": "push"},
        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
@@ -31,7 +33,7 @@ defmodule Ankusa.Sink.Message do
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 3145728,
-       "dedupe_key": "evt_1", "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
+       "dedupe_key": "evt_1", "event_type": null, "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
        "verification": {"status": "ok", "flagged": false},
        "headers": {},
        "instance": "default", "region": "eu-west-1",
@@ -156,6 +158,7 @@ defmodule Ankusa.Sink.Message do
         content_type: env.content_type,
         size: env.size,
         dedupe_key: env.dedupe_key,
+        event_type: env.event_type,
         replay_id: Map.get(ctx, :replay_id),
         idempotency_key: Envelope.idempotency_key(env),
         verification: verification(env.verification),
@@ -214,10 +217,11 @@ defmodule Ankusa.Sink.Message do
   this order: `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
   `ankusa_message_version` ("1"), `ankusa_idempotency_key`, `content_type`
   ("application/json"), `ankusa_dedupe_key`, `ankusa_replay_id`,
-  `ankusa_ordering_key` (the lane's key, of a hook of an ordered sink). A pair
+  `ankusa_ordering_key` (the lane's key, of a hook of an ordered sink),
+  `ankusa_event_type` (the hook's event type, when the source reads one). A pair
   whose value is `nil` or `""` is left out (no tenant, no dedupe key, not a
-  replay, not ordered). A hook that carries a trace context (`Ankusa.Trace`)
-  adds `traceparent` and, when it has one, `tracestate`, last.
+  replay, not ordered, no event type). A hook that carries a trace context
+  (`Ankusa.Trace`) adds `traceparent` and, when it has one, `tracestate`, last.
   """
   @spec attributes(Envelope.t(), Ankusa.Sink.ctx()) :: [{String.t(), String.t()}]
   def attributes(%Envelope{} = env, ctx) do
@@ -230,7 +234,8 @@ defmodule Ankusa.Sink.Message do
       {"content_type", "application/json"},
       {"ankusa_dedupe_key", env.dedupe_key},
       {"ankusa_replay_id", ctx[:replay_id]},
-      {"ankusa_ordering_key", ctx[:ordering_key]}
+      {"ankusa_ordering_key", ctx[:ordering_key]},
+      {"ankusa_event_type", env.event_type}
     ]
     |> Enum.filter(fn {_name, value} -> is_binary(value) and value != "" end)
     |> Kernel.++(trace_pairs(env.trace))
@@ -241,8 +246,9 @@ defmodule Ankusa.Sink.Message do
   (`Ankusa.Sink.Kafka`, `Ankusa.Sink.NATS`), as `{name, value}` pairs in this
   order: `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
   `ankusa_message_version` ("1"), `ankusa_idempotency_key`, `content_type`
-  ("application/json"), then `ankusa_dedupe_key` and `ankusa_replay_id` when
-  the hook carries them, then `traceparent` and `tracestate` when it carries a
+  ("application/json"), then `ankusa_dedupe_key`, `ankusa_replay_id`,
+  `ankusa_ordering_key` and `ankusa_event_type` when the hook carries them, then
+  `traceparent` and `tracestate` when it carries a
   trace context (`Ankusa.Trace`). Unlike `attributes/2`, `ankusa_tenant_id` is
   always present — `""` without a tenant — because a header can carry an empty
   value where an SQS or Pub/Sub attribute cannot. The AsyncAPI header schema
@@ -262,7 +268,8 @@ defmodule Ankusa.Sink.Message do
         {name, value} <- [
           {"ankusa_dedupe_key", env.dedupe_key},
           {"ankusa_replay_id", ctx[:replay_id]},
-          {"ankusa_ordering_key", ctx[:ordering_key]}
+          {"ankusa_ordering_key", ctx[:ordering_key]},
+          {"ankusa_event_type", env.event_type}
         ],
         is_binary(value),
         do: {name, value}

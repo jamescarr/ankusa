@@ -284,6 +284,30 @@ defmodule Ankusa.Sink.HttpTest do
     refute Map.has_key?(Map.new(headers), "x-ankusa-ordering-key")
   end
 
+  test "event_type: the hook's event type is sent as x-ankusa-event-type, never a forged one",
+       %{capture: capture} do
+    env = envelope(%{event_type: "push", headers: [{"x-ankusa-event-type", "forged"}]})
+
+    assert :ok =
+             Sink.Http.deliver(env, %{attempt: 1, forward_headers: :default}, opts("/hooks"))
+
+    assert [{"POST", "/hooks", headers, _body}] = Agent.get(capture, & &1)
+
+    assert [{"x-ankusa-event-type", "push"}] =
+             Enum.filter(headers, &(elem(&1, 0) == "x-ankusa-event-type"))
+
+    Agent.update(capture, fn _ -> [] end)
+
+    for none <- [nil, ""] do
+      assert :ok =
+               Sink.Http.deliver(envelope(%{event_type: none}), %{attempt: 1}, opts("/hooks"))
+    end
+
+    assert [{"POST", "/hooks", h1, _}, {"POST", "/hooks", h2, _}] = Agent.get(capture, & &1)
+    refute Map.has_key?(Map.new(h1), "x-ankusa-event-type")
+    refute Map.has_key?(Map.new(h2), "x-ankusa-event-type")
+  end
+
   describe "responses" do
     defp respond(status, headers \\ [], body \\ "") do
       Req.Test.stub(__MODULE__, fn conn ->

@@ -122,6 +122,39 @@ defmodule Ankusa.MetricsTest do
     refute scrape =~ ~s(provider="Ankusa.Verifier.None")
   end
 
+  test "event_type: a hook with none counts on ankusa_ingest_event_type_missing_total, by source" do
+    config =
+      start_instance(
+        source_store:
+          {Static,
+           sources: %{
+             "named" => [
+               verifier: {Ankusa.Verifier.None, []},
+               event_type: :github,
+               sinks: [{Ankusa.Sink.Log, []}]
+             ],
+             "plain" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{Ankusa.Sink.Log, []}]]
+           }},
+        metrics: %{detail: :source}
+      )
+
+    inst = config.instance
+    assert {:ok, _} = Ankusa.Edge.Ingest.ingest(inst, request("named", "{}"))
+    assert {:ok, _} = Ankusa.Edge.Ingest.ingest(inst, request("plain", "{}"))
+
+    assert {:ok, _} =
+             Ankusa.Edge.Ingest.ingest(inst, request("named", "{}", [{"x-github-event", "push"}]))
+
+    scrape = Ankusa.Metrics.scrape(inst)
+
+    assert scrape =~
+             ~r/^ankusa_ingest_event_type_missing_total\{[^}]*source_id="named"[^}]*\} 1(\.0)?$/m
+
+    # One miss only: the hook that carried an event type, and the source that
+    # reads none, leave no series.
+    refute scrape =~ ~r/^ankusa_ingest_event_type_missing_total\{[^}]*source_id="plain"/m
+  end
+
   test "a SHA-1 source counts every verification, ok or failed, and nothing else does" do
     scheme = %Ankusa.Verifier.Hmac.Scheme{signature_header: "x-sig", hash: :sha1}
 
