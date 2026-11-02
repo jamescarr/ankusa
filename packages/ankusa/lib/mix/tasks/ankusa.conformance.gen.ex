@@ -31,10 +31,10 @@ defmodule Mix.Tasks.Ankusa.Conformance.Gen do
 
   # The keys of a `decode_message` result (conformance/README.md), in the order
   # the vectors list them. A key the message lacks decodes to `null`, `headers`
-  # to `{}`; the message's other keys (`ordering_key`, `event_type`, …) are not decoded.
+  # to `{}`; the message's other keys (`ordering_key`, …) are not decoded.
   @output_keys ~w(v id source_id tenant_id received_at content_type size body_base64 claim
                   sha256 dedupe_key replay_id idempotency_key headers verification
-                  traceparent tracestate instance region)
+                  traceparent tracestate instance region event_type)
 
   @traceparent "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 

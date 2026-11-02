@@ -6,6 +6,11 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Message#event_type`: the provider's event name (for example `invoice.paid`)
+  from the message (`nil` when none); a non-string value is `invalid_field`.
+
 ## [0.6.0] - 2026-10-28
 
 ### Added

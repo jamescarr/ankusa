@@ -39,6 +39,7 @@ defmodule Ankusa.ConformanceGenTest do
       assert expect["id"] == message["id"]
       assert expect["instance"] == message["instance"]
       assert expect["region"] == message["region"]
+      assert expect["event_type"] == message["event_type"]
     end
   end
 
@@ -50,5 +51,13 @@ defmodule Ankusa.ConformanceGenTest do
              by_id["producer.inline_full"]
 
     assert %{"instance" => "conformance", "region" => nil} = by_id["producer.flagged"]
+  end
+
+  test "the event_type in the vectors is the envelope's" do
+    %{"cases" => cases} = JSON.decode!(File.read!(@vectors))
+    by_id = Map.new(cases, &{&1["id"], &1["expect"]["ok"]})
+
+    assert %{"event_type" => "invoice.paid"} = by_id["producer.inline_full"]
+    assert %{"event_type" => nil} = by_id["producer.flagged"]
   end
 end

@@ -134,13 +134,15 @@
 
   `{:v :id :source-id :tenant-id :received-at :content-type :size :body :claim
   :sha256 :dedupe-key :replay-id :idempotency-key :headers :verification
-  :traceparent :tracestate :instance :region}`
+  :traceparent :tracestate :instance :region :event-type}`
 
   where `:body` is a `byte[]` for an inline message and `nil` for a claim, and
   `:claim` the claim ref for a claim and `nil` otherwise. `:headers` keeps its
   string keys. `:instance` and `:region` are the name of the Ankusa instance
   that published the message and the region it is configured with (`nil` when
-  the message says `null` or predates the fields). Unknown keys are ignored.
+  the message says `null` or predates the fields). `:event-type` is the
+  provider's event name (for example `invoice.paid`) as the source's
+  `event_type` key read it (`nil` when none). Unknown keys are ignored.
 
   The rules run in order and the first failure wins: valid JSON, an object,
   a supported `v`, the typed fields, the body form, then (inline) size and
@@ -168,6 +170,7 @@
         tracestate (optional-string! raw "tracestate")
         instance (optional-string! raw "instance")
         region (optional-string! raw "region")
+        event-type (optional-string! raw "event_type")
         headers (if (contains? raw "headers") (get raw "headers") {})
         _ (check-field! (and (map? headers) (every? string? (vals headers))) "headers")
         sha256 (get raw "sha256")
@@ -200,7 +203,8 @@
      :traceparent traceparent
      :tracestate tracestate
      :instance instance
-     :region region}))
+     :region region
+     :event-type event-type}))
 
 (defn ->hook
   "Turn a decoded `message` into the hook a handler takes:

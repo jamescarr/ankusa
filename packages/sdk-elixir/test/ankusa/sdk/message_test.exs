@@ -151,6 +151,17 @@ defmodule Ankusa.SDK.MessageTest do
                decode(inline_message(%{"region" => ["eu"]}))
     end
 
+    test "event_type is an optional string: nil when absent or null" do
+      assert {:ok, %Message{event_type: nil}} = decode(inline_message())
+      assert {:ok, %Message{event_type: nil}} = decode(inline_message(%{"event_type" => nil}))
+
+      assert {:ok, %Message{event_type: "invoice.paid"}} =
+               decode(inline_message(%{"event_type" => "invoice.paid"}))
+
+      assert {:error, %InvalidMessageError{code: "invalid_field", field: "event_type"}} =
+               decode(inline_message(%{"event_type" => 7}))
+    end
+
     test "rejects a malformed field, naming it" do
       assert {:error, %InvalidMessageError{reason: {:invalid_field, "id"}}} =
                decode(inline_message(%{"id" => ""}))

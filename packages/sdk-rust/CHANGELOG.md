@@ -8,6 +8,9 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Message::event_type`: the provider's event name (for example `invoice.paid`)
+  from the message (`None` when none); a non-string value is `invalid_field`.
+
 - `ListDeadLettersParams` gained `tenant`, `sink`, `error_class` and `cursor`; the query
   goes out as `source_id, tenant, sink, error_class, since, limit, cursor`. `DlqEntry`
   gained `sink` and `error_class`, `DlqPage` gained `next_cursor`, and `ReplaySpec`
