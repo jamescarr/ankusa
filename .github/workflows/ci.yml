@@ -441,13 +441,16 @@ jobs:
     name: perf gate
     runs-on: ubuntu-latest
     env:
-      # Ground rule 10's hot-path files, plus the gate's own files.
+      # Ground rule 10's hot-path files, plus the gate's own files. `ci.yml` is
+      # not one of them: a workflow file cannot change the measured program, and
+      # an invocation it gets wrong shows up on the next push to `main` within
+      # minutes (CI-2 in CI_PIPELINE_PLAN.md).
       HOT_PATHS: >-
         ^packages/ankusa/lib/ankusa/(
         (edge|queue|store|dispatch|verifier|routes)/.*|
         (store|queue|dedupe|envelope|http|route_resolver)\.ex|
         sink/(message|http)\.ex
-        )$|^packages/ankusa/bench/|^\.mise/tasks/bench/|^\.github/workflows/ci\.yml$
+        )$|^packages/ankusa/bench/|^\.mise/tasks/bench/
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: scope

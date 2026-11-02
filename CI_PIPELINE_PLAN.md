@@ -120,7 +120,7 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 4/6 done · last updated: 2026-11-02
+Status: 5/6 done · last updated: 2026-11-02
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -191,7 +191,7 @@ priority, ID order.
 
 ### Phase B — Make red mean something
 
-- [ ] **CI-2 — Perf gate: make the base and branch legs comparable, so a diff that cannot change the runtime cannot fail the gate** · P1 · Deps: —
+- [x] **CI-2 — Perf gate: make the base and branch legs comparable, so a diff that cannot change the runtime cannot fail the gate** · P1 · Deps: —
   *Why:* on 2026-11-02 the gate failed PR 213, whose only change was two cache
   keys and a comment in `.github/workflows/ci.yml` (compiled program identical
   to base): `FAIL p99_ms 512B-ordered: 44.10 > 1.2×26.30 (limit 31.57)` — the
@@ -255,7 +255,33 @@ priority, ID order.
   `BENCH_CONFIRM`, `evaluate/3`, `report/4`), `.mise/tasks/bench/gate`,
   `packages/ankusa/bench/core_bench.exs` (where the store lives),
   `docs/testing.md:1310-1400`.
-  *Evidence:* —
+  *Evidence:* PR #217. Cause: the runner's disk, not an accumulated store —
+  `core_bench` already made a fresh data dir per cell (`0 B before` each with
+  the new `BENCH_TRACE=1`); `p50_ms` stayed within a few percent while `p99_ms`
+  spanned 4–10× inside one leg (base `512B` 155.56/177.99/195.47 ms, branch
+  `512B` 22.20/149.55/202.08, `512B-ordered` 44.10–186.70 after the confirm
+  round), because an ingest commit is `Store.write(..., sync: true)` and one
+  group commit carries up to 1 024 hooks, so the slowest fsyncs *are* p99: in
+  one base leg `-ordered` was 7× faster than `512B` with the same p50 for that
+  reason alone. Fix: `gate.exs` gives every run its own `TMPDIR` under
+  `/dev/shm` (7.8 GiB free on the runner; `BENCH_DATA_ROOT` overrides) and logs
+  the path and size before/after each cell; `HOT_PATHS` no longer lists
+  `ci.yml`. Guard: a cell whose three runs span >1.2× is measured once more
+  (samples added), and if the two rounds' medians still span >1.2× the run
+  fails as `INCONCLUSIVE p99_ms <cell>` with its samples (base leg included;
+  never a pass, never a regression). Three consecutive `perf gate` runs of
+  `37bef1fb` (jobs 125595490540, 125611013439, 125616200581): all green, every
+  gated delta within ±7.8 % (p99 +6.2/−3.4/−5.0/+1.7, +7.8/−1.9/+6.2/+4.9,
+  +5.1/+2.5/+1.3/−1.1; ingest within ±5.2 %), within-leg p99 spread ≤1.20×
+  except two cells re-measured by the guard. Proof: throwaway PR #218 (closed
+  unmerged, branch deleted) added `Process.sleep(1)` to
+  `Ankusa.Edge.Ingest.ingest/2` and the gate **failed**:
+  `FAIL ingest_per_s 512B-c32: 10744.35 < 0.8×16711.76` with `p50_ms +78.9 %`
+  and every other cell inside its limit. A `ci.yml`-only PR (#221, closed,
+  branch deleted) reported `no hot-path file touched: gate skipped`
+  (`run=false`). `mise run lint:workflows` passes; `mise run bench:gate`
+  locally reports the laptop's fsync-bound numbers (three cells INCONCLUSIVE,
+  `512B` FAIL on both gates), not a verdict.
 
 - [x] **CI-3 — Keep the CI images in the Actions cache instead of pulling them from Docker Hub on every job, and pin every compose image by digest** · P1 · Deps: —
   *Why:* **11 of 21 failed jobs in 30 runs** are
