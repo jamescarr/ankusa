@@ -12,6 +12,9 @@
 # (dereference an annotated tag with `git/tags/<sha>`), then change the SHA and
 # its comment together. To bump an image:
 # `docker buildx imagetools inspect <image:tag> --format '{{json .Manifest.Digest}}'`.
+# The compose files under packages/ are CI and local infrastructure images and
+# take the same digest: `docker compose -f <file> config --images` prints the
+# refs a bump has to cover.
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT"
@@ -51,9 +54,23 @@ done < <(grep -E '^FROM ' "$dockerfile")
 grep -qE '^# syntax=[^[:space:]]+@sha256:[0-9a-f]{64}$' "$dockerfile" ||
   problems+=("$dockerfile: the '# syntax=' frontend is not pinned by digest")
 
+# The compose files `check:package` brings up and `test:integration` starts.
+# Each `image:` is the same kind of input as a `FROM`: a mutable tag unless the
+# digest is there.
+for compose in packages/*/docker-compose.yml packages/ankusa/docker-compose.integration.yml; do
+  [ -f "$compose" ] || continue
+  while IFS= read -r line; do
+    image=$(echo "${line#*image:}" | awk '{print $1}')
+    case "$image" in
+      *@sha256:????????????????????????????????????????????????????????????????) continue ;;
+    esac
+    problems+=("$compose: image not pinned by digest: $line")
+  done < <(grep -E '^[[:space:]]+image:[[:space:]]' "$compose")
+done
+
 if [ "${#problems[@]}" -gt 0 ]; then
   printf '%s\n' "${problems[@]}" >&2
   fail "${#problems[@]} unpinned supply-chain input(s) (see the header of .mise/tasks/lint/pins)"
 fi
 
-echo "pins OK: every action is a commit SHA, every release-image input a digest"
+echo "pins OK: every action is a commit SHA, every image a digest"

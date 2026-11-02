@@ -740,6 +740,12 @@ the bucket/container bootstrap, runs `mix test --only integration` (the tagged t
 `packages/ankusa`, and tears the emulators down. CI runs it as the
 `core integration (floci)` job.
 
+CI keeps these images, and the four packages' own compose images, in the
+Actions cache (`scripts/ci/images.sh`): the job loads them and
+`docker compose up` pulls nothing, so a Docker Hub rate limit fails neither
+run. Nothing changes locally — `mise run test:integration` and
+`mise run check:package <pkg>` pull from whatever your daemon already has.
+
 Every floci emulator runs in `persistent` storage mode (the images default to
 in-memory) with its state on a named Docker volume, so it survives an emulator
 restart; the task's `down -v` removes those volumes, so each run starts empty.
@@ -1099,6 +1105,10 @@ builds with, and prints one line:
 mise run test:crash
 # acked=14940 recovered=14940 missing=0 enospc_503=1 resumed=true
 ```
+
+CI caches that base image between runs the same way as the compose images
+(`scripts/ci/images.sh`), so a drill job does not pull it from Docker Hub; a
+local run uses whatever your daemon already has.
 
 - **ENOSPC** (`mise run test:crash`, CI job `crash`): `/data` is a 192 MiB
   tmpfs. The harness ingests `RATE` (default 1000) hooks/s of `BODY_BYTES`

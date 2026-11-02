@@ -21,7 +21,7 @@ services:
   # runs in `persistent` storage mode (each change written to disk) into its
   # own named volume, instead of the images' in-memory default.
   floci:
-    image: floci/floci:latest
+    image: floci/floci:latest@sha256:5ee85db604c4aa74ac76e07ea5cc83086f37bb472bf3dbb97e34019e48efae9c
     ports:
       - "4566:4566"
     environment:
@@ -36,7 +36,7 @@ services:
   # (`backup.secondary`). Runs to completion; re-run is idempotent (`mb` on an
   # existing bucket is a no-op error we swallow).
   s3-bootstrap:
-    image: amazon/aws-cli:2.38.1
+    image: amazon/aws-cli:2.38.1@sha256:733d5be1015825e4038c6016f3fa9954868ddee1f611b73be795a9cc2e706bfd
     depends_on: [floci]
     environment:
       AWS_ACCESS_KEY_ID: test
@@ -55,7 +55,7 @@ services:
 
   # GCS emulator.
   floci-gcp:
-    image: floci/floci-gcp:latest
+    image: floci/floci-gcp:latest@sha256:d02e70407d6b37c3e24e31b5ccf100606735cba4f84fd476708b35afd052abb3
     ports:
       - "4588:4588"
     environment:
@@ -66,7 +66,7 @@ services:
 
   # Creates the GCS bucket once floci-gcp is answering requests.
   gcs-bootstrap:
-    image: curlimages/curl:8.23.0
+    image: curlimages/curl:8.23.0@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93
     depends_on: [floci-gcp]
     environment:
       ANKUSA_GCS_BUCKET: ankusa-segments-dev
@@ -82,7 +82,7 @@ services:
   # Azure Blob emulator. `dev` auth mode: credentials are not validated, so
   # the adapter's unauthenticated requests work against it unchanged.
   floci-az:
-    image: floci/floci-az:latest
+    image: floci/floci-az:latest@sha256:f9d7552c9c02be84f12e266d6201ff52c1f23421af94943cbf687526ded89790
     ports:
       - "4577:4577"
     environment:
@@ -93,7 +93,7 @@ services:
 
   # Creates the Blob container once floci-az is answering requests.
   azure-bootstrap:
-    image: curlimages/curl:8.23.0
+    image: curlimages/curl:8.23.0@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93
     depends_on: [floci-az]
     environment:
       ANKUSA_AZURE_CONTAINER: ankusa-segments-dev
@@ -107,7 +107,7 @@ services:
   # OCI Object Storage emulator. Request signatures are parsed for tenancy
   # context but never verified, so any locally generated RSA key works.
   floci-oci:
-    image: floci/floci-oci:latest
+    image: floci/floci-oci:latest@sha256:7b976aabefd8a53ebf09df52b788a1b3c3cd4e71f2e0b29efe8f9d8b3954fbd3
     ports:
       - "4599:4599"
     environment:
@@ -118,7 +118,7 @@ services:
 
   # Creates the Object Storage bucket once floci-oci is answering requests.
   oci-bootstrap:
-    image: curlimages/curl:8.23.0
+    image: curlimages/curl:8.23.0@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93
     depends_on: [floci-oci]
     environment:
       ANKUSA_OCI_BUCKET: ankusa-segments-dev
