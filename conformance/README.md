@@ -94,7 +94,7 @@ then runs every registered SDK's native runner.
   "replay_id": string|null, "idempotency_key": string|null, "headers": {},
   "verification": {"status": string, "flagged": bool}|null,
   "traceparent": string|null, "tracestate": string|null,
-  "instance": string|null, "region": string|null}`.
+  "instance": string|null, "region": string|null, "event_type": string|null}`.
   `body_base64` here is the decoded body re-encoded as standard base64, so
   runners compare bytes. `traceparent` and `tracestate` are the message's W3C
   trace context, passed through verbatim (the SDK neither parses nor validates
@@ -102,7 +102,10 @@ then runs every registered SDK's native runner.
   the fields. `instance` and `region` are the name of the Ankusa instance that
   published the message and the region it is configured with
   (`message.origin`): a string, or `null` for a message that says so or lacks
-  the key (a node older than the fields). `verification` is the message's
+  the key (a node older than the fields). `event_type` is the provider's event
+  name as the source's `event_type` key read it, for example `invoice.paid`
+  (`message.event_type`): a string, or `null` for a message that says so or
+  lacks the key. `verification` is the message's
   `verification`
   key verbatim; absent or `null` → `null` (a node older than the field);
   present but not an object of a non-empty string `status` and a boolean
@@ -120,7 +123,7 @@ then runs every registered SDK's native runner.
   3. Field types, in this order, else `invalid_field` with `field` set to the
      key name: `id` a non-empty string; `source_id` a string; `received_at` an
      integer; `size` an integer ≥ 0; `tenant_id`/`content_type`/`dedupe_key`/
-     `replay_id`/`idempotency_key`/`traceparent`/`tracestate`/`instance`/`region`
+     `replay_id`/`idempotency_key`/`traceparent`/`tracestate`/`instance`/`region`/`event_type`
      a string, null, or absent (in that order); `headers` absent
      or an object whose values are all strings; `sha256` absent or 64 lowercase
      hex characters.
@@ -136,7 +139,7 @@ then runs every registered SDK's native runner.
 
   Unknown keys are ignored. Absent `dedupe_key`, `replay_id`, `idempotency_key`
   and `sha256` decode to `null`; absent `headers` decodes to `{}`. Absent
-  `instance` and `region` decode to `null`.
+  `instance`, `region` and `event_type` decode to `null`.
 - `idempotency_key`: `{"message": string}` or `{"headers": {…}}`, plus an
   optional `"include_replay": bool`. The runner decodes the message with
   `decode_message` or parses the headers with `parse_headers`, then calls the

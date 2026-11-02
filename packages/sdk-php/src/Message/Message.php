@@ -36,7 +36,7 @@ use Ankusa\Webhook\Verification;
  * 3. field types -> `invalid_field` with `field` set to the key: `id` a
  *    non-empty string; `source_id` a string; `received_at` an integer; `size`
  *    an integer >= 0; `tenant_id`/`content_type`/`dedupe_key`/`replay_id`/
- *    `idempotency_key`/`traceparent`/`tracestate`/`instance`/`region` a string,
+ *    `idempotency_key`/`traceparent`/`tracestate`/`instance`/`region`/`event_type` a string,
  *    null, or absent, in that order; `headers` absent or an object
  *    of strings; `sha256` absent or 64 lowercase hex characters.
  * 4. body form: both `body_base64` and `claim` -> `ambiguous_body`; neither ->
@@ -102,6 +102,8 @@ final readonly class Message
         public ?string $instance = null,
         /** The region that instance is configured with; `null` when it has none or predates the field. */
         public ?string $region = null,
+        /** The provider's event name (for example `invoice.paid`), as the source's `event_type` key read it; `null` when none. */
+        public ?string $eventType = null,
     ) {}
 
     /**
@@ -153,6 +155,7 @@ final readonly class Message
         $tracestate = self::optionalString($raw, 'tracestate');
         $instance = self::optionalString($raw, 'instance');
         $region = self::optionalString($raw, 'region');
+        $eventType = self::optionalString($raw, 'event_type');
 
         $headers = self::headers($raw);
 
@@ -205,6 +208,7 @@ final readonly class Message
                 tracestate: $tracestate,
                 instance: $instance,
                 region: $region,
+                eventType: $eventType,
             );
         }
 
@@ -243,6 +247,7 @@ final readonly class Message
             tracestate: $tracestate,
             instance: $instance,
             region: $region,
+            eventType: $eventType,
         );
     }
 

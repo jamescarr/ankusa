@@ -414,7 +414,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": null,
-          "region": null
+          "region": null,
+          "event_type": null
         }
       }
     },

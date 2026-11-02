@@ -33,7 +33,8 @@
           "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
           "tracestate": "vendor=1",
           "instance": "conformance_eu",
-          "region": "eu-west-1"
+          "region": "eu-west-1",
+          "event_type": "invoice.paid"
         }
       }
     },
@@ -69,7 +70,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": "conformance_eu",
-          "region": "eu-west-1"
+          "region": "eu-west-1",
+          "event_type": null
         }
       }
     },
@@ -103,7 +105,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": "conformance",
-          "region": null
+          "region": null,
+          "event_type": null
         }
       }
     },
@@ -137,7 +140,8 @@
           "traceparent": null,
           "tracestate": null,
           "instance": "conformance",
-          "region": null
+          "region": null,
+          "event_type": null
         }
       }
     }

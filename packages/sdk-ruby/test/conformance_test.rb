@@ -169,7 +169,8 @@ class ConformanceTest < Minitest::Test
         "traceparent" => message.traceparent,
         "tracestate" => message.tracestate,
         "instance" => message.instance,
-        "region" => message.region
+        "region" => message.region,
+        "event_type" => message.event_type
       }
     when "idempotency_key"
       include_replay = input.fetch("include_replay", false)
