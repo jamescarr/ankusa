@@ -12,6 +12,12 @@ on:
   pull_request:
   workflow_call:
 
+concurrency:
+  # A newer push to the same PR supersedes the older run; a push to main (or
+  # a tag) never cancels, because its result is the record for the commit.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   discover:
     name: discover packages
