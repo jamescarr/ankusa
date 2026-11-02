@@ -54,10 +54,11 @@
 #
 # The same noise decides what the limit *can* say: the limits are ratios of
 # 1.2x and 0.8x, so a cell whose own `p99_ms` samples over one round span more
-# than 1.2x cannot support the decision. Such a cell is run one more round and
-# judged on that round; if it is still wider than the limit's headroom the run
-# is INCONCLUSIVE — it prints the samples and fails, and is neither a pass nor
-# a regression. (A wide base leg is inconclusive too: a comparison against a
+# than 1.2x cannot support the decision. Such a cell is run one more round
+# (its samples are added to the cell's: the verdict is the median of all six),
+# and if the new round is still wider than the limit's headroom the run is
+# INCONCLUSIVE — it prints the samples and fails, and is neither a pass nor a
+# regression. (A wide base leg is inconclusive too: a comparison against a
 # baseline measured that shakily means nothing.)
 #
 # Env knobs:
@@ -174,8 +175,10 @@ defmodule Bench.Gate do
 
   # A leg's `p99_ms` can only support a 1.2x decision if its own samples are
   # tighter than that. A cell wider than the limit's headroom over one round is
-  # measured one more round and judged on that round; the cells still wider are
-  # returned as inconclusive (see the header).
+  # measured one more round; that round is added to the cell's samples (so the
+  # verdict is the median of six, a better estimate than either round's three),
+  # and an inconclusive is judged on the round just measured. The cells still
+  # wider are returned as inconclusive (see the header).
   defp settle_spread(matrix, runs, root, trace?, samples, cells) do
     case wide(samples, cells) do
       [] ->
@@ -192,17 +195,15 @@ defmodule Bench.Gate do
         end
 
         retry = Enum.filter(matrix, fn {cell, _, _} -> cell in retry_cells end)
-        # The retry round replaces the first for these cells: it is the same
-        # measurement, taken once more, and the gate decides on one round.
-        samples = Map.merge(samples, collect(retry, runs, root, trace?, %{}))
-        {samples, wide(samples, cells, retry_cells)}
+        retried = collect(retry, runs, root, trace?, %{})
+        samples = Map.merge(samples, retried, fn _cell, first, more -> first ++ more end)
+        {samples, wide(retried, retry_cells)}
     end
   end
 
   # Cells whose own p99 samples span more than the p99 limit's factor.
-  defp wide(samples, cells, only \\ nil) do
+  defp wide(samples, cells) do
     for cell <- cells,
-        only == nil or cell in only,
         values = Enum.map(samples[cell], & &1["p99_ms"]),
         length(values) > 1,
         min = Enum.min(values),
@@ -531,7 +532,7 @@ defmodule Bench.Gate do
     end
   end
 
-  defp print_table(cells, medians, baseline, rows, inconclusive \\ []) do
+  defp print_table(cells, medians, baseline, rows, inconclusive) do
     gated = Map.new(rows, fn r -> {{r.cell, r.metric}, r} end)
 
     IO.puts("")

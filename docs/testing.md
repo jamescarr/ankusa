@@ -1365,9 +1365,10 @@ for such a cell.
 The limits are ratios, so the samples have to be tighter than the ratio for a
 verdict to mean anything. If a cell's own `p99_ms` over one round of three
 runs spans more than the limit's headroom (max ÷ min above 1.2×), the gate
-re-measures that cell once and decides on that round. If it is still wider,
-the run is **inconclusive**: it prints `INCONCLUSIVE p99_ms <cell>: samples
-span N× (...)` with the samples, exits 1, and is neither a pass nor a
+re-measures that cell once, adds those samples to the cell's (the verdict is
+the median of all six) and checks the new round the same way. If it is still
+wider, the run is **inconclusive**: it prints `INCONCLUSIVE p99_ms <cell>:
+samples span N× (...)` with the samples, exits 1, and is neither a pass nor a
 regression. The check applies to the base leg too — a baseline measured that
 shakily makes every comparison against it meaningless.
 
