@@ -345,8 +345,9 @@ jobs:
 
   # The perf regression gate (ground rule 10 of ANKUSA_HARDENING_PLAN.md,
   # docs/testing.md "Perf gate"): on every push to main, and on a PR only when
-  # its diff touches a hot-path file. The job itself always runs (so a
-  # branch-protection rule can require it); the steps that cost minutes are
+  # its diff touches a hot-path file. CI-2 proof: this PR changes only this
+  # comment, so the perf gate job must report run=false. The job always runs
+  # (so a branch-protection rule can require it); the steps that cost minutes are
   # skipped on a PR that does not touch the hot path. Hosted runners of one
   # class differ by a factor of two in speed from job to job, so the gate
   # compares against the base commit measured on this very runner (see the
