@@ -11,6 +11,12 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `bandit ~> 1.14 and >= 1.14.1` (was `~> 1.14`): 1.14.0 is affected
+  by EEF-CVE-2026-116078 (High: an HTTP/2 request body sent as 1-byte DATA
+  frames amplified memory use), fixed in 1.14.1; `mix hex.audit` fails on it.
+
 ## [0.7.0] - 2026-10-28
 
 ### Added

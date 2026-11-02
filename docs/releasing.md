@@ -83,6 +83,24 @@ device-mapper)` job of `ci.yml`'s push run for `HEAD`: it fails when that run
 is missing, red, or skipped the drill (a runner without device-mapper), and then
 the drill is a manual step, run on a privileged Docker host before tagging.
 
+### Versions: the Elixir family shares major.minor
+
+`ankusa`, `ankusa_kafka`, `ankusa_nats`, `ankusa_rabbitmq`, `ankusa_redis` and
+the server image (`ankusa_server`) share their major.minor: the adapters
+depend on core (`{:ankusa, "~> X.Y"}`) and the image bundles all of them, so
+the shared number says which ones go together. A core minor or major release
+bumps every one of them to the same `X.Y.0` in the same release PR, an adapter
+with nothing else to say gets a one-line "version aligned with `ankusa` X.Y"
+entry, and the adapters' `{:ankusa, "~> X.Y"}` follows. Patch versions are
+each package's own: a fix to one is `X.Y.1` of that one alone.
+
+The SDKs (`sdk-*`) and `async_api_spex` keep independent SemVer. No SDK
+depends on any package here: they speak the wire format to a running server,
+and their compatibility with a server is the queue message versions each one
+accepts (`message.versions` in
+[`conformance/features.json`](https://github.com/jamescarr/ankusa/blob/main/conformance/features.json)),
+not a shared version number.
+
 ### Ordering: core first
 
 Tag `ankusa` **alone** first, and wait for `release:watch ankusa` to finish

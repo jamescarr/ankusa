@@ -1,8 +1,9 @@
 # Changelog
 
-All notable changes to the Ankusa server image are documented here. This
-project is versioned independently of the `ankusa` Hex packages: it is the
-`jamescarr/ankusa` Docker image, tagged `ankusa_server-vX.Y.Z`.
+All notable changes to the Ankusa server image are documented here. It is the
+`jamescarr/ankusa` Docker image, tagged `ankusa_server-vX.Y.Z`, and shares its
+major.minor with the `ankusa` Hex packages it bundles; patch versions are its
+own ([`docs/releasing.md`](../../docs/releasing.md)).
 
 ## [Unreleased]
 
@@ -23,6 +24,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   rather than being polled until `--timeout`; the summary line gains `gone=N` after
   `unreachable=`, and the command exits `1`. Run it again with the same `--job-id` to
   reach the replacement.
+### Changed
+
+- The image's HTTP server is `bandit 1.14.1` (was `1.14.0`, affected by
+  EEF-CVE-2026-116078, High: an HTTP/2 request body sent as 1-byte DATA frames
+  amplified memory use). The 0.7.0 image ships 1.14.0; the advisory was
+  published after it was built.
 
 ## [0.7.0] - 2026-10-28
 
