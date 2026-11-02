@@ -8,7 +8,7 @@ defmodule Ankusa.SourceOrderingTest do
 
   use ExUnit.Case, async: false
 
-  alias Ankusa.{Config, Envelope, Ordering, Source}
+  alias Ankusa.{Config, Envelope, Ordering, Routing, Source}
   alias Ankusa.Sink.{GooglePubSub, Http, Log, SQS}
 
   @fifo "https://sqs.us-east-1.amazonaws.com/1/h.fifo"
@@ -23,6 +23,12 @@ defmodule Ankusa.SourceOrderingTest do
   end
 
   defp new(sinks, extra \\ []), do: Source.new("s", [sinks: sinks] ++ extra)
+
+  # What ingest resolves from a hook: its provider event key and its lanes.
+  defp resolve(instance, source, env) do
+    r = Routing.resolve(instance, source, env, dedupe: true)
+    {r.dedupe_key, r.lanes}
+  end
 
   defp env(headers \\ [], body \\ "{}") do
     %Envelope{
@@ -225,11 +231,11 @@ defmodule Ankusa.SourceOrderingTest do
       source = new([{Log, ordered: true, ordering_key: {:header, "x-entity"}}])
 
       assert {nil, [{lane, "e1"}]} =
-               Ordering.resolve(:none, source, env([{"X-Entity", "e1"}]))
+               resolve(:none, source, env([{"X-Entity", "e1"}]))
 
       assert lane == Ordering.lane_id(0, "s", "e1")
-      assert {nil, [{^lane, "e1"}]} = Ordering.resolve(:none, source, env([{"x-entity", "e1"}]))
-      assert {nil, [{other, "e2"}]} = Ordering.resolve(:none, source, env([{"x-entity", "e2"}]))
+      assert {nil, [{^lane, "e1"}]} = resolve(:none, source, env([{"x-entity", "e1"}]))
+      assert {nil, [{other, "e2"}]} = resolve(:none, source, env([{"x-entity", "e2"}]))
       assert other != lane
     end
 
@@ -242,7 +248,7 @@ defmodule Ankusa.SourceOrderingTest do
         ])
 
       assert {nil, [{first, "e"}, nil, {third, "e"}]} =
-               Ordering.resolve(:none, source, env([{"x-entity", "e"}]))
+               resolve(:none, source, env([{"x-entity", "e"}]))
 
       assert first != third
     end
@@ -250,7 +256,7 @@ defmodule Ankusa.SourceOrderingTest do
     test "a key over 128 bytes becomes sha256:hex" do
       source = new([{Log, ordered: true, ordering_key: {:header, "x-entity"}}])
       long = String.duplicate("k", 129)
-      assert {nil, [{_lane, key}]} = Ordering.resolve(:none, source, env([{"x-entity", long}]))
+      assert {nil, [{_lane, key}]} = resolve(:none, source, env([{"x-entity", long}]))
 
       assert key == "sha256:" <> Base.encode16(:crypto.hash(:sha256, long), case: :lower)
       assert byte_size(key) <= 128
@@ -258,14 +264,14 @@ defmodule Ankusa.SourceOrderingTest do
       exactly = String.duplicate("k", 128)
 
       assert {nil, [{_lane, ^exactly}]} =
-               Ordering.resolve(:none, source, env([{"x-entity", exactly}]))
+               resolve(:none, source, env([{"x-entity", exactly}]))
     end
 
     test "a json key walks the body; a missing path, a non-string and a non-JSON body are no key" do
       source = new([{Log, ordered: true, ordering_key: {:json, "data.customer"}}])
       body = ~s({"data":{"customer":"cus_1"}})
 
-      assert {nil, [{lane, "cus_1"}]} = Ordering.resolve(:none, source, env([], body))
+      assert {nil, [{lane, "cus_1"}]} = resolve(:none, source, env([], body))
       assert lane == Ordering.lane_id(0, "s", "cus_1")
 
       keyless = Ordering.lane_id(0, "s", nil)
@@ -276,7 +282,7 @@ defmodule Ankusa.SourceOrderingTest do
             "not json",
             ~s({"data":{"customer":""}})
           ] do
-        assert {nil, [{^keyless, ""}]} = Ordering.resolve(:none, source, env([], body)), body
+        assert {nil, [{^keyless, ""}]} = resolve(:none, source, env([], body)), body
       end
     end
 
@@ -286,7 +292,7 @@ defmodule Ankusa.SourceOrderingTest do
       body = ~s({"id":"a","pad":"#{pad}"})
       keyless = Ordering.lane_id(0, "s", nil)
 
-      assert {nil, [{^keyless, ""}]} = Ordering.resolve(:none, source, env([], body))
+      assert {nil, [{^keyless, ""}]} = resolve(:none, source, env([], body))
     end
 
     test "one decode serves an ordering key and a json dedupe on the same source" do
@@ -296,7 +302,7 @@ defmodule Ankusa.SourceOrderingTest do
         )
 
       body = ~s({"id":"evt_1","customer":"cus_9"})
-      assert {"evt_1", [{_lane, "cus_9"}]} = Ordering.resolve(:none, source, env([], body))
+      assert {"evt_1", [{_lane, "cus_9"}]} = resolve(:none, source, env([], body))
     end
 
     test "a function key runs under rescue: a raise or a non-binary is no key" do
@@ -304,11 +310,11 @@ defmodule Ankusa.SourceOrderingTest do
 
       for mfa <- [{Keys, :raises, []}, {Keys, :not_binary, []}, {Keys, :entity, []}] do
         source = new([{Log, ordered: true, ordering_key: mfa}])
-        assert {nil, [{^keyless, ""}]} = Ordering.resolve(:none, source, env()), inspect(mfa)
+        assert {nil, [{^keyless, ""}]} = resolve(:none, source, env()), inspect(mfa)
       end
 
       source = new([{Log, ordered: true, ordering_key: {Keys, :entity, []}}])
-      assert {nil, [{lane, "v"}]} = Ordering.resolve(:none, source, env([{"x-fn", "v"}]))
+      assert {nil, [{lane, "v"}]} = resolve(:none, source, env([{"x-fn", "v"}]))
       assert lane == Ordering.lane_id(0, "s", "v")
     end
 
@@ -328,22 +334,22 @@ defmodule Ankusa.SourceOrderingTest do
       keyed = new([{Log, ordered: true, ordering_key: {:header, "x-entity"}}])
       keyless = Ordering.lane_id(0, "s", nil)
 
-      assert {nil, [{^keyless, ""}]} = Ordering.resolve(:inst, keyed, env())
+      assert {nil, [{^keyless, ""}]} = resolve(:inst, keyed, env())
       assert_receive {:missing, %{instance: :inst, sink: Log}}
 
-      assert {nil, [{_lane, "e"}]} = Ordering.resolve(:inst, keyed, env([{"x-entity", "e"}]))
+      assert {nil, [{_lane, "e"}]} = resolve(:inst, keyed, env([{"x-entity", "e"}]))
       refute_receive {:missing, _}
 
       # `ordered: true` with no key at all is one lane by choice, not a missing key.
       plain = new([{Log, ordered: true}])
-      assert {nil, [{^keyless, ""}]} = Ordering.resolve(:inst, plain, env())
+      assert {nil, [{^keyless, ""}]} = resolve(:inst, plain, env())
       refute_receive {:missing, _}
     end
 
     test "an unordered source resolves no lanes and only the dedupe key" do
       source = new([{Log, []}], dedupe: %{header: "x-id", ttl_ms: 1_000})
-      assert {"abc", nil} = Ordering.resolve(:none, source, env([{"x-id", "abc"}]))
-      assert Ordering.lanes(:none, source, env()) == nil
+      assert {"abc", nil} = resolve(:none, source, env([{"x-id", "abc"}]))
+      assert Ordering.lanes(:none, source, env(), :skip) == nil
     end
 
     test "the sink's key: the lane's, or tenant/source for the keyless lane" do

@@ -1021,6 +1021,7 @@ sources:
       # secret: ["${sm:prod-vault:ankusa/stripe#whsec}", "${sm:aws:prod/stripe-old}"]
       tolerance_seconds: 300
     # dedupe: stripe   # a preset (github | standard_webhooks | svix | shopify | stripe | salesforce), or {header: X-Event-Id} / {json: data.id}, plus optional ttl_seconds (259200). A source with no dedupe logs one boot warning and counts in ankusa_sources_without_dedupe.
+    # event_type: stripe   # where the provider's event name is read from, stored on the hook and carried to every consumer (x-ankusa-event-type, the message's event_type): a preset (github | shopify | stripe | standard_webhooks | svix | slack), or exactly one of {header: X-Event} / {json: data.kind}
     # forward_headers: [stripe-signature]   # absent = every header except auth/framing/hop-by-hop and x-ankusa-*
     # max_headers: 64   # at most this many forwarded headers per message; the rest are dropped (ankusa_sink_headers_dropped_total{reason="count"})
     # forward_headers_max_bytes: 16384   # at most this many bytes of forwarded header names and values per message; a header that would pass it is dropped whole (reason="bytes")

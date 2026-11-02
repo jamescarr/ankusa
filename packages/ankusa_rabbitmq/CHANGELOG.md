@@ -6,6 +6,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The `ankusa_event_type` AMQP header, when the hook carries an event type
+  (`Ankusa.EventType`, CR-1). Requires an `ankusa` release with
+  `Ankusa.Envelope.event_type`; publish core first.
+
 ## [0.7.0] - 2026-10-28
 
 ### Added

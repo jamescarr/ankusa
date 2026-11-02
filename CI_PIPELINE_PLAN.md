@@ -120,7 +120,7 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 1/6 done · last updated: 2026-11-02
+Status: 3/6 done · last updated: 2026-11-02
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -342,7 +342,7 @@ priority, ID order.
 
 ### Phase C — Spend less per push
 
-- [ ] **CI-4 — `concurrency:` on `ci.yml`: cancel a superseded PR run instead of running the whole pipeline twice** · P1 · Deps: —
+- [x] **CI-4 — `concurrency:` on `ci.yml`: cancel a superseded PR run instead of running the whole pipeline twice** · P1 · Deps: —
   *Why:* `ci.yml` has no `concurrency:` block (every other workflow here does:
   `docker.yml:31`, `release*.yml`, `soak.yml`). A pushed-after-a-push PR runs
   two full pipelines: in the 30-run sample, `readme-cleanup` (3 runs),
@@ -367,7 +367,14 @@ priority, ID order.
   `in_progress`/`completed` — close it without merging; `mise run lint:workflows`.
   *Anchors:* `.github/workflows/ci.yml:1-12`, `.github/workflows/docker.yml:31-33`,
   `.github/workflows/e2e.yml`.
-  *Evidence:* —
+  *Evidence:* probe PR #215 (`ci/concurrency-probe`, closed unmerged, branch
+  deleted): run 41523518884 (`d8c0e26f`) and run 41523612780 (`47b0f7f0`) are
+  **`cancelled`**; the last push's run 41523628604 (`63707fa9`) is the one that
+  ran (`in_progress`). `cancel-in-progress: ${{ github.event_name ==
+  'pull_request' }}` leaves `push` — and therefore every `main` push and release
+  tag — at `false`, so the record for a commit is never cancelled.
+  `mise run lint:workflows` passes. This PR's run: 41523967650 (all 25 jobs
+  green; the follow-up commit that updates this line touches only this file).
 
 - [ ] **CI-5 — A `changes` job that skips the package jobs a diff cannot have touched, with `main` always running everything** · P2 · Deps: CI-1, CI-3, CI-4
   *Why:* every run executes 25 jobs regardless of the diff; **15 of the 25

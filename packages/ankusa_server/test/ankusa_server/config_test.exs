@@ -1625,6 +1625,89 @@ defmodule AnkusaServer.ConfigTest do
     end
   end
 
+  test "event_type accepts a preset, a header map and a json map" do
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          sources:
+            a: {verify: {type: none}, event_type: github, sinks: [{type: log}]}
+            b: {verify: {type: none}, event_type: {header: X-Custom-Event}, sinks: [{type: log}]}
+            c: {verify: {type: none}, event_type: {json: data.kind}, sinks: [{type: log}]}
+            d: {verify: {type: none}, event_type: {preset: slack}, sinks: [{type: log}]}
+            e: {verify: {type: none}, sinks: [{type: log}]}
+          """),
+        env: %{}
+      ).config
+
+    sources = config.source_store |> elem(1) |> Keyword.fetch!(:sources)
+
+    assert sources["a"][:event_type] == %{preset: :github}
+    assert sources["b"][:event_type] == %{header: "X-Custom-Event"}
+    assert sources["c"][:event_type] == %{json: "data.kind"}
+    assert sources["d"][:event_type] == %{preset: :slack}
+    refute Keyword.has_key?(sources["e"], :event_type)
+
+    assert Ankusa.Source.new("a", sources["a"]).event_type.from == {:header, "x-github-event"}
+    assert Ankusa.Source.new("b", sources["b"]).event_type.from == {:header, "x-custom-event"}
+    assert Ankusa.Source.new("c", sources["c"]).event_type.from == {:json, ["data", "kind"]}
+    assert Ankusa.Source.new("d", sources["d"]).event_type.from == {:json, ["event", "type"]}
+    assert Ankusa.Source.new("e", sources["e"]).event_type == nil
+
+    # The admin API's decoder is the same function, so it reads the same forms.
+    spec = %{"verify" => %{"type" => "none"}, "sinks" => [%{"type" => "log"}]}
+
+    assert Config.source_from_map!("api", Map.put(spec, "event_type", "stripe"))[:event_type] ==
+             %{preset: :stripe}
+
+    assert Config.source_from_map!("api", Map.put(spec, "event_type", %{"json" => "kind"}))[
+             :event_type
+           ] == %{json: "kind"}
+  end
+
+  test "event_type: every rejected form names its path" do
+    for {yaml, fragment} <- [
+          {"event_type: {}", "set exactly one of preset, header, json"},
+          {"event_type: {header: x-id, json: data.id}",
+           "set exactly one of preset, header, json"},
+          {"event_type: {preset: github, header: x-id}",
+           "set exactly one of preset, header, json"},
+          {"event_type: {preset: nope}", ~s(unknown value "nope")},
+          {"event_type: nope", ~s(unknown value "nope")},
+          {"event_type: {header: ''}", "header must be a non-empty string"},
+          {"event_type: {header: #{String.duplicate("h", 129)}}", "at most 128 bytes"},
+          {"event_type: {json: a..b}", "json path must be 1 to 16 non-empty"},
+          {"event_type: {json: '#{Enum.join(1..17, ".")}'}",
+           "json path must be 1 to 16 non-empty"},
+          {"event_type: {nope: 1}", ~s(unknown key "nope")},
+          {"event_type: 5", "sources.demo.event_type"},
+          {"event_type: [github]", "sources.demo.event_type"}
+        ] do
+      path =
+        tmp_config("""
+        sources:
+          demo:
+            verify: {type: none}
+            #{yaml}
+            sinks: [{type: log}]
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ "sources.demo.event_type", yaml
+      assert error.message =~ fragment, yaml
+      # The core module's own prefix is not repeated in the config error.
+      refute error.message =~ ~s(source "demo": event_type), yaml
+    end
+
+    assert_raise ConfigError, ~r/sources\.api\.event_type/, fn ->
+      Config.source_from_map!("api", %{
+        "verify" => %{"type" => "none"},
+        "event_type" => %{"json" => "a..b"},
+        "sinks" => [%{"type" => "log"}]
+      })
+    end
+  end
+
   test "forward_headers accepts a list (lowercased) or nothing, and rejects other shapes" do
     config =
       Config.load!(

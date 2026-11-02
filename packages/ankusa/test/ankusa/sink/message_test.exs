@@ -256,6 +256,34 @@ defmodule Ankusa.Sink.MessageTest do
     refute List.keymember?(Message.attributes(env, ctx), "ankusa_ordering_key", 0)
   end
 
+  test "event_type: the message always carries it, null without one; headers and attributes only with one",
+       %{ctx: ctx} do
+    env = envelope("x", %{event_type: "invoice.paid"})
+
+    assert {:ok, json} = Message.encode(env, ctx, 100)
+    assert JSON.decode!(json)["event_type"] == "invoice.paid"
+
+    assert {:ok, bare} = Message.encode(envelope("x"), ctx, 100)
+    assert %{"event_type" => nil} = decoded = JSON.decode!(bare)
+    assert Map.has_key?(decoded, "event_type")
+
+    # A claim message carries it too.
+    big = envelope(String.duplicate("b", 200), %{event_type: "invoice.paid"})
+    assert {:ok, claimed} = Message.encode(big, ctx, 100)
+    assert %{"event_type" => "invoice.paid", "claim" => _} = JSON.decode!(claimed)
+
+    assert {"ankusa_event_type", "invoice.paid"} in Message.headers(env, ctx)
+    assert {"ankusa_event_type", "invoice.paid"} in Message.attributes(env, ctx)
+    refute List.keymember?(Message.headers(envelope("x"), ctx), "ankusa_event_type", 0)
+    refute List.keymember?(Message.attributes(envelope("x"), ctx), "ankusa_event_type", 0)
+
+    # After the lane's key, before the trace context.
+    ordered = Map.put(ctx, :ordering_key, "cus_1")
+
+    assert Message.headers(env, ordered) |> Enum.map(&elem(&1, 0)) |> Enum.take(-2) ==
+             ["ankusa_ordering_key", "ankusa_event_type"]
+  end
+
   describe "origin" do
     test "a message names its instance and, with none configured, a null region", %{ctx: ctx} do
       assert {:ok, json} = Message.encode(envelope("x"), ctx, 100)
