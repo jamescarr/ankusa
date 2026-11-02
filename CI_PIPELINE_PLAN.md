@@ -138,6 +138,10 @@ executor in the same PR that ticks the box). **P1** is executed first.
     it exceeds ~2 GB, drop `packages/ankusa/deps` from `path` and keep `_build`
     only (deps are re-fetched in ~20 s and `_build` is what Mix trusts), and say
     so in the PR body and the comment.
+  - If a later run is ever suspected of having saved a poisoned (partial) entry
+    under the new key, bump the version again (`mix-v18-` → `mix-v19-`); the
+    comment in the step documents that this is the escape hatch, because
+    actions/cache never re-saves an existing key.
   *Done when:* a CI run's `ankusa` job log shows `==> third-party deps up to
   date` for the **dev** env and for the **test** env (not
   `third-party deps compiled`), and the job's duration drops to ≤ 16 min with
@@ -161,10 +165,12 @@ executor in the same PR that ticks the box). **P1** is executed first.
   `toomanyrequests: You have reached your unauthenticated pull rate limit` —
   `ankusa_redis` (2), `ankusa_rabbitmq` (2), `ankusa_nats` (2),
   `core integration (floci)` (2), `crash drill (ENOSPC)` (1),
-  `crash drill (power-loss)` (2). The `docker/login-action` step only runs when
-  the `DOCKERHUB_TOKEN` secret is present and the limit is per *account*, so
-  five jobs pulling per run across a day of agent traffic exhausts it either
-  way. Docker Hub pulls per run: `floci/floci{,-gcp,-az,-oci}:latest` (4,
+  `crash drill (power-loss)` (2). Authenticating does not save it: in
+  `ankusa_redis`'s failed job the log shows `Login Succeeded!` at 04:57:01 and
+  `toomanyrequests` at 04:57:14, i.e. the shared account's
+  200-pulls-per-6-hours limit was exhausted by five jobs pulling per run across
+  a day of agent traffic (the registry returns the "unauthenticated" wording
+  either way), and a fork PR gets no `DOCKERHUB_TOKEN` at all. Docker Hub pulls per run: `floci/floci{,-gcp,-az,-oci}:latest` (4,
   unpinned — a moved `latest` silently changes the integration suite),
   `amazon/aws-cli:2.38.1`, `curlimages/curl:8.23.0` (×3), `apache/kafka:3.9.1`,
   `nats:2-alpine`, `rabbitmq:4-management-alpine`, `redis:8-alpine`, and
@@ -192,7 +198,23 @@ executor in the same PR that ticks the box). **P1** is executed first.
     (`ghcr.io/jamescarr/ankusa/mirror/elixir:1.20.4-alpine@sha256:…` — the
     Dockerfile already carries the digest, so only the repository part changes,
     and `docker.yml` + both crash drills follow it automatically). Leave
-    `docker.redpanda.com` and `ghcr.io/shopify/toxiproxy` alone.
+    `docker.redpanda.com` and `ghcr.io/shopify/toxiproxy` alone. Also mirror
+    `moby/buildkit:buildx-stable-1@sha256:…`, which `docker.yml` pulls on every
+    PR that touches `packages/ankusa*/**` (the second-most-frequent job here).
+  - Registry auth: each CI job that pulls (replacing the four Docker Hub
+    `Log in to Docker Hub` steps, which go away) logs in to GHCR with
+    `docker/login-action` and `registry: ghcr.io`, `username: ${{ github.actor }}`,
+    `password: ${{ github.token }}` — that is the one action already pinned in
+    this repo, so `lint:pins` needs nothing new. Fork PRs get a read-only
+    `GITHUB_TOKEN`, which is all a pull needs.
+  - Package visibility: packages created by `GITHUB_TOKEN` are private, and the
+    compose files are also used locally. The PR must make the mirror packages
+    public (`gh api --method PATCH /user/packages/container/<name> -f
+    visibility=public`; if the CLI token lacks the scope, say so in the PR body
+    with the exact one-time click path, and add the
+    `docker login ghcr.io`-for-local-runs line to `docs/testing.md` so a local
+    run is never a mystery). Do not leave CI depending on a manual step: CI
+    authenticates either way.
   - `.mise/tasks/lint/pins`: every `image:` in `packages/*/docker-compose*.yml`
     and `.github/mirror-images.txt`'s source must carry `@sha256:<64 hex>` (the
     rule already applied to the Dockerfile), so a mirror line and its consumer
@@ -251,9 +273,11 @@ executor in the same PR that ticks the box). **P1** is executed first.
 ### Phase B — Do not start work the diff cannot need
 
 - [ ] **CI-4 — A `changes` job that skips the package jobs a diff cannot have touched, with `main` always running everything** · P2 · Deps: CI-1, CI-2, CI-3
-  *Why:* every run executes 25 jobs regardless of the diff; **9 of 25 finish in
-  under 1.2 min of which 30–50 s is checkout + toolchain restore**, and the
-  four Docker jobs pull images and start brokers for PRs that touch a README.
+  *Why:* every run executes 25 jobs regardless of the diff; **15 of the 25
+  finish in under 1.3 min**, and the file's own measurements put the
+  toolchain-restore step at 8–34 s of an 18–36 s mise-action step in jobs whose
+  check is 2–10 s, while the four Docker jobs pull images and start brokers for
+  PRs that touch a README.
   Most PRs in this repository touch one package (or docs); the full pipeline
   cost is 53–63 runner-minutes for a one-line docs change. A skipped job
   reports `skipped`, which satisfies branch protection for a required check —

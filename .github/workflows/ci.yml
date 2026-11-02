@@ -134,7 +134,9 @@ jobs:
       # was rebuilt from source every run. The rule now: **exactly one job
       # saves a given cache key; every other job restores it by prefix** (the
       # conformance job has its own `…-ankusa-conformance-…` key and restores
-      # this tree through its second `restore-keys` prefix).
+      # this tree through its second `restore-keys` prefix). Because
+      # actions/cache never re-saves an existing key, a poisoned (partial)
+      # entry is escaped only by bumping this version again (`mix-v19-`, …).
       - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
