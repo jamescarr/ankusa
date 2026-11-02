@@ -93,6 +93,14 @@ jobs:
             echo "tools=$tools"
             echo "cache=$cache"
           } >> "$GITHUB_OUTPUT"
+          # `check:package` brings a package's own docker-compose.yml up and
+          # nothing else (`ankusa`'s integration emulators are a different
+          # file, `ankusa_server` has none): only those packages cache images.
+          if [ -f "$(pkg_dir "${{ matrix.package }}")/docker-compose.yml" ]; then
+            echo "has_compose=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_compose=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
@@ -206,10 +214,48 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # The four packages with a compose file pull from Docker Hub every run,
+      # and anonymous pulls from shared runner IPs get `toomanyrequests` (11 of
+      # the last 21 failed jobs). Carry the images between runs instead:
+      # `scripts/ci/images.sh` keeps one tar per digest-qualified ref, the key
+      # hashes the compose file so a digest bump re-pulls exactly once, and
+      # `docker compose up` finds the loaded images and pulls nothing
+      # (`pull_policy` defaults to `missing`). A failed check still saves.
+      - name: use the containerd image store
+        if: steps.toolchain.outputs.has_compose == 'true'
+        run: scripts/ci/images.sh containerd
+      - name: cache the package's compose images
+        if: steps.toolchain.outputs.has_compose == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/docker-images
+          key: images-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles(format('packages/{0}/docker-compose.yml', matrix.package)) }}
+          restore-keys: |
+            images-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-
+      - name: load the package's compose images
+        if: steps.toolchain.outputs.has_compose == 'true'
+        run: |
+          set -euo pipefail
+          # The refs come from the compose file, not from a list kept here:
+          # `config --images` is what `docker compose up` resolves.
+          refs=()
+          while IFS= read -r ref; do refs+=("$ref"); done < <(
+            docker compose -f "packages/${{ matrix.package }}/docker-compose.yml" config --images
+          )
+          scripts/ci/images.sh sync "${{ runner.temp }}/docker-images" "${refs[@]}"
       - run: mise run check:package ${{ matrix.package }}
         env:
           # `mix hex.audit`'s report (retired packages, advisories), kept below.
           HEX_AUDIT_LOG: ${{ runner.temp }}/hex-audit-${{ matrix.package }}.txt
+      - name: save the package's compose images
+        if: always() && steps.toolchain.outputs.has_compose == 'true'
+        run: |
+          set -euo pipefail
+          refs=()
+          while IFS= read -r ref; do refs+=("$ref"); done < <(
+            docker compose -f "packages/${{ matrix.package }}/docker-compose.yml" config --images
+          )
+          scripts/ci/images.sh save "${{ runner.temp }}/docker-images" "${refs[@]}"
       # Even when the audit failed the job: the report says which dependency.
       - name: Upload the hex audit report
         if: ${{ !cancelled() }}
@@ -252,7 +298,36 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # The floci emulators and the AWS/GCS/Azure/OCI bootstrap containers are
+      # ~390 MB pulled from Docker Hub on every run; keep them between runs
+      # (see the `package` job for the shape of this).
+      - name: use the containerd image store
+        run: scripts/ci/images.sh containerd
+      - name: cache the emulators' images
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/docker-images
+          key: images-v1-${{ runner.os }}-${{ runner.arch }}-integration-${{ hashFiles('packages/ankusa/docker-compose.integration.yml') }}
+          restore-keys: |
+            images-v1-${{ runner.os }}-${{ runner.arch }}-integration-
+      - name: load the emulators' images
+        run: |
+          set -euo pipefail
+          refs=()
+          while IFS= read -r ref; do refs+=("$ref"); done < <(
+            docker compose -f packages/ankusa/docker-compose.integration.yml config --images
+          )
+          scripts/ci/images.sh sync "${{ runner.temp }}/docker-images" "${refs[@]}"
       - run: mise run test:integration
+      - name: save the emulators' images
+        if: always()
+        run: |
+          set -euo pipefail
+          refs=()
+          while IFS= read -r ref; do refs+=("$ref"); done < <(
+            docker compose -f packages/ankusa/docker-compose.integration.yml config --images
+          )
+          scripts/ci/images.sh save "${{ runner.temp }}/docker-images" "${refs[@]}"
 
   conformance:
     name: sdk conformance
@@ -497,7 +572,35 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # The drill runs the image packages/ankusa_server/Dockerfile's build
+      # stage pins (`crash.sh` reads the same `FROM` line). ~100 MB a run from
+      # Docker Hub, and the two drill jobs use one entry: both restore, the
+      # first to finish saves.
+      - name: the drill's base image
+        id: base-image
+        run: |
+          set -euo pipefail
+          ref=$(sed -n 's/^FROM \(elixir:[^ ]*\) AS build$/\1/p' packages/ankusa_server/Dockerfile)
+          [ -n "$ref" ] || {
+            echo "::error::no 'FROM elixir:… AS build' line in packages/ankusa_server/Dockerfile"
+            exit 1
+          }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: use the containerd image store
+        run: scripts/ci/images.sh containerd
+      - name: cache the drill's base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/docker-images
+          key: images-v1-${{ runner.os }}-${{ runner.arch }}-crash-${{ hashFiles('packages/ankusa_server/Dockerfile') }}
+          restore-keys: |
+            images-v1-${{ runner.os }}-${{ runner.arch }}-crash-
+      - name: load the drill's base image
+        run: scripts/ci/images.sh sync "${{ runner.temp }}/docker-images" "${{ steps.base-image.outputs.ref }}"
       - run: mise run test:crash
+      - name: save the drill's base image
+        if: always()
+        run: scripts/ci/images.sh save "${{ runner.temp }}/docker-images" "${{ steps.base-image.outputs.ref }}"
       # The drill runs as root inside its container, so every file it wrote to
       # the .cache/crash mount is root-owned — and the cache action's post step
       # (a tar as the runner user) cannot read them, so the cache was never
@@ -541,6 +644,29 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Same base image and cache entry as the tmpfs drill above: both
+      # restore, the first to finish saves.
+      - name: the drill's base image
+        id: base-image
+        run: |
+          set -euo pipefail
+          ref=$(sed -n 's/^FROM \(elixir:[^ ]*\) AS build$/\1/p' packages/ankusa_server/Dockerfile)
+          [ -n "$ref" ] || {
+            echo "::error::no 'FROM elixir:… AS build' line in packages/ankusa_server/Dockerfile"
+            exit 1
+          }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: use the containerd image store
+        run: scripts/ci/images.sh containerd
+      - name: cache the drill's base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/docker-images
+          key: images-v1-${{ runner.os }}-${{ runner.arch }}-crash-${{ hashFiles('packages/ankusa_server/Dockerfile') }}
+          restore-keys: |
+            images-v1-${{ runner.os }}-${{ runner.arch }}-crash-
+      - name: load the drill's base image
+        run: scripts/ci/images.sh sync "${{ runner.temp }}/docker-images" "${{ steps.base-image.outputs.ref }}"
       - name: scripts/drills/flakey.sh
         run: |
           rc=0
@@ -550,6 +676,9 @@ jobs:
           elif [ "$rc" != 0 ]; then
             exit "$rc"
           fi
+      - name: save the drill's base image
+        if: always()
+        run: scripts/ci/images.sh save "${{ runner.temp }}/docker-images" "${{ steps.base-image.outputs.ref }}"
       # Same root-owned cache as the tmpfs job above; the `if:` keeps this step
       # after a skipped drill too (a runner without device-mapper still warms
       # nothing, and the chown is a no-op when the container never wrote).
