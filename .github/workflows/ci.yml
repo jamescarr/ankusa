@@ -127,15 +127,23 @@ jobs:
       # only the delta, and Mix recompiles only the deps that changed. Without
       # that, every dep bump was a total miss that rebuilt every dep — RocksDB
       # from source, ~8 min (PR 110: `ankusa` 5.6 -> 18.4 min).
+      # `mix-v18-`: entries under `mix-v17-…-ankusa-…` were written by the
+      # `sdk conformance` job (2.4 min, test env only) before this job could
+      # save its `dev`+`test`+`prod` tree, and actions/cache never overwrites
+      # an existing key — so the restored tree lacked `dev` and RocksDB's NIF
+      # was rebuilt from source every run. The rule now: **exactly one job
+      # saves a given cache key; every other job restores it by prefix** (the
+      # conformance job has its own `…-ankusa-conformance-…` key and restores
+      # this tree through its second `restore-keys` prefix).
       - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             packages/${{ matrix.package }}/deps
             packages/${{ matrix.package }}/_build
-          key: mix-v17-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
+          key: mix-v18-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
           restore-keys: |
-            mix-v17-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
+            mix-v18-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
       # sdk-go has no dependencies outside the standard library, but
       # `go test -race -count=1` rebuilds the race-instrumented standard
       # library and the package on every run — 39 s of a 77 s job; locally the
@@ -258,17 +266,21 @@ jobs:
             cargo-v1-${{ runner.os }}-${{ runner.arch }}-sdk-rust-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-
       # `check.mjs` regenerates the producer vectors with core's own encoder
       # (`mix ankusa.conformance.gen`, MIX_ENV=test), which compiles RocksDB:
-      # restore the `ankusa` package job's entry (same key and prefix, so keep
-      # the `mix-v` here and there in step; whichever job saves first wins).
+      # restore the `ankusa` package job's tree. Exactly one job saves a given
+      # cache key; every other job restores it by prefix. This job saves its
+      # own `…-ankusa-conformance-…` entry (test env only) and reads the
+      # package job's full `dev`+`test`+`prod` entry through the second
+      # prefix, so sharing the prefix no longer costs the package job a save.
       - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             packages/ankusa/deps
             packages/ankusa/_build
-          key: mix-v17-${{ runner.os }}-${{ runner.arch }}-ankusa-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          key: mix-v18-${{ runner.os }}-${{ runner.arch }}-ankusa-conformance-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
           restore-keys: |
-            mix-v17-${{ runner.os }}-${{ runner.arch }}-ankusa-${{ hashFiles('.mise.toml') }}-
+            mix-v18-${{ runner.os }}-${{ runner.arch }}-ankusa-conformance-${{ hashFiles('.mise.toml') }}-
+            mix-v18-${{ runner.os }}-${{ runner.arch }}-ankusa-${{ hashFiles('.mise.toml') }}-
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
