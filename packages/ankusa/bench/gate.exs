@@ -53,13 +53,14 @@
 # rarely does.
 #
 # The same noise decides what the limit *can* say: the limits are ratios of
-# 1.2x and 0.8x, so a cell whose own `p99_ms` samples over one round span more
-# than 1.2x cannot support the decision. Such a cell is run one more round
-# (its samples are added to the cell's: the verdict is the median of all six),
-# and if the new round is still wider than the limit's headroom the run is
-# INCONCLUSIVE — it prints the samples and fails, and is neither a pass nor a
-# regression. (A wide base leg is inconclusive too: a comparison against a
-# baseline measured that shakily means nothing.)
+# 1.2x and 0.8x, so the cell's own measurements have to agree to better than
+# that. A cell whose three runs in one round span more than 1.2x is measured
+# one more round (its samples are added: the verdict is the median of all six);
+# if the two rounds — the p99 measurements the gate compares — still span more
+# than the limit's headroom, the run is INCONCLUSIVE: it prints the samples and
+# fails, and is neither a pass nor a regression. (A base leg the measurement
+# cannot decide is inconclusive too: a comparison against a baseline measured
+# that shakily means nothing.)
 #
 # Env knobs:
 #
@@ -173,12 +174,12 @@ defmodule Bench.Gate do
     end
   end
 
-  # A leg's `p99_ms` can only support a 1.2x decision if its own samples are
-  # tighter than that. A cell wider than the limit's headroom over one round is
-  # measured one more round; that round is added to the cell's samples (so the
-  # verdict is the median of six, a better estimate than either round's three),
-  # and an inconclusive is judged on the round just measured. The cells still
-  # wider are returned as inconclusive (see the header).
+  # A leg's p99 can only support a 1.2x decision if the cell's own measurements
+  # agree to better than that. A round whose three runs are wider than the
+  # limit's headroom is measured once more (its samples are added: the verdict
+  # is the median of all six); if the rounds' medians still span more than the
+  # headroom, the cell is inconclusive (see the header). A cell that never
+  # needs a second round is decided on one round, like before.
   defp settle_spread(matrix, runs, root, trace?, samples, cells) do
     case wide(samples, cells) do
       [] ->
@@ -197,7 +198,7 @@ defmodule Bench.Gate do
         retry = Enum.filter(matrix, fn {cell, _, _} -> cell in retry_cells end)
         retried = collect(retry, runs, root, trace?, %{})
         samples = Map.merge(samples, retried, fn _cell, first, more -> first ++ more end)
-        {samples, wide(retried, retry_cells)}
+        {samples, unstable(samples, retry_cells, runs)}
     end
   end
 
@@ -214,6 +215,27 @@ defmodule Bench.Gate do
     end
   end
 
+  # The cells whose rounds, i.e. the p99 measurements the gate compares,
+  # disagree by more than the limit can resolve.
+  defp unstable(samples, cells, runs) do
+    for cell <- cells,
+        values = Enum.map(samples[cell], & &1["p99_ms"]),
+        length(values) > runs,
+        rounds = values |> Enum.chunk_every(runs) |> Enum.map(&median/1),
+        min = Enum.min(rounds),
+        min > 0,
+        spread = Enum.max(rounds) / min,
+        spread > spread_limit() do
+      {cell, spread, rounds_joined(values, runs)}
+    end
+  end
+
+  defp rounds_joined(values, runs) do
+    values
+    |> Enum.chunk_every(runs)
+    |> Enum.map_join(" | ", fn round -> join_samples(round) end)
+  end
+
   defp spread_limit do
     {_metric, _kind, factor} = Enum.find(@gates, fn {metric, _, _} -> metric == "p99_ms" end)
     factor
@@ -225,11 +247,10 @@ defmodule Bench.Gate do
     do: Enum.map_join(values, ", ", fn v -> :erlang.float_to_binary(v * 1.0, decimals: 2) end)
 
   defp print_inconclusive(inconclusive) do
-    for {cell, spread, values} <- inconclusive do
+    for {cell, spread, samples} <- inconclusive do
       IO.puts(
-        "INCONCLUSIVE p99_ms #{cell}: samples span #{ratio(spread)} " <>
-          "(#{join_samples(values)}) — wider than the #{ratio(spread_limit())} the limit " <>
-          "can resolve, after one re-measure"
+        "INCONCLUSIVE p99_ms #{cell}: samples span #{ratio(spread)} across rounds " <>
+          "(#{samples}) — wider than the #{ratio(spread_limit())} the limit can resolve"
       )
     end
   end
