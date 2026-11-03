@@ -231,6 +231,8 @@ defmodule Ankusa.Edge.Ingest do
   @doc "Look the source up, refuse undeliverable header bytes, then `ingest/4`."
   @spec ingest(atom(), request()) :: result()
   def ingest(instance, %{source_id: source_id} = req) do
+    # PROBE (CI-14 evidence, never merged): a comment in a hot-path file, so
+    # bench-scope runs the gate.
     route = %Ankusa.Route{source_id: source_id, tenant_id: Map.get(req, :tenant_id)}
 
     with {:ok, source, tenant_id} <- lookup(instance, route),

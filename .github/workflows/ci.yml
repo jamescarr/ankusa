@@ -912,6 +912,8 @@ jobs:
       # `bench:gate` runs the tenant benches locally too; here `bench-tenant`
       # runs them in parallel, so the matrix task must not run them again.
       BENCH_SKIP_TENANTS: 1
+      # PROBE (CI-14 evidence, never merged): force 512B-c32 inconclusive.
+      BENCH_SELF_TEST_INCONCLUSIVE: 512B-c32
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
