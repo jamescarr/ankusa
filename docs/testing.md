@@ -1120,6 +1120,18 @@ docker compose logs worker   # via=inline, then via=claim:<id>
 docker compose down -v
 ```
 
+[`examples/event-routing/`](https://github.com/jamescarr/ankusa/tree/main/examples/event-routing/) is self-checking:
+its `run.sh` posts three hooks and exits non-zero unless the routing (a templated
+Kafka topic, a filtered HTTP sink, a hook no sink selects) landed each one where
+it should. CI does only what `mise run check:examples` does for its worker and
+receiver (install, typecheck); the stack itself is run by hand:
+
+```sh
+cd examples/event-routing
+docker compose up --build -d --wait && ./run.sh
+docker compose down -v
+```
+
 [`examples/jetstream-k8s/`](https://github.com/jamescarr/ankusa/tree/main/examples/jetstream-k8s/)
 is a manual drill on a real `kind` cluster. CI only does what
 `mise run check:examples` does for it: builds and typechecks the consumer,

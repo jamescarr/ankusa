@@ -1,0 +1,18 @@
+{
+  "name": "ankusa-event-routing-worker",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "start": "tsx src/worker.ts"
+  },
+  "dependencies": {
+    "ankusa": "file:../../../packages/sdk-typescript",
+    "kafkajs": "^2.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "tsx": "^4.19.1",
+    "typescript": "^7.0.2"
+  }
+}
