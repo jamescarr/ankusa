@@ -494,10 +494,10 @@ priority, ID order.
   41574117567 — `sdk-go`, `lint`, `changes`, `ci-summary`; the rest `skipped`);
   core hot path PR #234 (run 41574120125 — the whole Mix group, `core
   integration`, `sdk conformance`, both crash drills and `examples` ran exactly
-  as before; `tools` skipped). The PR's own run 41574084602 takes the all-true
-  path, because its diff is `.github/workflows/ci.yml` plus docs, and runs
-  every job. `mise run lint:workflows` and `mise run lint:pins` passed in
-  session; the first push to `main` after the merge is recorded in the PR.
+  as before; `tools` skipped). The PR's own run takes the all-true path — its
+  diff is `.github/workflows/ci.yml` plus docs — and runs every job.
+  `mise run lint:workflows` and `mise run lint:pins` passed in session; the
+  first push to `main` after the merge is recorded in the PR.
 
 ### Phase D — Shorter critical path
 
