@@ -132,7 +132,7 @@ defmodule Bench.Gate do
   # The discarded warm-up's size (header): the same cell at a tenth of the
   # hooks. `BENCH_WARMUP_N` raises it without a code change; nothing measured
   # reads it.
-  @warmup_n 2_000
+  @warmup_n 20_000
   @sink_latency_ms 5
   # {cell, BODY_BYTES, CONCURRENCY}; `512B-ordered` is `512B` with the source's sink
   # `ordered: true` over 64 keys (`ORDERED=1`, ADR 0004).
