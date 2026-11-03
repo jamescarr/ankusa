@@ -232,10 +232,11 @@ defmodule Ankusa.Edge.Ingest do
   @spec ingest(atom(), request()) :: result()
   def ingest(instance, %{source_id: source_id} = req) do
     # PROBE (CI-14 evidence, never merged): a fixed delay in the request path.
-    # With 512B-c32 unjudged the gate must still fail on another cell; sleep(1)
-    # adds 7% to a 256-worker cell's 13 ms service time, under the 20% the
-    # 0.8x limit allows, so this one is big enough to be a regression.
-    Process.sleep(5)
+    # With 512B-c32 unjudged the gate must still fail on another cell. sleep(1)
+    # is under 10% of a 256-worker cell's ~12 ms service time (the 0.8x/1.2x
+    # limits allow 20%), so this is large enough to be a regression the gate
+    # cannot miss.
+    Process.sleep(20)
     route = %Ankusa.Route{source_id: source_id, tenant_id: Map.get(req, :tenant_id)}
 
     with {:ok, source, tenant_id} <- lookup(instance, route),
