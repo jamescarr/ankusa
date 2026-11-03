@@ -228,7 +228,8 @@ defmodule Ankusa.SDK.ConformanceTest do
       "traceparent" => message.traceparent,
       "tracestate" => message.tracestate,
       "instance" => message.instance,
-      "region" => message.region
+      "region" => message.region,
+      "event_type" => message.event_type
     }
   end
 

@@ -9,6 +9,10 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Message.eventType`: the provider's event name (for example `invoice.paid`)
+  from the message (`null` when none); a non-string value is `invalid_field`. The
+  record's canonical constructor gained the component after `region`.
+
 - `ListDeadLettersParams` gained `tenant`, `sink`, `errorClass` and `cursor` (components
   and builder setters); the query goes out as `source_id, tenant, sink, error_class,
   since, limit, cursor`. `DlqEntry` gained `sink` and `errorClass`, `DlqPage` gained

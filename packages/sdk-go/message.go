@@ -64,6 +64,10 @@ type Message struct {
 	// null or predates the fields.
 	Instance *string `json:"instance"`
 	Region   *string `json:"region"`
+	// EventType is the provider's event name (for example "invoice.paid"), as
+	// the source's event_type key read it; nil when the source has none, the
+	// hook carries none, or the message predates the field.
+	EventType *string `json:"event_type"`
 
 	// Body is the decoded inline body. It is nil for a claim message.
 	Body []byte `json:"-"`
@@ -181,6 +185,12 @@ func DecodeMessage(data []byte) (Message, error) {
 		return Message{}, invalidField("region")
 	}
 	msg.Region = region
+
+	eventType, ok := optionalString(obj, "event_type")
+	if !ok {
+		return Message{}, invalidField("event_type")
+	}
+	msg.EventType = eventType
 
 	if headers, ok := headersValue(obj["headers"]); ok {
 		msg.Headers = headers

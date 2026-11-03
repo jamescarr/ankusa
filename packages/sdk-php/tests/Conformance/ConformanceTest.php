@@ -433,6 +433,7 @@ final class ConformanceTest extends TestCase
             'tracestate' => $message->tracestate,
             'instance' => $message->instance,
             'region' => $message->region,
+            'event_type' => $message->eventType,
         ];
     }
 

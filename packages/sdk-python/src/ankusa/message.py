@@ -112,6 +112,10 @@ class Message:
     # it is configured with; None when the message says null or predates the fields.
     instance: str | None = None
     region: str | None = None
+    # The provider's event name (for example ``invoice.paid``), as the source's
+    # ``event_type`` key read it; None when the source has none, the hook
+    # carries none, or the message predates the field.
+    event_type: str | None = None
 
 
 def _is_int(value: Any) -> TypeGuard[int]:
@@ -192,6 +196,7 @@ def decode_message(data: str | bytes) -> Message:
     tracestate = _optional_string(payload, "tracestate")
     instance = _optional_string(payload, "instance")
     region = _optional_string(payload, "region")
+    event_type = _optional_string(payload, "event_type")
 
     forwarded = payload.get("headers")
     headers: dict[str, str] = {}
@@ -260,6 +265,7 @@ def decode_message(data: str | bytes) -> Message:
         tracestate=tracestate,
         instance=instance,
         region=region,
+        event_type=event_type,
     )
 
 
