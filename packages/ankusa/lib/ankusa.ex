@@ -1,4 +1,5 @@
 defmodule Ankusa do
+  # Probe (CI-16): a packages/ankusa/lib diff must still trigger docker.yml. Closed unmerged.
   @moduledoc """
   A loosely coupled, high-throughput webhook ingestion framework.
 
