@@ -32,7 +32,9 @@ gate.
 | the diff touches | the jobs that run |
 | --- | --- |
 | `docs/**`, any `*.md`, `marketing/**`, `static/**` | none of the package jobs; `lint` is the guard, and the summary says "docs-only" |
-| `packages/ankusa/**` or `packages/async_api_spex/**` | the whole Mix group — `ankusa (static)`, `ankusa (tests)`, the five adapters, `ankusa_server`, `async_api_spex`, `sdk-elixir` — plus `core integration`, `sdk conformance`, both crash drills and `examples`. Every adapter package and `ankusa_server` path-depend on `ankusa`, so a core change is not finished until they pass |
+| `deploy/monitoring/**` | none of the package jobs; `check:monitoring` is one of `lint`'s steps |
+| `packages/ankusa/**` | the whole Mix group — `ankusa (static)`, `ankusa (tests)`, the five adapters, `ankusa_server`, `async_api_spex`, `sdk-elixir` — plus `core integration`, `sdk conformance`, both crash drills and `examples`. Every adapter package and `ankusa_server` path-depend on `ankusa`, so a core change is not finished until they pass, and the producer vectors `sdk conformance` regenerates are core's encoder's output |
+| `packages/async_api_spex/**` | the whole Mix group (`ankusa`'s `Ankusa.AsyncApi` and every project that pins it by path) and `examples` |
 | `packages/sdk-*` | that SDK alone; its `check:package` runs its own `conformance_test`, so the shared `sdk conformance` job is only for `conformance/**` and the producer vectors core generates |
 | an adapter (`packages/ankusa_kafka`, `…_nats`, `…_rabbitmq`, `…_redis`) | that package, both crash drills (they ack through the image), and `examples` for the two an example path-depends on |
 | `packages/ankusa_server/**` | `ankusa_server` and both crash drills |
