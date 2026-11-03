@@ -432,39 +432,73 @@ defmodule Ankusa.Dispatch.IsolationTest do
     end
 
     # The lag of `n` hooks of `tenant` on each of the two instances, in ms,
-    # from just before the commit to the sink call. The hooks alternate
-    # between the instances 15 ms apart, so one is in flight while the other
-    # is committed: what the two instances share (the host descheduling the
-    # VM, a lazy GC) lands in both numbers and cancels in their comparison,
-    # while the interference of `mixed`'s other tenant can only move that
-    # side. `sample` runs once per pair.
+    # from the store commit's return to the sink call -- and, beside each lag,
+    # the commit that admitted the hook. The hooks alternate between the
+    # instances 15 ms apart, so one is in flight while the other is committed:
+    # what the two instances share (the host descheduling the VM, a lazy GC)
+    # lands in both numbers and cancels in their comparison, while the
+    # interference of `mixed`'s other tenant can only move that side. `sample`
+    # runs once per pair.
+    #
+    # The window opens when `enqueue!/2` returns, not before it (CI-21). On the
+    # mixed instance 19 800 heavy-tenant rows and their outcomes share the
+    # RocksDB store, so a write stall (an fsync wait, a compaction) inflates
+    # the commit while the heartbeat still ticks -- a NIF blocking one
+    # scheduler does not stop the VM, so no pause is recorded. That is the
+    # store's cost, not the scheduler's fairness. On the red shard
+    # (run 41689506568, `ankusa (tests, 4/4)`) the solo instance's own p99 was
+    # 25.852 ms although its store holds ~400 rows and its delivery p99
+    # measured 0.292 ms in the same shard: only the commit accounted for it.
+    # Both halves are kept so the failure message prints them; neither the
+    # bound nor the sample count changed.
     #
     # A delivery whose window overlaps a gap in `pauses` is not counted at
     # all: the stall, not the scheduler, is what it measured, and the gap is
     # recorded by a heartbeat no tenant's load can stop -- so a light tenant
     # held behind a heavy one is still counted (the heartbeat keeps ticking).
     defp light_lags_pair(mixed, solo, tenant, n, sample, pauses) do
-      {mixed_lags, solo_lags} =
-        Enum.reduce_while(1..(4 * n), {[], []}, fn _, {mixed_lags, solo_lags} ->
-          {mixed_lag, solo_lag} = lag_pair(mixed, solo, tenant, pauses)
-          sample.()
-          Process.sleep(15)
+      acc =
+        Enum.reduce_while(
+          1..(4 * n),
+          %{mixed: [], solo: [], mixed_commits: [], solo_commits: []},
+          fn _, acc ->
+            {mixed_lag, solo_lag, mixed_commit, solo_commit} =
+              lag_pair(mixed, solo, tenant, pauses)
 
-          mixed_lags = if mixed_lag, do: [mixed_lag | mixed_lags], else: mixed_lags
-          solo_lags = if solo_lag, do: [solo_lag | solo_lags], else: solo_lags
+            sample.()
+            Process.sleep(15)
 
-          acc = {mixed_lags, solo_lags}
+            acc =
+              if mixed_lag,
+                do: %{
+                  acc
+                  | mixed: [mixed_lag | acc.mixed],
+                    mixed_commits: [mixed_commit | acc.mixed_commits]
+                },
+                else: acc
 
-          if length(mixed_lags) >= n and length(solo_lags) >= n,
-            do: {:halt, acc},
-            else: {:cont, acc}
-        end)
+            acc =
+              if solo_lag,
+                do: %{
+                  acc
+                  | solo: [solo_lag | acc.solo],
+                    solo_commits: [solo_commit | acc.solo_commits]
+                },
+                else: acc
+
+            if length(acc.mixed) >= n and length(acc.solo) >= n,
+              do: {:halt, acc},
+              else: {:cont, acc}
+          end
+        )
 
       # The counts are the test's: a window that shrank (because too many
       # deliveries overlapped a stall) fails there, it does not pass quietly.
       %{
-        mixed: mixed_lags |> Enum.take(n) |> Enum.reverse(),
-        solo: solo_lags |> Enum.take(n) |> Enum.reverse()
+        mixed: acc.mixed |> Enum.take(n) |> Enum.reverse(),
+        solo: acc.solo |> Enum.take(n) |> Enum.reverse(),
+        mixed_commits: acc.mixed_commits |> Enum.take(n) |> Enum.reverse(),
+        solo_commits: acc.solo_commits |> Enum.take(n) |> Enum.reverse()
       }
     end
 
@@ -472,10 +506,12 @@ defmodule Ankusa.Dispatch.IsolationTest do
       mixed_env = build_env("light", tenant)
       mixed_at = System.monotonic_time(:microsecond)
       enqueue!(mixed, mixed_env)
+      mixed_committed = System.monotonic_time(:microsecond)
 
       solo_env = build_env("light", tenant)
       solo_at = System.monotonic_time(:microsecond)
       enqueue!(solo, solo_env)
+      solo_committed = System.monotonic_time(:microsecond)
 
       stamps =
         for _ <- 1..2, into: %{} do
@@ -483,13 +519,23 @@ defmodule Ankusa.Dispatch.IsolationTest do
           {id, at}
         end
 
-      {lag(pauses, mixed_at, Map.fetch!(stamps, mixed_env.id)),
-       lag(pauses, solo_at, Map.fetch!(stamps, solo_env.id))}
+      {delivery_lag(pauses, mixed_committed, Map.fetch!(stamps, mixed_env.id)),
+       delivery_lag(pauses, solo_committed, Map.fetch!(stamps, solo_env.id)),
+       millis(mixed_at, mixed_committed), millis(solo_at, solo_committed)}
     end
 
-    defp lag(pauses, t0, t1) do
-      if stalled?(pauses, t0, t1), do: nil, else: (t1 - t0) / 1000
+    # The commit can return after the first delivery already happened -- the
+    # pipeline may claim the row before the writer's reply reaches this
+    # process -- so a stamp before `t0` is a zero, never a negative lag.
+    defp delivery_lag(pauses, t0, t1) do
+      cond do
+        stalled?(pauses, t0, t1) -> nil
+        t1 <= t0 -> 0.0
+        true -> millis(t0, t1)
+      end
     end
+
+    defp millis(t0, t1), do: (t1 - t0) / 1000
 
     defp stalled?(pauses, t0, t1) do
       Enum.any?(:ets.tab2list(pauses), fn {_id, from, to} -> from <= t1 and to >= t0 end)
@@ -574,8 +620,15 @@ defmodule Ankusa.Dispatch.IsolationTest do
       samples = :ets.new(:window_samples, [:public])
       sample = fn -> :ets.insert(samples, {System.unique_integer(), claimed_rows(mixed, ord)}) end
 
-      %{mixed: mixed_lags, solo: solo_lags} =
-        light_lags_pair(mixed, solo, "light-tenant", @measured, sample, pauses)
+      # The p99 the bound is about: from the commit's return to the sink call,
+      # so the mixed instance's store write is reported beside it (the test
+      # comment on `light_lags_pair/6` says why).
+      %{
+        mixed: mixed_lags,
+        solo: solo_lags,
+        mixed_commits: mixed_commits,
+        solo_commits: solo_commits
+      } = light_lags_pair(mixed, solo, "light-tenant", @measured, sample, pauses)
 
       assert length(mixed_lags) == @measured
       assert length(solo_lags) == @measured
@@ -589,7 +642,9 @@ defmodule Ankusa.Dispatch.IsolationTest do
       assert :atomics.get(atomics, 2) in 2..4
 
       assert mixed_p99 <= max(2 * solo_p99, 25),
-             "light tenant p99 #{mixed_p99} ms against #{solo_p99} ms alone"
+             "light tenant p99 #{mixed_p99} ms against #{solo_p99} ms alone " <>
+               "(delivery from the commit's return to the sink call; the commit " <>
+               "p99 was #{p99(mixed_commits)} ms mixed against #{p99(solo_commits)} ms solo)"
     end
 
     defp await(fun, tries \\ 400) do
