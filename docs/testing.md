@@ -247,7 +247,8 @@ The always-on tests cover:
   (`Ankusa.TestHelpers.store_calls/1`). `a tick visits only tenants with work`
   puts 1 000 tenants in the queue with 3 due and reads the scan's
   `active_tenants` gauge. `bench/gauges_bench.exs` and
-  `bench/dispatch_tick_bench.exs` are self-asserting and run by `bench:gate`
+  `bench/dispatch_tick_bench.exs` are self-asserting and run by
+  `bench:tenants`, which `bench:gate` runs too
   (see [Perf gate](#perf-gate-mise-run-benchgate)).
 - **HTTP adapters** (outbound): the SigV4 signing `BlobStore.S3` puts on the
   wire, pinned against AWS's published reference signatures and against the
@@ -1242,7 +1243,7 @@ sink's deliveries, the log's records):
   `admin/router_test.exs` that `/v1/config` shows the new keys.
 
 `bench/intake_bench.exs` (`MIX_ENV=test mix run bench/intake_bench.exs`, also run
-by `mise run bench:gate`) compares `wal: :dual` with `wal: :disk` in one VM:
+by `mise run bench:tenants`, and by `mise run bench:gate` locally) compares `wal: :dual` with `wal: :disk` in one VM:
 `Ankusa.Intake.Memory` confirms after 5 ms, one client measures the ack p50 over
 200 requests with 1 KB bodies, 512 clients measure throughput over 6 000 (the best of three rounds), and the log's mean batch is printed. It passes only if the
 dual p50 is within `max(disk p50, 5 ms) + 5 ms` (the parallel commit costs the
@@ -1460,8 +1461,10 @@ the full 10 000-key budget, `error_class=throttled`), and for every tenant
 index at once with it (`Ankusa.Queue.dead/2` directly, `TENANTS=8` is the
 bound), and exits 1 unless every case's p99 is under 100 ms.
 
-`mise run bench:gate` also runs four self-asserting scripts first, with no
-baseline entry (the fourth, [`bench/intake_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/intake_bench.exs), is under [Dual commit](#dual-commit-wal-type-dual)):
+`mise run bench:tenants` runs four self-asserting scripts, with no
+baseline entry (the fourth, [`bench/intake_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/intake_bench.exs), is under [Dual commit](#dual-commit-wal-type-dual)) —
+`mise run bench:gate` runs them too, before the matrix, unless
+`BENCH_SKIP_TENANTS=1` (which only CI sets, below):
 [`bench/gauges_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/gauges_bench.exs)
 times `Ankusa.Metrics.Gauges.measure/1` and
 [`bench/dispatch_tick_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/dispatch_tick_bench.exs)
@@ -1491,16 +1494,29 @@ Redis half (boot and reload through `HSCAN`) is
 (`BENCH_REBASELINE=1`) skips them: it measures the
 base commit's sources, which have neither the layout nor these APIs.
 
-CI runs it as the `perf gate` job in `ci.yml`: on every push to `main`, and on
-a pull request whose diff touches a hot-path file: anything under
+CI runs it as two jobs in `ci.yml`. `perf gate` is `mise run bench:gate` with
+`BENCH_SKIP_TENANTS=1`: the matrix and its two base-against-branch legs.
+`bench-tenant` is `mise run bench:tenants`: the self-asserting scripts above,
+which compare against no baseline, so they have no leg to measure and run
+beside the gate instead of in front of it. Both jobs obey one scope decision
+over the run's diff: anything under
 `packages/ankusa/lib/ankusa/{edge,queue,store,dispatch,verifier,routes}/`,
 `store.ex`, `queue.ex`, `dedupe.ex`, `envelope.ex`, `http.ex`,
 `route_resolver.ex`, `sink/message.ex`, `sink/http.ex`, or the gate's own files
-(`packages/ankusa/bench/`, `.mise/tasks/bench/`). A workflow file is not a hot
-path: it cannot change the measured program, and an invocation it gets wrong
-surfaces on the next push to `main` within minutes. The job always
-reports a status (it can be a required check); on a PR that touches none of
-those paths its steps are skipped. The run's `last.json` and the base
+(`packages/ankusa/bench/`, `.mise/tasks/bench/`) runs both; a pull request that
+touches none of them runs neither, and neither does a push to `main` whose
+range (`github.event.before..github.sha`) touches none of them. That second
+rule is the one `main` needs: a merge's push carries the diff its pull request
+already gated, so re-measuring it on the default branch buys nothing (CI-7).
+A workflow file is not a hot path: it cannot change the measured program, and
+an invocation it gets wrong surfaces on the next push to `main` within
+minutes. `perf gate` always runs — it is the job that computes the decision,
+and a job skipped by `if:` could not publish it — with the steps that cost
+minutes skipped; `bench-tenant` is skipped outright. A release tag runs neither
+(its commit was gated on its pull request and its push to `main`), and a
+`workflow_call`, a `workflow_dispatch`, a first push or force-push with no
+`before` commit, and any error in the scope step run both: a filter that
+breaks must run the gate, never skip it. The run's `last.json` and the base
 commit's numbers are attached as the `bench-last` artifact. A run that cannot
 resolve the limits says so (`INCONCLUSIVE`, above) instead of passing or
 failing; re-running it re-measures.
