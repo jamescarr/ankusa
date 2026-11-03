@@ -195,6 +195,12 @@ defmodule Ankusa.Admin.Redact do
     {Map.new(pairs), acc}
   end
 
+  # A sink's `filter` (`Ankusa.Filter`) is a predicate over the event type, the
+  # tenant, headers and JSON paths: its keys are dynamic (`header.<name>`,
+  # `json.<path>`), so no allowlist can name them, and none of it is a secret.
+  # It is neither hidden nor encrypted at rest.
+  defp hide_entry("filter", value, acc, _fun) when is_map(value), do: {value, acc}
+
   # Header names stay, so a spec still says which headers a sink sends.
   defp hide_entry("headers", headers, acc, fun) when is_map(headers) do
     {pairs, acc} =
@@ -280,6 +286,8 @@ defmodule Ankusa.Admin.Redact do
   defp closed_entry(key, value), do: closed(key_string(key), value)
 
   defp closed("headers", value), do: redact_headers(value)
+
+  defp closed("filter", value) when is_map(value), do: open(value)
 
   defp closed(key, value) do
     case structural(value) do

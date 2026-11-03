@@ -1,8 +1,8 @@
 defmodule Ankusa.Edge.Publish do
   @moduledoc """
   The `wal: :none` ack path: publish one verified envelope to every sink its
-  source declares, in the request process, and answer only once each has
-  confirmed.
+  source declares and its filters select (`Ankusa.Filter`), in the request
+  process, and answer only once each has confirmed.
 
   All sinks publish concurrently, and the whole set runs under one deadline,
   `direct_publish_timeout_ms` (default 8 000 ms, under the provider's own
@@ -11,6 +11,10 @@ defmodule Ankusa.Edge.Publish do
   their copy, so the retry is a second hook with a second `id` — the same
   at-least-once contract a provider retry after a lost ack has always had
   here, and the reason consumers dedupe on the idempotency key.
+
+  A hook no sink selects is `{:filtered, env}`: nothing is published and it is
+  answered `201 {"filtered": true}`. A hook whose selected sinks are none of them
+  durable is a `503`, as a source with no durable sink is.
 
   There is no retry policy and no dead-letter queue in this mode: the provider
   is the retry, and the broker is the durable store.
@@ -22,36 +26,47 @@ defmodule Ankusa.Edge.Publish do
   alias Ankusa.Health.SinkErrors
   alias Ankusa.Sink.Message
 
-  @spec publish(atom(), Source.t(), Envelope.t()) ::
-          {:ok, Envelope.t()} | {:error, :store_unavailable}
-  def publish(instance, %Source{} = source, %Envelope{} = env) do
-    if durable?(source),
-      do: deliver(instance, source, env),
+  @spec publish(atom(), Source.t(), Envelope.t(), :all | [non_neg_integer()]) ::
+          {:ok, Envelope.t()} | {:filtered, Envelope.t()} | {:error, :store_unavailable}
+  def publish(_instance, %Source{}, %Envelope{} = env, []), do: {:filtered, env}
+
+  def publish(instance, %Source{} = source, %Envelope{} = env, selected) do
+    sinks = selected_sinks(source.sinks, selected)
+
+    if durable?(sinks),
+      do: deliver(instance, source, sinks, env),
       else: refuse(env)
   end
+
+  defp selected_sinks(sinks, :all), do: sinks
+
+  defp selected_sinks(sinks, selected),
+    do: for({sink, index} <- Enum.with_index(sinks), index in selected, do: sink)
 
   # Boot refuses a static source with no durable sink and a source write is
   # refused the same way, but a source can still get here without either check:
   # one stored before the write check existed, or one written to a shared
   # (Redis) source store by a node that runs `wal: :disk`. Acking it would be a
-  # `2xx` with no durable copy anywhere, so it is a `503` instead.
-  defp durable?(%Source{sinks: sinks}),
+  # `2xx` with no durable copy anywhere, so it is a `503` instead. A filter can
+  # leave a source with durable sinks and a hook with none: the same `503`.
+  defp durable?(sinks),
     do: Enum.any?(sinks, fn {mod, opts} -> Sink.durable?(mod, opts) end)
 
   defp refuse(env) do
     Logger.warning(
-      "[ankusa] source #{env.source_id} has no durable sink; under wal: :none nothing can ack it"
+      "[ankusa] source #{env.source_id} has no durable sink for hook #{env.id}; " <>
+        "under wal: :none nothing can ack it"
     )
 
     {:error, :store_unavailable}
   end
 
-  defp deliver(instance, %Source{} = source, %Envelope{} = env) do
-    with {:ok, ctx} <- ctx(instance, source, env) do
+  defp deliver(instance, %Source{} = source, sinks, %Envelope{} = env) do
+    with {:ok, ctx} <- ctx(instance, source, sinks, env) do
       timeout = Ankusa.config(instance).direct_publish_timeout_ms
 
       tasks =
-        Enum.map(source.sinks, fn {mod, opts} ->
+        Enum.map(sinks, fn {mod, opts} ->
           Task.async(fn ->
             started = System.monotonic_time()
 
@@ -65,7 +80,7 @@ defmodule Ankusa.Edge.Publish do
       results = Task.yield_many(tasks, timeout: timeout, on_timeout: :kill_task)
 
       outcomes =
-        source.sinks
+        sinks
         |> Enum.zip(results)
         |> Enum.map(fn {{mod, _opts}, {_task, result}} ->
           case result do
@@ -101,7 +116,7 @@ defmodule Ankusa.Edge.Publish do
         end)
 
       # What `/ready` reports as `sinks` (`Ankusa.Health.SinkErrors`).
-      source.sinks
+      sinks
       |> Enum.zip(outcomes)
       |> Enum.each(fn {sink, {_mod, outcome, _ms}} ->
         SinkErrors.record(instance, sink, if(outcome == :ok, do: :ok, else: :error))
@@ -119,7 +134,7 @@ defmodule Ankusa.Edge.Publish do
 
   # The ctx every sink already handles under dispatch (`Pipeline.ctx/3`),
   # including the one claim-check ref every sink and retry shares.
-  defp ctx(instance, %Source{} = source, env) do
+  defp ctx(instance, %Source{} = source, sinks, env) do
     ctx = %{
       instance: instance,
       source_id: env.source_id,
@@ -130,7 +145,7 @@ defmodule Ankusa.Edge.Publish do
       forward_headers_max_bytes: source.forward_headers_max_bytes
     }
 
-    case claim_needed(source.sinks, env) do
+    case claim_needed(sinks, env) do
       {:ok, true} ->
         case Message.check_in(instance, env) do
           {:ok, claim} ->

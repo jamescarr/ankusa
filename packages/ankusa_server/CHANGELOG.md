@@ -18,6 +18,17 @@ own ([`docs/releasing.md`](../../docs/releasing.md)).
   `ankusa_ingest_event_type_missing_total`. Every rejected form names
   `sources.<id>.event_type`.
 
+- **`sinks[].filter` (CR-2).** Every sink entry (not `lifecycle.sinks`) takes a
+  `filter`: `all` / `any` / `not` and `field: matcher` over `event_type`,
+  `tenant`, `content_type`, `header.<name>` and `json.<path>`, which decides
+  whether the sink gets a delivery row. A hook no sink selects is answered
+  `201 {"filtered": true}` and not stored. The admin API reads and shows the
+  same form; every ceiling and every malformed node is refused naming
+  `sources.<id>.sinks[i].filter`. New series
+  `ankusa_dispatch_filtered_total{sink}` and
+  `ankusa_dispatch_filter_unevaluable_total{sink}`; `outcome="filtered"` on
+  `ankusa_ingest_requests_total`.
+
 - **`replay --expect-nodes N`.** The number of nodes `--nodes` must resolve to; on any
   other count the command sends nothing and exits `1`, naming the nodes it found
   (`--nodes resolved to 2 node(s) (…), --expect-nodes is 3`).

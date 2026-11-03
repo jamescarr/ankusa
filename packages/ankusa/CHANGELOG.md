@@ -28,6 +28,29 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `event_type`. `Sink.SQS` leaves `ankusa_event_type` off a message that would
   pass SQS's 10 attributes (the body carries it too).
 
+- **Per-sink `filter:` (CR-2).** A sink entry may carry a data predicate
+  (`Ankusa.Filter`: `all` / `any` / `not` over `event_type`, `tenant`,
+  `content_type`, `header.<name>` and `json.<path>`, with `eq`, `neq`, `in`,
+  `not_in`, `prefix`, `suffix` and `exists`; 32 conditions, 4 levels, 256-byte
+  literals) that decides whether the sink gets a delivery row.
+  `Ankusa.Source` gains `filters`, aligned with `sinks`, and `Ankusa.Routing`
+  judges them at ingest on the one shared body decode and returns `selected`.
+  A hook no sink selects is answered `201 {"filtered": true}`
+  (`Ankusa.Edge.Ingest` returns `{:filtered, env}`, ingest outcome `:filtered`)
+  and is not stored: no dedupe claim, no commit, nothing to replay. A filter with
+  a `json.*` condition on a body over `dedupe.max_json_bytes` or not JSON selects
+  its sink and counts `ankusa_dispatch_filter_unevaluable_total{sink}`; a sink a
+  filter drops counts `ankusa_dispatch_filtered_total{sink}`. `Ankusa.Queue`
+  entries take `selected`, `Queue.Writer` writes no row for an unselected sink
+  (indexes kept), `Edge.Publish.publish/4` publishes to the selected sinks only
+  (`wal: :none`: none durable is `503`, none selected is `201 filtered`), and a
+  quarantine release, an archive replay and the intake log's recovery honour the
+  filters. `Ankusa.Filter.check/2` refuses a source whose `header.<name>`
+  condition is dropped by its `store_headers` policy or whose `event_type`
+  condition has no `event_type` to read. The admin view of a source shows each
+  filter as written (it is neither redacted nor encrypted at rest), and the
+  AsyncAPI channel description names it.
+
 ### Fixed
 
 - **A row parked behind a breaker that a throttling sink opened is dead-lettered as
@@ -44,6 +67,11 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `Ankusa.Ordering.lanes/4` takes the decoded body. The body cap of an
   `ordering_key: {:json, _}` is now `dedupe.max_json_bytes` (1 MiB by default,
   as before) instead of a fixed 1 MiB.
+- `Ankusa.Routing.resolve/4` takes `telemetry: false` (a replay or a recovery
+  counts nothing again) and keeps the event type a stored hook already carries;
+  `Ankusa.Ordering.lanes/5` takes the selected sinks and reads no key for a sink
+  a filter dropped; `Ankusa.Edge.Publish.publish` takes the selected sinks (four
+  arguments, was three).
 
 - Requires `bandit ~> 1.14 and >= 1.14.1` (was `~> 1.14`): 1.14.0 is affected
   by EEF-CVE-2026-116078 (High: an HTTP/2 request body sent as 1-byte DATA

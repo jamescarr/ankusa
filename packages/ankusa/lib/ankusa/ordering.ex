@@ -195,7 +195,11 @@ defmodule Ankusa.Ordering do
     end)
   end
 
-  defp stored_policy(config, %Source{store_headers: override, verifier: verifier}) do
+  @doc false
+  # The stored-header policy this source runs under: the instance's, overridden by
+  # the source's, plus the credential headers of a token verifier. Shared with
+  # `Ankusa.Filter.check/2`.
+  def stored_policy(config, %Source{store_headers: override, verifier: verifier}) do
     policy = StoredHeaders.resolve(override, config.store_headers)
 
     case verifier do
@@ -221,21 +225,28 @@ defmodule Ankusa.Ordering do
 
   @doc """
   The lanes of `env` for `source`, from the complete header list and `decoded`,
-  the body's JSON as `Ankusa.Routing.decode/3` returns it (`:skip`: not decoded,
+  the body's JSON as `Ankusa.Routing` decodes it (`:skip`: not decoded,
   so a `{:json, _}` key is missing). `nil` for a source with no ordered sink,
   else a list aligned with the source's sinks, each `nil` (unordered) or
   `{lane, key}`. One decode serves an `ordering_key: {:json, _}`, a
   `dedupe: json` and an `event_type: json` on the same source.
+
+  `selected` is the sinks that get a delivery row (`Ankusa.Filter`): a sink a
+  filter dropped has no row, so its lane is `nil` and its key is not read (no
+  `lane_key_missing` for a hook that never joins the lane).
   """
   @spec lanes(
           atom(),
           Source.t(),
           Envelope.t(),
-          {:ok, term()} | {:error, term()} | :skip
+          {:ok, term()} | {:error, term()} | :skip,
+          :all | [non_neg_integer()]
         ) :: [lane() | nil] | nil
-  def lanes(_instance, %Source{ordering: nil}, _env, _decoded), do: nil
+  def lanes(instance, source, env, decoded, selected \\ :all)
 
-  def lanes(instance, %Source{id: id, sinks: sinks, ordering: ordering}, env, decoded) do
+  def lanes(_instance, %Source{ordering: nil}, _env, _decoded, _selected), do: nil
+
+  def lanes(instance, %Source{id: id, sinks: sinks, ordering: ordering}, env, decoded, selected) do
     sinks
     |> Enum.zip(ordering)
     |> Enum.with_index()
@@ -244,16 +255,18 @@ defmodule Ankusa.Ordering do
         nil
 
       {{{mod, _opts}, {:ordered, spec}}, index} ->
-        key = key(spec, env, decoded)
+        if selected == :all or index in selected do
+          key = key(spec, env, decoded)
 
-        if spec != nil and key == nil,
-          do:
-            Ankusa.Telemetry.emit([:dispatch, :lane_key_missing], %{}, %{
-              instance: instance,
-              sink: mod
-            })
+          if spec != nil and key == nil,
+            do:
+              Ankusa.Telemetry.emit([:dispatch, :lane_key_missing], %{}, %{
+                instance: instance,
+                sink: mod
+              })
 
-        {lane_id(index, id, key), key || ""}
+          {lane_id(index, id, key), key || ""}
+        end
     end)
   end
 

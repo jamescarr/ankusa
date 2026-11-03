@@ -155,6 +155,73 @@ defmodule Ankusa.MetricsTest do
     refute scrape =~ ~r/^ankusa_ingest_event_type_missing_total\{[^}]*source_id="plain"/m
   end
 
+  test "filter: a dropped sink counts ankusa_dispatch_filtered_total, a filtered hook is an ingest outcome" do
+    config =
+      start_instance(
+        source_store:
+          {Static,
+           sources: %{
+             "routed" => [
+               verifier: {Ankusa.Verifier.None, []},
+               event_type: %{json: "type"},
+               sinks: [
+                 {Ankusa.Sink.Log, filter: %{event_type: "invoice.paid"}},
+                 {Ankusa.Sink.Http,
+                  url: "https://x.test/", allow_unsigned: true, filter: %{event_type: "never"}}
+               ]
+             ]
+           }},
+        metrics: %{detail: :source}
+      )
+
+    inst = config.instance
+
+    assert {:ok, _} =
+             Ankusa.Edge.Ingest.ingest(inst, request("routed", ~s({"type":"invoice.paid"})))
+
+    assert {:filtered, _} = Ankusa.Edge.Ingest.ingest(inst, request("routed", ~s({"type":"x"})))
+    assert {:filtered, _} = Ankusa.Edge.Ingest.ingest(inst, request("routed", ~s({"type":"y"})))
+
+    scrape = Ankusa.Metrics.scrape(inst)
+
+    # The Http sink was dropped by all three hooks, the Log sink by the two that did not match.
+    assert scrape =~
+             ~r/^ankusa_dispatch_filtered_total\{[^}]*sink="Ankusa.Sink.Http"[^}]*source_id="routed"[^}]*\} 3(\.0)?$/m or
+             scrape =~
+               ~r/^ankusa_dispatch_filtered_total\{[^}]*source_id="routed"[^}]*sink="Ankusa.Sink.Http"[^}]*\} 3(\.0)?$/m
+
+    assert scrape =~
+             ~r/^ankusa_dispatch_filtered_total\{[^}]*sink="Ankusa.Sink.Log"[^}]*\} 2(\.0)?$/m
+
+    assert scrape =~ ~r/^ankusa_ingest_requests_total\{[^}]*outcome="filtered"[^}]*\} 2(\.0)?$/m
+    assert scrape =~ ~r/^ankusa_ingest_requests_total\{[^}]*outcome="committed"[^}]*\} 1(\.0)?$/m
+  end
+
+  test "filter: an unjudgeable json filter counts ankusa_dispatch_filter_unevaluable_total" do
+    config =
+      start_instance(
+        source_store:
+          {Static,
+           sources: %{
+             "jsonf" => [
+               verifier: {Ankusa.Verifier.None, []},
+               sinks: [{Ankusa.Sink.Log, filter: %{"json.type" => "a"}}]
+             ]
+           }}
+      )
+
+    inst = config.instance
+    assert {:ok, _} = Ankusa.Edge.Ingest.ingest(inst, request("jsonf", "not json"))
+    assert {:ok, _} = Ankusa.Edge.Ingest.ingest(inst, request("jsonf", ~s({"type":"a"})))
+
+    scrape = Ankusa.Metrics.scrape(inst)
+
+    assert scrape =~
+             ~r/^ankusa_dispatch_filter_unevaluable_total\{[^}]*sink="Ankusa.Sink.Log"[^}]*\} 1(\.0)?$/m
+
+    refute scrape =~ "ankusa_dispatch_filtered_total{"
+  end
+
   test "a SHA-1 source counts every verification, ok or failed, and nothing else does" do
     scheme = %Ankusa.Verifier.Hmac.Scheme{signature_header: "x-sig", hash: :sha1}
 
