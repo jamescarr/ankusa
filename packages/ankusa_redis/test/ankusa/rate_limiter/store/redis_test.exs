@@ -105,7 +105,11 @@ defmodule Ankusa.RateLimiter.Store.RedisTest do
     conn
   end
 
-  defp eventually(fun, deadline_ms \\ 3_000) do
+  # Ten seconds: twenty times the CI runner's measured p99.9 for these waits
+  # (CI-15 measured 945 of them over 20 runs: p50 21 ms, p90 105 ms, p99.9
+  # 504 ms), while staying under the store's periodic refresh so a dropped
+  # broadcast still fails the test instead of being waited out.
+  defp eventually(fun, deadline_ms \\ 10_000) do
     deadline = System.monotonic_time(:millisecond) + deadline_ms
     do_eventually(fun, deadline)
   end
