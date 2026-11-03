@@ -55,6 +55,26 @@ When a diff runs no package at all, that row is named `matrix.package` in the
 checks list and the summary: GitHub does not expand a matrix for a job whose
 `if:` skipped it. The job and its `skipped` conclusion are still there.
 
+### The job's toolchain, and nothing else (CI-22)
+
+mise loads `.mise/conf.d/*.toml` repo-wide, so every directory declares all 19
+tools, and its task runner installs every missing declared tool before a task
+runs (`task.run_auto_install`, on by default) — which undid each job's
+`install_args`: `ankusa_server` installed 16 tools inside `mise run check:package`,
+`examples`, which named none, made its mise-action step install all 19, and a
+`lint` run downloaded 17 it never uses and died on a 500 from ruby's release
+URL. `ci.yml` therefore sets `MISE_AUTO_INSTALL=false` in
+its top-level `env:`, so a job installs exactly the `install_args` its
+mise-action step names and `mise run` installs nothing; a task that needs a tool
+its job did not install fails at that command, loudly, instead of starting a
+19-tool download. Locally nothing changes — `mise run check` still installs what
+it needs. Beside it, `MISE_HTTP_RETRIES=6` widens the retry budget for the
+downloads that remain (a package job's three tools): six retries with mise's
+backoff (≈0.2 s, 0.8 s, 2.6 s, 14 s, 14 s, 9 s — ~42 s from the first attempt
+to the final failure) instead of the default three inside ~4 s. A new job names
+the tools its task calls in `install_args`; a tool added to `.mise/conf.d/`
+reaches only the jobs that list it.
+
 ## Static analysis and coverage gates
 
 `check:package` runs these on every Mix package (sobelow only on the two Plug

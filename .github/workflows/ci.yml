@@ -18,6 +18,25 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# CI-22. mise loads `.mise/conf.d/*.toml` repo-wide, so every directory declares
+# all 19 tools, and `task.run_auto_install` (default on) makes `mise run` install
+# every missing one before the task starts — undoing the per-kind `install_args`
+# the job chose. `auto_install=false` scopes a job's toolchain to exactly its
+# mise-action step: a task that needs a tool the job did not install fails at
+# that command instead of downloading the repo's whole set. Measured on run
+# 41700744695: `ankusa_server` installed 16 tools inside `mise run`, `examples`
+# 19; on 41689506568 a `lint` run downloaded 17 tools it never uses and died on
+# a 500 from ruby's release URL.
+#
+# `http_retries=6` rides out exactly that burst: mise's backoff is ~0.2 s, 0.8 s,
+# 2.6 s, 14 s, 14 s, 9 s — ~42 s from the first attempt to the final failure,
+# measured on a probe with a URL that always answers 500 — instead of the
+# default three attempts inside ~4 s. The downloads that remain — a package
+# job's three tools — are the whole remaining 5xx surface.
+env:
+  MISE_AUTO_INSTALL: "false"
+  MISE_HTTP_RETRIES: "6"
+
 jobs:
   # CI-5: which jobs can this diff possibly need? This job decides once, every
   # other job reads its outputs, and `ci-summary` reports the result. The
@@ -765,10 +784,13 @@ jobs:
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `test:integration` is Mix against the emulators: the same three tools
+      # and the same cache entry the `ankusa` package job keeps (CI-22).
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
-          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+          install_args: elixir erlang cmake
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-hex" # the default key skips .mise/conf.d/
       - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -828,6 +850,12 @@ jobs:
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
+          # Everything `check:conformance` spawns, read off `.mise/tasks/check/conformance`
+          # and `conformance/sdks.json`: `check.mjs` regenerates the producer
+          # vectors with core's `mix` (RocksDB's NIF compiles, so cmake), then
+          # hands each SDK its own command — `mix`, `npm`/`npx`, `uv`, `cargo`,
+          # `bundle`, `go`, `sbt`, `clojure`, `composer`/`php` (CI-22).
+          install_args: elixir erlang cmake node uv rust ruby go java sbt clojure http:php http:composer
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       # The rust SDK's conformance run is `cargo build --locked --tests` +
       # `cargo test --locked --test conformance`: the same dependency graph the
@@ -874,6 +902,15 @@ jobs:
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
+          # What `check:examples` runs, plus the `examples/fleet-e2e/kind/`
+          # toolchain the job's chart render stands in for (CI-22's set): every
+          # example's `mix` app (RocksDB's NIF needs cmake), the npm SDKs'
+          # `npm ci`/`build` and the workers' `npx tsc` (node), the Python
+          # worker's `uv sync`, the Rust worker's `cargo fmt`/`clippy`, and the
+          # charts' `helm lint`/`template` + `kubeconform`. The task itself never
+          # shells out to `kind` or `kubectl` — it renders the fleet chart's
+          # values with helm — but they stay declared, as the plan lists them.
+          install_args: elixir erlang cmake node uv rust helm kubectl kubeconform kind
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1033,7 +1070,10 @@ jobs:
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
-          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+          # `bench:gate` is Mix (`mix compile`, `elixir bench/gate.exs`); the
+          # same three tools and cache entry as the `ankusa` package job (CI-22).
+          install_args: elixir erlang cmake
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-hex" # the default key skips .mise/conf.d/
       - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1101,7 +1141,10 @@ jobs:
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
-          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+          # `bench:tenants` is Mix too — elixir, OTP and cmake — from the same
+          # cache entry as the gate beside it (CI-22).
+          install_args: elixir erlang cmake
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-hex" # the default key skips .mise/conf.d/
       # The same entry the `bench` job keeps: both compile the same
       # `MIX_ENV=test` tree with the same task, so both restore it and the
       # first to finish saves (as the two crash drills do with the image
@@ -1134,7 +1177,13 @@ jobs:
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
-          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+          # `test:crash` is `scripts/drills/crash.sh tmpfs`, which runs the
+          # drill inside the `ankusa_server` image (docker only); the Elixir,
+          # OTP and cmake pins in `.mise.toml` are what that image's `FROM`
+          # tracks, so they stay declared here as the plan's set, from the
+          # `ankusa` package job's cache entry (CI-22).
+          install_args: elixir erlang cmake
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-hex" # the default key skips .mise/conf.d/
       - name: cache compiled deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
