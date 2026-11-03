@@ -113,6 +113,15 @@ CI keeps the compose, floci-emulator and drill images in the Actions cache
 (`scripts/ci/images.sh`) and only pulls one when its digest pin changes;
 locally `mise run check:package` / `test:integration` are unchanged.
 
+`ci.yml` runs only the jobs a pull request's diff can need: the touched
+package (or, for a core change, the whole Mix group, because every adapter and
+`ankusa_server` path-depend on it), the crash drills for core or adapter code,
+`examples` for `examples/`, `deploy/helm/` or a package an example
+path-depends on; `changes`, `lint` and `ci-summary` always run, and a job the
+diff cannot need reports `skipped`. A push to `main`, a tag and `workflow_call`
+run every job. The pattern → job table and the fail-safe are in
+[`testing.md`](docs/testing.md#what-a-pull-request-runs).
+
 ## Run the checks before calling work done
 
 Format, warnings-as-errors, and tests — for **every** package the change
@@ -144,7 +153,7 @@ every one of them:
 
 | Drill | Where CI runs it |
 | --- | --- |
-| `test:crash`, `scripts/drills/flakey.sh` | `ci.yml`'s two `crash drill` jobs: every PR, every push to `main` |
+| `test:crash`, `scripts/drills/flakey.sh` | `ci.yml`'s two `crash drill` jobs: every push to `main`, and every PR whose diff touches core's `lib`, an adapter's `lib`, or `packages/ankusa_server/Dockerfile` — which includes the ack path (`queue/writer.ex`, `store.ex`, `edge/batcher.ex`) |
 | `examples/fleet-e2e/run.sh` (`--replay-drill`, `--wal dual\|disk --kill-node`) | `e2e.yml`'s `fleet end to end (compose)`: nightly, every release tag, and PRs that touch `examples/fleet-e2e/**`, `tools/loadgen/**` or the server `Dockerfile` |
 | `mise run e2e` (kind: the Oban consumer, the Helm fleet) | `e2e.yml`'s `kind end to end`: nightly, every release tag |
 | `bench:soak` (3600 s) | `soak.yml`: nightly |
