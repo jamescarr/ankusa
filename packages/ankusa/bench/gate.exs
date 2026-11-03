@@ -46,6 +46,15 @@
 # disk is used and the fsync is part of the measurement (docs/testing.md
 # "Perf gate").
 #
+# Before any measured run, every cell gets one discarded warm-up run of its
+# own. The first run of a cell pays costs that do not belong to the code: the
+# `mix run` boot, module loading, allocator growth, a cold page cache and the
+# CPU governor ramping. They show up as a trend across rounds — the failing
+# base leg of run 41586954095 had `512B-c32` round medians of 6.12, 5.77 and
+# 4.78 ms with the first round always slowest — and no number of extra rounds
+# settles a trend. The warm-up sample feeds neither the medians nor the
+# spread; it is measured on this runner, for this leg, once per cell.
+#
 # A p99 over 20k samples is noisy on a shared machine, and noise only ever
 # adds latency and takes throughput away. So a cell over a limit after its
 # `BENCH_RUNS` runs is run `BENCH_RUNS` more times and judged on its best run
@@ -66,10 +75,17 @@
 # failures: the job does not fail on it. A cell whose failure the measurement
 # *can* resolve still fails, and a cell that is over its limit and also
 # unresolvable says how far over: `inconclusive (over limit by 6.2%)`.
-# `BENCH_REBASELINE=1` is the one exception: it still fails on one, because
-# that is a refusal to record a baseline from samples that wide (a baseline
-# measured that shakily makes every later comparison meaningless), not a
-# verdict about a change.
+# `BENCH_REBASELINE=1` is the base leg: it records the cells it measured and
+# leaves a cell it could not settle out of the baseline it writes, printing the
+# same `INCONCLUSIVE p99_ms <cell>: …` line, `::warning::` annotation and step
+# summary as a comparison run, then exits 0. It never records a baseline from
+# samples that wide — a baseline measured that shakily would make every later
+# comparison meaningless — and it never fails the job over a measurement it
+# cannot make: no diff was involved, and the branch leg still has to run. A
+# cell absent from that baseline is **not judged** by the comparison leg, never
+# passed: it prints the INCONCLUSIVE line for it, marks it `inconclusive` and
+# does not fail on it, while every cell the baseline does carry keeps its
+# judgement — a cell over its limit still fails.
 #
 # Env knobs:
 #
@@ -146,10 +162,14 @@ defmodule Bench.Gate do
 
     IO.puts("==> bench data root: #{root} (#{describe_root(root)}), a fresh directory per run")
 
+    warmup(@matrix, root, trace?)
     samples = collect(@matrix, runs, root, trace?, %{})
     {samples, inconclusive} = settle_spread(@matrix, runs, root, trace?, samples, cells)
     medians = medians(samples, cells)
     rows = if baseline, do: evaluate(baseline, medians, cells), else: []
+    # A cell the base leg could not settle has no entry in the baseline it
+    # wrote: it is not judged (header), never compared with a missing number.
+    unjudged = if baseline, do: Enum.filter(cells, &is_nil(baseline[&1])), else: []
     failing = rows |> Enum.filter(& &1.failed) |> Enum.map(& &1.cell) |> Enum.uniq()
 
     # One more round of runs for just the cells over a limit, judged on their
@@ -175,28 +195,44 @@ defmodule Bench.Gate do
 
     IO.puts("wrote #{Path.relative_to_cwd(@last)}")
 
+    not_judged = not_judged_entries(inconclusive, unjudged)
+
     cond do
       rebaseline? and inconclusive != [] ->
-        # A baseline recorded from samples this wide would make every later
-        # comparison meaningless (header).
-        print_table(
-          cells,
+        # The cells this leg can measure are recorded; the ones it cannot are
+        # left out (a baseline measured from samples that wide would make every
+        # later comparison meaningless), reported exactly as a comparison run
+        # reports them, and the job goes on to the branch leg (header).
+        cells_inconclusive = Enum.map(inconclusive, &elem(&1, 0))
+        settled = Enum.reject(cells, &(&1 in cells_inconclusive))
+
+        print_table(cells, medians, empty_baseline(cells), rows, cells_inconclusive)
+        print_inconclusive(not_judged)
+        annotate_inconclusive(not_judged)
+        step_summary(not_judged, rows)
+
+        write_json(
+          baseline_path(),
+          settled,
           medians,
-          empty_baseline(cells),
-          rows,
-          Enum.map(inconclusive, &elem(&1, 0))
+          runner,
+          [],
+          carried_f1_code(baseline_path())
         )
 
-        print_inconclusive(inconclusive)
-        IO.puts("INCONCLUSIVE")
-        System.halt(1)
+        IO.puts(
+          "rebaselined #{baseline_path()} (runner #{runner}) without " <>
+            "#{Enum.join(cells_inconclusive, ", ")}: not judged, see the step summary"
+        )
+
+        IO.puts(inconclusive_summary(not_judged, rows))
 
       rebaseline? ->
         write_json(baseline_path(), cells, medians, runner, [], carried_f1_code(baseline_path()))
         IO.puts("rebaselined #{baseline_path()} (runner #{runner})")
 
       true ->
-        report(cells, medians, baseline, rows, inconclusive)
+        report(cells, medians, baseline, rows, not_judged)
     end
   end
 
@@ -301,16 +337,60 @@ defmodule Bench.Gate do
   defp join_samples(values),
     do: Enum.map_join(values, ", ", fn v -> :erlang.float_to_binary(v * 1.0, decimals: 2) end)
 
-  defp print_inconclusive(inconclusive) do
-    for {cell, spread, samples} <- inconclusive do
-      IO.puts(
-        "INCONCLUSIVE p99_ms #{cell}: samples span #{ratio(spread)} across rounds " <>
-          "(#{samples}) — wider than the #{ratio(spread_limit())} the limit can resolve"
-      )
+  # The cells the gate cannot judge, and why: the measurement could not settle
+  # the cell's p99 (`inconclusive`), or the base leg could not settle it, so
+  # the baseline it wrote has no entry for the cell (`unjudged`). Both are
+  # reported the same way and neither is ever a pass (header).
+  defp not_judged_entries(inconclusive, unjudged) do
+    measured =
+      for {cell, spread, samples} <- inconclusive do
+        %{
+          cell: cell,
+          detail:
+            "samples span #{ratio(spread)} across rounds (#{samples}) — wider than the " <>
+              "#{ratio(spread_limit())} the limit can resolve"
+        }
+      end
+
+    measured ++
+      for cell <- unjudged do
+        %{
+          cell: cell,
+          detail:
+            "absent from the baseline (the base leg could not settle it on this runner), " <>
+              "so there is nothing to compare it with"
+        }
+      end
+  end
+
+  defp print_inconclusive(not_judged) do
+    for %{cell: cell, detail: detail} <- not_judged do
+      IO.puts("INCONCLUSIVE p99_ms #{cell}: #{detail}")
     end
   end
 
   defp empty_baseline(cells), do: Map.new(cells, fn cell -> {cell, %{}} end)
+
+  # One discarded run per cell before the measured rounds (header): its sample
+  # feeds neither the medians nor the spread, only the runner state the
+  # measured rounds inherit.
+  defp warmup(matrix, root, trace?) do
+    IO.puts("==> warm-up: one discarded run per cell (feeds neither the medians nor the spread)")
+
+    for {cell, bytes, concurrency} <- matrix do
+      IO.puts("==> bench #{cell} warm-up (discarded)")
+
+      run_bench(
+        root,
+        trace?,
+        cell,
+        bytes,
+        concurrency,
+        String.ends_with?(cell, "-ordered"),
+        "warmup"
+      )
+    end
+  end
 
   # Round-robin over the cells so a noisy minute is spread over all of them.
   # `round` is the measurement round within the cell's budget (0 for the
@@ -581,8 +661,12 @@ defmodule Bench.Gate do
     baseline
   end
 
+  # A cell the base leg could not settle is absent from the baseline it wrote:
+  # it is not judged — never passed, never failed — and the caller reports it
+  # inconclusive (header). A cell the baseline does have is judged as usual.
   defp evaluate(baseline, medians, cells) do
     for cell <- cells,
+        not is_nil(baseline[cell]),
         {metric, kind, factor} <- @gates,
         base = get_in(baseline, [cell, metric]) || abort("baseline has no #{cell}.#{metric}"),
         current = medians[cell][metric] do
@@ -600,10 +684,10 @@ defmodule Bench.Gate do
     end
   end
 
-  defp report(cells, medians, baseline, rows, inconclusive) do
-    cells_inconclusive = Enum.map(inconclusive, &elem(&1, 0))
+  defp report(cells, medians, baseline, rows, not_judged) do
+    cells_inconclusive = Enum.map(not_judged, & &1.cell)
     print_table(cells, medians, baseline, rows, cells_inconclusive)
-    print_inconclusive(inconclusive)
+    print_inconclusive(not_judged)
 
     # A cell the measurement cannot decide is neither a pass nor a regression:
     # it is reported as INCONCLUSIVE, not as a FAIL, and it does not fail the
@@ -620,10 +704,10 @@ defmodule Bench.Gate do
       )
     end
 
-    if inconclusive != [] do
-      annotate_inconclusive(inconclusive)
-      step_summary(inconclusive, rows)
-      IO.puts(inconclusive_summary(inconclusive, rows))
+    if not_judged != [] do
+      annotate_inconclusive(not_judged)
+      step_summary(not_judged, rows)
+      IO.puts(inconclusive_summary(not_judged, rows))
     end
 
     cond do
@@ -631,7 +715,7 @@ defmodule Bench.Gate do
         IO.puts("FAIL")
         System.halt(1)
 
-      inconclusive != [] ->
+      not_judged != [] ->
         # Not judged and not failed: the summary line above says so, and the
         # exit code is 0 for it. Never `PASS`: the measurement did not pass.
         :ok
@@ -641,25 +725,23 @@ defmodule Bench.Gate do
     end
   end
 
-  # One warning annotation per cell the measurement could not decide, where the
-  # job's log and the pull request show it.
-  defp annotate_inconclusive(inconclusive) do
-    for {cell, _spread, _samples} <- inconclusive do
+  # One warning annotation per cell the gate could not judge, where the job's
+  # log and the pull request show it.
+  defp annotate_inconclusive(not_judged) do
+    for %{cell: cell} <- not_judged do
       IO.puts("::warning::INCONCLUSIVE p99_ms #{cell} — not judged")
     end
   end
 
-  # The step summary line for each such cell: which cell, every sample, and
-  # that it was not judged. `GITHUB_STEP_SUMMARY` is unset off CI, where this
-  # does nothing.
-  defp step_summary(inconclusive, rows) do
+  # The step summary line for each such cell: which cell, why, and that it was
+  # not judged. `GITHUB_STEP_SUMMARY` is unset off CI, where this does nothing.
+  defp step_summary(not_judged, rows) do
     case System.get_env("GITHUB_STEP_SUMMARY") do
       path when is_binary(path) and path != "" ->
         lines =
-          for {cell, spread, samples} <- inconclusive do
+          for %{cell: cell, detail: detail} <- not_judged do
             "- **INCONCLUSIVE** `p99_ms #{cell}`#{over_limit_note(cell, rows)}: **not judged** — " <>
-              "samples span #{ratio(spread)} across rounds (#{samples}), wider than the " <>
-              "#{ratio(spread_limit())} the limit can resolve.\n"
+              "#{detail}.\n"
           end
 
         File.write!(path, lines, [:append])
@@ -674,13 +756,13 @@ defmodule Bench.Gate do
   # that is also over its limit carries that note, e.g.
   # `512B-c32 (p99_ms over limit by 6.2%)`. Deliberately not `PASS`: nothing
   # was decided either way.
-  defp inconclusive_summary(inconclusive, rows) do
+  defp inconclusive_summary(not_judged, rows) do
     cells =
-      Enum.map_join(inconclusive, ", ", fn {cell, _spread, _samples} ->
+      Enum.map_join(not_judged, ", ", fn %{cell: cell} ->
         cell <> over_limit_note(cell, rows)
       end)
 
-    count = length(inconclusive)
+    count = length(not_judged)
     noun = if count == 1, do: "cell", else: "cells"
 
     "#{count} #{noun} inconclusive (#{cells}): not judged, see the step summary"
@@ -714,7 +796,9 @@ defmodule Bench.Gate do
       {limit, status} =
         case gated[{cell, metric}] do
           nil ->
-            {"-", ""}
+            # No gate row: the baseline has no entry for the cell (the base leg
+            # could not settle it), so it is not judged.
+            {"-", if(cell in inconclusive, do: "inconclusive", else: "")}
 
           r ->
             status =
@@ -782,7 +866,7 @@ defmodule Bench.Gate do
         ~s(  "#{cell}": {\n#{fields}\n  })
       end
 
-    f1_lines = if f1_code, do: [f1_code_block(cells, f1_code)], else: []
+    f1_lines = if f1_code, do: [f1_code_block(f1_code)], else: []
 
     tail =
       Enum.map([{"runner", runner} | extra], fn {k, v} -> ~s(  "#{k}": #{JSON.encode!(v)}) end)
@@ -790,9 +874,12 @@ defmodule Bench.Gate do
     File.write!(path, "{\n" <> Enum.join(cell_lines ++ f1_lines ++ tail, ",\n") <> "\n}\n")
   end
 
-  defp f1_code_block(cells, f1_code) do
+  # Every cell the carried block has, in matrix order — not just the cells this
+  # run writes: a baseline that leaves an unsettled cell out still carries the
+  # whole `f1_code` block (header).
+  defp f1_code_block(f1_code) do
     cell_lines =
-      for cell <- cells, f1_code[cell] do
+      for {cell, _, _} <- @matrix, f1_code[cell] do
         fields =
           Enum.map_join(@metrics, ", ", fn m ->
             ~s("#{m}": #{:erlang.float_to_binary(f1_code[cell][m] * 1.0, decimals: 3)})
