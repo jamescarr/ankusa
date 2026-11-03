@@ -9,11 +9,11 @@ docs), starting and stopping that package's own `docker-compose.yml` around the
 suite; `mise run check` runs all of them. `check:package` also takes
 `--lane static` / `--lane test`, which run the two halves of a Mix package
 separately — with no flag it runs both, in the original order, and `mise run
-`check` and every other caller pass no flag. CI uses it for `ankusa` alone: the
+check` and every other caller pass no flag. CI uses it for `ankusa` alone: the
 `ankusa (static)` job runs `mise run check:package ankusa --lane static` (deps,
 `hex.audit`, format, `compile --warnings-as-errors`, credo, dialyzer, sobelow,
-docs, `hex.build`) and the test lane runs as three shards (`ankusa (tests, n/3)`,
-each `--lane test --partition n/3`: `mix test --cover --partitions 3`, its own
+docs, `hex.build`) and the test lane runs as four shards (`ankusa (tests, n/4)`,
+each `--lane test --partition n/4`: `mix test --cover --partitions 4`, its own
 seed line, and the failing tests' names on failure) with one `ankusa (coverage)`
 job that merges the shards' coverage exports and enforces the package's floor,
 side by side instead of the suite waiting behind dialyzer.
@@ -36,7 +36,7 @@ gate.
 | --- | --- |
 | `docs/**`, any `*.md`, `marketing/**`, `static/**` | none of the package jobs; `lint` is the guard, and the summary says "docs-only" |
 | `deploy/monitoring/**` | none of the package jobs; `check:monitoring` is one of `lint`'s steps |
-| `packages/ankusa/**` | the whole Mix group — `ankusa (static)`, `ankusa (tests, 1/3)` … `(tests, 3/3)`, `ankusa (coverage)`, the five adapters, `ankusa_server`, `async_api_spex`, `sdk-elixir` — plus `core integration`, `sdk conformance`, both crash drills and `examples`. Every adapter package and `ankusa_server` path-depend on `ankusa`, so a core change is not finished until they pass, and the producer vectors `sdk conformance` regenerates are core's encoder's output |
+| `packages/ankusa/**` | the whole Mix group — `ankusa (static)`, `ankusa (tests, 1/4)` … `(tests, 4/4)`, `ankusa (coverage)`, the five adapters, `ankusa_server`, `async_api_spex`, `sdk-elixir` — plus `core integration`, `sdk conformance`, both crash drills and `examples`. Every adapter package and `ankusa_server` path-depend on `ankusa`, so a core change is not finished until they pass, and the producer vectors `sdk conformance` regenerates are core's encoder's output |
 | `packages/async_api_spex/**` | the whole Mix group (`ankusa`'s `Ankusa.AsyncApi` and every project that pins it by path) and `examples` |
 | `packages/sdk-*` | that SDK alone; its `check:package` runs its own `conformance_test`, so the shared `sdk conformance` job is only for `conformance/**` and the producer vectors core generates |
 | an adapter (`packages/ankusa_kafka`, `…_nats`, `…_rabbitmq`, `…_redis`) | that package, both crash drills (they ack through the image), and `examples` for the two an example path-depends on |
@@ -65,7 +65,7 @@ applications) between `mix compile --warnings-as-errors` and the tests:
 | `mix credo --strict` | any issue | [`.credo.exs`](../.credo.exs): the default checks, except `Design.AliasUsage` is off and the nesting and cyclomatic-complexity ceilings sit at the worst function that exists today (5 and 20) |
 | `mix dialyzer` | any warning (a wrong `@spec`, an unreachable clause, a call that can never succeed) | PLTs live in `_build/plts`; CI caches `_build` keyed on the toolchain pins and `mix.lock`, so a PLT rebuilds only when one changes |
 | `mix sobelow --exit --skip` | any finding in `ankusa` core or `ankusa_server` | a deliberate finding is marked in the code with `# sobelow_skip ["<Check>"]` and a line saying why it is safe; `--skip` is what makes sobelow read those marks |
-| `mix test --cover` | line coverage under the package's `test_coverage` threshold | `85` for `ankusa` core (shared test helpers excluded), `80` for every other package, in each `mix.exs`. Core's suite runs as three shards, each of which only exports its share, so the floor is enforced on the **merged** report in the `ankusa (coverage)` job (`mix test.coverage`, same threshold and `ignore_modules`); every other package runs one process in its own job |
+| `mix test --cover` | line coverage under the package's `test_coverage` threshold | `85` for `ankusa` core (shared test helpers excluded), `80` for every other package, in each `mix.exs`. Core's suite runs as four shards, each of which only exports its share, so the floor is enforced on the **merged** report in the `ankusa (coverage)` job (`mix test.coverage`, same threshold and `ignore_modules`); every other package runs one process in its own job |
 
 The test run prints its ExUnit seed; in CI `check:package` also appends it to the
 job's summary (`$GITHUB_STEP_SUMMARY`), so an order-dependent failure replays with
@@ -88,19 +88,20 @@ mise run check:package ankusa         # no external infra needed
 mise run test:integration             # +22 tests against the floci emulators (see below)
 ```
 
-CI splits this suite into three shards on three runners and merges their
+CI splits this suite into four shards on four runners and merges their
 coverage. `--partitions` keeps whole test *files* together and assigns them in
 round-robin order over the sorted file list, so the shards differ in time and
-content; the two heavy property files land in different shards
-(`property/migrate_property_test.exs` on shard 1, `property/pack_property_test.exs`
-on shard 3). To reproduce one shard locally, run it from the package directory
+content; with three shards the two heavy property files made the slowest shard
+322 s against 127 s for the fastest, which is why there are four (the measured
+tables are in the PR that landed this). To reproduce one shard locally, run it
+from the package directory
 or through the task; the shard exports its coverage instead of enforcing the
 85 % floor, so merge the exports afterwards (they collect in the gitignored
 `packages/ankusa/cover/`, one `<n>.coverdata` per shard — delete the directory
 to start clean):
 
 ```sh
-mise run check:package ankusa --partition 1/3   # MIX_TEST_PARTITION=1 mix test --partitions 3 --cover
+mise run check:package ankusa --partition 1/4   # MIX_TEST_PARTITION=1 mix test --partitions 4 --cover
 cd packages/ankusa && MIX_ENV=test mix test.coverage  # imports cover/*.coverdata and enforces the floor
 ```
 
