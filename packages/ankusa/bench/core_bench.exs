@@ -255,3 +255,5 @@ if missing > 0 do
   IO.write(:stderr, "core_bench: #{missing} acked hook(s) never reached the sink\n")
   System.halt(1)
 end
+# CI-22 probe: this touch (plus the ci.yml on this throwaway branch) is what
+# makes bench-scope run the two bench jobs; never merged.
