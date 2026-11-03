@@ -196,7 +196,7 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 15/19 done · closed without meeting the bar: CI-9 · next: CI-19, CI-17, CI-13 · last updated: 2026-11-03
+Status: 16/19 done · closed without meeting the bar: CI-9 · next: CI-17, CI-13 · last updated: 2026-11-03
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -1115,7 +1115,7 @@ which it does when a measured red run outranks a slow pipeline.
   `ankusa (tests)` job are the 0 side. `mise run lint:pins` and
   `mise run lint:workflows` green.
 
-- [ ] **CI-19 — The `/ready` flip deadline: measure the flip, not the test's round trip** · P2 · Deps: —
+- [x] **CI-19 — The `/ready` flip deadline: measure the flip, not the test's round trip** · P2 · Deps: —
   *Why:* `Ankusa.DrainTest` "SIGTERM with 200 requests in flight: ready flips, zero resets, every 201 survives a restart" failed on `main` (run 41625156213, `da3a7bb9` — a `docker.yml`-only diff) with `assert flip_ms <= 100, "/ready took #{flip_ms} ms to flip to draining"`, `Result: 2079/2080 passed`. Unlike every other site the measurement found, 100 ms is a **product promise** about how fast `/ready` flips after SIGTERM — the bound must not move. What is wrong is what `flip_ms` spans: `sent = System.monotonic_time(:millisecond)` → `System.cmd("kill", ["-TERM", …])` (a **fork/exec of a shell**) → the drainer → an HTTP poll of `/ready` **on the listener that holds 200 in-flight requests**, retried with no delay (`await_draining/2`). Three of those terms are the test harness's, not the drainer's, and on a loaded runner the fork alone can exceed 100 ms.
   *Change:* attribute first, on the runner, with numbers:
   1. State in the PR exactly what `flip_ms` spans today (the four terms above, with the code paths).
@@ -1126,7 +1126,7 @@ which it does when a measured red run outranks a slow pipeline.
   *Done when:* the PR shows both distributions and either (a) the bound re-based onto the promise's own span, unchanged, with 20/20 green on the runner, or (b) the item closes as a product finding with the samples in *Evidence*.
   *Proof:* the two sample tables (20 rows each), the probe run ids, `mise run check:package ankusa --lane test`, `mise run lint:workflows`.
   *Anchors:* `packages/ankusa/test/ankusa/drain_test.exs` (the SIGTERM test's `flip_ms`, and `await_draining/2`), `packages/ankusa/test/support/drain_harness.exs`, `packages/ankusa/lib/ankusa/instance/drain.ex` (read-only; out of scope to change).
-  *Evidence:* —
+  *Evidence:* probe PR #263 (closed unmerged, branch deleted), run [41668142392](https://github.com/jamescarr/ankusa/actions/runs/41668142392): 20 hosted-runner samples — harness span (SIGTERM receipt → `Health.drain/1`) 3–5 ms, median 4, **20/20 under 100 ms**; the old `flip_ms` (before the `kill` → first `503 draining` answer) 11–192 ms, median 12, **2/20 over 100 ms**. `kill` fork/exec 1–2 ms; the residual 9–190 ms is the polled `/ready` round trip on the listener holding the 200 requests. The unchanged assertion `assert flip_ms <= 100, "/ready took #{flip_ms} ms to flip to draining"` now applies to the harness's own span; `/ready` answering `503 draining` is asserted separately and untimed; `docs/testing.md` says which is which. PR #264: `mise run check:package ankusa --lane test` green, `mise run lint:pins` and `mise run lint:workflows` OK.
 
 - [ ] **CI-13 — Evaluate an arm64 runner for the Mix jobs, measured, not guessed** · P3 · Deps: CI-5
   *Why:* the repository is public, so standard runners are free either way, and
