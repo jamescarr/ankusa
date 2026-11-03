@@ -504,6 +504,24 @@ jobs:
         env:
           # `mix hex.audit`'s report (retired packages, advisories), kept below.
           HEX_AUDIT_LOG: ${{ runner.temp }}/hex-audit-${{ matrix.package }}.txt
+
+      # THROWAWAY (CI-15 deadline probe, never merged): ten runs of the four
+      # `eventually`-backed files with every wait's elapsed time logged, so the
+      # deadline can be set from the CI runner's own distribution.
+      - name: deadline probe
+        if: matrix.package == 'ankusa_redis'
+        working-directory: packages/ankusa_redis
+        run: |
+          set -euo pipefail
+          docker compose up -d --wait
+          for i in $(seq 1 10); do
+            echo "== probe run $i"
+            mix test test/ankusa/source_store/redis_test.exs \
+              test/ankusa/routes/store/redis_test.exs \
+              test/ankusa/routes/store/redis_scale_test.exs \
+              test/ankusa/rate_limiter/store/redis_test.exs 2>&1 \
+              | grep -E "EVENTUALLY|Result:" | sed "s/^/run $i /"
+          done
       - name: save the package's compose images
         if: always() && steps.toolchain.outputs.has_compose == 'true'
         run: |

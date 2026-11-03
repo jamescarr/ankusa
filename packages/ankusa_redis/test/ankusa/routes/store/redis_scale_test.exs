@@ -82,8 +82,12 @@ defmodule Ankusa.Routes.Store.RedisScaleTest do
     config.instance
   end
 
-  defp eventually(fun, deadline_ms \\ 5_000),
-    do: wait_until(fun, System.monotonic_time(:millisecond) + deadline_ms)
+  defp eventually(fun, deadline_ms \\ 5_000) do
+    start = System.monotonic_time(:millisecond)
+    result = wait_until(fun, start + deadline_ms)
+    IO.puts("EVENTUALLY routes_scale #{System.monotonic_time(:millisecond) - start}")
+    result
+  end
 
   defp wait_until(fun, deadline) do
     cond do
