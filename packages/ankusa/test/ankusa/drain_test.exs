@@ -32,7 +32,13 @@ defmodule Ankusa.DrainTest do
   describe "SIGTERM" do
     @describetag timeout: 180_000
 
+    # Probe (CI-19): 20 samples of the same drill in one run.
+    @tag timeout: 900_000
     test "with 200 requests in flight: ready flips, zero resets, every 201 survives a restart" do
+      for sample <- 1..20, do: drill(sample)
+    end
+
+    defp drill(sample) do
       data_dir = unique_data_dir(:drain_harness)
       on_exit(fn -> File.rm_rf(data_dir) end)
       http_port = free_port()
@@ -52,11 +58,14 @@ defmodule Ankusa.DrainTest do
              "a request was answered while the writer was stalled"
 
       sent = System.monotonic_time(:millisecond)
+      started = System.monotonic_time(:millisecond)
       {_, 0} = System.cmd("kill", ["-TERM", Integer.to_string(os_pid)])
+      kill_ms = System.monotonic_time(:millisecond) - started
       # The promise is the drainer's, so the clock starts when the harness
       # received SIGTERM, not when the test forked `kill`; the end is the moment
       # `Health.drain/1` ran, not when a polled `/ready` answered.
       sigterm = await_marker(port, "SIGTERM", 5_000)
+      sigterm_read_ms = System.monotonic_time(:millisecond) - sent
       draining = await_marker(port, "DRAINING", 5_000)
       flip_ms = draining - sigterm
 
@@ -91,10 +100,12 @@ defmodule Ankusa.DrainTest do
       assert MapSet.size(missing) == 0,
              "lost #{MapSet.size(missing)} acked hooks: #{inspect(Enum.take(missing, 5))}"
 
+      stop_supervised!({Ankusa.Store, config.instance})
+
       IO.puts(
-        "drain: SIGTERM to draining in #{flip_ms} ms; first 503 answer #{observed_ms} ms " <>
-          "after the test sent the signal; zero resets; #{length(acked)} x 201, " <>
-          "#{length(answered) - length(acked)} x 503; every 201 present after restart"
+        "SAMPLE #{sample} external_ms=#{observed_ms} kill_ms=#{kill_ms} " <>
+          "sigterm_read_ms=#{sigterm_read_ms} internal_ms=#{flip_ms} " <>
+          "residual_ms=#{observed_ms - sigterm_read_ms}"
       )
     end
   end

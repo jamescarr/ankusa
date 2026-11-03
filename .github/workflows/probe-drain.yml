@@ -1,0 +1,51 @@
+name: probe drain timing (throwaway)
+
+# CI-19: 20 samples of the SIGTERM drain drill on the hosted runner, in one run.
+# Not for main: the probe branch is closed unmerged; the probe test loops the
+# drill and prints `SAMPLE <n> external_ms=... internal_ms=...` lines.
+
+on:
+  push:
+    branches: ["probe/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: drain timing samples
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.12
+          install_args: elixir erlang cmake
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-hex" # the default key skips .mise/conf.d/
+      - name: cache mix deps
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            packages/ankusa/deps
+            packages/ankusa/_build
+          key: mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-probe-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          restore-keys: |
+            mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-test-${{ hashFiles('.mise.toml') }}-
+            mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-${{ hashFiles('.mise.toml') }}-
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - run: mix local.hex --force && mix local.rebar --force
+      - name: log in to Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: 20 drain drill samples
+        working-directory: packages/ankusa
+        run: |
+          mix deps.get
+          mix test test/ankusa/drain_test.exs
