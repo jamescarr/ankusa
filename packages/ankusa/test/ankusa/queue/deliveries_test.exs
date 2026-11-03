@@ -870,10 +870,18 @@ defmodule Ankusa.Queue.DeliveriesTest do
     defp drill_env(name, default), do: String.to_integer(System.get_env(name, default))
 
     defp sink_down(days, hooks) do
+      # An hour, not `0`: the drill drives every tick itself (`Compactor.tick/1`
+      # per day, then `retention_tick/1`), and `interval_ms: 0` is a background
+      # compactor that spins `Process.send_after(self(), :tick, 0)` as fast as
+      # the store lets it. On a fast store (the suite's tmpfs root) that loop
+      # wins races the fixture never asked it to run: it archived a hook between
+      # the day's `kill_all/2` and the fixture's own tick, and the footprint the
+      # drill asserts was the loop's, not the retention window's (CI-9: 40/80/60/
+      # 6/40 expected, 46/92/60/9/46 seen on the runner).
       inst =
         start_instance(
           queue: %{dlq: %{retention_days: 2}},
-          storage: %{interval_ms: 0, catalogue_retention_days: 2},
+          storage: %{interval_ms: 3_600_000, catalogue_retention_days: 2},
           archive: %{retention_days: 2},
           claim_check: %{retention_days: 2, redeem_grace_ms: 500}
         )
