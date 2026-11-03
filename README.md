@@ -37,8 +37,9 @@ Each source and tenant gets the combination it needs, set in YAML:
 - **[Dedupe](docs/configuration.md#sources)** provider retries on the
   provider's own event id, on one node or across the fleet.
 - **[Route](docs/multi-tenancy.md)** one catch URL per customer, pin a route to
-  a provider's published IP ranges, and add sources through the admin API
-  without a redeploy.
+  a provider's published IP ranges, add sources through the admin API
+  without a redeploy, filter each sink on the event type, and name topics and
+  URLs by it ([routing by content](docs/delivery.md#routing-by-content)).
 
 One container is a complete receiver: the image ships a health check, serves
 Prometheus `/metrics`, and keeps its working state in one data volume. A fleet
@@ -244,6 +245,7 @@ different transport.
 | [http-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/http-consumer/) | HTTP | Python | signed HTTP deliveries to your own service, retries, dead letters, replay |
 | [rabbitmq-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/) | RabbitMQ | TypeScript | consumer-owned queues, large payloads via the claim-check gateway |
 | [kafka-sqs-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/) | Kafka → SQS FIFO | TypeScript | SQS FIFO handoff, failure drills |
+| [event-routing](https://github.com/jamescarr/ankusa/tree/main/examples/event-routing/) | Kafka topic by event type, filtered HTTP | TypeScript | an event type read once, a per-sink filter, a templated topic, a hook no sink selects answered `filtered: true` |
 | [nats-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/nats-consumer/) | NATS JetStream | Rust | a consumer-owned stream, claim-check redemption with the published Rust crate |
 | [oban-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/oban-consumer/) | HTTP → Oban on Kubernetes | Elixir | a fleet of independent nodes, each with its own on-disk store, load-tested with pods killed mid-run |
 | [fleet-e2e](https://github.com/jamescarr/ankusa/tree/main/examples/fleet-e2e/) | RabbitMQ, two nodes behind nginx | TypeScript | shared routes, sources, bucket prefixes, and a node killed mid-run; run nightly in CI |

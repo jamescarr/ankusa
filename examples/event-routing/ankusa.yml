@@ -1,0 +1,72 @@
+# The event-routing config: one source, an event type read once, and two sinks
+# that each decide what to do with it. Every key, at its default:
+# https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/reference.yml
+
+node:
+  data_dir: /var/lib/ankusa
+
+admin:
+  enabled: true
+  port: 4002
+  # the host's published port reaches it
+  ip: 0.0.0.0
+  # Demo: the host's published port is bound to 127.0.0.1 in docker-compose.yml.
+  # Real deployments set auth.mode to token, jwt or mtls (docs/configuration.md).
+  auth: {mode: none, allow_insecure: true}
+
+# Short on purpose, so a failure drill takes seconds, not minutes.
+dispatch:
+  breaker_failures: 0
+  retry:
+    base_ms: 1000
+    max_ms: 4000
+    max_attempts: 6
+
+# The receiver is plain http on the compose network, at a private address, which
+# the egress policy refuses by default. A production sink is an https:// URL on
+# a public name and needs none of this (docs/configuration.md#egress).
+egress:
+  allow_insecure_http: true
+  allow_hosts: [receiver]
+
+sources:
+  # Every hook of this source is read for its event type once, at ingest: the
+  # `type` key of the JSON body. Both sinks below use it, and so does the
+  # consumer, which receives it as `event_type` on the message and as the
+  # x-ankusa-event-type header of the HTTP delivery.
+  billing:
+    # Accepts anything, so it works before you have provider credentials.
+    verify: {type: none}
+    event_type: {json: type}
+    sinks:
+      # No filter: every hook goes to Kafka. The topic is named by the event
+      # type, and a hook with none goes to events.other. The sink never creates
+      # a topic: redpanda-bootstrap in docker-compose.yml creates both.
+      - type: kafka
+        brokers: [redpanda:9092]
+        topic: "events.{{ event_type ?? other }}"
+      # Only invoice.paid reaches the receiver. Any other hook gets no delivery
+      # row for this sink.
+      - type: http
+        url: http://receiver:3000/invoices
+        filter: {event_type: [invoice.paid]}
+        # Deliveries are signed (Standard Webhooks); the receiver verifies them
+        # with the same secret. A sink with no secret does not load unless it
+        # says allow_unsigned: true.
+        secret: ${SINK_WHSEC}
+        allow_unsigned: false
+        timeout_ms: 5000
+
+  # The same event type, but its only sink is filtered: a hook that is not an
+  # invoice.paid is selected by no sink, so it is answered 201 with
+  # "filtered": true and is not stored.
+  invoices:
+    verify: {type: none}
+    event_type: {json: type}
+    sinks:
+      - type: http
+        url: http://receiver:3000/invoices
+        filter: {event_type: [invoice.paid]}
+        secret: ${SINK_WHSEC}
+        allow_unsigned: false
+        timeout_ms: 5000
