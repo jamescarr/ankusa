@@ -486,6 +486,41 @@ defmodule Ankusa.Dispatch.IsolationTest do
       end
     end
 
+    test "filter: a filter on a tenant keeps its hooks off the other tenants' sinks, and the reverse" do
+      inst =
+        start(
+          %{
+            "s" => %{
+              trust_url_tenant: true,
+              sinks: [
+                {TagSink, tag: :acme_only, pid: self(), filter: %{tenant: "acme"}},
+                {TagSink, tag: :rest, pid: self(), filter: %{tenant: %{neq: "acme"}}},
+                {TagSink, tag: :everyone, pid: self()}
+              ]
+            }
+          },
+          %{}
+        )
+
+      ingest = fn tenant ->
+        assert {:ok, env} =
+                 Ankusa.Edge.Ingest.ingest(inst, Map.put(request("s", "{}"), :tenant_id, tenant))
+
+        env.id
+      end
+
+      acme = ingest.("acme")
+      globex = ingest.("globex")
+
+      assert_receive {:delivered, :acme_only, ^acme, 1}, 5_000
+      assert_receive {:delivered, :everyone, ^acme, 1}, 5_000
+      assert_receive {:delivered, :rest, ^globex, 1}, 5_000
+      assert_receive {:delivered, :everyone, ^globex, 1}, 5_000
+
+      refute_receive {:delivered, :rest, ^acme, _}, 200
+      refute_receive {:delivered, :acme_only, ^globex, _}, 200
+    end
+
     test "a page is shared across the active tenants, not taken by the oldest" do
       inst =
         start(

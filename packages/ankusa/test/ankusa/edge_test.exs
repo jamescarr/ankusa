@@ -1146,6 +1146,185 @@ defmodule Ankusa.EdgeTest do
     end
   end
 
+  describe "filter" do
+    alias Ankusa.Queue.Deliveries
+
+    defp filter_sources do
+      %{
+        "fan" => [
+          verifier: {Ankusa.Verifier.None, []},
+          event_type: %{json: "type"},
+          dedupe: %{json: "id", ttl_ms: 60_000},
+          sinks: [
+            {Ankusa.Sink.Log, filter: %{event_type: ["invoice.paid"]}},
+            {Ankusa.Sink.Log, filter: %{"header.x-github-event" => "push"}}
+          ]
+        ],
+        "big" => [
+          verifier: {Ankusa.Verifier.None, []},
+          sinks: [{Ankusa.Sink.Log, filter: %{"json.type" => "a"}}, {Ankusa.Sink.Log, []}]
+        ],
+        "flag" => [
+          verifier: {Ankusa.Verifier.Hmac, scheme: :standard_webhooks, secret: @secret},
+          on_verify_failure: :accept_flag,
+          event_type: :github,
+          sinks: [{Ankusa.Sink.Log, filter: %{event_type: "push"}}]
+        ]
+      }
+    end
+
+    defp rows(instance, env) do
+      assert {:ok, hooks} = Ankusa.Queue.hooks(instance, 0, 100)
+      stored = Enum.find(hooks, &(&1.id == env.id))
+      assert {:ok, rows} = Deliveries.existing_sinks(instance, stored.seq)
+      rows
+    end
+
+    defp attach_filter_events(events) do
+      test = self()
+      handler = "edge-filter-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach_many(
+        handler,
+        events,
+        fn event, _measurements, metadata, _config ->
+          send(test, {List.last(event), metadata[:sink], metadata[:source_id]})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+    end
+
+    test "filter: a hook gets a delivery row for the sinks it selects, and only those" do
+      config = start_edge(filter_sources())
+
+      assert {:ok, env} =
+               Ingest.ingest(
+                 config.instance,
+                 request("fan", ~s({"id":"1","type":"invoice.paid"}))
+               )
+
+      assert rows(config.instance, env) == MapSet.new([0])
+
+      assert {:ok, env} =
+               Ingest.ingest(
+                 config.instance,
+                 request("fan", ~s({"id":"2","type":"other"}), [{"x-github-event", "push"}])
+               )
+
+      assert rows(config.instance, env) == MapSet.new([1])
+
+      assert {:ok, env} =
+               Ingest.ingest(
+                 config.instance,
+                 request("fan", ~s({"id":"3","type":"invoice.paid"}), [
+                   {"x-github-event", "push"}
+                 ])
+               )
+
+      assert rows(config.instance, env) == MapSet.new([0, 1])
+    end
+
+    test "filter: a hook no sink selects is 201 filtered, stores nothing, and claims no dedupe key" do
+      config = start_edge(filter_sources())
+      attach_filter_events([[:ankusa, :dispatch, :filtered]])
+      body = ~s({"id":"evt_1","type":"customer.created"})
+
+      conn = route_through_edge(config, request("fan", body))
+      assert conn.status == 201
+
+      assert %{"status" => "accepted", "id" => id, "filtered" => true} =
+               JSON.decode!(conn.resp_body)
+
+      assert is_binary(id)
+      assert stored_ids(config.instance) == []
+      assert_receive {:filtered, Ankusa.Sink.Log, "fan"}
+      assert_receive {:filtered, Ankusa.Sink.Log, "fan"}
+
+      # The same hook again is filtered again, not a duplicate: nothing was claimed.
+      conn = route_through_edge(config, request("fan", body))
+      assert conn.status == 201
+      assert %{"filtered" => true} = decoded = JSON.decode!(conn.resp_body)
+      refute Map.has_key?(decoded, "duplicate")
+      assert stored_ids(config.instance) == []
+
+      # And once a hook that a sink selects carries that key, it is stored: the key was free.
+      assert {:ok, _env} =
+               Ingest.ingest(
+                 config.instance,
+                 request("fan", ~s({"id":"evt_1","type":"invoice.paid"}))
+               )
+    end
+
+    test "filter: a filtered hook is a :filtered ingest outcome, carrying its event type" do
+      config = start_edge(filter_sources())
+
+      assert {:filtered, %Envelope{event_type: "customer.created", source_id: "fan"}} =
+               Ingest.ingest(
+                 config.instance,
+                 request("fan", ~s({"id":"1","type":"customer.created"}))
+               )
+    end
+
+    test "filter: a body over the cap is delivered to a json-filtered sink and counted unevaluable" do
+      config = start_edge(filter_sources())
+      attach_filter_events([[:ankusa, :dispatch, :filter_unevaluable]])
+
+      big = ~s({"type":"other","pad":"#{String.duplicate("x", 2 * 1_048_576)}"})
+      assert {:ok, env} = Ingest.ingest(config.instance, request("big", big))
+
+      assert rows(config.instance, env) == MapSet.new([0, 1])
+      assert_receive {:filter_unevaluable, Ankusa.Sink.Log, "big"}
+
+      # A body under the cap that does not match is not delivered to that sink.
+      assert {:ok, env} = Ingest.ingest(config.instance, request("big", ~s({"type":"b"})))
+      assert rows(config.instance, env) == MapSet.new([1])
+      refute_receive {:filter_unevaluable, _, _}
+    end
+
+    test "filter: a flag-accepted hook is filtered too, and still claims no dedupe key" do
+      config = start_edge(filter_sources())
+      forged = [{"webhook-signature", "v1,nope"}]
+
+      assert {:filtered, %Envelope{event_type: "ping", dedupe_key: nil}} =
+               Ingest.ingest(
+                 config.instance,
+                 request("flag", "forged", forged ++ [{"x-github-event", "ping"}])
+               )
+
+      assert stored_ids(config.instance) == []
+
+      assert {:ok, %Envelope{event_type: "push"} = env} =
+               Ingest.ingest(
+                 config.instance,
+                 request("flag", "forged", forged ++ [{"x-github-event", "push"}])
+               )
+
+      assert rows(config.instance, env) == MapSet.new([0])
+    end
+
+    test "filter: the ingest outcome is counted as filtered" do
+      config = start_edge(filter_sources())
+      test = self()
+      handler = "edge-filter-outcome-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:ankusa, :ingest, :stop],
+        fn _event, _measurements, metadata, _config ->
+          send(test, {:outcome, metadata.outcome})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      Ingest.ingest(config.instance, request("fan", ~s({"id":"1","type":"nope"})))
+      assert_receive {:outcome, :filtered}
+    end
+  end
+
   describe "verifier breadth" do
     @tls_dir Path.expand("../fixtures/tls", __DIR__)
 

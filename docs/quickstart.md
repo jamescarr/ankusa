@@ -216,7 +216,7 @@ GitHub and Standard Webhooks sources are the same shape with a different
 
 | Status | Meaning |
 | --- | --- |
-| `201` | Accepted, durably so. A repeat on a source with `dedupe:` answers `201` with the original `id` and `"duplicate": true`, and stores nothing new. |
+| `201` | Accepted, durably so. A repeat on a source with `dedupe:` answers `201` with the original `id` and `"duplicate": true`, and stores nothing new. A hook that no sink of its source selects through a sink [`filter`](configuration.md#sink-filters) answers `201` with `"filtered": true`: received, and not stored. |
 | `202` | Quarantined after a failed verification (`on_verify_failure: quarantine`). It is held, not accepted for delivery. |
 | `400` | The body could not be read, or a header holds a byte outside visible ASCII, space and tab (`invalid_header`; no sink could carry it, so retrying is pointless). |
 | `401` | Verification failed under `on_verify_failure: reject`. |

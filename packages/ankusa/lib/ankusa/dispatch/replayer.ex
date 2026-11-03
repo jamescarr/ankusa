@@ -31,9 +31,7 @@ defmodule Ankusa.Dispatch.Replayer do
   alias Ankusa.{
     Audit,
     BlobStore,
-    Dedupe,
     Lifecycle,
-    Ordering,
     Routing,
     SourceStore,
     Store,
@@ -574,7 +572,9 @@ defmodule Ankusa.Dispatch.Replayer do
   # Re-verify a page of held hooks against each source's current verifier.
   # The ones that pass commit as new hooks (original id, `replay: job.id` on
   # every delivery row) in one synced batch with their pen deletes and the
-  # job's cursor; the rest stay in the pen, counted as skipped.
+  # job's cursor; the rest stay in the pen, counted as skipped, except a hook no
+  # sink of its source selects (`Ankusa.Filter`): it leaves the pen with nothing
+  # committed, and is counted as skipped too.
   defp step(state, %{kind: :quarantine} = job, n) do
     instance = state.instance
     now = System.system_time(:millisecond)
@@ -584,12 +584,12 @@ defmodule Ankusa.Dispatch.Replayer do
 
     with {:ok, hits, last, exhausted?, scanned} <-
            Quarantine.page(instance, {lower, upper}, job.filter, n, @max_scan_per_tick),
-         {:ok, entries, ops, bytes, failed} <- release_page(instance, hits, job.id) do
+         {:ok, entries, ops, bytes, skipped} <- release_page(instance, hits, job.id) do
       job = %{
         job
         | cursor: last || job.cursor,
           scanned: job.scanned + scanned,
-          skipped: job.skipped + failed,
+          skipped: job.skipped + skipped,
           updated_at: now
       }
 
@@ -845,22 +845,32 @@ defmodule Ankusa.Dispatch.Replayer do
                                                    {:ok, entries, skipped} ->
       case SourceStore.fetch(instance, env.source_id) do
         {:ok, source} ->
+          # The sinks the job names, that the source's filters select for the
+          # stored hook (its event type is the one stored with it).
           case filter_sinks(filter, source.sinks) do
             [] ->
               {:cont, {:ok, entries, skipped + 1}}
 
-            indexes ->
-              entry = %{
-                bin: bin,
-                size: size,
-                sinks: indexes,
-                lanes: replay_lanes(instance, source, env, indexes),
-                replay_id: job.id,
-                source_id: env.source_id,
-                tenant_id: env.tenant_id
-              }
+            named ->
+              r = Routing.resolve(instance, source, env, dedupe: false, telemetry: false)
 
-              {:cont, {:ok, [entry | entries], skipped}}
+              case selected_sinks(named, r.selected) do
+                [] ->
+                  {:cont, {:ok, entries, skipped + 1}}
+
+                indexes ->
+                  entry = %{
+                    bin: bin,
+                    size: size,
+                    sinks: indexes,
+                    lanes: replay_lanes(r.lanes, indexes),
+                    replay_id: job.id,
+                    source_id: env.source_id,
+                    tenant_id: env.tenant_id
+                  }
+
+                  {:cont, {:ok, [entry | entries], skipped}}
+              end
           end
 
         {:error, :unavailable} ->
@@ -916,14 +926,13 @@ defmodule Ankusa.Dispatch.Replayer do
 
   # The lanes of the sinks an archive replay re-drives: the stored hook is the
   # envelope the lane is resolved from (ADR 0004, section 2).
-  defp replay_lanes(instance, source, env, indexes) do
-    decoded = Routing.decode(source, env, Dedupe.max_json_bytes(instance))
+  defp replay_lanes(nil, _indexes), do: nil
+  defp replay_lanes(lanes, indexes), do: Enum.map(indexes, fn {i, _mod} -> Enum.at(lanes, i) end)
 
-    case Ordering.lanes(instance, source, env, decoded) do
-      nil -> nil
-      lanes -> Enum.map(indexes, fn {i, _mod} -> Enum.at(lanes, i) end)
-    end
-  end
+  defp selected_sinks(indexes, :all), do: indexes
+
+  defp selected_sinks(indexes, selected),
+    do: Enum.filter(indexes, fn {i, _mod} -> i in selected end)
 
   defp filter_sinks(filter, sinks) do
     case Map.get(filter, :sinks) do
@@ -977,14 +986,16 @@ defmodule Ankusa.Dispatch.Replayer do
   # ── quarantine steps ──────────────────────────────────────────────────────
 
   # Each hit's envelope, re-verified. Returns the queue entries, the deletes for
-  # their pen entries, the bytes those held, and how many hits stay held (a
-  # failed check, an unknown source, a body gone or unreadable). A store error,
-  # or a source store that cannot answer, fails the page so the tick retries
-  # it: nothing is released and nothing is counted as held.
+  # their pen entries, the bytes those held, and how many hits were skipped: a
+  # hit that stays held (a failed check, an unknown source, a body gone or
+  # unreadable), or one no sink of its source selects (`Ankusa.Filter`), which
+  # leaves the pen with nothing to commit, as a filtered hook is never stored. A
+  # store error, or a source store that cannot answer, fails the page so the tick
+  # retries it: nothing is released and nothing is counted as held.
   defp release_page(instance, hits, replay_id) do
     result =
       Enum.reduce_while(hits, {[], [], 0, 0}, fn {key, summary} = hit,
-                                                 {entries, ops, bytes, failed} ->
+                                                 {entries, ops, bytes, skipped} ->
         case Quarantine.envelope(instance, hit) do
           {:ok, env} ->
             case reverify(instance, env) do
@@ -993,10 +1004,15 @@ defmodule Ankusa.Dispatch.Replayer do
                 size = Map.get(summary, :size, 0)
 
                 {:cont,
-                 {[entry | entries], Quarantine.delete_ops(key) ++ ops, bytes + size, failed}}
+                 {[entry | entries], Quarantine.delete_ops(key) ++ ops, bytes + size, skipped}}
+
+              :filtered ->
+                size = Map.get(summary, :size, 0)
+
+                {:cont, {entries, Quarantine.delete_ops(key) ++ ops, bytes + size, skipped + 1}}
 
               :failed ->
-                {:cont, {entries, ops, bytes, failed + 1}}
+                {:cont, {entries, ops, bytes, skipped + 1}}
 
               :unavailable ->
                 {:halt, {:error, :source_store_unavailable}}
@@ -1008,7 +1024,7 @@ defmodule Ankusa.Dispatch.Replayer do
                  {:error, :undecodable},
                  {:error, :unsupported_envelope_version}
                ] ->
-            {:cont, {entries, ops, bytes, failed + 1}}
+            {:cont, {entries, ops, bytes, skipped + 1}}
 
           {:error, reason} ->
             {:halt, {:error, reason}}
@@ -1017,7 +1033,7 @@ defmodule Ankusa.Dispatch.Replayer do
 
     case result do
       {:error, reason} -> {:error, reason}
-      {entries, ops, bytes, failed} -> {:ok, Enum.reverse(entries), ops, bytes, failed}
+      {entries, ops, bytes, skipped} -> {:ok, Enum.reverse(entries), ops, bytes, skipped}
     end
   end
 
@@ -1041,13 +1057,18 @@ defmodule Ankusa.Dispatch.Replayer do
             env = %{env | verification: verification, seq: nil}
             r = Routing.resolve(instance, source, env, dedupe: true)
 
-            {:ok,
-             %{
-               envelope: %{env | dedupe_key: r.dedupe_key, event_type: r.event_type},
-               sinks: source.sinks,
-               lanes: r.lanes,
-               dedupe_ttl_ms: source.dedupe && source.dedupe.ttl_ms
-             }}
+            if r.selected == [] do
+              :filtered
+            else
+              {:ok,
+               %{
+                 envelope: %{env | dedupe_key: r.dedupe_key, event_type: r.event_type},
+                 sinks: source.sinks,
+                 lanes: r.lanes,
+                 selected: r.selected,
+                 dedupe_ttl_ms: source.dedupe && source.dedupe.ttl_ms
+               }}
+            end
 
           _failed ->
             :failed
@@ -1069,13 +1090,14 @@ defmodule Ankusa.Dispatch.Replayer do
     kind, reason -> {:error, {kind, reason}}
   end
 
-  # Nothing passed: only the cursor moves. Otherwise the writer commits the
+  # Nothing passed: only the cursor moves, with the pen deletes of the hooks no
+  # sink selected (`reverify/2`). Otherwise the writer commits the
   # hooks, the pen deletes and the cursor as one synced batch. A duplicate
   # (the provider's own retry already got through) still leaves the pen. The
   # record written here predates this page's moved/duplicate counts; the next
   # progress write (or `finish_release/2`) carries them.
-  defp commit_release(instance, job, [], _ops, finished?) do
-    case Store.write(instance, [job_put(job)], sync: finished?) do
+  defp commit_release(instance, job, [], ops, finished?) do
+    case Store.write(instance, ops ++ [job_put(job)], sync: finished?) do
       :ok -> {:ok, 0, 0}
       {:error, reason} -> {:error, reason}
     end

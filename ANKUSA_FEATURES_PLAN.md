@@ -41,7 +41,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why*, *Change* (modu
   *Anchors:* `packages/ankusa/lib/ankusa/dedupe.ex:55-118,147-178`, `ordering.ex:229-275`, `edge/ingest.ex:345-381`, `dispatch/replayer.ex:850-858,1040-1050`, `envelope.ex:13-64,116-145`, `source.ex:72-124`, `sink/message.ex:151-168,221-275`, `sink/http.ex:414-441,557-593`, `sink/log.ex`, `async_api/schemas.ex:20-55,160-190`, `lib/mix/tasks/ankusa.conformance.gen.ex:35-37,84-176`, `metrics.ex:65-68,150-180`, `admin/redact.ex:51-55,127-157,203-210`, `packages/ankusa_server/lib/ankusa_server/config.ex:176-185,2200,2290-2330`, `packages/ankusa_server/test/ankusa_server/config_test.exs:1579-1627`, `docs/configuration.md:197-209,1661-1667`.
   *Evidence:* —
 
-- [ ] **CR-2 — Per-sink `filter:`: a data predicate decides which sinks get a delivery row** · P1 · Deps: CR-1 (after: 1)
+- [x] **CR-2 — Per-sink `filter:`: a data predicate decides which sinks get a delivery row** · P1 · Deps: CR-1 (after: 1)
   *Why:* a source's sinks all receive every hook (`docs/configuration.md:203`); the only way to send `invoice.*` to one topic and `customer.*` to another is one source per family, which splits the provider's single endpoint and its dedupe window. Rows are created per sink from `entry.sinks` in `Queue.prepare/3` (`packages/ankusa/lib/ankusa/queue.ex:118-134`), indexed by position in `Queue.Writer.build_ops/5` (`queue/writer.ex:1573-1577`), and archive replay already commits a subset of sinks by index (`writer.ex:551-561`): the row-creation seam exists, it only needs a predicate in front of it.
   *Change:*
   - **Grammar** (data; identical in Elixir, YAML and the admin API's JSON; map keys may be atoms or strings on the Elixir side):

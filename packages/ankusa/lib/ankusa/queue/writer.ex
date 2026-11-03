@@ -1568,12 +1568,15 @@ defmodule Ankusa.Queue.Writer do
       size = byte_size(bin)
       ord = Map.fetch!(ords, Tenants.normalize(env.tenant_id))
 
-      # `rows` are the `{delivery row, lane or nil}` `Ankusa.Queue` encoded, one per sink
+      # `rows` are the `{delivery row, lane or nil}` `Ankusa.Queue` encoded, one per
+      # sink: `nil` for a sink the hook's filter did not select (no row, the index
+      # kept)
       row_ops =
         rows
         |> Enum.with_index()
-        |> Enum.flat_map(fn {{row, lane}, i} ->
-          Deliveries.new_ops(ord, now, seq, i, size, row, lane)
+        |> Enum.flat_map(fn
+          {nil, _i} -> []
+          {{row, lane}, i} -> Deliveries.new_ops(ord, now, seq, i, size, row, lane)
         end)
 
       archive_ops = if archive?, do: Deliveries.archive_ops(ord, seq, size), else: []

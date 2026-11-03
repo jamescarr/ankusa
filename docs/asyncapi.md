@@ -72,6 +72,11 @@ nothing to advertise: the channel has no address and says so. `log` and `http`
 sinks are not channels and are left out (an `http` sink's description says it
 carries the provider's raw body, not the envelope this document describes).
 
+A sink with a [`filter`](configuration.md#sink-filters) receives only the hooks
+its filter selects, so its channel's description says so: `Filter: event_type in
+[invoice.paid, invoice.failed]` (a channel several sources share names the source
+each filter belongs to). The messages themselves are described as for any hook.
+
 Validate it with the AsyncAPI CLI:
 
 ```sh

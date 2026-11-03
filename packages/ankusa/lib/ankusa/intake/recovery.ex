@@ -510,9 +510,9 @@ defmodule Ankusa.Intake.Recovery do
   defp count(state, :applied, false), do: %{state | applied: state.applied + 1}
   defp count(state, :unroutable, false), do: %{state | unroutable: state.unroutable + 1}
 
-  # The hook, its delivery rows (sinks from the source's current config), its
-  # archive obligation, and its dedupe key. An unknown source keeps only its
-  # archive obligation.
+  # The hook, its delivery rows (sinks from the source's current config, those its
+  # filters select), its archive obligation, and its dedupe key. An unknown source
+  # keeps only its archive obligation.
   defp hook_ops(ctx, env, bin, seq, ords) do
     size = byte_size(bin)
     ord = Map.fetch!(ords.ords, Tenants.normalize(env.tenant_id))
@@ -524,16 +524,24 @@ defmodule Ankusa.Intake.Recovery do
         _unknown -> {nil, [], :unroutable}
       end
 
-    lanes = if source, do: recovery_lanes(ctx.instance, source, env)
+    routing = source && recovery_routing(ctx.instance, source, env)
+    lanes = routing && routing.lanes
+    selected = if routing, do: routing.selected, else: :all
 
     rows =
       sinks
       |> Enum.with_index()
       |> Enum.flat_map(fn {mod, i} ->
-        lane = lanes && Enum.at(lanes, i)
-        row = Deliveries.encode_row(Deliveries.new_row(mod, now, size, env.source_id, lane: lane))
+        if selected == :all or i in selected do
+          lane = lanes && Enum.at(lanes, i)
 
-        Deliveries.new_ops(ord, now, seq, i, size, row, lane && elem(lane, 0))
+          row =
+            Deliveries.encode_row(Deliveries.new_row(mod, now, size, env.source_id, lane: lane))
+
+          Deliveries.new_ops(ord, now, seq, i, size, row, lane && elem(lane, 0))
+        else
+          []
+        end
       end)
 
     archive = if ctx.archive?, do: Deliveries.archive_ops(ord, seq, size), else: []
@@ -546,14 +554,10 @@ defmodule Ankusa.Intake.Recovery do
     {hook ++ rows ++ archive ++ dedupe_ops(ctx, source, env, ord, hook != []), kind}
   end
 
-  # The lanes of a recovered hook, resolved from the stored envelope as ingest
-  # did (`Ankusa.Routing`).
-  defp recovery_lanes(instance, source, env) do
-    decoded =
-      Ankusa.Routing.decode(source, env, Ankusa.Dedupe.max_json_bytes(instance))
-
-    Ankusa.Ordering.lanes(instance, source, env, decoded)
-  end
+  # The lanes and the selected sinks of a recovered hook, resolved from the stored
+  # envelope as ingest did (`Ankusa.Routing`); the hook was counted at ingest.
+  defp recovery_routing(instance, source, env),
+    do: Ankusa.Routing.resolve(instance, source, env, dedupe: false, telemetry: false)
 
   # The key the hook was admitted under, so a provider retry after recovery is
   # still a duplicate. Only a key that has not expired and is not already there.

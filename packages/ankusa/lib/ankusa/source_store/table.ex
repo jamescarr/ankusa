@@ -176,7 +176,9 @@ defmodule Ankusa.SourceStore.Table do
   Refuse a write of a source the instance's config would not run: a shared
   source without a verifier (`Ankusa.Verifier.check_shared/2`), under
   `wal: :none`, a source with no durable sink (`Ankusa.Queue.check_durable/2`),
-  or one whose retry horizon outlasts the claim bucket's lifecycle rule
+  an ordering or a filter the config cannot serve (`Ankusa.Ordering.check/2`,
+  `Ankusa.Filter.check/2`), or one whose retry horizon outlasts the claim bucket's
+  lifecycle rule
   (`Ankusa.ClaimCheck.check_retry_horizon/2`: `{:error,
   :retry_exceeds_claim_expiry, message}`, the admin API's `422`).
   `build/4` and `load_spec/5` stay permissive: refusing a stored source at load
@@ -192,6 +194,7 @@ defmodule Ankusa.SourceStore.Table do
     with :ok <- Ankusa.Verifier.check_shared(config, source),
          :ok <- Ankusa.Queue.check_durable(config, source),
          :ok <- Ankusa.Ordering.check(config, source),
+         :ok <- Ankusa.Filter.check(config, source),
          :ok <- claim_horizon(config, source) do
       :ok
     else
