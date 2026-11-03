@@ -558,20 +558,28 @@ jobs:
       - run: mise run check:tools
 
   # The perf regression gate (ground rule 10 of ANKUSA_HARDENING_PLAN.md,
-  # docs/testing.md "Perf gate"): on every push to main, and on a PR only when
-  # its diff touches a hot-path file. The job itself always runs (so a
-  # branch-protection rule can require it); the steps that cost minutes are
-  # skipped on a PR that does not touch the hot path. Hosted runners of one
-  # class differ by a factor of two in speed from job to job, so the gate
-  # compares against the base commit measured on this very runner (see the
-  # "measure the base commit" step); the checked-in
+  # docs/testing.md "Perf gate"): on a push to main and on a PR only when the
+  # diff touches a hot-path file. The job itself always runs — it is the job
+  # that computes the decision, and a skipped job cannot publish an output —
+  # while the steps that cost minutes are skipped on a diff that touches no
+  # hot-path file. `bench-tenant` (below) is one of those steps split out, and
+  # reads this job's `run` output, so both jobs run on the same judgement.
+  # Hosted runners of one class differ by a factor of two in speed from job to
+  # job, so the gate compares against the base commit measured on this very
+  # runner (see the "measure the base commit" step); the checked-in
   # packages/ankusa/bench/baseline.json (recorded on a laptop with the bench's
   # data directory on a RAM disk, see docs/testing.md "Perf gate") is the
   # fallback when there is no base commit to measure.
   bench:
     name: perf gate
     runs-on: ubuntu-latest
+    outputs:
+      # The scope decision, for `bench-tenant`. Nothing else reads it.
+      run: ${{ steps.scope.outputs.run }}
     env:
+      # `bench:gate` runs the tenant benches locally too; here `bench-tenant`
+      # runs them in parallel, so the matrix task must not run them again.
+      BENCH_SKIP_TENANTS: 1
       # Ground rule 10's hot-path files, plus the gate's own files. `ci.yml` is
       # not one of them: a workflow file cannot change the measured program, and
       # an invocation it gets wrong shows up on the next push to `main` within
@@ -584,6 +592,13 @@ jobs:
         )$|^packages/ankusa/bench/|^\.mise/tasks/bench/
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The one scope decision both bench jobs obey. A pull request is judged by
+      # its diff from the API; a push to `main` by `github.event.before..sha`,
+      # which is the PR diff that was already gated plus whatever else landed
+      # in the range — so a main push that touches no hot-path file skips both
+      # jobs, and its commit keeps the verdict its PR run gave it (CI-7). Every
+      # failure in here resolves to `run=true`: a filter that breaks must run
+      # the gate, never skip it.
       - id: scope
         name: does the diff touch the hot path?
         env:
@@ -592,31 +607,53 @@ jobs:
           EVENT: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
           PR: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          decide() {
+            echo "run=$1" >> "$GITHUB_OUTPUT"
+            echo "$2"
+            exit 0
+          }
           # A release tag runs this workflow on a commit its PR and its push to
           # main already gated. A new tag has no `before` commit to measure, so
           # the gate would compare a hosted runner with the checked-in laptop
           # baseline, which fails on any runner (the 0.7.0 tags did, 11 times).
           if [ "$REF_TYPE" = tag ]; then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "a release tag: its commit was gated on its pull request and its push to main"
-            exit 0
+            decide false "a release tag: its commit was gated on its pull request and its push to main"
           fi
-          if [ "$EVENT" != pull_request ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "not a pull request: gate runs"
-            exit 0
-          fi
+          # Only a PR or a push carries a diff to judge. `workflow_call` and
+          # `workflow_dispatch` have none: gate.
+          case "$EVENT" in
+            pull_request)
+              files=$(gh api "repos/$REPO/pulls/$PR/files" --paginate -q '.[].filename') \
+                || decide true "::notice::cannot list the pull request's files: gate runs"
+              ;;
+            push)
+              # The previous head. A first push to a branch or a force-push
+              # leaves it empty or all zeros: no diff to judge.
+              if [ -z "$BEFORE" ] || [ -z "${BEFORE//0/}" ]; then
+                decide true "::notice::no base commit (a first push or a force-push): gate runs"
+              fi
+              git fetch --depth=1 --quiet origin "$BEFORE" \
+                || decide true "::notice::cannot fetch $BEFORE: gate runs"
+              files=$(git diff --name-only "$BEFORE" "$SHA") \
+                || decide true "::notice::cannot diff $BEFORE..$SHA: gate runs"
+              ;;
+            *)
+              decide true "not a pull request or a push: gate runs"
+              ;;
+          esac
           pattern=$(echo "$HOT_PATHS" | tr -d ' ')
-          touched=$(gh api "repos/$REPO/pulls/$PR/files" --paginate -q '.[].filename' | grep -E "$pattern" || true)
+          touched=$(printf '%s\n' "$files" | grep -E "$pattern" || true)
           if [ -n "$touched" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             echo "hot-path files touched:"
             echo "$touched"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "no hot-path file touched: gate skipped"
+            echo "no hot-path file touched: perf gate and bench-tenant skipped"
           fi
       - if: steps.scope.outputs.run == 'true'
         uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
@@ -674,6 +711,47 @@ jobs:
             packages/ankusa/bench/last.json
             ${{ runner.temp }}/base-baseline.json
           if-no-files-found: ignore
+
+  # The tenant benches (gauges, dispatch tick, intake, routes:
+  # docs/testing.md "Perf gate") assert their own flatness and budgets and have
+  # no baseline entry, so they are not part of the base-against-branch
+  # measurement — they only rode along inside `mise run bench:gate` until
+  # CI-7, where they were 2:33 of the gate's 10.6 min. They are their own job
+  # here, gated by the same scope output, so the gate's critical path is its
+  # two legs alone and both jobs share the warm `MIX_ENV=test` tree. A job can
+  # read another job's output only through `needs:`, so this one starts when
+  # `bench` finishes; that is the price of the shared decision, and it is paid
+  # once, at the tail of a hot-path run, not on the pushes that skip both.
+  # Nothing else about the benches changes: same commands, same
+  # `BENCH_REBASELINE` skip, same assertions (`mise run bench:tenants`).
+  bench-tenant:
+    name: bench-tenant
+    needs: bench
+    if: needs.bench.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.12
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+      # The same entry the `bench` job keeps: both compile the same
+      # `MIX_ENV=test` tree with the same task, so both restore it and the
+      # first to finish saves (as the two crash drills do with the image
+      # cache) — one entry, never two copies of the same `_build`.
+      - name: cache mix deps
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            packages/ankusa/deps
+            packages/ankusa/_build
+          key: mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          restore-keys: |
+            mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml') }}-
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - run: mix local.hex --force && mix local.rebar --force
+      - run: mise run bench:tenants
 
   # The crash-consistency drill (scripts/drills/crash_drill.sh): ENOSPC on a
   # 192 MiB tmpfs, then kill -9 under load; every acked hook must read back.

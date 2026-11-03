@@ -105,6 +105,7 @@ one; CI runs the same tasks this table does.
 | `mise run docker:smoke` | build `jamescarr/ankusa:dev`, run `packages/ankusa_server/scripts/smoke.sh` against it (`SMOKE_COSIGN_IMAGE=<published image>` also runs `cosign verify` on it) |
 | `mise run bench` | core's in-process ingest → dispatch bench (`N`, `CONCURRENCY`, `BODY_BYTES`, `SINK_LATENCY_MS` pass through) |
 | `mise run bench:gate` | the perf regression gate: bench matrix (512 B / 10 KB), median of 3, vs. `packages/ankusa/bench/baseline.json`; p99 > 1.2× or ingest/s < 0.8× fails ([`testing.md`](docs/testing.md#perf-gate-mise-run-benchgate)) |
+| `mise run bench:tenants` | the self-asserting tenant benches (gauges, dispatch tick, intake, routes): no baseline entry, each asserts its own flatness and budgets; `bench:gate` runs them too, and CI runs them as the `bench-tenant` job beside `perf gate` (`BENCH_SKIP_TENANTS=1`) |
 | `mise run bench:soak` | build the image and soak it under loadgen (`DURATION`, default 3600 s); fails on `missing > 0` or RSS growth > 5 % |
 | `mise run build [pkg]` | local only: build one Mix package from source (default `ankusa_server`); compiled Hex deps come from a cache in `~/.cache/ankusa/mix` shared by every worktree, their warnings go to `_build/<env>/deps-compile.log`, ours stay fatal |
 
