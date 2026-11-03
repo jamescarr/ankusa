@@ -25,7 +25,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `error_class` filter examined 8 × 10 000 keys and read 8 × 10 000 delivery
   rows (178 ms p99 at 50 000 rows, already past the 100 ms *Done when*). The
   budget is now split evenly across the indexes a call scans, so no call
-  examines more than 10 000 keys or reads more than 10 000 rows; the same
+  examines more than 10 000 keys, and a deferred predicate reads at most one
+  row per candidate it reaches — 10 000 global dead keys for `source_id`,
+  10 000 delivery rows for `error_class`, 10 000 of each with both; the same
   worst page measures 43 ms p99 at 10 million rows over 8 tenants
   (`bench/dlq_page_bench.exs`, new `error_class=throttled` and all-tenants
   cases; `admin/router_test.exs` "a two-tenant filtered walk where one scan

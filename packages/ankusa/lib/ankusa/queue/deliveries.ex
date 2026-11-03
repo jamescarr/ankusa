@@ -1311,8 +1311,9 @@ defmodule Ankusa.Queue.Deliveries do
   # The most dead keys one call of `dead/2` examines, whatever the DLQ holds: a
   # page costs this much at worst, not the size of the DLQ. A tenant-scoped
   # listing splits the budget across the tenant indexes it scans
-  # (`scan_sources/5`), so a page is this many keys and row reads at most
-  # whatever the filters and the tenants.
+  # (`scan_sources/5`). A deferred predicate adds a read per candidate:
+  # `source_id` reads the global dead key, `error_class` the delivery row, so a
+  # page with both reads this many of each at most.
   @list_max_scan 10_000
   # Candidate keys a filtered listing checks per batch of store reads.
   @list_chunk 1_000
