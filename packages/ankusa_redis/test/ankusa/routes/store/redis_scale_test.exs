@@ -82,7 +82,11 @@ defmodule Ankusa.Routes.Store.RedisScaleTest do
     config.instance
   end
 
-  defp eventually(fun, deadline_ms \\ 5_000),
+  # Ten seconds: twenty times the CI runner's measured p99.9 for these waits
+  # (CI-15 measured 945 of them over 20 runs: p50 21 ms, p90 105 ms, p99.9
+  # 504 ms), while staying under the store's periodic refresh so a dropped
+  # broadcast still fails the test instead of being waited out.
+  defp eventually(fun, deadline_ms \\ 10_000),
     do: wait_until(fun, System.monotonic_time(:millisecond) + deadline_ms)
 
   defp wait_until(fun, deadline) do

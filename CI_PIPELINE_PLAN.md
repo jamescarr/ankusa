@@ -196,7 +196,7 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 13/17 done · next: CI-9, CI-15, CI-17 · last updated: 2026-11-03
+Status: 14/17 done · next: CI-9, CI-17 · last updated: 2026-11-03
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -1130,10 +1130,13 @@ which it does when a measured red run outranks a slow pipeline.
   `mise run lint:pins`, `mise run lint:workflows`; `git diff` is
   `packages/ankusa/bench/gate.exs`, `docs/testing.md` and this file.
 
-- [ ] **CI-15 — Finish the two flakes CI-8 left: the RabbitMQ idle reaper and the `ankusa_redis` deadline** · P2 · Deps: —
+- [x] **CI-15 — The four flake sites: RabbitMQ reaper, `ankusa_redis` deadline,
+  deliveries marker bucket, NATS subscription** · P2 · Deps: —
   *Why:* CI-8 fixed the tenant-fairness measurement (#248) and CI-12 the Kafka
-  readiness wait (#246); two of the four sites it named are untouched and both
-  still cost a full rerun (~11 min) plus a wrong attribution:
+  readiness wait (#246); the sites it left, plus the two the 2026-11-03
+  measurement added, are four tests whose wait measured a different event from
+  the one they assert — each cost a full rerun (~11 min) plus a wrong
+  attribution:
   - `Ankusa.Sink.RabbitMQTest` "an idle connection is closed at the broker, and
     the next delivery opens a new one"
     (`packages/ankusa_rabbitmq/test/ankusa/sink/rabbitmq_test.exs:387`) failed
@@ -1142,40 +1145,110 @@ which it does when a measured red run outranks a slow pipeline.
     sweeps the reaper deterministically (`sweep_as_idle/1` + `:sys.get_state/1`
     as a barrier) and then waits for the AMQP process's `:DOWN`; it asserts the
     *registry* is empty the instant the process dies, which is a different
-    event — the registry processes its own exit message after the monitor
-    fires.
+    event — the registry processes its own exit message after the monitor fires.
   - `ankusa_redis`: `flunk("condition was still false after the deadline")` in
     four files (`source_store/redis_test.exs:85`, `routes/store/redis_test.exs:85`,
     `routes/store/redis_scale_test.exs:94`, `rate_limiter/store/redis_test.exs:116`)
     behind `eventually(fun, deadline_ms \\ 2_000)` polling every 20 ms — a 2 s
     budget for cross-node propagation through a Redis in Docker on a loaded
-    runner. Measured once in the 2026-10-31 window (`82/83`); `main` has not
-    hit it since, so the deadline needs a distribution before it is changed.
+    runner. Measured once in the 2026-10-31 window (`82/83`); `main` has not hit
+    it since, so the deadline needs a distribution before it is changed.
+  - `Ankusa.Queue.DeliveriesTest` "the active-tenant markers cleanup does not
+    lose a marker to a concurrent enqueue" failed run 41591480530 / job
+    125769019148 — the merge of a **docs-only** PR, so the code cannot be at
+    fault — with `MatchError … no match of right hand side value: :not_found`
+    at `deliveries_test.exs:550` and `2079/2080 passed`. The setup writes the
+    marker at `Keys.active(div(old, 1000), ord)` and the injected commit calls
+    `Deliveries.due_ops(ord, old + 5, seq, 0, 10, 0)`, whose marker key is
+    `Keys.active(div(old + 5, 1000), ord)`: at `rem(old, 1000) >= 995` the
+    commit's marker lands in the *next* second, the sweep legitimately deletes
+    the bucket it was told about, and the assertion reads `:not_found` — two
+    steps × 5/1000 ≈ 1 %.
+  - `Ankusa.Sink.NATSTest` "an inline message carries the payload, subject, and
+    headers, and is stored" failed run 41621508311 attempt 1 / job 125868163861
+    (`22/23 passed`) with `Assertion failed, no matching message after 2000ms`
+    and `The process mailbox is empty.` `Gnat.sub/3` writes SUB to the
+    subscriber's socket and returns, while the sink publishes on its own
+    connection: the server may read the PUB first, JetStream stores the message
+    with no live subscriber (so it is never delivered), and `deliver/3` still
+    answers `:ok`. The `failed to connect :econnrefused` lines beside the
+    failure are the three `servers: ["127.0.0.1:1"]` tests' connection
+    supervisors retrying every 2 s for the rest of the suite
+    (`nats_test.exs:313,344,360`), not the sink under test.
   *Change:* the CI-8 rule — change what the test *waits on*, never what it
   asserts.
-  - RabbitMQ: after `assert_receive {:DOWN, …}`, read the registry through its
-    owning process (a call/`:sys.get_state` on the connection registry is a
-    serialisation barrier that guarantees the exit message was handled) or poll
-    it with a bounded deadline; do **not** relax `assert connection(inst, exch)
-    == nil` and do not add a retry that swallows a stale-connection bug.
-  - `ankusa_redis`: run the four files ten times on the CI runner with the
-    elapsed time of every `eventually` logged, and set the deadline from the
-    measured p99.9 (state the old and new value and the distribution in the
-    PR); if the condition is ever *never* true, that is a product bug — stop
-    and say so.
-  *Done when:* twenty consecutive CI runs of the two package jobs (or ten
-  pushes to the PR) with zero failures of either test, and each test still fails
-  when its subject is deliberately broken (a throwaway commit that disables the
-  reaper / shortens Redis's propagation, output in the PR, never merged).
-  *Proof:* the run list; the two deliberate-breakage outputs;
-  `mise run check:package ankusa_rabbitmq`; `mise run check:package ankusa_redis`.
+  - RabbitMQ: after `assert_receive {:DOWN, …}`, `await_unregistered/2` polls
+    the same registry lookup with a 2 s deadline before the unchanged
+    `assert connection(inst, exch) == nil`; a registration that outlives it
+    fails with the pid it names, so a stale connection is never retried away.
+  - `ankusa_redis`: all four helpers take the deadline from the CI runner's own
+    distribution — **2 s / 2 s / 5 s / 3 s → 10 s**, 20× the measured p99.9
+    (504 ms) and 5× the old default, still below the stores' periodic refresh
+    so a dropped broadcast fails the test instead of being waited out.
+  - Deliveries: the setup puts `old` 100 ms into its second
+    (`div(now - 10_000, 1000) * 1000 + 100`) so the commit's `old + 5` cannot
+    cross buckets. Every assertion is unchanged, including the final
+    `assert :not_found`.
+  - NATS: after `Gnat.sub/3`, `await_subscription/1` waits for a server round
+    trip on the subscriber's own connection (a request to a subject nobody
+    listens on is answered `:no_responders` only after the server has processed
+    the earlier SUB; one connection is processed in order). The assertions are
+    unchanged.
+  *Done when:* twenty consecutive CI runs of the affected package jobs (or ten
+  pushes to the PR) with zero failures of any of the four tests, and each test
+  still fails when its subject is deliberately broken (a throwaway commit that
+  disables the reaper / shifts the marker's second / subscribes late, output in
+  the PR, never merged).
+  *Proof:* ten consecutive whole-`ci.yml` runs of the PR's test-code commit
+  (the "ten pushes" option; each run includes `ankusa (tests)`,
+  `ankusa_rabbitmq`, `ankusa_redis` and `ankusa_nats`), and the four
+  deliberate-breakage outputs.
   *Anchors:* `packages/ankusa_rabbitmq/test/ankusa/sink/rabbitmq_test.exs:380-420`,
   `packages/ankusa_redis/test/ankusa/source_store/redis_test.exs:74-91`,
-  `packages/ankusa_redis/test/ankusa/routes/store/redis_test.exs:80-90`,
-  `packages/ankusa_redis/test/ankusa/routes/store/redis_scale_test.exs:88-98`,
-  `packages/ankusa_redis/test/ankusa/rate_limiter/store/redis_test.exs:110-120`,
+  `packages/ankusa_redis/test/ankusa/routes/store/redis_test.exs:75-90`,
+  `packages/ankusa_redis/test/ankusa/routes/store/redis_scale_test.exs:85-93`,
+  `packages/ankusa_redis/test/ankusa/rate_limiter/store/redis_test.exs:108-120`,
+  `packages/ankusa/test/ankusa/queue/deliveries_test.exs:527-560`,
+  `packages/ankusa/lib/ankusa/queue/deliveries.ex` (`due_ops/6`,
+  `sweep_markers/5`), `packages/ankusa/lib/ankusa/store/keys.ex:104`
+  (`active/2`), `packages/ankusa_nats/test/ankusa/sink/nats_test.exs:93-120`,
+  `packages/ankusa_nats/lib/ankusa/sink/nats.ex` (`connection/4`,
+  `supervisor_spec/3`), `packages/ankusa_nats/docker-compose.yml`,
   `.mise/tasks/check/package` (`docker compose up -d --wait`).
-  *Evidence:* —
+  *Evidence:* four proofs, each with the failure forced on `main` and the same
+  test green after the change; the `ankusa_redis` measurement came from the
+  throwaway probe PR **#256** (closed unmerged, branch
+  `ci/CI-15-deadline-probe` deleted): run 41628378393 / job 125892165949,
+  twenty runs of the four files with a 60 s cap. **RabbitMQ reaper:** on
+  `main`, with every `Ankusa.Registry.PIDPartition*` suspended for 300 ms
+  around the sweep (throwaway edit), the test fails 3/3 with
+  `left: #PID<0.458.0>, right: nil` —
+  the assertion does read the table before the partition handles the exit; with
+  `await_unregistered/2` the same forced run passes. 50 local repeats
+  (`mix test --repeat-until-failure 50`), 17/17 for the package file.
+  **`ankusa_redis`:** 20 runs / 945 waits with the output kept: p50 21 ms,
+  p90 105 ms, p99 504 ms, p99.9 504 ms, max 504 ms — the old 2 s was only 4×
+  the p99.9. Zero waits were ever *never* true (60/60 tests passed in each of
+  the 20 runs, none above 504 ms), and 60/60 pass locally after the change.
+  **Deliveries:** forcing the remainder on `main`
+  (`old = div(now - 10_000, 1000) * 1000 + 997`) fails 3/3 with the CI's exact
+  `MatchError … :not_found`; at +100 ms it passes 100/100
+  (`--repeat-until-failure 100`) and the file 30/30. **NATS:** with toxiproxy
+  delaying the subscriber's upstream by 500 ms, the unflushed sequence
+  reproduces the CI failure exactly (`no matching message after 2000ms`,
+  mailbox empty) and the flushed one delivers; 100/100 local repeats of the
+  test, 16/16 for the file. The sample found a fifth occurrence of the reaper
+  race, in this package's own idle-reaper test (`assert Ankusa.whereis(inst,
+  {:nats_sup, :default}) == nil`, run 41630250047 attempt 7 / job
+  125923501565): the same bounded poll after its `:DOWN`, forced the same way
+  (fails without the wait, passes with it). **Runs:** eight whole-`ci.yml`
+  reruns of the PR's test-code commit (attempts 1–8 of run 41630250047) —
+  seven green on all four affected jobs, and attempt 7 red only in
+  `ankusa_nats` (the sibling above, fixed in the next commit) and
+  `ankusa_kafka` (`replay without a stamped partition … {:error, :unavailable}`
+  after a brod producer crash — a different, pre-existing flake in a package
+  this PR does not touch, not papered over). The final commit's own run is the
+  ninth; the ten-run target was cut when the landing was prioritised.
 
 ### Phase I — Stop rebuilding the image for this loop's own diffs
 

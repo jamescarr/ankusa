@@ -52,7 +52,52 @@ defmodule Ankusa.Sink.NATSTest do
     [host_port | _] = @servers
     [host, port] = String.split(host_port, ":")
 
-    %{host: to_charlist(host), port: String.to_integer(port)}
+    # `no_responders: true` lets `await_subscription/1` flush with a request
+    # to a subject nobody listens on; it changes nothing else this connection
+    # does (stream admin and subscriptions).
+    %{host: to_charlist(host), port: String.to_integer(port), no_responders: true}
+  end
+
+  # A subscription is written to the connection's socket before `Gnat.sub/3`
+  # returns, but the *server* has not necessarily read it yet — and the sink
+  # publishes on a second connection, which the server may process first. A
+  # message its stream stored while the subscriber was not live is never
+  # delivered. A request to a subject nobody listens on gets its 503 only when
+  # the server has read it, and one connection is processed in order, so the
+  # answer proves every SUB sent before it is registered.
+  defp await_subscription(admin) do
+    {:error, :no_responders} =
+      Gnat.request(admin, "ankusa.barrier.#{System.unique_integer([:positive])}", "",
+        receive_timeout: 5_000
+      )
+
+    :ok
+  end
+
+  # The registry drops a dead process's key in its partition process, after the
+  # monitor's `:DOWN` and after the connection's own exit: reading the table
+  # the instant the process dies can still see the entry (run 41630250047
+  # attempt 7, job 125923501565). Poll the same lookup until the registry has
+  # caught up, then assert once; a registration that outlives the deadline is
+  # a real leak, and this fails on it.
+  defp await_unregistered(inst, key, deadline_ms \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + deadline_ms
+    do_await_unregistered(inst, key, deadline)
+  end
+
+  defp do_await_unregistered(inst, key, deadline) do
+    case Ankusa.whereis(inst, key) do
+      nil ->
+        :ok
+
+      pid ->
+        if System.monotonic_time(:millisecond) > deadline do
+          flunk("the registry still names #{inspect(pid)} after the connection exited")
+        else
+          Process.sleep(10)
+          do_await_unregistered(inst, key, deadline)
+        end
+    end
   end
 
   defp envelope(overrides \\ %{}) do
@@ -97,6 +142,7 @@ defmodule Ankusa.Sink.NATSTest do
     admin: admin
   } do
     {:ok, _sid} = Gnat.sub(admin, self(), subject)
+    :ok = await_subscription(admin)
 
     env = envelope(%{dedupe_key: "evt_1"})
     assert :ok = deliver(env, Map.put(ctx(inst), :replay_id, "rid"), opts(subject))
@@ -405,6 +451,8 @@ defmodule Ankusa.Sink.NATSTest do
     :sys.get_state(reaper)
 
     assert_receive {:DOWN, ^conn_ref, :process, ^conn, _reason}, 5_000
+    await_unregistered(inst, {:nats_sup, :default})
+    await_unregistered(inst, {:nats_conn, :default})
     assert Ankusa.whereis(inst, {:nats_sup, :default}) == nil
     assert Ankusa.whereis(inst, {:nats_conn, :default}) == nil
 
