@@ -528,7 +528,12 @@ defmodule Ankusa.Queue.DeliveriesTest do
       inst = start_instance()
       ord = tenant_ord!(inst, "acme")
       now = System.system_time(:millisecond)
-      old = now - 10_000
+
+      # 100 ms into its second, so the commit's `old + 5` cannot cross into the
+      # next one: `due_ops/6` writes the marker under `div(at, 1000)`, and a
+      # marker landing in a second the sweep never judged is a different
+      # bucket, not a lost marker.
+      old = div(now - 10_000, 1000) * 1000 + 100
 
       # A tenant whose only marker is from an earlier second and has no row.
       write!(inst, [{:put, :index, Keys.active(div(old, 1000), ord), <<>>}])
