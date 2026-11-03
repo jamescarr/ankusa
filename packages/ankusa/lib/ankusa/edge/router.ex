@@ -280,6 +280,10 @@ defmodule Ankusa.Edge.Router do
   defp respond(conn, {:duplicate, env}),
     do: send_json(conn, 201, %{status: "accepted", id: env.id, duplicate: true})
 
+  # No sink of the source selects the hook (`Ankusa.Filter`): acknowledged, not stored.
+  defp respond(conn, {:filtered, env}),
+    do: send_json(conn, 201, %{status: "accepted", id: env.id, filtered: true})
+
   defp respond(conn, {:quarantined, reason}),
     do: send_json(conn, 202, %{status: "quarantined", reason: inspect(reason)})
 

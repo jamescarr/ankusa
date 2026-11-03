@@ -198,19 +198,27 @@ defmodule AnkusaServer.Config do
   @verify_asym_keys ~w(type public_key tolerance_seconds signature_header parse sig_prefix sig_key version signed algorithm encoding timestamp_header)
   @verify_token_keys ~w(type secret location header param)
   @verify_client_cert_keys ~w(type fingerprints subjects)
-  @log_sink_keys ~w(type)
-  @http_sink_keys ~w(type url method headers timeout_ms secret allow_unsigned max_response_bytes cacertfile allow_insecure_tls ordered ordering_key)
-  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_message_bytes max_inflight idle_timeout_ms ordered ordering_key)
-  @kafka_sink_keys ~w(type brokers topic key inline_max_bytes max_record_bytes ssl sasl idle_timeout_ms ordered ordering_key)
+  # Read by core, not by the sink module: `ordered` and `ordering_key`
+  # (`Ankusa.Ordering`) and `filter` (`Ankusa.Filter`).
+  @core_sink_keys ~w(ordered ordering_key filter)
+  @log_sink_keys ~w(type filter)
+  @http_sink_keys ~w(type url method headers timeout_ms secret allow_unsigned max_response_bytes cacertfile allow_insecure_tls) ++
+                    @core_sink_keys
+  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_message_bytes max_inflight idle_timeout_ms) ++
+                        @core_sink_keys
+  @kafka_sink_keys ~w(type brokers topic key inline_max_bytes max_record_bytes ssl sasl idle_timeout_ms) ++
+                     @core_sink_keys
   @sasl_keys ~w(mechanism username password)
-  @nats_sink_keys ~w(type servers subject inline_max_bytes max_message_bytes publish_timeout_ms tls auth idle_timeout_ms ordered ordering_key)
+  @nats_sink_keys ~w(type servers subject inline_max_bytes max_message_bytes publish_timeout_ms tls auth idle_timeout_ms) ++
+                    @core_sink_keys
   @nats_auth_keys ~w(username password token nkey_seed jwt)
-  @redis_sink_keys ~w(type url channel inline_max_bytes max_message_bytes publish_timeout_ms idle_timeout_ms ordered ordering_key)
+  @redis_sink_keys ~w(type url channel inline_max_bytes max_message_bytes publish_timeout_ms idle_timeout_ms) ++
+                     @core_sink_keys
   @batch_sink_keys ~w(batch batch_linger_ms batch_max_entries batch_max_bytes batch_queue_max batch_queue_max_bytes batch_queue_tenant_max batch_max_inflight)
-  @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token ordered ordering_key) ++
-                   @batch_sink_keys
-  @google_pubsub_sink_keys ~w(type project topic endpoint ordering_key inline_max_bytes max_message_bytes timeout_ms auth token ordered) ++
-                             @batch_sink_keys
+  @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token) ++
+                   @core_sink_keys ++ @batch_sink_keys
+  @google_pubsub_sink_keys ~w(type project topic endpoint inline_max_bytes max_message_bytes timeout_ms auth token) ++
+                             @core_sink_keys ++ @batch_sink_keys
 
   @roles ~w(edge dispatch storage claim_check)
   @routes_store_types ~w(ets redis)
@@ -2157,6 +2165,7 @@ defmodule AnkusaServer.Config do
       _ ->
         lifecycle = section!(doc, "lifecycle", @lifecycle_keys, [])
         sinks = sinks!(lifecycle, ["lifecycle"])
+        refuse_filters!(sinks, ["lifecycle"])
         check_sink_schemes!(sinks, egress, ["lifecycle"])
         [lifecycle: %{sinks: sinks}]
     end
@@ -2228,6 +2237,7 @@ defmodule AnkusaServer.Config do
 
     check_sink_schemes!(opts[:sinks], egress, path)
     check_ordering!(opts[:sinks], path)
+    check_filters!(opts, path)
     opts
   end
 
@@ -2240,6 +2250,34 @@ defmodule AnkusaServer.Config do
   rescue
     error in ArgumentError ->
       reraise ConfigError, [message: "#{render_path(path)}: #{error.message}"], __STACKTRACE__
+  end
+
+  # A filter on `event_type` needs a source that reads one. The grammar was
+  # checked with its path in `filter!/2`; the instance's boot check
+  # (`Ankusa.Filter.check/2`) repeats this one and adds the stored-header policy.
+  defp check_filters!(opts, path) do
+    id = List.last(path)
+    {_sinks, filters} = Ankusa.Filter.normalize_sinks!(id, opts[:sinks])
+
+    case Ankusa.Filter.check_event_type(id, filters, opts[:event_type] != nil) do
+      :ok -> :ok
+      {:error, message} -> raise ConfigError, message: "#{render_path(path)}: #{message}"
+    end
+  end
+
+  # A filter selects hooks by their content; a lifecycle event is not a hook, and
+  # nothing would read the option.
+  defp refuse_filters!(sinks, path) do
+    sinks
+    |> Enum.with_index()
+    |> Enum.each(fn {{_module, opts}, index} ->
+      if Keyword.has_key?(opts, :filter) do
+        raise ConfigError,
+          message:
+            "#{render_path(path ++ ["sinks", index, "filter"])}: " <>
+              "a filter selects hooks by their content and does not apply to lifecycle events"
+      end
+    end)
   end
 
   # `nil`, a preset name (`github`, `stripe`, …), or a map with exactly one of
@@ -2828,6 +2866,11 @@ defmodule AnkusaServer.Config do
 
   defp sink!(sink, path) do
     sink = expect_map(sink, path)
+    {module, opts} = typed_sink!(sink, path)
+    {module, put_opt(opts, :filter, filter!(sink["filter"], path ++ ["filter"]))}
+  end
+
+  defp typed_sink!(sink, path) do
     type = enum!(required_string!(sink, "type", path), @sink_types, path ++ ["type"])
 
     case type do
@@ -2990,6 +3033,18 @@ defmodule AnkusaServer.Config do
   end
 
   defp ordering_key(key, path), do: expect_string(key, path)
+
+  # `filter` (`Ankusa.Filter`): a sink option read by core. The grammar is core's;
+  # a bad one is refused here with its path (`sources.<id>.sinks[1].filter: …`),
+  # and a good one is handed on as the mapping it was written as.
+  defp filter!(nil, _path), do: nil
+
+  defp filter!(filter, path) do
+    case Ankusa.Filter.parse(filter) do
+      {:ok, _filter} -> filter
+      {:error, reason} -> raise ConfigError, message: "#{render_path(path)}: #{reason}"
+    end
+  end
 
   # The batching options of `Ankusa.Sink.SQS` and `Ankusa.Sink.GooglePubSub`
   # (`Ankusa.Sink.Batcher`). Types only here; the ranges are the sink's, checked

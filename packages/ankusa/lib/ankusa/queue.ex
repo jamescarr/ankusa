@@ -28,7 +28,12 @@ defmodule Ankusa.Queue do
           optional(:replay_id) => String.t(),
           # one per sink: `nil` (unordered) or `{lane, key}` (`Ankusa.Ordering`, ADR
           # 0004); the delivery row joins that lane instead of becoming due at once
-          optional(:lanes) => [Ankusa.Ordering.lane() | nil] | nil
+          optional(:lanes) => [Ankusa.Ordering.lane() | nil] | nil,
+          # the indexes of the sinks that get a delivery row (`Ankusa.Filter`); absent
+          # or `:all`: every sink. A sink left out has no row, and the hook is not
+          # stored at all when none is selected (`Ankusa.Edge.Ingest` answers it
+          # `filtered` before it gets here)
+          optional(:selected) => :all | [non_neg_integer()]
         }
 
   @doc """
@@ -105,8 +110,8 @@ defmodule Ankusa.Queue do
   end
 
   # What the writer is handed: the items (`{envelope, binary, rows, dedupe ttl,
-  # replay id}`, `rows` being `{encoded delivery row, lane or nil}` of each sink,
-  # stamped with
+  # replay id}`, `rows` being, for each sink, `{encoded delivery row, lane or
+  # nil}`, or `nil` for a sink the entry's filter did not select, stamped with
   # the time the hook was received), their count and body bytes, and, with
   # `prefetch?`, the stored value of every dedupe key read at `read_at` (a
   # `System.monotonic_time(:millisecond)` taken before the read, which is what
@@ -121,13 +126,19 @@ defmodule Ankusa.Queue do
         replay_id = Map.get(entry, :replay_id)
         size = byte_size(bin)
         lanes = Map.get(entry, :lanes) || List.duplicate(nil, length(sinks))
+        selected = Map.get(entry, :selected, :all)
 
         rows =
           sinks
           |> Enum.zip(lanes)
-          |> Enum.map(fn {{mod, _opts}, lane} ->
-            row = Deliveries.new_row(mod, at, size, env.source_id, replay: replay_id, lane: lane)
-            {Deliveries.encode_row(row), lane && elem(lane, 0)}
+          |> Enum.with_index()
+          |> Enum.map(fn {{{mod, _opts}, lane}, index} ->
+            if selected == :all or index in selected do
+              row =
+                Deliveries.new_row(mod, at, size, env.source_id, replay: replay_id, lane: lane)
+
+              {Deliveries.encode_row(row), lane && elem(lane, 0)}
+            end
           end)
 
         {env, bin, rows, Map.get(entry, :dedupe_ttl_ms), replay_id}

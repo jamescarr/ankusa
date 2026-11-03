@@ -106,6 +106,48 @@ defmodule Ankusa.AsyncApiTest do
     refute "event_type" in required
   end
 
+  test "filter: the channel description names a filtered sink's filter" do
+    map =
+      document_map(
+        source_store:
+          static(%{
+            "stripe" => [
+              event_type: :stripe,
+              sinks: [
+                {DescribedSink,
+                 address: "ankusa.hooks",
+                 filter: %{event_type: ["invoice.paid", "invoice.failed"]}}
+              ]
+            ],
+            "plain" => source(address: "ankusa.plain")
+          })
+      )
+
+    descriptions = map["channels"] |> Map.values() |> Map.new(&{&1["address"], &1["description"]})
+
+    assert descriptions["ankusa.hooks"] ==
+             "Hooks from: stripe. Filter: event_type in [invoice.paid, invoice.failed]"
+
+    assert descriptions["ankusa.plain"] == "Hooks from: plain"
+  end
+
+  test "filter: sources sharing a channel name whose filter is whose" do
+    map =
+      document_map(
+        source_store:
+          static(%{
+            "stripe" => [
+              event_type: :stripe,
+              sinks: [{DescribedSink, address: "ankusa.hooks", filter: %{event_type: "a"}}]
+            ],
+            "github" => source(address: "ankusa.hooks")
+          })
+      )
+
+    assert [%{"description" => description}] = Map.values(map["channels"])
+    assert description == "Hooks from: github, stripe. Filter (stripe): event_type = a"
+  end
+
   test "different addresses, brokers, and bindings are different channels and servers" do
     map =
       document_map(

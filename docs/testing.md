@@ -422,6 +422,20 @@ The always-on tests cover:
   counters equal a fold). `source_ordering_test.exs` is the option grammar and
   lane resolution; the 7 → 8 migration and the `store-v8` fixture (a busy lane,
   a lane whose head waits out a retry, a keyless lane) are in the upgrade test.
+- **Sink filters (CR-2)** (`filter_test.exs`, `edge_test.exs`, `edge_direct_test.exs`,
+  `dispatch_test.exs`, `dispatch/isolation_test.exs`, `replay_test.exs`,
+  `metrics_test.exs`, `async_api_test.exs`, `admin/router_test.exs`,
+  `crypto_test.exs`; `config_test.exs` in `ankusa_server`): every accepted and
+  every rejected form of the grammar and each ceiling at its edge, each operator on a
+  present and an absent value, the unevaluable rule (a `json.*` condition on a body
+  past `dedupe.max_json_bytes` or not JSON selects its sink and counts), a hook
+  getting delivery rows for the sinks it selects only, a hook no sink selects
+  answered `201 filtered` with nothing stored and no dedupe key claimed (the same
+  hook again is `filtered`, not `duplicate`), `wal: :none` publishing to the
+  selected sinks (none durable is `503`), an archive replay and a quarantine
+  release honouring the filters, a filter on `tenant` in a shared source, the
+  filter shown as written in the admin view and never encrypted at rest, and the
+  `ankusa_dispatch_filtered_total` / `_filter_unevaluable_total` series.
 - **Dispatch, retry horizon and error classes (DEL-2)** (`dispatch_test.exs`,
   `retry_policy_exponential_test.exs`, `retry_policy_test.exs`,
   `sink/{sqs,google_pubsub,http}_test.exs`): a row 7 h in with 200 attempts

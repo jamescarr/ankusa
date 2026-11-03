@@ -239,6 +239,79 @@ defmodule Ankusa.DispatchTest do
     assert stored_ids(inst) == []
   end
 
+  describe "filter" do
+    defp filtered_source do
+      %{
+        "src1" => %{
+          event_type: %{json: "type"},
+          sinks: [
+            {TagSink, tag: :invoices, pid: self(), filter: %{event_type: ["invoice.paid"]}},
+            {TagSink, tag: :pushes, pid: self(), filter: %{"header.x-github-event" => "push"}}
+          ]
+        }
+      }
+    end
+
+    defp post(inst, body, headers \\ []),
+      do: Ankusa.Edge.Ingest.ingest(inst, request("src1", body, headers))
+
+    test "filter: a hook is delivered to the sinks it selects only, and reclaimed when they settle" do
+      inst = start(filtered_source())
+
+      assert {:ok, env} = post(inst, ~s({"type":"invoice.paid"}))
+      id = env.id
+
+      # One delivery row, for sink 0: the second sink has none.
+      assert {:ok, [stored]} = Ankusa.Queue.hooks(inst, 0, 10)
+      assert {:ok, rows} = Deliveries.existing_sinks(inst, stored.seq)
+      assert rows == MapSet.new([0])
+
+      assert {:ok, _} = Pipeline.tick(inst)
+      assert_receive {:delivered, :invoices, ^id}
+      refute_receive {:delivered, :pushes, ^id}, 100
+
+      # No storage role: its single row settled, so the hook has no obligation left.
+      assert stored_ids(inst) == []
+    end
+
+    test "filter: a hook selecting the other sink only is delivered to it only" do
+      inst = start(filtered_source())
+
+      assert {:ok, env} = post(inst, ~s({"type":"other"}), [{"x-github-event", "push"}])
+      id = env.id
+      assert {:ok, _} = Pipeline.tick(inst)
+
+      assert_receive {:delivered, :pushes, ^id}
+      refute_receive {:delivered, :invoices, ^id}, 100
+    end
+
+    test "filter: a hook no sink selects is filtered, stores nothing, and is filtered again" do
+      inst = start(filtered_source())
+      test = self()
+      handler = "dispatch-filtered-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:ankusa, :dispatch, :filtered],
+        fn _event, _measurements, metadata, _config -> send(test, {:filtered, metadata.sink}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      assert {:filtered, %Envelope{event_type: "customer.created"}} =
+               post(inst, ~s({"type":"customer.created"}))
+
+      assert {:filtered, _} = post(inst, ~s({"type":"customer.created"}))
+      assert stored_ids(inst) == []
+      assert {:ok, _} = Pipeline.tick(inst)
+      refute_receive {:delivered, _, _}, 100
+
+      # Two hooks, two sinks each.
+      for _ <- 1..4, do: assert_receive({:filtered, TagSink})
+    end
+  end
+
   @doc false
   # Runs in the queue's syncer, before its fsync: tells the test and waits.
   def hold_sync(_event, _measurements, %{instance: inst}, {inst, test_pid}) do

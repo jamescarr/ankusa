@@ -1207,6 +1207,65 @@ defmodule Ankusa.Admin.RouterTest do
       refute Map.has_key?(JSON.decode!(conn.resp_body), "event_type")
     end
 
+    test "filter: a sink's filter is shown as written, never redacted", %{inst: inst} do
+      filter = %{
+        "all" => [
+          %{"tenant" => "acme"},
+          %{"header.x-github-event" => ["push", "ping"]},
+          %{"not" => %{"json.repository.private" => %{"eq" => "true"}}}
+        ]
+      }
+
+      body =
+        JSON.encode!(
+          spec(%{
+            "name" => "routed",
+            "sinks" => [%{"type" => "log", "filter" => filter}, %{"type" => "log"}]
+          })
+        )
+
+      conn = call(inst, :post, "/v1/tenants/acme/sources", body)
+      assert conn.status == 201
+      assert [%{"filter" => ^filter}, second] = JSON.decode!(conn.resp_body)["sinks"]
+      refute Map.has_key?(second, "filter")
+
+      conn = call(inst, :get, "/v1/tenants/acme/sources/routed")
+      assert conn.status == 200
+      assert [%{"type" => "log", "filter" => ^filter}, _] = JSON.decode!(conn.resp_body)["sinks"]
+    end
+
+    test "filter: a malformed filter is 400 invalid_source and nothing is stored", %{inst: inst} do
+      body =
+        JSON.encode!(
+          spec(%{
+            "name" => "bad",
+            "sinks" => [%{"type" => "log", "filter" => %{"nope" => "x"}}]
+          })
+        )
+
+      conn = call(inst, :post, "/v1/tenants/acme/sources", body)
+      assert conn.status == 400
+      assert %{"error" => "invalid_source", "message" => message} = JSON.decode!(conn.resp_body)
+      assert message =~ "filter"
+      assert call(inst, :get, "/v1/tenants/acme/sources/bad").status == 404
+    end
+
+    test "filter: a header the store_headers policy drops is 400 invalid_source", %{inst: inst} do
+      body =
+        JSON.encode!(
+          spec(%{
+            "name" => "dropped",
+            "sinks" => [%{"type" => "log", "filter" => %{"header.authorization" => "x"}}]
+          })
+        )
+
+      conn = call(inst, :post, "/v1/tenants/acme/sources", body)
+      assert conn.status == 400
+      assert %{"error" => "invalid_source", "message" => message} = JSON.decode!(conn.resp_body)
+      assert message =~ "drops or hashes"
+      assert call(inst, :get, "/v1/tenants/acme/sources/dropped").status == 404
+    end
+
     test "list is sorted by name and scoped to its tenant", %{inst: inst} do
       for name <- ~w(zebra apple mango) do
         assert call(
@@ -1882,7 +1941,17 @@ defmodule Ankusa.Admin.RouterTest do
 
   defp retry_opts(_spec), do: []
 
+  # The decoder is where a spec is validated (the server's `source_from_map!/2`
+  # refuses a malformed filter before core builds the source).
+  defp sink(%{"type" => "log", "filter" => filter}) do
+    case Ankusa.Filter.parse(filter) do
+      {:ok, _filter} -> {Ankusa.Sink.Log, [filter: filter]}
+      {:error, reason} -> raise ArgumentError, "filter #{reason}"
+    end
+  end
+
   defp sink(%{"type" => "log"}), do: {Ankusa.Sink.Log, []}
+
   defp sink(%{"type" => "fail"}), do: {AlwaysFailSink, []}
   defp sink(%{"type" => "http"} = spec), do: {Ankusa.Sink.Http, [url: spec["url"] || "http://x"]}
 
