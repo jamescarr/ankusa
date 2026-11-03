@@ -196,7 +196,7 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 12/17 done · next: CI-9, CI-16, CI-15, CI-17 · last updated: 2026-11-03
+Status: 13/17 done · next: CI-9, CI-15, CI-17 · last updated: 2026-11-03
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -1179,7 +1179,7 @@ which it does when a measured red run outranks a slow pipeline.
 
 ### Phase I — Stop rebuilding the image for this loop's own diffs
 
-- [ ] **CI-16 — `docker.yml` must not build the image for a `ci.yml`-only diff** · P1 · Deps: —
+- [x] **CI-16 — `docker.yml` must not build the image for a `ci.yml`-only diff** · P1 · Deps: —
   *Why:* `.github/workflows/docker.yml` lists `.github/workflows/ci.yml` in both
   its `push` and its `pull_request` `paths`, so **every** CI change this loop
   makes rebuilds and smoke-tests both architectures: 13 of the last 30
@@ -1208,7 +1208,25 @@ which it does when a measured red run outranks a slow pipeline.
   `mise run lint:workflows`.
   *Anchors:* `.github/workflows/docker.yml` (`on.push.paths`,
   `on.pull_request.paths`, the `ci` job's `if`).
-  *Evidence:* —
+  *Evidence:* PR #253. `.github/workflows/ci.yml` dropped from both `paths`
+  lists (the two `packages/*`, `.dockerignore` and `docker.yml` filters kept),
+  with the reason folded into the "path filters are not evaluated for tag
+  pushes" note above the lists and a one-line pointer in each list; the `ci`
+  job's `if: github.ref_type == 'tag'`, the `build`/`merge`/`publish-meta`
+  jobs, the pins and `concurrency:` are untouched. Measured on 2026-11-03:
+  baseline 25 `pull_request` runs to 11:00 — 3 non-skipped jobs each (`Resolve
+  version and tags` 4–5 s, `Build and smoke (linux/amd64)` ~2m5s, `(linux/
+  arm64)` ~1m36s), median 135 s wall clock (e.g. run 41621508408, 138 s).
+  Probe PRs, both branched off #253's head so they run the new file, both
+  closed unmerged with branches deleted: #254 (only a comment in
+  `.github/workflows/ci.yml`) — **no `Docker image` workflow run at all**; its
+  24 checks are `ci.yml` jobs only. #255 (only a comment in
+  `packages/ankusa/lib/ankusa.ex`) — run 41624301573, 152 s, 3 non-skipped
+  jobs, so the package filter still fires. #253 itself edits `docker.yml`, the
+  one kept self-filter: run 41624247554, 57 s, 3 non-skipped jobs (warm buildx
+  cache), so that trigger still fires too. Net for the loop: a CI-only PR now
+  costs 0 docker jobs and 0 docker seconds instead of 3 jobs and ~135 s.
+  `mise run lint:workflows` and `mise run lint:pins` green.
 
 ## Backlog (not yet an item)
 
