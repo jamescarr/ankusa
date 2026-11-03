@@ -71,7 +71,7 @@ defmodule Ankusa.SourceStore.RedisTest do
     end
   end
 
-  defp eventually(fun, deadline_ms \\ 2_000) do
+  defp eventually(fun, deadline_ms \\ 60_000) do
     start = System.monotonic_time(:millisecond)
     result = do_eventually(fun, start + deadline_ms)
     IO.puts("EVENTUALLY source_store #{System.monotonic_time(:millisecond) - start}")

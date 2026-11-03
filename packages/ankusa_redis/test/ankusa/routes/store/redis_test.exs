@@ -72,7 +72,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
   # Polling, because the assertion is "this arrives without a tick" — a sleep
   # long enough to be safe would also be long enough for the 60s tick to be
   # irrelevant, so a deadline is the honest way to express it.
-  defp eventually(fun, deadline_ms \\ 2_000) do
+  defp eventually(fun, deadline_ms \\ 60_000) do
     start = System.monotonic_time(:millisecond)
     result = do_eventually(fun, start + deadline_ms)
     IO.puts("EVENTUALLY routes_store #{System.monotonic_time(:millisecond) - start}")

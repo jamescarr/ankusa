@@ -515,7 +515,7 @@ jobs:
           set -uo pipefail
           docker compose up -d --wait
           failures=0
-          for i in $(seq 1 10); do
+          for i in $(seq 1 20); do
             echo "== probe run $i"
             mix test test/ankusa/source_store/redis_test.exs \
               test/ankusa/routes/store/redis_test.exs \
@@ -526,7 +526,7 @@ jobs:
             grep -E "EVENTUALLY|Result:|^  [0-9]+\) test|Assertion|code:|deadline" "/tmp/probe-$i.log" | sed "s/^/run $i /"
             echo "run $i status=$status"
           done
-          echo "probe: $failures failing runs of 10"
+          echo "probe: $failures failing runs of 20"
           exit 0
       - name: save the package's compose images
         if: always() && steps.toolchain.outputs.has_compose == 'true'
