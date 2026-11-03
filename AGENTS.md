@@ -108,6 +108,10 @@ one; CI runs the same tasks this table does.
 | `mise run bench:soak` | build the image and soak it under loadgen (`DURATION`, default 3600 s); fails on `missing > 0` or RSS growth > 5 % |
 | `mise run build [pkg]` | local only: build one Mix package from source (default `ankusa_server`); compiled Hex deps come from a cache in `~/.cache/ankusa/mix` shared by every worktree, their warnings go to `_build/<env>/deps-compile.log`, ours stay fatal |
 
+CI keeps the compose, floci-emulator and drill images in the Actions cache
+(`scripts/ci/images.sh`) and only pulls one when its digest pin changes;
+locally `mise run check:package` / `test:integration` are unchanged.
+
 ## Run the checks before calling work done
 
 Format, warnings-as-errors, and tests — for **every** package the change

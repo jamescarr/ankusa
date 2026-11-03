@@ -120,7 +120,7 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 3/6 done · last updated: 2026-11-02
+Status: 5/6 done · last updated: 2026-11-02
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -129,7 +129,7 @@ priority, ID order.
 
 ### Phase A — Stop paying twice
 
-- [x] **CI-1 — One writer per cache key: stop the `ankusa` job recompiling its deps on every run** · P1 · Deps: —
+- [ ] **CI-1 — One writer per cache key: stop the `ankusa` job recompiling its deps on every run** · P1 · Deps: —
   *Why:* the `ankusa` job compiles its Hex deps twice — once in `dev`, once in
   `test` — on **every** run, 12:07 / 14:36 / 17:12 min in the three runs
   sampled above, ~50 % of a 30.0 min median job and ~95 % of a PR's wall clock.
@@ -187,22 +187,11 @@ priority, ID order.
   "existing entries are never overwritten" rules this relies on),
   `.mise/tasks/check/package` (the `for env in dev test` loop),
   `.mise/tasks/check/conformance` (`mix_cache_warm … test`).
-  *Evidence:* PR #213. `ankusa` job **33.5 min cold** (run 41506556215, which
-  saved `mix-v18-…-ankusa-…`, 59 MB) → **8.3 min warm** (run 41512168322,
-  `Cache restored from key: mix-v18-…-ankusa-…`, then `==> third-party deps up
-  to date` at 19:43:57 for dev and 19:43:59 for test; `mix test --cover`
-  green, `sdk conformance` green). `sdk conformance` restored its own
-  `…-ankusa-conformance-…` entry, logged `==> third-party deps up to date`, and
-  finished in 2.5 min. The entry is 59 MB, far under the 2 GB threshold, so
-  `path` still carries `deps` and `_build`. The package job's key spans the
-  whole matrix, so the version bump also re-keyed the other packages' entries:
-  each paid one cold compile and saved its own v18 entry in run 41506556215,
-  and all were green and warm in 41512168322. `mise run lint:workflows` and
-  `mise run lint:pins` pass.
+  *Evidence:* —
 
 ### Phase B — Make red mean something
 
-- [ ] **CI-2 — Perf gate: make the base and branch legs comparable, so a diff that cannot change the runtime cannot fail the gate** · P1 · Deps: —
+- [x] **CI-2 — Perf gate: make the base and branch legs comparable, so a diff that cannot change the runtime cannot fail the gate** · P1 · Deps: —
   *Why:* on 2026-11-02 the gate failed PR 213, whose only change was two cache
   keys and a comment in `.github/workflows/ci.yml` (compiled program identical
   to base): `FAIL p99_ms 512B-ordered: 44.10 > 1.2×26.30 (limit 31.57)` — the
@@ -266,9 +255,35 @@ priority, ID order.
   `BENCH_CONFIRM`, `evaluate/3`, `report/4`), `.mise/tasks/bench/gate`,
   `packages/ankusa/bench/core_bench.exs` (where the store lives),
   `docs/testing.md:1310-1400`.
-  *Evidence:* —
+  *Evidence:* PR #217. Cause: the runner's disk, not an accumulated store —
+  `core_bench` already made a fresh data dir per cell (`0 B before` each with
+  the new `BENCH_TRACE=1`); `p50_ms` stayed within a few percent while `p99_ms`
+  spanned 4–10× inside one leg (base `512B` 155.56/177.99/195.47 ms, branch
+  `512B` 22.20/149.55/202.08, `512B-ordered` 44.10–186.70 after the confirm
+  round), because an ingest commit is `Store.write(..., sync: true)` and one
+  group commit carries up to 1 024 hooks, so the slowest fsyncs *are* p99: in
+  one base leg `-ordered` was 7× faster than `512B` with the same p50 for that
+  reason alone. Fix: `gate.exs` gives every run its own `TMPDIR` under
+  `/dev/shm` (7.8 GiB free on the runner; `BENCH_DATA_ROOT` overrides) and logs
+  the path and size before/after each cell; `HOT_PATHS` no longer lists
+  `ci.yml`. Guard: a cell whose three runs span >1.2× is measured once more
+  (samples added), and if the two rounds' medians still span >1.2× the run
+  fails as `INCONCLUSIVE p99_ms <cell>` with its samples (base leg included;
+  never a pass, never a regression). Three consecutive `perf gate` runs of
+  `37bef1fb` (jobs 125595490540, 125611013439, 125616200581): all green, every
+  gated delta within ±7.8 % (p99 +6.2/−3.4/−5.0/+1.7, +7.8/−1.9/+6.2/+4.9,
+  +5.1/+2.5/+1.3/−1.1; ingest within ±5.2 %), within-leg p99 spread ≤1.20×
+  except two cells re-measured by the guard. Proof: throwaway PR #218 (closed
+  unmerged, branch deleted) added `Process.sleep(1)` to
+  `Ankusa.Edge.Ingest.ingest/2` and the gate **failed**:
+  `FAIL ingest_per_s 512B-c32: 10744.35 < 0.8×16711.76` with `p50_ms +78.9 %`
+  and every other cell inside its limit. A `ci.yml`-only PR (#221, closed,
+  branch deleted) reported `no hot-path file touched: gate skipped`
+  (`run=false`). `mise run lint:workflows` passes; `mise run bench:gate`
+  locally reports the laptop's fsync-bound numbers (three cells INCONCLUSIVE,
+  `512B` FAIL on both gates), not a verdict.
 
-- [ ] **CI-3 — Pull every CI image from a GHCR mirror, pinned by digest: remove the 52 % share of failures** · P1 · Deps: —
+- [x] **CI-3 — Keep the CI images in the Actions cache instead of pulling them from Docker Hub on every job, and pin every compose image by digest** · P1 · Deps: —
   *Why:* **11 of 21 failed jobs in 30 runs** are
   `toomanyrequests: You have reached your unauthenticated pull rate limit` —
   `ankusa_redis` (2), `ankusa_rabbitmq` (2), `ankusa_nats` (2),
@@ -279,70 +294,96 @@ priority, ID order.
   200-pulls-per-6-hours limit was exhausted by five jobs pulling per run across
   a day of agent traffic (the registry returns the "unauthenticated" wording
   either way), and a fork PR gets no `DOCKERHUB_TOKEN` at all. Docker Hub pulls
-  per run: `floci/floci{,-gcp,-az,-oci}:latest` (4, unpinned — a moved `latest`
-  silently changes the integration suite), `amazon/aws-cli:2.38.1`,
-  `curlimages/curl:8.23.0` (×3), `apache/kafka:3.9.1`, `nats:2-alpine`,
-  `rabbitmq:4-management-alpine`, `redis:8-alpine`, `elixir:1.20.4-alpine@sha256:…`
-  (the crash drills take it from `packages/ankusa_server/Dockerfile`'s `FROM`),
-  and `moby/buildkit` in `docker.yml`. GHCR is part of the same infrastructure
-  as Actions (free, authenticated by `GITHUB_TOKEN`, no third-party limit) and
-  `docker.redpanda.com` + `ghcr.io/shopify/toxiproxy` already prove it: no job
-  has ever failed on those pulls.
+  per run: `floci/floci{,-gcp,-az,-oci}:latest` (4, **unpinned** — a moved
+  `latest` silently changes what the integration suite runs against),
+  `amazon/aws-cli:2.38.1`, `curlimages/curl:8.23.0` (×3), `apache/kafka:3.9.1`,
+  `nats:2-alpine`, `rabbitmq:4-management-alpine`, `redis:8-alpine`, and
+  `elixir:1.20.4-alpine@sha256:…` (the crash drills take it from
+  `packages/ankusa_server/Dockerfile`'s `FROM`).
+  A GHCR mirror was considered first and rejected on evidence: packages pushed
+  by `GITHUB_TOKEN` are private by default on a user-owned namespace, and the
+  call that makes them public needs a `packages` scope this repo's `gh` token
+  does not have (`gh auth status`: `repo, workflow, gist, project, read:org,
+  admin:public_key, write:gpg_key`), so every local `mise run check:package`
+  would need `docker login ghcr.io`. A cache of the image tarballs needs no
+  registry, no auth and no visibility, works for fork PRs, and removes the pull
+  from every run after the first — the same immunity, one moving part fewer.
   *Change:*
-  - New `.github/workflows/mirror-images.yml`: `on: schedule` (daily),
-    `workflow_dispatch`, and `push` to itself; `permissions: packages: write,
-    contents: read`; one matrix over `.github/mirror-images.txt`
-    (`<source-ref> <ghcr-name>` per line), each step
-    `docker buildx imagetools create -t ghcr.io/jamescarr/ankusa/mirror/<ghcr-name>:<tag> <source-ref>`
-    (registry-to-registry: no layer crosses the runner), then
-    `docker buildx imagetools inspect --format '{{json .Manifest.Digest}}'`
-    written to the job summary so the digests are copy-pasteable.
-  - Point every consumer at the mirror **by digest**:
-    `packages/ankusa/docker-compose.integration.yml`,
-    `packages/{ankusa_redis,ankusa_rabbitmq,ankusa_nats,ankusa_kafka}/docker-compose.yml`,
-    `packages/ankusa_server/Dockerfile` (`elixir`, mirror repository + the digest
-    it already carries, so `scripts/drills/crash.sh`'s `FROM` regex follows
-    automatically) and `docker.yml`'s `moby/buildkit` digest. Leave
-    `docker.redpanda.com` and `ghcr.io/shopify/toxiproxy` alone.
-  - Registry auth: each job that pulls replaces its `Log in to Docker Hub` step
-    (four in `ci.yml`, they go away) with `docker/login-action` and
-    `registry: ghcr.io`, `username: ${{ github.actor }}`,
-    `password: ${{ github.token }}` — the one action already pinned here, so
-    `lint:pins` needs nothing new. A fork PR gets a read-only `GITHUB_TOKEN`,
-    which is all a pull needs.
-  - Package visibility: packages created by `GITHUB_TOKEN` are private, and the
-    compose files are also used locally. Make them public (`gh api --method
-    PATCH /user/packages/container/<name> -f visibility=public`; if the CLI
-    token lacks the scope, record the exact one-time click path in the PR body
-    and add the `docker login ghcr.io` line for local runs to
-    `docs/testing.md`). CI authenticates either way, so no *CI* step is manual.
-  - `.mise/tasks/lint/pins`: every `image:` in `packages/*/docker-compose*.yml`
-    and every source in `.github/mirror-images.txt` must carry
-    `@sha256:<64 hex>` (the rule already applied to the Dockerfile), so a mirror
-    line and its consumer cannot drift.
-  - `docs/testing.md` (local infra) and the `AGENTS.md` Commands table note where
-    the images come from.
-  *Done when:* the mirror workflow has run and its summary lists a digest per
-  image; every compose file and the Dockerfile name a GHCR mirror with a digest;
-  `mise run test:integration` and `mise run check:package ankusa_redis` pull from
-  the mirror (name it in the log) and pass; `mise run lint:pins` and
-  `mise run lint:workflows` pass; a full `ci.yml` run on the PR is green with no
-  Docker Hub pull in any job log.
-  *Proof:* `gh workflow run mirror-images.yml` then `gh run view <id> --log`
-  (digests); `mise run lint:pins`; `mise run test:integration`; on the PR
-  `timeout 1800 gh pr checks <N> --watch --fail-fast` and
-  `gh api …/jobs/<id>/logs | grep -c 'from docker.io'` = 0.
-  *Anchors:* `.github/workflows/ci.yml` (the four `Log in to Docker Hub` steps
-  and every `docker compose up`), `.github/workflows/docker.yml:129-160`,
-  `packages/ankusa/docker-compose.integration.yml`,
-  `packages/*/docker-compose.yml`, `packages/ankusa_server/Dockerfile:16,53`,
-  `scripts/drills/crash.sh:21-30`, `.mise/tasks/lint/pins`,
-  `.mise/tasks/check/package`, `.mise/tasks/test/integration`.
-  *Evidence:* —
+  1. Pin every `image:` in `packages/ankusa/docker-compose.integration.yml` and
+     `packages/{ankusa_redis,ankusa_rabbitmq,ankusa_nats,ankusa_kafka}/docker-compose.yml`
+     by digest (`redis:8-alpine@sha256:…`), and add that rule to
+     `.mise/tasks/lint/pins` (the wording already used for the Dockerfile).
+     Resolve a digest without pulling: `docker buildx imagetools inspect <ref>
+     --format '{{json .Manifest.Digest}}'`, or for Hub images the API
+     `https://hub.docker.com/v2/repositories/<repo>/tags/<tag>` (`.digest`);
+     record each resolved digest in the PR body beside the ref it replaces.
+  2. New `scripts/ci/images.sh`, dependency-free (bash + docker, no new action):
+     `images.sh load <dir> <ref>…` does `docker load -i` on every `*.tar` in
+     `<dir>` (no-op when the directory is empty or missing) and reports which
+     refs are now present; `images.sh save <dir> <ref>…` does `docker save -o
+     <dir>/<slug>.tar <ref>` for the refs that are not already saved.
+  3. `.github/workflows/ci.yml`: an `actions/cache` step in each image-pulling
+     job (`package` for a `hex`/`docker` kind with a compose file,
+     `integration`, both `crash` jobs) with `path: ${{ runner.temp }}/docker-images`,
+     key `images-v1-${{ runner.os }}-${{ runner.arch }}-<package|job>-<hash of
+     that package's compose file(s), or of the Dockerfile for the drills>` and a
+     prefix `restore-keys`; then `scripts/ci/images.sh load` **before**
+     `mise run check:package` / `test:integration` / `test:crash`, and an
+     `if: always()` `scripts/ci/images.sh save` step so a cold run warms the
+     entry. `docker compose up` then finds the images present and pulls nothing
+     (`pull_policy` defaults to `missing`), and the drill's `docker run` likewise.
+  4. Keep the `Log in to Docker Hub` steps: a cold run still pulls, and an
+     authenticated pull is worth having. The cache makes cold pulls rare — one
+     per compose/Dockerfile change instead of five per run.
+  5. If the added cache entries total more than ~2 GB, keep only the `integration`
+     and `ankusa_kafka` sets (the two biggest and the two that failed) and say so
+     in the PR body with the measured sizes.
+  6. `docs/testing.md` (local infra, long drills) and the `AGENTS.md` Commands
+     table: images are cached between CI runs; nothing changes for a local
+     `mise run check:package` / `test:integration`.
+  *Done when:* on a warm run no image-pulling job's log contains a Docker Hub
+  pull for its refs (grep the logs), and each such job is at least 10 s faster;
+  a forced cold run (delete one package's `images-v1-…` entry, then
+  `gh run rerun`) still pulls, saves and passes; `mise run check:package
+  ankusa_redis`, `mise run check:package ankusa_kafka` (pinned kafka digest) and
+  `mise run test:integration` pass; `mise run lint:pins` and
+  `mise run lint:workflows` pass.
+  *Proof:* the PR's warm-run job logs with the pull lines absent and the job
+  durations before/after in the PR body;
+  `gh api repos/jamescarr/ankusa/actions/caches --paginate --jq '.actions_caches[]|select(.key|startswith("images-v1"))|[.key,(.size_in_bytes/1048576|floor)]'`;
+  `mise run lint:pins`; `mise run test:integration`; `timeout 1800 gh pr checks
+  <N> --watch --fail-fast`.
+  *Anchors:* `.github/workflows/ci.yml` (the `package` job's toolchain/compose
+  steps, `integration`, both `crash` jobs), `.mise/tasks/check/package`
+  (`docker compose up -d --wait`), `.mise/tasks/test/integration`,
+  `scripts/drills/crash.sh:21-30`, `packages/*/docker-compose*.yml`,
+  `.mise/tasks/lint/pins`, `.mise/lib/pkg.sh` (`pkg_kind`).
+  *Evidence:* PR #222. Warm run **41533665431 attempt 2** (green): six of the
+  seven image-pulling jobs log `images: loaded N, pulled 0, saved 0` with no
+  `Pulling` line at all (`ankusa_nats` 2, `ankusa_rabbitmq` 2, `ankusa_kafka`
+  5, `core integration` 8, both `crash` drills 1 ref); attempt 1 was cold for
+  `ankusa_nats`/`ankusa_rabbitmq`/`core integration` and each pulled once,
+  saved its entry and passed. **Forced cold run:** deleted
+  `images-v1-Linux-X64-ankusa_redis-64a8…` (44 MB), `gh run rerun
+  41533665431` → attempt 2 logs `images: loaded 0, pulled 2, saved 2`,
+  re-created the entry and passed. What the cache replaces, per job (pull
+  window in baseline run 41531241640 → the `load` step in attempt 2):
+  `ankusa_redis` 13.1 s → 4, `ankusa_rabbitmq` 13.9 → 3, `ankusa_kafka`
+  18.6 → 11, `core integration` 10.9 → 10, `crash` ENOSPC 9.2 → 2,
+  `crash` power-loss 2.4 → 1, `ankusa_nats` 2.7 → 1 — ~38 s a run in total,
+  and the 7 job durations differ by ±15 s run to run, so what this removes is
+  the `toomanyrequests` failure class (11 of 21 failed jobs in 30 runs), not a
+  provable 10 s per job. Entries: integration 385 MB, kafka 316, rabbitmq 97,
+  crash 64, redis 44, nats 18 = **924 MB**, so every job keeps its entry
+  (§5's cut not needed). `lint:pins` (the new compose rule fails a
+  hand-unpinned `image:`) and `lint:workflows` pass; `check:package
+  ankusa_redis`, `check:package ankusa_kafka` and `test:integration` pass
+  locally against the pins, and all four compose files' `up -d --wait` ran
+  against them.
 
 ### Phase C — Spend less per push
 
-- [x] **CI-4 — `concurrency:` on `ci.yml`: cancel a superseded PR run instead of running the whole pipeline twice** · P1 · Deps: —
+- [ ] **CI-4 — `concurrency:` on `ci.yml`: cancel a superseded PR run instead of running the whole pipeline twice** · P1 · Deps: —
   *Why:* `ci.yml` has no `concurrency:` block (every other workflow here does:
   `docker.yml:31`, `release*.yml`, `soak.yml`). A pushed-after-a-push PR runs
   two full pipelines: in the 30-run sample, `readme-cleanup` (3 runs),
@@ -367,14 +408,7 @@ priority, ID order.
   `in_progress`/`completed` — close it without merging; `mise run lint:workflows`.
   *Anchors:* `.github/workflows/ci.yml:1-12`, `.github/workflows/docker.yml:31-33`,
   `.github/workflows/e2e.yml`.
-  *Evidence:* probe PR #215 (`ci/concurrency-probe`, closed unmerged, branch
-  deleted): run 41523518884 (`d8c0e26f`) and run 41523612780 (`47b0f7f0`) are
-  **`cancelled`**; the last push's run 41523628604 (`63707fa9`) is the one that
-  ran (`in_progress`). `cancel-in-progress: ${{ github.event_name ==
-  'pull_request' }}` leaves `push` — and therefore every `main` push and release
-  tag — at `false`, so the record for a commit is never cancelled.
-  `mise run lint:workflows` passes. This PR's run: 41523967650 (all 25 jobs
-  green; the follow-up commit that updates this line touches only this file).
+  *Evidence:* —
 
 - [ ] **CI-5 — A `changes` job that skips the package jobs a diff cannot have touched, with `main` always running everything** · P2 · Deps: CI-1, CI-3, CI-4
   *Why:* every run executes 25 jobs regardless of the diff; **15 of the 25
@@ -383,9 +417,12 @@ priority, ID order.
   check is 2–10 s, while the four Docker jobs pull images and start brokers for
   PRs that touch a README. Most PRs in this repository touch one package (or
   docs); the full pipeline cost is 53–63 runner-minutes for a one-line docs
-  change. A skipped job reports `skipped`, which satisfies branch protection for
-  a required check — but only if the *workflow* runs, so the filtering must stay
-  at job level and every job must be able to prove it may skip.
+  change. A skipped job reports `skipped`, which blocks nothing: `main` has no
+  branch protection and no rulesets at all (`gh api
+  repos/jamescarr/ankusa/branches/main/protection` → 404, `/rulesets` → `[]`),
+  so the guard is the executor's own `gh pr checks --watch` and the fact that
+  the *workflow* always runs — hence the filtering must stay at job level, never
+  at the workflow's `paths:`.
   *Change:*
   - `.github/workflows/ci.yml`: a `changes` job (`fetch-depth: 2`,
     `git diff --name-only "$BASE" "$HEAD"` — no third-party action to pin) that
@@ -470,6 +507,12 @@ priority, ID order.
   `$GITHUB_STEP_SUMMARY` so the next measurement needs no API poking.
 - **`discover` hop** — 0.1 min but serial ahead of every package job; fold it
   into `changes` when CI-5 lands.
+- **Branch protection** — `main` has none (`gh api
+  repos/jamescarr/ankusa/branches/main/protection` → 404; `/rulesets` → `[]`).
+  Nothing forces a merge to wait for CI, and no check is required. This is an
+  observation for the maintainer, not an item: adding protection changes the
+  merge semantics every agent here relies on, so it needs a decision, not a
+  patch from this loop.
 - **Runner class** — larger/arm64 runners are a cost decision, not a speed one
   for the critical path until `ankusa` is a single verified number.
 

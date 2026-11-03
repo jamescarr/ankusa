@@ -74,6 +74,23 @@
                   "\"body_base64\":\"aGVsbG8=\",\"verification\":{\"status\":\"failed\",\"flagged\":true}}")]
     (is (= {:status "failed" :flagged true} (:verification (message/decode json))))))
 
+(deftest decode-event-type-is-nil-when-absent-or-null
+  (is (nil? (:event-type (message/decode inline-json))))
+  (is (nil? (:event-type (message/decode (str "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1,\"size\":5,"
+                                              "\"body_base64\":\"aGVsbG8=\",\"event_type\":null}"))))))
+
+(deftest decode-event-type-is-the-providers-event-name
+  (let [json (str "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1,\"size\":5,"
+                  "\"body_base64\":\"aGVsbG8=\",\"event_type\":\"invoice.paid\"}")]
+    (is (= "invoice.paid" (:event-type (message/decode json))))))
+
+(deftest decode-event-type-must-be-a-string
+  (let [json (str "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1,\"size\":5,"
+                  "\"body_base64\":\"aGVsbG8=\",\"event_type\":7}")
+        e (failure #(message/decode json))]
+    (is (= "invalid_field" (:code (ex-data e))))
+    (is (= "event_type" (:field (ex-data e))))))
+
 (deftest a-claim-hook-redeems-the-claim
   (let [rec (gateway/recorder)
         hook (message/->hook (message/decode claim-json) (gateway-client rec 200 "hello"))]

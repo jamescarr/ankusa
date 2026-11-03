@@ -68,6 +68,9 @@ import tools.jackson.databind.JsonNode;
  *     so or predates the field
  * @param region the region that instance is configured with, or null when it has none or predates
  *     the field
+ * @param eventType the provider's event name (for example {@code invoice.paid}) as the source's
+ *     {@code event_type} key read it, or null when the source has none, the hook carries none, or
+ *     the message predates the field
  */
 public record Message(
     int v,
@@ -88,7 +91,8 @@ public record Message(
     @Nullable String traceparent,
     @Nullable String tracestate,
     @Nullable String instance,
-    @Nullable String region) {
+    @Nullable String region,
+    @Nullable String eventType) {
 
   /**
    * The lowest message {@code v} {@link #decode(String)} accepts.
@@ -176,6 +180,7 @@ public record Message(
     String tracestate = nullableText(root, "tracestate");
     String instance = nullableText(root, "instance");
     String region = nullableText(root, "region");
+    String eventType = nullableText(root, "event_type");
     Map<String, String> headers = headers(root);
     String sha256 = sha256(root);
     Verification verification = verification(root);
@@ -222,7 +227,8 @@ public record Message(
           traceparent,
           tracestate,
           instance,
-          region);
+          region,
+          eventType);
     }
 
     if (!claimNode.isString()) {
@@ -265,7 +271,8 @@ public record Message(
         traceparent,
         tracestate,
         instance,
-        region);
+        region,
+        eventType);
   }
 
   /**

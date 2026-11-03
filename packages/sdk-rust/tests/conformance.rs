@@ -829,6 +829,7 @@ fn message_json(message: &Message) -> Value {
         "tracestate": message.tracestate,
         "instance": message.instance,
         "region": message.region,
+        "event_type": message.event_type,
     })
 }
 

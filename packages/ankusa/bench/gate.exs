@@ -36,11 +36,31 @@
 # block over from the file it overwrites; re-measure it (docs/testing.md
 # "Perf gate") when the harness, `bench/core_bench.exs`, changes.
 #
+# Every run of a cell gets a fresh data directory of its own (the cell's store
+# lives in `TMPDIR`, and the bench removes it on exit), so no cell and no leg
+# can inherit another's store or its page cache. By default the directory is
+# under `/dev/shm` when that is a writable tmpfs with room: an ingest commit
+# ends in an fsync, and on the runner's disk one slow fsync is the whole p99
+# tail (a stalled commit holds up to `group_commit_max_records` hooks).
+# `BENCH_DATA_ROOT` overrides the root; anywhere without a tmpfs the runner's
+# disk is used and the fsync is part of the measurement (docs/testing.md
+# "Perf gate").
+#
 # A p99 over 20k samples is noisy on a shared machine, and noise only ever
 # adds latency and takes throughput away. So a cell over a limit after its
 # `BENCH_RUNS` runs is run `BENCH_RUNS` more times and judged on its best run
 # of all (lowest p99, highest ingest/s): a regression raises every run, noise
 # rarely does.
+#
+# The same noise decides what the limit *can* say: the limits are ratios of
+# 1.2x and 0.8x, so the cell's own measurements have to agree to better than
+# that. A cell whose three runs in one round span more than 1.2x is measured
+# one more round (its samples are added: the verdict is the median of all six);
+# if the two rounds — the p99 measurements the gate compares — still span more
+# than the limit's headroom, the run is INCONCLUSIVE: it prints the samples and
+# fails, and is neither a pass nor a regression. (A base leg the measurement
+# cannot decide is inconclusive too: a comparison against a baseline measured
+# that shakily means nothing.)
 #
 # Env knobs:
 #
@@ -52,6 +72,11 @@
 #   BENCH_REBASELINE=1      write the medians to the baseline file instead of
 #                           comparing (the checked-in one changes only in a
 #                           `perf: rebaseline <reason>` PR; see docs/testing.md)
+#   BENCH_DATA_ROOT=<dir>   where the per-run data directories go (default: a
+#                           tmpfs if there is one, else the system temp dir)
+#   BENCH_TRACE=1           sample each run's data directory and print its peak
+#                           size (diagnostics; off, the gate does not touch the
+#                           store's directory during a run)
 #
 # Run it from `packages/ankusa` (the mise task does):
 #
@@ -78,6 +103,11 @@ defmodule Bench.Gate do
   @last Path.join(@bench_dir, "last.json")
   @default_baseline Path.join(@bench_dir, "baseline.json")
 
+  # A per-run store for the 10 KB cell is a few hundred MB; below this much
+  # free space a tmpfs is left alone and the runner's disk is used.
+  @tmpfs_min_free 2 * 1024 * 1024 * 1024
+  @tmpfs_candidates ["/dev/shm"]
+
   def main do
     runs = env_int("BENCH_RUNS", 3)
     cells = Enum.map(@matrix, &elem(&1, 0))
@@ -85,8 +115,13 @@ defmodule Bench.Gate do
     rebaseline? = System.get_env("BENCH_REBASELINE") in ["1", "true"]
     # Read before the minutes of benching, so a missing baseline fails at once.
     baseline = if rebaseline?, do: nil, else: load_baseline(runner)
+    root = data_root()
+    trace? = System.get_env("BENCH_TRACE") in ["1", "true"]
 
-    samples = collect(@matrix, runs, %{})
+    IO.puts("==> bench data root: #{root} (#{describe_root(root)}), a fresh directory per run")
+
+    samples = collect(@matrix, runs, root, trace?, %{})
+    {samples, inconclusive} = settle_spread(@matrix, runs, root, trace?, samples, cells)
     medians = medians(samples, cells)
     rows = if baseline, do: evaluate(baseline, medians, cells), else: []
     failing = rows |> Enum.filter(& &1.failed) |> Enum.map(& &1.cell) |> Enum.uniq()
@@ -100,7 +135,7 @@ defmodule Bench.Gate do
         )
 
         retry = Enum.filter(@matrix, fn {cell, _, _} -> cell in failing end)
-        samples = collect(retry, runs, samples)
+        samples = collect(retry, runs, root, trace?, samples)
         medians = medians(samples, cells, failing)
         {samples, medians, evaluate(baseline, medians, cells)}
       else
@@ -114,20 +149,131 @@ defmodule Bench.Gate do
 
     IO.puts("wrote #{Path.relative_to_cwd(@last)}")
 
-    if rebaseline? do
-      write_json(baseline_path(), cells, medians, runner, [], carried_f1_code(baseline_path()))
-      IO.puts("rebaselined #{baseline_path()} (runner #{runner})")
-    else
-      report(cells, medians, baseline, rows)
+    cond do
+      rebaseline? and inconclusive != [] ->
+        # A baseline recorded from samples this wide would make every later
+        # comparison meaningless (header).
+        print_table(
+          cells,
+          medians,
+          empty_baseline(cells),
+          rows,
+          Enum.map(inconclusive, &elem(&1, 0))
+        )
+
+        print_inconclusive(inconclusive)
+        IO.puts("INCONCLUSIVE")
+        System.halt(1)
+
+      rebaseline? ->
+        write_json(baseline_path(), cells, medians, runner, [], carried_f1_code(baseline_path()))
+        IO.puts("rebaselined #{baseline_path()} (runner #{runner})")
+
+      true ->
+        report(cells, medians, baseline, rows, inconclusive)
     end
   end
 
+  # A leg's p99 can only support a 1.2x decision if the cell's own measurements
+  # agree to better than that. A round whose three runs are wider than the
+  # limit's headroom is measured once more (its samples are added: the verdict
+  # is the median of all six); if the rounds' medians still span more than the
+  # headroom, the cell is inconclusive (see the header). A cell that never
+  # needs a second round is decided on one round, like before.
+  defp settle_spread(matrix, runs, root, trace?, samples, cells) do
+    case wide(samples, cells) do
+      [] ->
+        {samples, []}
+
+      wide ->
+        retry_cells = Enum.map(wide, &elem(&1, 0))
+
+        for {cell, spread, values} <- wide do
+          IO.puts(
+            "==> p99_ms #{cell} spans #{ratio(spread)} over #{runs} runs " <>
+              "(#{join_samples(values)}): re-measuring it once"
+          )
+        end
+
+        retry = Enum.filter(matrix, fn {cell, _, _} -> cell in retry_cells end)
+        retried = collect(retry, runs, root, trace?, %{})
+        samples = Map.merge(samples, retried, fn _cell, first, more -> first ++ more end)
+        {samples, unstable(samples, retry_cells, runs)}
+    end
+  end
+
+  # Cells whose own p99 samples span more than the p99 limit's factor.
+  defp wide(samples, cells) do
+    for cell <- cells,
+        values = Enum.map(samples[cell], & &1["p99_ms"]),
+        length(values) > 1,
+        min = Enum.min(values),
+        min > 0,
+        spread = Enum.max(values) / min,
+        spread > spread_limit() do
+      {cell, spread, values}
+    end
+  end
+
+  # The cells whose rounds, i.e. the p99 measurements the gate compares,
+  # disagree by more than the limit can resolve.
+  defp unstable(samples, cells, runs) do
+    for cell <- cells,
+        values = Enum.map(samples[cell], & &1["p99_ms"]),
+        length(values) > runs,
+        rounds = values |> Enum.chunk_every(runs) |> Enum.map(&median/1),
+        min = Enum.min(rounds),
+        min > 0,
+        spread = Enum.max(rounds) / min,
+        spread > spread_limit() do
+      {cell, spread, rounds_joined(values, runs)}
+    end
+  end
+
+  defp rounds_joined(values, runs) do
+    values
+    |> Enum.chunk_every(runs)
+    |> Enum.map_join(" | ", fn round -> join_samples(round) end)
+  end
+
+  defp spread_limit do
+    {_metric, _kind, factor} = Enum.find(@gates, fn {metric, _, _} -> metric == "p99_ms" end)
+    factor
+  end
+
+  defp ratio(spread), do: :erlang.float_to_binary(spread * 1.0, decimals: 2) <> "\u00D7"
+
+  defp join_samples(values),
+    do: Enum.map_join(values, ", ", fn v -> :erlang.float_to_binary(v * 1.0, decimals: 2) end)
+
+  defp print_inconclusive(inconclusive) do
+    for {cell, spread, samples} <- inconclusive do
+      IO.puts(
+        "INCONCLUSIVE p99_ms #{cell}: samples span #{ratio(spread)} across rounds " <>
+          "(#{samples}) — wider than the #{ratio(spread_limit())} the limit can resolve"
+      )
+    end
+  end
+
+  defp empty_baseline(cells), do: Map.new(cells, fn cell -> {cell, %{}} end)
+
   # Round-robin over the cells so a noisy minute is spread over all of them.
-  defp collect(matrix, runs, samples) do
+  defp collect(matrix, runs, root, trace?, samples) do
     for run <- 1..runs, {cell, bytes, concurrency} <- matrix, reduce: samples do
       acc ->
         IO.puts("==> bench #{cell} run #{run}/#{runs}")
-        sample = run_bench(bytes, concurrency, String.ends_with?(cell, "-ordered"))
+
+        sample =
+          run_bench(
+            root,
+            trace?,
+            cell,
+            bytes,
+            concurrency,
+            String.ends_with?(cell, "-ordered"),
+            run
+          )
+
         Map.update(acc, cell, [sample], &(&1 ++ [sample]))
     end
   end
@@ -149,9 +295,18 @@ defmodule Bench.Gate do
 
   defp baseline_path, do: System.get_env("BENCH_BASELINE", @default_baseline)
 
-  defp run_bench(body_bytes, concurrency, ordered?) do
+  defp run_bench(root, trace?, cell, body_bytes, concurrency, ordered?, run) do
+    # The bench puts its store in `TMPDIR` and removes it on exit. A directory
+    # of its own per run is what keeps one cell (or one leg) from inheriting
+    # another's store, its size or its page cache.
+    dir = Path.join(root, "ankusa_bench_gate_#{cell}_#{run}_#{unique_suffix()}")
+    File.mkdir_p!(dir)
+    before = dir_bytes(dir)
+    sampler = if trace?, do: start_sampler(dir)
+
     env = [
       {"MIX_ENV", "test"},
+      {"TMPDIR", dir},
       {"N", Integer.to_string(@n)},
       {"CONCURRENCY", Integer.to_string(concurrency)},
       {"SINK_LATENCY_MS", Integer.to_string(@sink_latency_ms)},
@@ -161,6 +316,15 @@ defmodule Bench.Gate do
 
     {out, status} =
       System.cmd("mix", ["run", "bench/core_bench.exs"], env: env, stderr_to_stdout: true)
+
+    peak = if sampler, do: stop_sampler(sampler)
+    after_bytes = dir_bytes(dir)
+    File.rm_rf(dir)
+
+    IO.puts(
+      "    store #{dir}: #{bytes(before)} before, #{bytes(after_bytes)} after" <>
+        if(peak, do: ", #{bytes(peak)} peak (traced)", else: "")
+    )
 
     if status != 0 do
       IO.write(out)
@@ -180,6 +344,136 @@ defmodule Bench.Gate do
     report = JSON.decode!(json)
     IO.puts("    #{inspect(Map.take(report, @metrics))}")
     Map.new(@metrics, fn m -> {m, to_float(Map.fetch!(report, m))} end)
+  end
+
+  # Where the per-run data directories go. `/dev/shm` is the runner's tmpfs: an
+  # ingest commit ends in an fsync, and a tmpfs makes that the "costs nothing"
+  # regime (docs/testing.md "Perf gate") instead of letting one slow fsync
+  # become the whole p99 tail. Anywhere without room for a run's store, the
+  # system temp dir is used and the log says so.
+  defp data_root do
+    case System.get_env("BENCH_DATA_ROOT") do
+      root when is_binary(root) and root != "" ->
+        File.mkdir_p!(root)
+        root
+
+      _ ->
+        Enum.find(@tmpfs_candidates, &tmpfs_usable?/1) || System.tmp_dir!()
+    end
+  end
+
+  defp tmpfs_usable?(path) do
+    File.dir?(path) and match?({:ok, _}, File.stat(path)) and
+      writable?(path) and enough_free?(path)
+  end
+
+  defp writable?(path) do
+    probe = Path.join(path, ".ankusa_bench_probe_#{unique_suffix()}")
+
+    case File.write(probe, "") do
+      :ok ->
+        File.rm(probe)
+        true
+
+      _ ->
+        false
+    end
+  end
+
+  defp enough_free?(path) do
+    case free_bytes(path) do
+      nil -> false
+      bytes -> bytes >= @tmpfs_min_free
+    end
+  end
+
+  defp describe_root(root) do
+    case {fs_type(root), free_bytes(root)} do
+      {"tmpfs", bytes} -> "tmpfs, #{bytes(bytes)} free"
+      {type, bytes} when is_binary(type) -> "#{type}, #{bytes(bytes)} free"
+      {nil, bytes} -> "system temp dir, #{bytes(bytes)} free"
+    end
+  end
+
+  defp fs_type(path) do
+    with {:ok, mounts} <- File.read("/proc/mounts") do
+      mounts
+      |> String.split("\n", trim: true)
+      |> Enum.find_value(fn line ->
+        case String.split(line) do
+          [_device, mount, type | _] when mount == path -> type
+          _ -> nil
+        end
+      end)
+    else
+      _ -> nil
+    end
+  end
+
+  # `df -Pk`: the POSIX form, so it means the same on the runner and a laptop.
+  defp free_bytes(path) do
+    with {out, 0} <- System.cmd("df", ["-Pk", path], stderr_to_stdout: true),
+         line <- out |> String.split("\n", trim: true) |> List.last(),
+         available <- line |> String.split() |> Enum.at(3),
+         {kb, ""} <- Integer.parse(available) do
+      kb * 1024
+    else
+      _ -> nil
+    end
+  end
+
+  defp dir_bytes(path) do
+    case File.stat(path) do
+      {:ok, %{type: :regular, size: size}} ->
+        size
+
+      {:ok, %{type: :directory}} ->
+        case File.ls(path) do
+          {:ok, entries} -> entries |> Enum.map(&dir_bytes(Path.join(path, &1))) |> Enum.sum()
+          _ -> 0
+        end
+
+      _ ->
+        0
+    end
+  end
+
+  defp bytes(nil), do: "n/a"
+  defp bytes(n) when n < 1024, do: "#{n} B"
+  defp bytes(n) when n < 1024 * 1024, do: "#{Float.round(n / 1024, 1)} KiB"
+  defp bytes(n) when n < 1024 * 1024 * 1024, do: "#{Float.round(n / 1024 / 1024, 1)} MiB"
+  defp bytes(n), do: "#{Float.round(n / 1024 / 1024 / 1024, 2)} GiB"
+
+  # `BENCH_TRACE=1`: the peak size of the run's data directory, sampled once a
+  # second in the background. Off by default: the gate must not walk the
+  # store's directory while the store is what is being measured.
+  defp start_sampler(dir) do
+    parent = self()
+    ref = make_ref()
+    pid = spawn_link(fn -> sample_loop(dir, 0, parent, ref) end)
+    {pid, ref}
+  end
+
+  defp sample_loop(dir, peak, parent, ref) do
+    receive do
+      {:stop, ^ref} -> send(parent, {:peak, ref, max(peak, dir_bytes(dir))})
+    after
+      1_000 -> sample_loop(dir, max(peak, dir_bytes(dir)), parent, ref)
+    end
+  end
+
+  defp stop_sampler({pid, ref}) do
+    send(pid, {:stop, ref})
+
+    receive do
+      {:peak, ^ref, peak} -> peak
+    after
+      5_000 -> 0
+    end
+  end
+
+  defp unique_suffix do
+    "#{System.system_time(:microsecond)}_#{Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)}"
   end
 
   defp load_baseline(runner) do
@@ -226,10 +520,15 @@ defmodule Bench.Gate do
     end
   end
 
-  defp report(cells, medians, baseline, rows) do
-    print_table(cells, medians, baseline, rows)
+  defp report(cells, medians, baseline, rows, inconclusive) do
+    cells_inconclusive = Enum.map(inconclusive, &elem(&1, 0))
+    print_table(cells, medians, baseline, rows, cells_inconclusive)
+    print_inconclusive(inconclusive)
 
-    failures = Enum.filter(rows, & &1.failed)
+    # A cell the measurement cannot decide is neither a pass nor a regression:
+    # it is reported as INCONCLUSIVE, not also as a FAIL (header).
+    failures =
+      Enum.filter(rows, &(&1.failed and &1.cell not in cells_inconclusive))
 
     for f <- failures do
       cmp = if f.kind == :max, do: ">", else: "<"
@@ -240,15 +539,21 @@ defmodule Bench.Gate do
       )
     end
 
-    if failures == [] do
-      IO.puts("PASS")
-    else
-      IO.puts("FAIL")
-      System.halt(1)
+    cond do
+      inconclusive != [] ->
+        IO.puts("INCONCLUSIVE")
+        System.halt(1)
+
+      failures == [] ->
+        IO.puts("PASS")
+
+      true ->
+        IO.puts("FAIL")
+        System.halt(1)
     end
   end
 
-  defp print_table(cells, medians, baseline, rows) do
+  defp print_table(cells, medians, baseline, rows, inconclusive) do
     gated = Map.new(rows, fn r -> {{r.cell, r.metric}, r} end)
 
     IO.puts("")
@@ -260,8 +565,18 @@ defmodule Bench.Gate do
 
       {limit, status} =
         case gated[{cell, metric}] do
-          nil -> {"-", ""}
-          r -> {limit_label(r), if(r.failed, do: "FAIL", else: "ok")}
+          nil ->
+            {"-", ""}
+
+          r ->
+            status =
+              cond do
+                cell in inconclusive -> "?"
+                r.failed -> "FAIL"
+                true -> "ok"
+              end
+
+            {limit_label(r), status}
         end
 
       IO.puts(pad([cell, metric, fmt(base), fmt(current), delta(base, current), limit, status]))
