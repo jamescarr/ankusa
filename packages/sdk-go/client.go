@@ -160,3 +160,5 @@ func appendQuery(path string, pairs [][2]string) string {
 	}
 	return b.String()
 }
+
+// Probe: this comment exists only to make a sdk-go-only diff.
