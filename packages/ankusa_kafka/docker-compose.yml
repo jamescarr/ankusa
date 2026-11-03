@@ -20,7 +20,17 @@ name: ankusa_kafka
 x-kafka: &kafka
   image: apache/kafka:3.9.1@sha256:4ceccc577f03f51f6af8dbfda55194d0d892f4fa7913ffbded567ce3895622ed
   healthcheck:
-    test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+    # Both listeners the tests use: the INTERNAL one this probe always had, and
+    # the EXTERNAL one on the host (`localhost:2909N`, where every client in the
+    # suites connects). A broker that has only bound INTERNAL used to pass here
+    # and then hand the tests `{:error, :unavailable}`. The tool needs a broker
+    # that answers, so the two probes are chained: a comma list would be
+    # satisfied by either one (checked with `--bootstrap-server 9092,<closed>`).
+    test:
+      - CMD-SHELL
+      - >-
+        /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 &&
+        /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:$$EXTERNAL_LISTENER_PORT >/dev/null 2>&1
     interval: 3s
     timeout: 10s
     retries: 40
@@ -68,6 +78,8 @@ services:
       - "29092:29092"
     environment:
       <<: *kafka-env
+      # What the healthcheck's second probe reaches; the suites' port for this node.
+      EXTERNAL_LISTENER_PORT: "29092"
       KAFKA_NODE_ID: 1
       KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29092
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-1:9092,EXTERNAL://localhost:29092
@@ -79,6 +91,7 @@ services:
       - "29093:29093"
     environment:
       <<: *kafka-env
+      EXTERNAL_LISTENER_PORT: "29093"
       KAFKA_NODE_ID: 2
       KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29093
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-2:9092,EXTERNAL://localhost:29093
@@ -90,6 +103,7 @@ services:
       - "29094:29094"
     environment:
       <<: *kafka-env
+      EXTERNAL_LISTENER_PORT: "29094"
       KAFKA_NODE_ID: 3
       KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29094
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-3:9092,EXTERNAL://localhost:29094
