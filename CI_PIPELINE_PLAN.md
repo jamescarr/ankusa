@@ -222,10 +222,14 @@ median of three such samples cannot support a 1.2× decision.
 
 ### Current state (8 runs, 2026-11-03 17:45 … 19:25Z — after CI-17…CI-20)
 
-- **`main` is red at 19:25Z**: run 41689506568 (`902e3dcb`) failed two jobs —
-  `ankusa (tests, 4/4)` (CI-21's tenant-fairness p99) and `lint` (a `mise install`
-  500, CI-22). Run 41702699820 (`e53e3d32`, CI-20's merge) was still in progress
-  at this measurement. AGENTS.md blocks a tag on a red `main` until diagnosed.
+- **`main` is red, twice, on two different causes**: run 41689506568
+  (`902e3dcb`) failed `ankusa (tests, 4/4)` (CI-21's tenant-fairness p99) and
+  `lint` (a `mise install` 500, CI-22); run 41702699820 (`e53e3d32`, CI-20's
+  merge — a `bench/gate.exs` + docs diff) failed `ankusa_kafka` 40/42
+  (CI-26: two `publish_batch` tests, `{:error, :unavailable}` after a
+  `{:reached_max_retries, :shutdown}` producer crash) and its `perf gate` was
+  still running at 19:25Z. AGENTS.md blocks a tag on a red `main` until
+  diagnosed.
 - **Wall clock after CI-17: 5.35 min** on a green `main` run (41688133998) and
   6.15 min on the red one; the two `main` runs are the only non-gate runs in the
   window. The CI-20 probe PRs read 11.9 / 16.7 / 12.7 / 21.4 / 12.0 min because
@@ -253,7 +257,7 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 18/25 done · closed without meeting the bar: CI-9 · next: CI-21, CI-22 · main: **red** (run 41689506568, `902e3dcb` — CI-21's p99 and CI-22's mise 500; 41702699820 on `e53e3d32` in progress at 19:25Z) · last updated: 2026-11-03
+Status: 18/26 done · closed without meeting the bar: CI-9 · next: CI-21, CI-26, CI-22 · main: **red** (41689506568 `902e3dcb`: CI-21 + CI-22; 41702699820 `e53e3d32`: CI-26, gate still running at 19:25Z) · last updated: 2026-11-03
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -1783,6 +1787,54 @@ which it does when a measured red run outranks a slow pipeline.
   (the summary page, if documented there).
   *Evidence:* —
 
+### Phase L — `main`'s kafka red
+
+- [ ] **CI-26 — `ankusa_kafka`: after a broker-restart drill, the next `publish_batch` is `:unavailable` because the producer has `max_retries: 0`** · P1 · Deps: CI-12
+  *Why:* run 41702699820 (`main` `e53e3d32`, CI-20's bench/docs merge) `ankusa_kafka`
+  job 126150001619 failed **40/42**: `assert {:ok, %{position: 2}} =
+  Kafka.publish_batch(…)` at `kafka_test.exs:455` and `… position: 0` at `:492`,
+  both `right: {:error, :unavailable}`, each preceded by
+  `GenServer #PID<0.3227.0> terminating ** (stop) {:reached_max_retries,
+  :shutdown}` in `brod_producer_buffer.rebuffer_or_crash/3` with `Last message:
+  {:DOWN, …, :shutdown}`. The test's own clients *had* connected
+  (`:ankusa_intake_probe_… connected to localhost:29094`,
+  `intake_kafka_… connected to localhost:29092` at 19:26:34.5) and
+  `create_topic/1` had polled leader + ISR, so the cluster was not simply "down";
+  with `max_retries: 0` (deliberate — kafka_test.exs:192: "produce that fails
+  kills its producer") a single attempt against a leader/connection that is
+  still re-forming reports unavailability instead of retrying. CI-12 (#246)
+  fixed exactly this shape at *startup* with a bounded commit probe, and this is
+  the same state entered mid-suite after the outage drills
+  (`compose(["restart" | all])`, `kafka_test.exs:340-400`), where nothing
+  re-probes. `main` is red on it, and it is the second `main` failure this
+  window after a diff (`bench/gate.exs` + docs) that cannot touch the adapter.
+  *Change:* the CI-12 rule — make the *wait* right, never the assertion:
+  1. Attribute on CI first: ten reruns of the failing job on the same commit (or
+     a probe branch), recording for each whether the failure follows a restart
+     drill (`compose(["restart" | all])`), and the state at failure
+     (`:brod.get_metadata` leader/ISR for the new topic, which broker the leader
+     was on, the crashed producer's last batch). One sample is not a diagnosis.
+  2. If it follows a restart: after every restart/stop drill, re-establish the
+     produce path before the next test — a bounded (20 s) leader + ISR wait plus
+     CI-12's commit probe on a topic of its own — in the drill's teardown, or
+     lazily in `create_topic/1` when the helper sees a new restart generation.
+     No retry inside a test body, and the probe keeps `max_retries: 0`.
+  3. If it does not follow a restart — a broker is genuinely unreachable long
+     enough under the suite's load — record the timings and hand it to the
+     maintainer as a product finding; do not widen the test.
+  *Done when:* twenty consecutive `mise run check:package ankusa_kafka` runs (or
+  ten CI reruns — say which) are green with no `reached_max_retries` in any log;
+  the failure still reproduces when the re-probe is stubbed out and a broker is
+  restarted between tests; every assertion is unchanged.
+  *Proof:* the rerun list with the log excerpt, the stubbed negative check,
+  `docker compose up -d --wait`, `mise run check:package ankusa_kafka`, and a
+  green `main` run after the merge.
+  *Anchors:* `packages/ankusa_kafka/test/ankusa/intake/kafka_test.exs:180-200,340-400,450-500`
+  (the `max_retries: 0` comment, `compose/1`, the leader/ISR waits,
+  `create_topic/1`), `packages/ankusa_kafka/lib/ankusa/intake/kafka.ex` (the
+  `:unavailable` mapping), `packages/ankusa_kafka/docker-compose.yml`.
+  *Evidence:* —
+
 ## Backlog (not yet an item)
 
 - **SQS FIFO batch order** — `Ankusa.Sink.SQSIntegrationTest` "sqs batch order:
@@ -1844,7 +1896,7 @@ bisect.
 
 ## Verification of this plan
 
-- `grep -cE '^- \[[ x]\] \*\*CI-' CI_PIPELINE_PLAN.md` → 25 (the number of
+- `grep -cE '^- \[[ x]\] \*\*CI-' CI_PIPELINE_PLAN.md` → 26 (the number of
   items; fewer ticked as they land, and the count matches the `Status:` line's
   denominator).
 - Every *Anchors* path exists at the commit the item is executed on (re-read the
