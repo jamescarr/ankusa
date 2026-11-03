@@ -103,9 +103,12 @@ case "$kind" in
       # `--cover` enforces the package's
       # `test_coverage: [summary: [threshold: n]]` floor (core 85, every other
       # package 80).
+      # `TEST_ARGS` appends flags for a one-off profile of the lane
+      # (`TEST_ARGS="--slowest 30"`, CI-9's evidence); empty in CI.
       testlog=$(mktemp)
       status=0
-      mix test --cover 2>&1 | tee "$testlog" || status=$?
+      # shellcheck disable=SC2086
+      mix test --cover ${TEST_ARGS:-} 2>&1 | tee "$testlog" || status=$?
       record_seed
       [ "$status" -eq 0 ] || exit "$status"
       # The one package-specific step: async_api_spex is for other projects, so

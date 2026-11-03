@@ -636,6 +636,8 @@ jobs:
       # audit and its `hex-audit-ankusa` artifact stay in the static lane —
       # `hex.audit` runs there, and two jobs must not upload one artifact name.
       - run: mise run check:package ankusa --lane test
+        env:
+          TEST_ARGS: "--slowest 30"
 
   # Core's object-store adapters (and the S3 backup round trip) against the
   # floci emulators: `mix test --only integration` (the rest of core's suite
