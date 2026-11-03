@@ -19,33 +19,250 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  discover:
-    name: discover packages
+  # CI-5: which jobs can this diff possibly need? This job decides once, every
+  # other job reads its outputs, and `ci-summary` reports the result. The
+  # filter lives at job level and never in the workflow's `paths:`: a skipped
+  # job reports `skipped`, which blocks nothing (`main` has no protection and
+  # no rulesets), so the workflow must always run and always report — the
+  # guard is the executor's own `gh pr checks --watch`, and `ci-summary`
+  # failing the run when this job did not finish.
+  #
+  # Everything here is fail-safe: a non-pull_request event, an empty or
+  # unreadable diff, an unknown path and any error inside the step all resolve
+  # to "run everything", never to "skip everything". A filter that breaks must
+  # cost a slow run, not a missing gate.
+  changes:
+    name: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
-      packages: ${{ steps.discover.outputs.packages }}
-      packages_rest: ${{ steps.discover.outputs.packages_rest }}
+      # The JSON matrices: every package to run, and the same list without
+      # `ankusa`, whose analysis and suite are the two lane jobs below. An
+      # empty matrix is a workflow error, so "nothing" is `["-"]` and the
+      # `package` job's `if:` is what keeps it from expanding.
+      packages: ${{ steps.filter.outputs.packages }}
+      packages_rest: ${{ steps.filter.outputs.packages_rest }}
+      # `ankusa` is one of the packages to run (a core change, or a diff that
+      # touched core): the two lane jobs' whole condition.
+      core: ${{ steps.filter.outputs.core }}
+      docs_only: ${{ steps.filter.outputs.docs_only }}
+      examples: ${{ steps.filter.outputs.examples }}
+      tools: ${{ steps.filter.outputs.tools }}
+      conformance: ${{ steps.filter.outputs.conformance }}
+      integration: ${{ steps.filter.outputs.integration }}
+      drills: ${{ steps.filter.outputs.drills }}
+      # One line for `ci-summary` and the log: what the diff touched and what
+      # it decided.
+      reason: ${{ steps.filter.outputs.reason }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - id: discover
+        with:
+          # The diff needs two commits: HEAD, and (on a pull request) the base.
+          # A base that is still missing — the merge ref's parent is the branch
+          # tip, but a base moved on — is fetched below; a failed fetch runs
+          # everything.
+          fetch-depth: 2
+      - id: filter
+        name: which jobs can this diff need?
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           source .mise/lib/pkg.sh
-          echo "packages=$(pkg_json)" >> "$GITHUB_OUTPUT"
-          # `ankusa` is not in the matrix: its analysis and its suite run side
-          # by side as `ankusa-static` and `ankusa-test` below, so the suite no
-          # longer queues behind dialyzer. Every other package keeps the
-          # one-job-per-package shape. `packages` stays for anything that wants
-          # the whole list.
-          rest="["
-          sep=""
-          for name in $(pkg_names); do
-            if [ "$name" != ankusa ]; then
-              rest="$rest$sep\"$name\""
-              sep=","
+
+          # Every package, in `pkg_names` order (`ankusa` first, then the Mix
+          # adapters, then the images and the SDKs). Space separated: it is
+          # word-split for the membership tests below.
+          all=$(pkg_names | tr '\n' ' ')
+
+          # $1: the packages to run, space separated, in any order (it is
+          # reordered and deduplicated by the caller); then examples, tools,
+          # conformance, integration, drills, docs_only, and a one-line reason.
+          emit() {
+            local pkgs="$1" name out="" rest="" core=false
+            for name in $pkgs; do
+              out="$out${out:+,}\"$name\""
+              if [ "$name" = ankusa ]; then
+                core=true
+              else
+                rest="$rest${rest:+,}\"$name\""
+              fi
+            done
+            [ -n "$out" ] || out="-"
+            [ -n "$rest" ] || rest="-"
+            {
+              echo "packages=[$out]"
+              echo "packages_rest=[$rest]"
+              echo "core=$core"
+              echo "examples=$2"
+              echo "tools=$3"
+              echo "conformance=$4"
+              echo "integration=$5"
+              echo "drills=$6"
+              echo "docs_only=$7"
+              echo "reason=$8"
+            } >> "$GITHUB_OUTPUT"
+            printf 'packages=[%s]\ncore=%s; examples=%s tools=%s conformance=%s integration=%s drills=%s docs_only=%s\n%s\n' \
+              "$out" "$core" "$2" "$3" "$4" "$5" "$6" "$7" "$8"
+          }
+
+          # Both failure modes have the same answer: run everything. The guard
+          # variable stops a failure inside `emit` from re-entering this.
+          failed=0
+          everything() {
+            if [ "$failed" = 1 ]; then exit 0; fi
+            failed=1
+            echo "$1"
+            if [ -z "$all" ]; then
+              # Without the package list there is no "everything" to run, and
+              # "skip everything" is the one answer this step must never give:
+              # fail the job instead, and `ci-summary` fails the run.
+              echo "::error::cannot list packages/*, so the all-jobs fallback is impossible"
+              exit 1
             fi
+            emit "$all" true true true true true false "$1"
+            exit 0
+          }
+          trap 'everything "::warning::the diff filter failed; every job runs"' ERR
+
+          if [ "$EVENT" != pull_request ]; then
+            everything "not a pull request (event: $EVENT): a push to main, a tag or workflow_call runs every job"
+          fi
+          if [ -z "$BASE" ] || [ -z "${BASE//0/}" ] || [ -z "$HEAD" ]; then
+            everything "no base and head to diff: every job runs"
+          fi
+          changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || true)
+          if [ -z "$changed" ]; then
+            # Most likely a shallow clone without the base commit. Not fatal:
+            # the retry below decides, and a still-empty diff runs everything.
+            git fetch --depth=1 --quiet origin "$BASE" >/dev/null 2>&1 || true
+            changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || true)
+          fi
+          if [ -z "$changed" ]; then
+            everything "the diff $BASE..$HEAD is empty or could not be read: every job runs"
+          fi
+          echo "the diff $BASE..$HEAD touches:"
+          printf '%s\n' "$changed"
+
+          # One pass over the diff, setting the flags each job reads. The
+          # order of the patterns matters: a Markdown file is prose wherever it
+          # lives (`*.md` comes before `packages/*`), and anything this list
+          # does not recognise runs everything.
+          every=0
+          core=0
+          touched=""
+          conformance=false
+          integration=false
+          drills=false
+          examples=false
+          tools=false
+          docs_only=true
+
+          while IFS= read -r path; do
+            case "$path" in
+              # Prose, the site, the housekeeping files: `lint` (which also runs
+              # check:monitoring and check:links) is what guards them.
+              docs/* | *.md | marketing/* | static/* | LICENSE | .gitignore | .gitattributes | .editorconfig)
+                ;;
+              # The toolchain, the tasks, and CI itself: every job's outcome
+              # can change without a package changing.
+              .mise.toml | .mise/* | scripts/* | .github/*)
+                every=1
+                ;;
+              packages/*/*)
+                name=${path#packages/}
+                name=${name%%/*}
+                case " $all " in
+                  *" $name "*) touched="$touched $name" ;;
+                  *) every=1 ;;
+                esac
+                case "$path" in
+                  packages/ankusa/* | packages/async_api_spex/*) core=1 ;;
+                esac
+                # The producer vectors are core's encoder's output, and the
+                # shared job is the only thing that regenerates and validates
+                # them. Each SDK's own `check:package` already runs that SDK's
+                # `conformance_test`, so an SDK-only diff does not need it.
+                case "$path" in
+                  packages/ankusa/*) conformance=true ;;
+                esac
+                case "$path" in
+                  packages/ankusa/*) integration=true ;;
+                esac
+                # The crash drills ack through the built image: any core or
+                # adapter code, the image, and the drills' own scripts. Kept
+                # deliberately wide — the drills are the ack-path gate.
+                case "$path" in
+                  packages/ankusa/lib/* | packages/ankusa/mix.exs | packages/ankusa/mix.lock)
+                    drills=true ;;
+                  packages/ankusa_server/* | packages/ankusa_*/lib/* | packages/ankusa_*/mix.exs)
+                    drills=true ;;
+                esac
+                # `check:examples` builds every example's Mix app; these are
+                # the packages those apps path-depend on.
+                case "$path" in
+                  packages/ankusa/* | packages/async_api_spex/* | packages/ankusa_kafka/* | packages/ankusa_rabbitmq/*)
+                    examples=true ;;
+                esac
+                docs_only=false
+                ;;
+              conformance/*)
+                conformance=true
+                docs_only=false
+                ;;
+              examples/* | deploy/helm/*)
+                examples=true
+                docs_only=false
+                ;;
+              tools/*)
+                tools=true
+                examples=true
+                docs_only=false
+                ;;
+              # `check:monitoring` runs in `lint`, which always runs.
+              deploy/monitoring/*)
+                docs_only=false
+                ;;
+              *)
+                every=1
+                ;;
+            esac
+          done <<EOF
+          $changed
+          EOF
+
+          if [ "$every" = 1 ]; then
+            everything "a toolchain, CI or script file, or a path this filter does not know, changed: every job runs"
+          fi
+
+          # The dependency rule from AGENTS.md: every adapter package and
+          # `ankusa_server` path-depend on `ankusa` core, so a core change is
+          # not finished until they pass — the whole Mix group, which is every
+          # `hex` package (`ankusa`, the five adapters, `async_api_spex`,
+          # `sdk-elixir`) plus `ankusa_server` (kind `docker`).
+          if [ "$core" = 1 ]; then
+            for name in $all; do
+              case "$(pkg_kind "$name")" in
+                hex | docker) touched="$touched $name" ;;
+              esac
+            done
+          fi
+
+          # `pkg_names` order, no duplicates.
+          ordered=""
+          for name in $all; do
+            case " $touched " in *" $name "*) ordered="$ordered $name" ;; esac
           done
-          echo "packages_rest=$rest]" >> "$GITHUB_OUTPUT"
+
+          if [ "$docs_only" = true ]; then
+            reason="docs-only diff: every package job and every drill is skipped; lint still runs"
+          else
+            reason="packages:${ordered:- none}; examples=$examples tools=$tools conformance=$conformance integration=$integration drills=$drills"
+          fi
+
+          emit "$ordered" "$examples" "$tools" "$conformance" "$integration" "$drills" "$docs_only" "$reason"
 
   lint:
     name: lint
@@ -69,7 +286,11 @@ jobs:
 
   package:
     name: ${{ matrix.package }}
-    needs: discover
+    needs: changes
+    # `["-"]` is the changes job's "no package to run"; the matrix would be a
+    # workflow error (`Matrix vector 'package' does not contain any values`),
+    # so the job is skipped instead of expanded.
+    if: needs.changes.outputs.packages_rest != '["-"]'
     runs-on: ubuntu-latest
     env:
       # Fork PRs get no secrets; skip the login there rather than fail it.
@@ -77,8 +298,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every package but `ankusa`, which has the two lane jobs below.
-        package: ${{ fromJSON(needs.discover.outputs.packages_rest) }}
+        # Every package the diff can need, but `ankusa` — it has the two lane
+        # jobs below.
+        package: ${{ fromJSON(needs.changes.outputs.packages_rest) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # A package job needs one toolchain, not the repo's whole set: the
@@ -306,7 +528,10 @@ jobs:
   # a key) is to bump it here and in the `package` job together.
   ankusa-static:
     name: ankusa (static)
-    needs: discover
+    needs: changes
+    # The same condition the matrix would apply to `ankusa`: core is in the
+    # packages to run.
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     env:
       # Fork PRs get no secrets; skip the login there rather than fail it.
@@ -360,7 +585,8 @@ jobs:
 
   ankusa-test:
     name: ankusa (tests)
-    needs: discover
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     env:
       # Fork PRs get no secrets; skip the login there rather than fail it.
@@ -404,6 +630,8 @@ jobs:
   # runs in the `ankusa-test` job).
   integration:
     name: core integration (floci)
+    needs: changes
+    if: needs.changes.outputs.integration == 'true'
     runs-on: ubuntu-latest
     env:
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
@@ -464,6 +692,8 @@ jobs:
 
   conformance:
     name: sdk conformance
+    needs: changes
+    if: needs.changes.outputs.conformance == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -508,6 +738,8 @@ jobs:
   # packages, and where a lockfile goes stale without anyone noticing.
   examples:
     name: examples
+    needs: changes
+    if: needs.changes.outputs.examples == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -545,6 +777,8 @@ jobs:
 
   tools:
     name: tools
+    needs: changes
+    if: needs.changes.outputs.tools == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -759,6 +993,8 @@ jobs:
   # 192 MiB tmpfs, then kill -9 under load; every acked hook must read back.
   crash:
     name: crash drill (ENOSPC, kill -9)
+    needs: changes
+    if: needs.changes.outputs.drills == 'true'
     runs-on: ubuntu-latest
     env:
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
@@ -834,6 +1070,8 @@ jobs:
   # that does not, and the step reports a skip; any other failure fails the job.
   crash-powerloss:
     name: crash drill (power-loss cut, device-mapper)
+    needs: changes
+    if: needs.changes.outputs.drills == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -901,3 +1139,86 @@ jobs:
         run: |
           [ -d .cache/crash ] || exit 0
           sudo chown -R "$(id -u):$(id -g)" .cache/crash
+
+  # CI-5: what the run did, and the one job that fails when the filter itself
+  # did not work. `if: always()` so it reports even when every other job was
+  # skipped: without it, a `changes` job that broke would leave a run that is
+  # green because nothing ran.
+  ci-summary:
+    name: ci-summary
+    needs:
+      - changes
+      - lint
+      - package
+      - ankusa-static
+      - ankusa-test
+      - integration
+      - conformance
+      - examples
+      - tools
+      - bench
+      - bench-tenant
+      - crash
+      - crash-powerloss
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: the per-job result table
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          CHANGES: ${{ needs.changes.result }}
+          REASON: ${{ needs.changes.outputs.reason }}
+        run: |
+          set -uo pipefail
+          # The jobs API is where a matrix job appears leg by leg (`needs`
+          # only aggregates it) and where the real durations are. Read with the
+          # run's own token: no third-party action to pin, no extra permission.
+          rows=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" --paginate \
+            -q '.jobs[]
+                | select(.name != "ci-summary")
+                | [.name, (.conclusion // "-"),
+                   (if .started_at and .completed_at
+                    then (((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601)) / 60 * 10 | round / 10 | tostring)
+                    else "-" end)]
+                | @tsv' 2>/dev/null) || rows=""
+
+          table() {
+            echo "| job | result | minutes |"
+            echo "| --- | --- | --- |"
+            if [ -n "$rows" ]; then
+              printf '%s\n' "$rows" | while IFS=$'\t' read -r name result minutes; do
+                printf '| %s | %s | %s |\n' "$name" "$result" "$minutes"
+              done
+            else
+              echo "| (the jobs API returned nothing) | - | - |"
+            fi
+          }
+
+          {
+            echo "## CI"
+            echo
+            if [ -n "$REASON" ]; then
+              echo "**The \`changes\` job decided:** $REASON"
+              echo
+            fi
+            table
+            echo
+            echo "A job reported \`skipped\` because the diff cannot have touched it; the decision, the diff it read and the jobs it chose are in the \`changes\` job's log."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          # The filter is the only thing standing between a diff and its gates,
+          # so a `changes` job that did not finish fails the run instead of
+          # leaving it green with every gated job skipped. A run cancelled by a
+          # newer push is not a filter failure.
+          case "$CHANGES" in
+            success) ;;
+            cancelled)
+              echo "::notice::the changes job was cancelled with the run; nothing to judge"
+              ;;
+            *)
+              echo "::error::the changes job did not succeed ($CHANGES), so every gated job was skipped"
+              exit 1
+              ;;
+          esac

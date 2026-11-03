@@ -113,6 +113,15 @@ CI keeps the compose, floci-emulator and drill images in the Actions cache
 (`scripts/ci/images.sh`) and only pulls one when its digest pin changes;
 locally `mise run check:package` / `test:integration` are unchanged.
 
+`ci.yml` runs only the jobs a pull request's diff can need: the touched
+package (or, for a core change, the whole Mix group, because every adapter and
+`ankusa_server` path-depend on it), the crash drills for core or adapter code,
+`examples` for `examples/`, `deploy/helm/` or a package an example
+path-depends on; `changes`, `lint` and `ci-summary` always run, and a job the
+diff cannot need reports `skipped`. A push to `main`, a tag and `workflow_call`
+run every job. The pattern → job table and the fail-safe are in
+[`testing.md`](docs/testing.md#what-a-pull-request-runs).
+
 ## Run the checks before calling work done
 
 Format, warnings-as-errors, and tests — for **every** package the change

@@ -17,6 +17,36 @@ and its seed line), side by side instead of the suite waiting behind dialyzer.
 The eight client SDKs are also checked against one shared, language-neutral
 vector suite — `mise run check:conformance`, below.
 
+## What a pull request runs
+
+`ci.yml` opens with a `changes` job that reads the pull request's diff and tells
+every other job whether its input can have changed; a job it turns off reports
+`skipped` and blocks nothing. `changes`, `lint` (workflow pins, links,
+monitoring) and `ci-summary`, which writes the run's job table to the summary,
+always run. A push to `main`, a release tag and `workflow_call` run **every**
+job — their diff was already gated on a pull request, or is not a diff at all.
+So does any diff the filter cannot classify, an empty or unreadable diff, and
+any error inside the step: a broken filter costs a slow run, never a missing
+gate.
+
+| the diff touches | the jobs that run |
+| --- | --- |
+| `docs/**`, any `*.md`, `marketing/**`, `static/**` | none of the package jobs; `lint` is the guard, and the summary says "docs-only" |
+| `packages/ankusa/**` or `packages/async_api_spex/**` | the whole Mix group — `ankusa (static)`, `ankusa (tests)`, the five adapters, `ankusa_server`, `async_api_spex`, `sdk-elixir` — plus `core integration`, `sdk conformance`, both crash drills and `examples`. Every adapter package and `ankusa_server` path-depend on `ankusa`, so a core change is not finished until they pass |
+| `packages/sdk-*` | that SDK alone; its `check:package` runs its own `conformance_test`, so the shared `sdk conformance` job is only for `conformance/**` and the producer vectors core generates |
+| an adapter (`packages/ankusa_kafka`, `…_nats`, `…_rabbitmq`, `…_redis`) | that package, both crash drills (they ack through the image), and `examples` for the two an example path-depends on |
+| `packages/ankusa_server/**` | `ankusa_server` and both crash drills |
+| `conformance/**` | `sdk conformance` |
+| `examples/**`, `deploy/helm/**` | `examples` |
+| `tools/**` | `tools` and `examples` |
+| `.mise.toml`, `.mise/**`, `scripts/**`, `.github/**`, or a path the filter does not know | every job |
+
+The perf gate and `bench-tenant` keep their own scope decision (below): on a
+PR that touches no hot-path file they still start, spend a few seconds judging
+the diff, and skip the minutes of benching. If a skip looks wrong, read the
+`ci-summary` job's table and then the `changes` job's log: it prints the diff
+it read, the packages and flags it decided, and the rule that decided them.
+
 ## Static analysis and coverage gates
 
 `check:package` runs these on every Mix package (sobelow only on the two Plug
