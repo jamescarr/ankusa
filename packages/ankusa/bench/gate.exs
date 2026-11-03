@@ -123,7 +123,7 @@ defmodule Bench.Gate do
   # the limit, the rounds' medians disagree, and the cell runs out of retries
   # as inconclusive — deterministically, on any machine. CI never sets it.
   @self_test_switch "BENCH_SELF_TEST_INCONCLUSIVE"
-  @self_test_p99_factors [[1.0, 2.0, 1.0], [2.0, 2.0, 2.0], [1.0, 1.0, 1.0]]
+  @self_test_p99_factors [[1.0, 2.0, 1.0], [3.0, 3.0, 3.0], [1.0, 1.0, 1.0]]
 
   @bench_dir Path.dirname(__ENV__.file)
   @last Path.join(@bench_dir, "last.json")
@@ -230,7 +230,7 @@ defmodule Bench.Gate do
 
         retry_cells = Enum.map(unsettled, &elem(&1, 0))
         retry = Enum.filter(matrix, fn {cell, _, _} -> cell in retry_cells end)
-        retried = collect(retry, runs, root, trace?, %{})
+        retried = collect(retry, runs, root, trace?, %{}, extra_rounds + 1)
         samples = Map.merge(samples, retried, fn _cell, first, more -> first ++ more end)
         settle(matrix, runs, root, trace?, samples, cells, extra_rounds + 1)
     end
@@ -313,7 +313,10 @@ defmodule Bench.Gate do
   defp empty_baseline(cells), do: Map.new(cells, fn cell -> {cell, %{}} end)
 
   # Round-robin over the cells so a noisy minute is spread over all of them.
-  defp collect(matrix, runs, root, trace?, samples) do
+  # `round` is the measurement round within the cell's budget (0 for the
+  # first, then 1..@spread_retries for the re-measurements); only the
+  # self-test switch reads it.
+  defp collect(matrix, runs, root, trace?, samples, round \\ 0) do
     for run <- 1..runs, {cell, bytes, concurrency} <- matrix, reduce: samples do
       acc ->
         IO.puts("==> bench #{cell} run #{run}/#{runs}")
@@ -329,23 +332,21 @@ defmodule Bench.Gate do
             run
           )
 
-        sample = self_test_p99(sample, cell, length(Map.get(acc, cell, [])), runs)
+        sample = self_test_p99(sample, cell, round, run)
         Map.update(acc, cell, [sample], &(&1 ++ [sample]))
     end
   end
 
   # `BENCH_SELF_TEST_INCONCLUSIVE=<cell>` (header): a switch no CI job sets. It
   # multiplies the cell's `p99_ms` by round and run, so the first round is
-  # wider than the limit and the rounds' medians disagree, and the gate has to
-  # take the inconclusive path on any machine.
-  defp self_test_p99(sample, cell, measured, runs) do
+  # wider than the limit, the second's median is three times the first's, and
+  # the gate has to take the inconclusive path on any machine.
+  defp self_test_p99(sample, cell, round, run) do
     if System.get_env(@self_test_switch) == cell do
-      round = div(measured, runs)
-
       factor =
         @self_test_p99_factors
         |> Enum.at(min(round, length(@self_test_p99_factors) - 1))
-        |> Enum.at(rem(measured, runs)) || 1.0
+        |> Enum.at(run - 1) || 1.0
 
       IO.puts(
         "    SELF-TEST #{@self_test_switch}=#{cell}: p99_ms x#{factor} (round #{round + 1})"
