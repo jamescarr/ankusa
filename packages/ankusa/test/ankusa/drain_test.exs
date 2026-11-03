@@ -5,9 +5,12 @@ defmodule Ankusa.DrainTest do
   The drill is OS-level, like `loss_test.exs`: a child BEAM
   (`test/support/drain_harness.exs`) runs the real `:ankusa` application with one
   instance whose queue writer the test stalls, so 200 POSTs sit in the batchers.
-  The test then sends SIGTERM and asserts what the clients and the store saw: `/ready` answers
-  `503 draining` within 100 ms of the signal, every request is answered `201`
-  or `503` (zero connection resets), and every `201` is in the store after a
+  The test then sends SIGTERM and asserts what the clients and the store saw:
+  the drainer flips `/ready` to `503 draining` within 100 ms of the harness
+  receiving the signal (the harness prints a `SIGTERM` and a `DRAINING`
+  timestamp of its own, so the test's `kill` fork/exec and its polled `/ready`
+  round trip are not in the measurement), every request is answered `201` or
+  `503` (zero connection resets), and every `201` is in the store after a
   restart. The `in process` tests cover `Ankusa.Instance.Drain` and
   `Ankusa.Edge.Batcher.queued/2` without a second VM.
   """
@@ -50,10 +53,19 @@ defmodule Ankusa.DrainTest do
 
       sent = System.monotonic_time(:millisecond)
       {_, 0} = System.cmd("kill", ["-TERM", Integer.to_string(os_pid)])
-      flipped = await_draining(http_port, sent)
-      flip_ms = flipped - sent
+      # The promise is the drainer's, so the clock starts when the harness
+      # received SIGTERM, not when the test forked `kill`; the end is the moment
+      # `Health.drain/1` ran, not when a polled `/ready` answered.
+      sigterm = await_marker(port, "SIGTERM", 5_000)
+      draining = await_marker(port, "DRAINING", 5_000)
+      flip_ms = draining - sigterm
 
       assert flip_ms <= 100, "/ready took #{flip_ms} ms to flip to draining"
+
+      # The client-facing half, untimed: `/ready` still answers `503 draining`
+      # on the listener that holds the 200 in-flight requests.
+      observed = await_draining(http_port, sent)
+      observed_ms = observed - sent
 
       results = Task.await_many(tasks, 60_000)
       resets = for {:reset, why} <- results, do: why
@@ -80,7 +92,8 @@ defmodule Ankusa.DrainTest do
              "lost #{MapSet.size(missing)} acked hooks: #{inspect(Enum.take(missing, 5))}"
 
       IO.puts(
-        "drain: ready flips in #{flip_ms} ms; zero resets; #{length(acked)} x 201, " <>
+        "drain: SIGTERM to draining in #{flip_ms} ms; first 503 answer #{observed_ms} ms " <>
+          "after the test sent the signal; zero resets; #{length(acked)} x 201, " <>
           "#{length(answered) - length(acked)} x 503; every 201 present after restart"
       )
     end
@@ -249,6 +262,27 @@ defmodule Ankusa.DrainTest do
     end
   end
 
+  # The child's own monotonic millisecond from a marker line such as
+  # `SIGTERM 12345` (both timestamps come from the same clock, so their
+  # difference is exact).
+  defp await_marker(port, marker, timeout) do
+    receive do
+      {^port, {:data, {:eol, line}}} ->
+        case String.split(line, " ", parts: 2) do
+          [^marker, ms] -> String.to_integer(ms)
+          _other -> await_marker(port, marker, timeout)
+        end
+
+      {^port, {:data, _other}} ->
+        await_marker(port, marker, timeout)
+
+      {^port, {:exit_status, status}} ->
+        flunk("the drain harness exited with status #{status} before printing #{marker}")
+    after
+      timeout -> flunk("the drain harness never printed #{marker}")
+    end
+  end
+
   defp ingress_pid(instance) do
     instance
     |> Ankusa.via(:edge)
@@ -330,8 +364,9 @@ defmodule Ankusa.DrainTest do
   defp parse(data), do: {:reset, {:no_response, data}}
 
   # Poll `/ready` until it answers `503` with `"status":"draining"`; the
-  # monotonic millisecond it first did. `unavailable` is some other check, and
-  # not it.
+  # monotonic millisecond the test saw it. Not the deadline — the drainer's own
+  # span is the harness's `SIGTERM` → `DRAINING` markers. `unavailable` is some
+  # other check, and not it.
   defp await_draining(port, since) do
     request = "GET /ready HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n"
 

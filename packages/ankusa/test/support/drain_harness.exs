@@ -14,6 +14,18 @@
 #                  and print `RESUMED`. A POST sent meanwhile blocks in the
 #                  batcher, which is how a drill holds requests in flight.
 #
+# It also prints the two timestamps the drain promise is measured on, in this
+# process's own `System.monotonic_time(:millisecond)`:
+#
+#     SIGTERM <ms>    the VM received SIGTERM (`:erl_signal_server`'s default
+#                     handler still stops the node through `prep_stop/1`)
+#     DRAINING <ms>   `Ankusa.Health.drain/1` had run: `/ready` now answers
+#                     `503 draining` from this moment on
+#
+# The distance between them is what the test asserts on. Measuring from this
+# process' receipt of the signal leaves out the test's `kill` fork/exec and its
+# polled `/ready` round trip, which are the harness's costs, not the drainer's.
+#
 # Required by `test_helper.exs` for `Ankusa.DrainHarness.config/2`: the file only
 # runs when its argv is exactly `serve`.
 defmodule Ankusa.DrainHarness do
@@ -30,6 +42,37 @@ defmodule Ankusa.DrainHarness do
       Process.sleep(Keyword.fetch!(opts, :delay_ms))
       :ok
     end
+  end
+
+  # `:erl_signal_server`'s second handler: the stop's own starting timestamp.
+  # SIGTERM is handled by the VM by default, and `erl_signal_handler` (already
+  # installed) is what stops it; this one only reports when the signal arrived.
+  defmodule Signal do
+    @moduledoc false
+    @behaviour :gen_event
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_event(:sigterm, state) do
+      IO.puts("SIGTERM #{System.monotonic_time(:millisecond)}")
+      {:ok, state}
+    end
+
+    def handle_event(_event, state), do: {:ok, state}
+
+    @impl true
+    def handle_call(_request, state), do: {:ok, :ok, state}
+
+    @impl true
+    def handle_info(_message, state), do: {:ok, state}
+
+    @impl true
+    def terminate(_reason, _state), do: :ok
+
+    @impl true
+    def code_change(_old_vsn, state, _extra), do: {:ok, state}
   end
 
   @doc "The instance config the serving child and a reopening parent both use."
@@ -79,9 +122,24 @@ defmodule Ankusa.DrainHarness do
     {:ok, _} = Application.ensure_all_started(:ankusa)
     {:ok, _} = Supervisor.start_child(Ankusa.Supervisor, {Ankusa.Instance, config})
 
+    # After the instance is up, so `draining?` only ever turns true for the stop.
+    :ok = :gen_event.add_handler(:erl_signal_server, Signal, nil)
+    spawn(&announce_draining/0)
     spawn(&commands/0)
     IO.puts("READY")
     Process.sleep(:infinity)
+  end
+
+  # `Ankusa.Health.drain/1` is the flip: the next `/ready` answers `503 draining`.
+  # A 1 ms poll sees it, no HTTP round trip on the listener that is holding the
+  # drill's requests, and prints it on this process' own clock.
+  defp announce_draining do
+    if Ankusa.Health.draining?(@instance) do
+      IO.puts("DRAINING #{System.monotonic_time(:millisecond)}")
+    else
+      Process.sleep(1)
+      announce_draining()
+    end
   end
 
   defp commands do
