@@ -1849,6 +1849,201 @@ defmodule AnkusaServer.ConfigTest do
     end
   end
 
+  test "templated sinks load with the strings as written, and Source.new compiles them" do
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          sources:
+            demo:
+              verify: {type: none}
+              event_type: {json: type}
+              sinks:
+                - {type: kafka, brokers: ["k:9092"], topic: "events.{{ event_type ?? other }}", key: "{{ tenant }}"}
+                - {type: rabbitmq, exchange: x, routing_key: "{{ event_type }}"}
+                - {type: nats, servers: ["n:4222"], subject: "hooks.{{ tenant }}.{{ source }}"}
+                - {type: redis, url: "redis://r:6379", channel: "c.{{ source }}"}
+                - {type: sqs, queue_url: "https://sqs.us-east-1.amazonaws.com/1/q.fifo", region: us-east-1, message_group_id: "{{ tenant }}"}
+                - {type: google_pubsub, project: p, topic: t, ordering_key: "{{ id }}"}
+                - type: http
+                  url: "https://hooks.example.com/t/{{ tenant }}?e={{ header.x-github-event ?? none }}"
+                  headers: {x-event: "{{ event_type }}", x-static: "1"}
+                  allow_unsigned: true
+          """),
+        env: %{}
+      ).config
+
+    opts = config.source_store |> elem(1) |> Keyword.fetch!(:sources) |> Map.fetch!("demo")
+    assert [{Ankusa.Sink.Kafka, kafka} | _] = opts[:sinks]
+    assert kafka[:topic] == "events.{{ event_type ?? other }}"
+
+    sinks = Ankusa.Source.new("demo", opts).sinks
+
+    assert [
+             {_, kafka},
+             {_, rabbit},
+             {_, nats},
+             {_, redis},
+             {_, sqs},
+             {_, pubsub},
+             {_, http}
+           ] = sinks
+
+    assert {:template, ["events.", {:var, "event_type", "other"}]} = kafka[:topic]
+    assert {:template, [{:var, "tenant", nil}]} = kafka[:key]
+    assert {:template, [{:var, "event_type", nil}]} = rabbit[:routing_key]
+    assert {:template, ["hooks.", _, ".", _]} = nats[:subject]
+    assert {:template, ["c.", {:var, "source", nil}]} = redis[:channel]
+    assert {:template, [{:var, "tenant", nil}]} = sqs[:message_group_id]
+    assert {:template, [{:var, "id", nil}]} = pubsub[:ordering_key]
+
+    assert {:template, ["https://hooks.example.com/t/", {:var, "tenant", nil}, "?e=", _]} =
+             http[:url]
+
+    assert [{"x-event", {:template, _}}, {"x-static", "1"}] = http[:headers]
+  end
+
+  test "templated url: host rule" do
+    http = fn url ->
+      """
+      sources:
+        demo:
+          verify: {type: none}
+          sinks:
+            - type: http
+              url: "#{url}"
+              allow_unsigned: true
+      """
+    end
+
+    for url <- [
+          "https://hooks.example.com/{{ tenant }}",
+          "https://hooks.example.com:8443/t/{{ tenant }}/{{ event_type ?? x }}?a=1",
+          "https://hooks.example.com/t?e={{ id }}",
+          "HTTPS://hooks.example.com/{{ tenant }}"
+        ] do
+      assert %{config: _} = Config.load!(path: tmp_config(http.(url)), env: %{}), url
+    end
+
+    for url <- [
+          "https://{{ tenant }}.example.com/x",
+          "https://hooks.{{ tenant }}.example.com/x",
+          "https://hooks.example.com{{ tenant }}",
+          "https://hooks.example.com?e={{ id }}",
+          "https://user:{{ tenant }}@hooks.example.com/x",
+          "{{ tenant }}://hooks.example.com/x",
+          "{{ tenant }}"
+        ] do
+      error =
+        assert_raise ConfigError, fn -> Config.load!(path: tmp_config(http.(url)), env: %{}) end
+
+      assert error.message ==
+               "sources.demo.sinks[0].url: templates are allowed after the host, not in it",
+             url
+    end
+
+    # the literal prefix is still held to the scheme rule
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config(http.("http://hooks.example.com/{{ tenant }}")), env: %{})
+      end
+
+    assert error.message =~ "sources.demo.sinks[0].url: must be an https:// URL"
+
+    # the admin API's decoder runs the same checks
+    assert_raise ConfigError,
+                 ~r/sources\.api\.sinks\[0\]\.url: templates are allowed after the host/,
+                 fn ->
+                   Config.source_from_map!("api", %{
+                     "verify" => %{"type" => "none"},
+                     "sinks" => [
+                       %{
+                         "type" => "http",
+                         "url" => "https://{{ tenant }}.example.com/",
+                         "allow_unsigned" => true
+                       }
+                     ]
+                   })
+                 end
+  end
+
+  test "templates on a non-templatable key are refused" do
+    for {sink, key} <- [
+          {"{type: sqs, queue_url: \"https://sqs.us-east-1.amazonaws.com/{{ tenant }}\", region: us-east-1}",
+           "queue_url"},
+          {"{type: google_pubsub, project: p, topic: \"{{ tenant }}\"}", "topic"},
+          {"{type: google_pubsub, project: \"{{ tenant }}\", topic: t}", "project"},
+          {"{type: rabbitmq, exchange: \"{{ tenant }}\"}", "exchange"},
+          {"{type: rabbitmq, exchange: x, url: \"amqp://{{ tenant }}\"}", "url"},
+          {"{type: redis, url: \"redis://{{ tenant }}\", channel: c}", "url"},
+          {"{type: kafka, brokers: [\"{{ tenant }}:9092\"], topic: t}", "brokers"},
+          {"{type: nats, servers: [\"{{ tenant }}:4222\"], subject: s}", "servers"}
+        ] do
+      path =
+        tmp_config("""
+        sources:
+          demo:
+            verify: {type: none}
+            sinks: [#{sink}]
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+
+      assert error.message == "sources.demo.sinks[0]: templates are not supported on #{key}",
+             sink
+    end
+
+    # lifecycle events have no hook to read a variable from
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(
+          path:
+            tmp_config("""
+            lifecycle:
+              sinks: [{type: kafka, brokers: ["k:9092"], topic: "events.{{ source }}"}]
+            sources:
+              demo: {verify: {type: none}, sinks: [{type: log}]}
+            """),
+          env: %{}
+        )
+      end
+
+    assert error.message == "lifecycle.sinks: templates are not supported on lifecycle sinks"
+  end
+
+  test "a malformed template names the sink key it is on" do
+    for {sink, fragment} <- [
+          {"{type: kafka, brokers: [\"k:9092\"], topic: \"{{ nope }}\"}",
+           ~s(sources.demo.sinks[0].topic: unknown variable "nope")},
+          {"{type: nats, servers: [\"n:4222\"], subject: \"a.{{ tenant\"}",
+           "sources.demo.sinks[0].subject: unclosed {{"},
+          {"{type: redis, url: \"redis://r\", channel: \"{{ }}\"}",
+           "sources.demo.sinks[0].channel: empty {{ }}"},
+          {"{type: kafka, brokers: [\"k:9092\"], topic: t, key: \"{{ tenant ?? a b }}\"}",
+           "sources.demo.sinks[0].key: the fallback of {{ tenant }}"},
+          {"{type: http, url: \"https://h.example.com/\", allow_unsigned: true, headers: {x-e: \"{{ header. }}\"}}",
+           "sources.demo.sinks[0].headers.x-e: header. needs a header name"}
+        ] do
+      path =
+        tmp_config("""
+        sources:
+          demo:
+            verify: {type: none}
+            sinks: [#{sink}]
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ fragment, sink
+    end
+
+    assert_raise ConfigError, ~r/sources\.api\.sinks\[0\]\.topic: unknown variable/, fn ->
+      Config.source_from_map!("api", %{
+        "verify" => %{"type" => "none"},
+        "sinks" => [%{"type" => "kafka", "brokers" => ["k:9092"], "topic" => "{{ nope }}"}]
+      })
+    end
+  end
+
   test "forward_headers accepts a list (lowercased) or nothing, and rejects other shapes" do
     config =
       Config.load!(

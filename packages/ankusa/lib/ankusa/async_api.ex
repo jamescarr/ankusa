@@ -252,7 +252,9 @@ defmodule Ankusa.AsyncApi do
             "durable, in commit order, at least once, replayable"
       ),
       if(Enum.any?(entries, &(&1.d.address == nil)),
-        do: "The address is computed per hook by a configured function and cannot be advertised."
+        do:
+          "The address is computed per hook (by a configured function or a template) and " <>
+            "cannot be advertised."
       ),
       filter_text(hooks)
     ]

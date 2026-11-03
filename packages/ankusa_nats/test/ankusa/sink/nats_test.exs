@@ -141,6 +141,42 @@ defmodule Ankusa.Sink.NATSTest do
     refute Map.has_key?(Map.new(headers), "ankusa_ordering_key")
   end
 
+  test "templated subject: rendered per hook from the envelope", %{
+    instance: inst,
+    suffix: suffix,
+    admin: admin
+  } do
+    prefix = "ankusa.test.#{suffix}"
+    {:ok, _sid} = Gnat.sub(admin, self(), prefix <> ".>")
+
+    template =
+      Ankusa.Sink.Template.compile!("test", prefix <> ".{{ tenant }}.{{ event_type ?? none }}")
+
+    assert :ok = deliver(envelope(%{event_type: "invoice.paid"}), ctx(inst), opts(template))
+    assert :ok = deliver(envelope(), ctx(inst), opts(template))
+
+    paid = prefix <> ".t1.invoice.paid"
+    none = prefix <> ".t1.none"
+    assert_receive {:msg, %{topic: ^paid}}, 2_000
+    assert_receive {:msg, %{topic: ^none}}, 2_000
+
+    # no value and no fallback: a permanent failure, nothing published
+    strict = opts(Ankusa.Sink.Template.compile!("test", prefix <> ".{{ event_type }}"))
+
+    assert {:error, {:permanent, {:template_missing, "event_type"}}} =
+             Ankusa.Sink.safe_deliver(NATS, envelope(), ctx(inst), strict)
+
+    refute_receive {:msg, _}, 200
+  end
+
+  test "templated subject: describe/2 names no address" do
+    template = Ankusa.Sink.Template.compile!("test", "hooks.{{ tenant }}")
+    subject = %{source_id: "src", tenant_id: nil}
+
+    assert %{address: nil} = NATS.describe(subject, opts(template))
+    assert %{address: "hooks.x"} = NATS.describe(subject, opts("hooks.x"))
+  end
+
   test "a fat payload is checked in through ClaimCheck and the message carries a ticket", %{
     instance: inst,
     subject: subject,

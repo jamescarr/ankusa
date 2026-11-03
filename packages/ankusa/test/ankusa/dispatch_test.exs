@@ -1270,6 +1270,68 @@ defmodule Ankusa.DispatchTest do
              ])
   end
 
+  defmodule AddressSink do
+    @moduledoc false
+    @behaviour Ankusa.Sink
+
+    # What a messaging sink does with a per-hook address: resolve it, then publish.
+    @impl true
+    def deliver(env, _ctx, opts) do
+      address = Ankusa.Sink.Messaging.resolve(Keyword.fetch!(opts, :address), env)
+      send(Keyword.fetch!(opts, :pid), {:address, env.id, address})
+      :ok
+    end
+  end
+
+  test "template: a variable with no value is a permanent dead letter that delivers after a fix and a replay" do
+    inst = unique_instance()
+    dir = unique_data_dir(inst)
+    on_exit(fn -> File.rm_rf(dir) end)
+    :persistent_term.put({__MODULE__, :address_pid}, self())
+    on_exit(fn -> :persistent_term.erase({__MODULE__, :address_pid}) end)
+
+    start_supervised!(
+      {Ankusa.Instance,
+       persistent_config(inst, dir, [:edge, :dispatch], %{retry: retry(max_attempts: 5)})}
+    )
+
+    assert {:ok, _} =
+             Ankusa.SourceStore.put(
+               inst,
+               "acme",
+               "billing",
+               %{"address" => "ev.{{ event_type }}"},
+               :create
+             )
+
+    env = enqueue!(inst, build_env("acme.billing"))
+    assert {:ok, _} = Pipeline.tick(inst)
+
+    # dead after its first attempt, not retried five times: the hook lacks the field
+    assert {:ok, %{total: 1, entries: [entry]}} = Ankusa.Queue.dead(inst, limit: 10)
+    assert entry.envelope.id == env.id
+    assert entry.error_class == :permanent
+
+    assert entry.reason ==
+             inspect({:sink, AddressSink, {:permanent, {:template_missing, "event_type"}}})
+
+    refute_receive {:address, _, _}, 100
+
+    # the source is fixed with a fallback; the replay renders from the stored hook
+    assert {:ok, _} =
+             Ankusa.SourceStore.put(
+               inst,
+               "acme",
+               "billing",
+               %{"address" => "ev.{{ event_type ?? other }}"},
+               :update
+             )
+
+    assert {:ok, :created, _job} = Ankusa.Replay.start(inst, %{kind: :dlq, rate: 1_000})
+    id = env.id
+    assert_receive {:address, ^id, "ev.other"}, 5_000
+  end
+
   @doc false
   def forward_config_error(_event, _measurements, meta, pid),
     do: send(pid, {:config_error, meta})
@@ -1302,6 +1364,16 @@ defmodule Ankusa.DispatchTest do
   defp decode_source(_source_id, %{"fail" => true} = spec) do
     retry = for {key, value} <- Map.get(spec, "retry", %{}), do: {String.to_atom(key), value}
     [sinks: [{AlwaysFail, []}]] ++ if(retry == [], do: [], else: [retry: retry])
+  end
+
+  defp decode_source(_source_id, %{"address" => address}) do
+    [
+      sinks: [
+        {AddressSink,
+         pid: :persistent_term.get({__MODULE__, :address_pid}),
+         address: Ankusa.Sink.Template.compile!("address", address)}
+      ]
+    ]
   end
 
   defp decode_source(_source_id, %{"sinks" => [_ | _]}), do: [sinks: [{Ankusa.Sink.Log, []}]]

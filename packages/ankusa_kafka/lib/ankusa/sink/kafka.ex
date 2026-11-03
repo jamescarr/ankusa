@@ -65,8 +65,13 @@ defmodule Ankusa.Sink.Kafka do
   ## opts
 
     * `:brokers`            — required; `"host:port"` strings or `{host, port}` tuples
-    * `:topic`              — required
-    * `:key`                — a string, or `(Envelope.t() -> String.t())`;
+    * `:topic`              — required: a string, or per hook a
+                              `(Envelope.t() -> String.t())` or a `{{ var }}`
+                              template (`Ankusa.Sink.Template`, from YAML:
+                              `events.{{ event_type ?? other }}`). The topic
+                              must exist: this sink never creates one
+    * `:key`                — a string, a `{{ var }}` template, or
+                              `(Envelope.t() -> String.t())`;
                               default `"\#{tenant_id}/\#{source_id}"`
     * `:inline_max_bytes`   — default 64 KiB (65,536), configurable
     * `:max_record_bytes`   — the largest value + key produced; default
@@ -101,7 +106,7 @@ defmodule Ankusa.Sink.Kafka do
 
   @impl true
   def publish(payload, %Envelope{} = env, ctx, opts) do
-    topic = Keyword.fetch!(opts, :topic)
+    topic = Messaging.resolve(Keyword.fetch!(opts, :topic), env)
     timeout = Keyword.get(opts, :produce_timeout_ms, 5_000)
     client = client_id(ctx.instance, Keyword.get(opts, :client, :default))
     key = lane_or_configured_key(ctx, env, opts)
@@ -135,7 +140,7 @@ defmodule Ankusa.Sink.Kafka do
 
   @impl true
   def describe(subject, opts) do
-    topic = Keyword.fetch!(opts, :topic)
+    topic = Messaging.static(Keyword.fetch!(opts, :topic))
 
     %Description{
       protocol: "kafka",
@@ -145,7 +150,7 @@ defmodule Ankusa.Sink.Kafka do
         |> Messaging.endpoints()
         |> Enum.map_join(",", fn {host, port} -> "#{host}:#{port}" end),
       address: topic,
-      channel_bindings: %{"kafka" => %{"topic" => topic, "bindingVersion" => "0.5.0"}},
+      channel_bindings: %{"kafka" => topic_binding(topic)},
       message_bindings: %{
         "kafka" => %{"key" => key_schema(subject, opts), "bindingVersion" => "0.5.0"}
       },
@@ -160,13 +165,20 @@ defmodule Ankusa.Sink.Kafka do
       key when is_binary(key) ->
         %{"type" => "string", "const" => key}
 
-      fun when is_function(fun, 1) ->
-        %{"type" => "string", "description" => "Computed per hook by a configured function."}
+      computed when is_function(computed, 1) or is_tuple(computed) ->
+        %{
+          "type" => "string",
+          "description" => "Computed per hook by a configured function or template."
+        }
 
       nil ->
         default_key_schema(subject)
     end
   end
+
+  # The topic names a channel only when one string serves every hook.
+  defp topic_binding(nil), do: %{"bindingVersion" => "0.5.0"}
+  defp topic_binding(topic), do: %{"topic" => topic, "bindingVersion" => "0.5.0"}
 
   defp default_key_schema(%{tenant_id: tenant, source_id: source_id}) when is_binary(tenant) do
     %{"type" => "string", "const" => "#{tenant}/#{source_id}"}

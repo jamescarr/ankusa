@@ -198,7 +198,8 @@ defmodule Ankusa.Ordering do
   @doc false
   # The stored-header policy this source runs under: the instance's, overridden by
   # the source's, plus the credential headers of a token verifier. Shared with
-  # `Ankusa.Filter.check/2`.
+  # `Ankusa.Filter.check/2` and `Ankusa.Sink.Template.check/2`.
+  @spec stored_policy(Ankusa.Config.t(), Source.t()) :: StoredHeaders.policy()
   def stored_policy(config, %Source{store_headers: override, verifier: verifier}) do
     policy = StoredHeaders.resolve(override, config.store_headers)
 

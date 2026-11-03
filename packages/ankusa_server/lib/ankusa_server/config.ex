@@ -2070,6 +2070,10 @@ defmodule AnkusaServer.Config do
 
   # `https` only, unless `egress.allow_insecure_http`. Judged on the URL's shape,
   # not its address: a name resolves at delivery, where the egress policy decides.
+  # A URL with a `{{ var }}` template (`Ankusa.Sink.Template`) is judged on the
+  # literal text before the first one, which must hold the whole origin: a host is
+  # what the egress policy and the connection pools key on, so a template may
+  # only follow it, in the path or the query.
   # The message never echoes the URL, which may carry credentials.
   defp check_sink_schemes!(sinks, egress, path) do
     sinks
@@ -2084,6 +2088,22 @@ defmodule AnkusaServer.Config do
   end
 
   defp check_sink_scheme!(url, egress, path) do
+    case :binary.match(url, "{{") do
+      :nomatch -> check_url_shape!(url, egress, path)
+      {at, _length} -> check_templated_url!(binary_part(url, 0, at), egress, path)
+    end
+  end
+
+  defp check_templated_url!(literal_prefix, egress, path) do
+    unless Regex.match?(~r{\A[A-Za-z][A-Za-z0-9+.\-]*://[^/?#]+/}, literal_prefix) do
+      raise ConfigError,
+        message: "#{render_path(path)}: templates are allowed after the host, not in it"
+    end
+
+    check_url_shape!(literal_prefix, egress, path)
+  end
+
+  defp check_url_shape!(url, egress, path) do
     case URI.parse(url) do
       %URI{scheme: scheme, host: host}
       when is_binary(scheme) and is_binary(host) and host != "" ->
@@ -2166,6 +2186,7 @@ defmodule AnkusaServer.Config do
         lifecycle = section!(doc, "lifecycle", @lifecycle_keys, [])
         sinks = sinks!(lifecycle, ["lifecycle"])
         refuse_filters!(sinks, ["lifecycle"])
+        reject_lifecycle_templates!(sinks)
         check_sink_schemes!(sinks, egress, ["lifecycle"])
         [lifecycle: %{sinks: sinks}]
     end
@@ -2238,7 +2259,30 @@ defmodule AnkusaServer.Config do
     check_sink_schemes!(opts[:sinks], egress, path)
     check_ordering!(opts[:sinks], path)
     check_filters!(opts, path)
+    check_templates!(opts[:sinks], path)
     opts
+  end
+
+  # The grammar of `{{ var }}` templates is core's (`Ankusa.Sink.Template`), like
+  # the ordering options': a bad one, or one on an option that takes none, is
+  # refused here, with the path of the sink's key.
+  defp check_templates!(sinks, path) do
+    sinks
+    |> Enum.with_index()
+    |> Enum.each(fn {sink, index} ->
+      Ankusa.Sink.Template.normalize_sink!(render_path(path ++ ["sinks", index]), sink)
+    end)
+  rescue
+    error in ArgumentError ->
+      reraise ConfigError, [message: error.message], __STACKTRACE__
+  end
+
+  # A lifecycle event has no source's hook to read a variable from.
+  defp reject_lifecycle_templates!(sinks) do
+    if Ankusa.Sink.Template.templated?(sinks) do
+      raise ConfigError,
+        message: "lifecycle.sinks: templates are not supported on lifecycle sinks"
+    end
   end
 
   # The grammar of `ordered` / `ordering_key` is core's (`Ankusa.Ordering`): a bad

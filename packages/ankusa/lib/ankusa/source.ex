@@ -23,7 +23,8 @@ defmodule Ankusa.Source do
     trust_url_tenant: false,
     # [{module, opts}] implementing Ankusa.Sink. `ordered`, `ordering_key` and
     # `filter` are read off each entry by `Ankusa.Ordering` and `Ankusa.Filter` and
-    # are not in the opts a sink sees
+    # are not in the opts a sink sees; a `{{ var }}` string on an address option is
+    # compiled by `Ankusa.Sink.Template`
     sinks: [{Ankusa.Sink.Log, []}],
     # nil (no sink is ordered), or one `Ankusa.Ordering.sink_ordering()` per sink
     # (ADR 0004): `nil` for an unordered sink, `{:ordered, key spec | nil}` else
@@ -88,6 +89,7 @@ defmodule Ankusa.Source do
       Ankusa.Ordering.normalize_sinks!(id, Map.get(opts, :sinks, [{Ankusa.Sink.Log, []}]))
 
     {sinks, filters} = Ankusa.Filter.normalize_sinks!(id, sinks)
+    sinks = Ankusa.Sink.Template.normalize_sinks!(id, sinks)
 
     unless Ankusa.ClaimCheck.Ref.valid_tenant?(tenant_id) do
       raise ArgumentError,

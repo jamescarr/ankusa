@@ -138,6 +138,39 @@ defmodule Ankusa.Sink.GooglePubSubTest do
     assert [%{"orderingKey" => "stripe-x"}] = request["messages"]
   end
 
+  test "template: ordering_key renders per hook, and a variable with no value is permanent",
+       %{capture: capture} do
+    key = Ankusa.Sink.Template.compile!("test", "{{ tenant }}/{{ event_type }}")
+
+    assert :ok =
+             GooglePubSub.deliver(
+               envelope(%{event_type: "invoice.paid"}),
+               %{attempt: 1},
+               opts(ordering_key: key)
+             )
+
+    {_, _, _, request} = sent(capture)
+    assert [%{"orderingKey" => "acme/invoice.paid"}] = request["messages"]
+
+    Agent.update(capture, fn _ -> [] end)
+
+    assert {:error, {:permanent, {:template_missing, "event_type"}}} =
+             Ankusa.Sink.safe_deliver(
+               GooglePubSub,
+               envelope(),
+               %{attempt: 1},
+               opts(ordering_key: key)
+             )
+
+    assert Agent.get(capture, & &1) == []
+
+    # the description cannot name a templated key
+    assert %{message_bindings: bindings} =
+             GooglePubSub.describe(%{source_id: "s", tenant_id: nil}, opts(ordering_key: key))
+
+    assert bindings == %{}
+  end
+
   test "an ordered sink's orderingKey is the lane's key, over any ordering_key of the sink",
        %{capture: capture} do
     ctx = %{attempt: 1, ordering_key: "cus_1", lane: "abc"}

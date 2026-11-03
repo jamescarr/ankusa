@@ -195,6 +195,7 @@ defmodule Ankusa.SourceStore.Table do
          :ok <- Ankusa.Queue.check_durable(config, source),
          :ok <- Ankusa.Ordering.check(config, source),
          :ok <- Ankusa.Filter.check(config, source),
+         :ok <- Ankusa.Sink.Template.check(config, source),
          :ok <- claim_horizon(config, source) do
       :ok
     else

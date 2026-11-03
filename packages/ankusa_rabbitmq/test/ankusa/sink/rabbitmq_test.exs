@@ -196,6 +196,42 @@ defmodule Ankusa.Sink.RabbitMQTest do
     assert meta2.routing_key == "dyn.t1.src"
   end
 
+  test "templated routing_key: rendered per hook, and a missing variable is permanent", %{
+    instance: inst,
+    exchange: exch,
+    chan: chan,
+    queue: queue
+  } do
+    routing_key =
+      Ankusa.Sink.Template.compile!("test", "ev.{{ event_type ?? none }}.{{ tenant }}")
+
+    opts = [exchange: exch, url: @amqp_url, routing_key: routing_key]
+
+    assert :ok = deliver_when_connected(envelope(%{event_type: "invoice.paid"}), ctx(inst), opts)
+    {_payload, meta} = get_message(chan, queue)
+    assert meta.routing_key == "ev.invoice.paid.t1"
+
+    assert :ok = RabbitMQ.deliver(envelope(), ctx(inst), opts)
+    {_payload, meta} = get_message(chan, queue)
+    assert meta.routing_key == "ev.none.t1"
+
+    strict =
+      Keyword.put(opts, :routing_key, Ankusa.Sink.Template.compile!("test", "{{ event_type }}"))
+
+    assert {:error, {:permanent, {:template_missing, "event_type"}}} =
+             Ankusa.Sink.safe_deliver(RabbitMQ, envelope(), ctx(inst), strict)
+
+    assert {:empty, _} = AMQP.Basic.get(chan, queue, no_ack: true)
+  end
+
+  test "templated routing_key: describe/2 names no address" do
+    template = Ankusa.Sink.Template.compile!("test", "{{ event_type }}")
+    subject = %{source_id: "src", tenant_id: nil}
+
+    assert %{address: nil} =
+             RabbitMQ.describe(subject, exchange: "x", url: @amqp_url, routing_key: template)
+  end
+
   test "a publish no queue is bound to receive is {:error, {:unroutable, key}}, not :ok", %{
     instance: inst,
     chan: chan

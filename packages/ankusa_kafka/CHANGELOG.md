@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.Sink.Kafka`'s `:topic` is per hook like `:key`: a function of the
+  envelope, or a `{{ var }}` template (`Ankusa.Sink.Template`, e.g.
+  `events.{{ event_type ?? other }}`) that the YAML loader and the admin API
+  can state. The sink still never creates a topic. `describe/2` names the
+  channel's address only for a static topic; a computed one is a dynamic
+  channel in the AsyncAPI document. Requires an `ankusa` release with
+  `Ankusa.Sink.Template`; publish core first.
+
 ## [0.7.0] - 2026-10-28
 
 ### Added
