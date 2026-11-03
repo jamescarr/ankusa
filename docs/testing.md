@@ -1566,26 +1566,31 @@ Redis half (boot and reload through `HSCAN`) is
 (`BENCH_REBASELINE=1`) skips them: it measures the
 base commit's sources, which have neither the layout nor these APIs.
 
-CI runs it as two jobs in `ci.yml`. `perf gate` is `mise run bench:gate` with
-`BENCH_SKIP_TENANTS=1`: the matrix and its two base-against-branch legs.
-`bench-tenant` is `mise run bench:tenants`: the self-asserting scripts above,
-which compare against no baseline, so they have no leg to measure and run as a
-job of their own rather than as the gate's first step (it starts when `perf
-gate` finishes, because the scope decision it obeys is that job's output). Both
-jobs obey one scope decision over the run's diff: anything under
+CI runs it as three jobs in `ci.yml`, and the split is what decides the
+pipeline's length. `bench-scope` is the decision on its own: a checkout, the
+run's file list from the API (a PR) or `github.event.before..github.sha` (a
+push), and one `grep -E` against `HOT_PATHS` — seconds. `perf gate` is
+`mise run bench:gate` with `BENCH_SKIP_TENANTS=1`: the matrix and its two
+base-against-branch legs. `bench-tenant` is `mise run bench:tenants`: the
+self-asserting scripts above, which compare against no baseline, so they have
+no leg to measure and are a job of their own rather than the gate's first step.
+Both `need` `bench-scope` and start together, so neither is on the other's
+critical path: CI-7 split them and CI-10 took the scope step out of the gate,
+because with it inside, the tenant job waited for the whole gate and a merge
+push's wall clock went to 14:24 from 10:04. Both obey that one decision over
+the run's diff: anything under
 `packages/ankusa/lib/ankusa/{edge,queue,store,dispatch,verifier,routes}/`,
 `store.ex`, `queue.ex`, `dedupe.ex`, `envelope.ex`, `http.ex`,
 `route_resolver.ex`, `sink/message.ex`, `sink/http.ex`, or the gate's own files
 (`packages/ankusa/bench/`, `.mise/tasks/bench/`) runs both; a pull request that
 touches none of them runs neither, and neither does a push to `main` whose
-range (`github.event.before..github.sha`) touches none of them. That second
-rule is the one `main` needs: a merge's push carries the diff its pull request
-already gated, so re-measuring it on the default branch buys nothing (CI-7).
-A workflow file is not a hot path: it cannot change the measured program, and
-an invocation it gets wrong surfaces on the next push to `main` within
-minutes. `perf gate` always runs — it is the job that computes the decision,
-and a job skipped by `if:` could not publish it — with the steps that cost
-minutes skipped; `bench-tenant` is skipped outright. A release tag runs neither
+range (`github.event.before..github.sha`) touches none of them. (`bench-scope`
+runs in either case — it is what computes the decision, and a job skipped by
+`if:` could not publish it.) That second rule is the one `main` needs: a
+merge's push carries the diff its pull request already gated, so re-measuring
+it on the default branch buys nothing (CI-7). A workflow file is not a hot
+path: it cannot change the measured program, and an invocation it gets wrong
+surfaces on the next push to `main` within minutes. A release tag runs neither
 (its commit was gated on its pull request and its push to `main`), and a
 `workflow_call`, a `workflow_dispatch`, a first push or force-push with no
 `before` commit, and any error in the scope step run both: a filter that

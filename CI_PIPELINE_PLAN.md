@@ -139,7 +139,7 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 7/10 done · last updated: 2026-11-02
+Status: 10/13 done · last updated: 2026-11-03
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -487,17 +487,20 @@ priority, ID order.
   `bench` job's `HOT_PATHS` scope step as the pattern to follow),
   `.mise/lib/pkg.sh` (`pkg_names`, `pkg_kind`), `.mise/tasks/check/_default`
   (the "everything CI checks" contract this must not contradict).
-  *Evidence:* PR #231. Three probes, each a branch into the PR's own base and
-  closed unmerged: docs-only PR #232 (run 41574599194 — `changes`, `lint`, the
-  perf gate's scope step and `ci-summary` ran, every other job `skipped`, 0:36
-  wall clock, under one runner-minute); `packages/sdk-go`-only PR #233 (run
-  41574117567 — `sdk-go`, `lint`, `changes`, `ci-summary`; the rest `skipped`);
-  core hot path PR #234 (run 41574120125 — the whole Mix group, `core
-  integration`, `sdk conformance`, both crash drills and `examples` ran exactly
-  as before; `tools` skipped). The PR's own run takes the all-true path — its
-  diff is `.github/workflows/ci.yml` plus docs — and runs every job.
-  `mise run lint:workflows` and `mise run lint:pins` passed in session; the
-  first push to `main` after the merge is recorded in the PR.
+  *Evidence:* PR #231, merged as `897e6b94`. Measured on its probe PRs:
+  **a docs-only PR runs 4 jobs in 36 s** (`changes`, `lint`, the gate's scope
+  job, `ci-summary`) instead of ~48 runner-minutes; an `sdk-go`-only PR runs 5
+  jobs; a core hot-path PR runs 18 (the whole Mix group, the perf gate, both
+  crash drills, conformance, integration, examples; `tools` skipped); a push to
+  `main` runs all 28 job entries (run 41578446187, 10:03, green). `discover` was
+  folded into the new `changes` job, so the serial hop is gone too. Fail-safe:
+  non-PR event, empty/unreadable diff, unknown path and any trap error emit the
+  all-true values and exit 0; an unlistable `packages/` fails the job rather than
+  skipping everything. A probe caught a real bug before merge: the "nothing to
+  run" matrix was emitted as `[-]`, which is not JSON, so `fromJSON` failed at
+  job creation (run 41574114453); `["-"]` plus the job's `if:` guard is the fix.
+  `ci-summary` writes the per-job table to the step summary and fails the run
+  when `changes` itself failed, so a broken filter is loud.
 
 ### Phase D — Shorter critical path
 
@@ -603,7 +606,7 @@ priority, ID order.
 
 ### Phase G — Fix what the measurements exposed
 
-- [ ] **CI-10 — `bench-tenant` must run *beside* the perf gate, not after it** · P1 · Deps: CI-7
+- [x] **CI-10 — `bench-tenant` must run *beside* the perf gate, not after it** · P1 · Deps: CI-7
   *Why:* CI-7 split the tenant benches out of the gate to take 2:33–4:16 off its
   critical path, but the new job declares `needs: bench` — it reads the scope
   job's `run` output from it — so on the merge push (run 41568929419) it started
@@ -626,9 +629,134 @@ priority, ID order.
   non-hot-path push with the three jobs `skipped`; `mise run lint:workflows`.
   *Anchors:* `.github/workflows/ci.yml` (`bench` job's scope step and
   `outputs`, `bench-tenant` job).
-  *Evidence:* —
+  *Evidence:* 2026-11-03 · PR #230 · `mise run lint:workflows`, `mise run
+  lint:pins`, `mise run check:links`. The scope step is a `bench-scope` job
+  now; `perf gate` and `bench-tenant` both `needs: bench-scope` and start
+  together, and `ci-summary` lists the new job. CI-5's `changes` job has no
+  `hot-path` output (it is the package/drill filter), so `bench-scope` is not a
+  duplicate and the `HOT_PATHS` rules stay where CI-7 left them. The
+  non-hot-path case on this PR's own runs: **41573739333** (`8ed29d6e`) —
+  `bench-scope` success **16 s** (03:41:57 → 03:42:13) with `perf gate` and
+  `bench-tenant` both `skipped`; **41578011409** (`fa2921df`) — `bench-scope`
+  **5 s** (04:25:38 → 04:25:43), both `skipped`, run wall clock **10:46**. The
+  merge push is the same case on `main`. The overlap needs a hot-path run,
+  which this PR's diff is not (`ci.yml` + docs + plan), so it is the first
+  hot-path push after the merge — the item's own *Proof* run — and not
+  manufactured here.
+
+- [x] **CI-11 — An INCONCLUSIVE perf measurement must report, not fail** · P1 · Deps: CI-2
+  *Why:* CI-2 made an unresolvable measurement an explicit verdict, which is
+  right in principle and wrong in its consequence. On run 41571000120 (`main`,
+  `a57976f8`, a product PR) the gate exited 1 with
+  `INCONCLUSIVE p99_ms 512B-c32: samples span 1.76× across rounds (2.99, 3.18,
+  3.62 | 1.81, 3.54, 1.76)` — a cell whose absolute latency is 2–3 ms, where a
+  1 ms of scheduler jitter is 30 %, and therefore a cell that cannot support a
+  1.2× decision at all. It painted `main` red for a reason nobody can act on,
+  roughly one run in eight since CI-2 landed (2 of the 8 gate runs). "I could
+  not measure this" is information, not a regression.
+  *Change:* in `packages/ankusa/bench/gate.exs` only (no `ci.yml` change — the
+  script writes `$GITHUB_STEP_SUMMARY` itself):
+  1. When a cell's round medians span more than the limit's headroom, re-measure
+     that cell for up to **2 more rounds** of `BENCH_RUNS` runs (bounded).
+  2. If it is still unresolvable, **do not fail the run**: print the existing
+     `INCONCLUSIVE p99_ms <cell>: samples span N× across rounds (…)` line, emit
+     `::warning::INCONCLUSIVE p99_ms <cell> — not judged`, append one line to the
+     step summary naming the cell, every sample, and the fact that it was not
+     judged, and exclude that cell from the failure list.
+  3. Never print `ok` for it: the verdict column says `inconclusive`, and a cell
+     that is both unresolvable and over its limit says
+     `inconclusive (over limit by X%)`. The final line counts them.
+  4. Everything else unchanged: `@gates` (1.2× max p99, 0.8× min throughput), the
+     matrix, `BENCH_CONFIRM`'s confirm round, `BENCH_REBASELINE`, the per-run
+     `/dev/shm` data directory. A *resolvable* failure still exits non-zero.
+  5. `docs/testing.md` Perf gate: one paragraph on the policy.
+  *Done when:* an exercised inconclusive path exits 0 with the warning, the
+  `inconclusive` verdict and the summary line; a resolvable regression still
+  exits 1 with `FAIL`; three consecutive hot-path runs are green; the PR's own
+  `perf gate`/`bench-tenant` jobs are green.
+  *Proof:* the evidence for each of those three paths in the PR body (exit code,
+  table excerpt, summary text, and for the regression a tightened
+  `BENCH_BASELINE`); `mise run bench:gate` locally.
+  *Anchors:* `packages/ankusa/bench/gate.exs` (`settle_spread/6`,
+  `print_inconclusive/1`, the `System.halt(1)` on the inconclusive branch,
+  `report/5`), `docs/testing.md:1310-1400`.
+  *Evidence:* PR #245, merged as `77e22b6f`. The verdict is now bounded-retry then
+  report: `@spread_retries = 2` (nine runs max for a cell), then the table says
+  `inconclusive` (and `inconclusive (over limit by X%)` when it is also over),
+  `::warning::INCONCLUSIVE … not judged`, and one `$GITHUB_STEP_SUMMARY` line
+  with every sample — exit code 0 unless another cell has a resolvable failure.
+  Proven deterministically with the documented, CI-unset
+  `BENCH_SELF_TEST_INCONCLUSIVE=<cell>` switch (spans 2.17× then 1.92×, exits 0,
+  a settled cell on the same run kept its real `ok`), and the failure path with
+  `BENCH_RUNS=1` plus a quartered baseline (`FAIL p99_ms 512B: 34.09 > 1.2×4.78`,
+  exit 1). `@gates`, the matrix, `BENCH_CONFIRM`, `BENCH_REBASELINE` (still
+  refuses to record a baseline from samples that wide) and the `/dev/shm` TMPDIR
+  are untouched. PR run 41585504758 green (`perf gate` 10:02 + `bench-tenant`
+  both ran and passed). The inciting run was 41571000120 on `main`.
 
 ### Phase E — Make a single-test flake stop costing a pipeline
+
+- [x] **CI-12 — `ankusa_kafka`: the test publishes before the topic's leader exists** · P1 · Deps: —
+  *Why:* run 41575311702 (`main`, `9d774f83` — a docs/examples-only commit) failed
+  `ankusa_kafka` 40/42 with two `** (MatchError) no match of right hand side
+  value: {:error, :unavailable}` at `Kafka.publish_batch`
+  (`test/ankusa/intake/kafka_test.exs:654` and `:538`), each logged immediately
+  after `client :"ankusa_kafka.intake_kafka_…" connected to localhost:29092`. The
+  `econnrefused 127.0.0.1` lines in the same job are a **red herring**: they come
+  from the `kafka_down_*` client the tests configure with
+  `brokers: ["127.0.0.1:1"]` (`kafka_test.exs:636`) to exercise the down-broker
+  path. Startup is not the problem either — `docker compose up -d --wait` had
+  every broker `Healthy` at 04:06:02 (its healthcheck probes
+  `kafka-broker-api-versions --bootstrap-server localhost:9092`) and the tests
+  began at 04:06:26. What was not ready is the **topic's leader**, and
+  `publish_batch` maps that transient to `:unavailable` — correctly. The test
+  then asserts `{:ok, _}` on its first publish. Two of the last three
+  `ankusa_kafka` failures have this shape.
+  *Change:*
+  1. Put the wait in the fixture, not the assertion: the test-support helper
+     that creates (or deletes and recreates) a topic polls until its partitions
+     report a leader — `:brod.get_metadata` or a bounded
+     `Kafka.publish_batch` retry — with a timeout that fails with the broker's
+     own metadata in the message. No blanket retry around a test body, and no
+     assertion changes.
+  2. Harden the compose healthcheck while you are there: `x-kafka.healthcheck`
+     probes the internal listener only. Probe the **external** one the tests use
+     (`localhost:29092` on `kafka-1`), so a listener that has not bound cannot
+     report Healthy.
+  *Done when:* ten consecutive `mise run check:package ankusa_kafka` runs are
+  green with no `{:error, :unavailable}` in their logs (or ten CI reruns if the
+  local docker path is unavailable — say which), and
+  `docker compose up -d --wait` still succeeds with the new healthcheck.
+  *Proof:* the ten runs; a deliberate negative check (publish immediately after
+  creating a topic, with the wait disabled → the same `:unavailable`, showing the
+  wait is the fix); the compose up output with the external probe.
+  *Anchors:* `packages/ankusa_kafka/test/ankusa/intake/kafka_test.exs:520-670`,
+  `packages/ankusa_kafka/test/support/` (the topic helper),
+  `packages/ankusa_kafka/docker-compose.yml` (`x-kafka`, `KAFKA_LISTENERS`,
+  `KAFKA_ADVERTISED_LISTENERS`), `.mise/tasks/check/package`
+  (`docker compose up -d --wait`).
+  *Evidence:* PR #246, merged as `fc3b3b4e`. The diagnosis came out sharper than
+  the item's: `create_topic/1` already polled every broker for leader + ISR, so
+  the missing wait was elsewhere. Two windows mapped to `:unavailable` — (a) a
+  broker serves the topic in its metadata image before the leader has applied
+  its assignment (`not_leader_for_partition`, reproduced 1/150 locally with the
+  existing wait), and (b) a replica is in the ISR from creation but has not
+  fetched yet, so an `acks=-1` produce commits only on the followers' first
+  fetch turn (~1 s idle) against the tests' **2 s** publish deadline — which
+  matches the CI failure times exactly (2.00 s / 2.08 s). The fix is a bounded
+  (20 s) **commit probe** on a topic of its own with the adapter's producer
+  settings, run after the leader/ISR wait; a fresh brod client per attempt
+  because brod caches "unknown topic" for 2 minutes. No assertion touched, and
+  the probe topic keeps the tests' offsets pristine. Ten consecutive
+  `mise run check:package ankusa_kafka` runs green (42 passed each, zero
+  `:unavailable` in any log, 132–286 s). Negative check: with the wait stubbed
+  and `kafka-3` restarted, the CI shape reproduces (`{:error, :unavailable}` at
+  the same two tests); with the wait restored, three restarts are green each.
+  Healthcheck now probes **both** listeners per broker (a comma list was
+  measured to exit 0 through a closed port, so it cannot prove both); a live
+  container reports `healthy`, the probe exits 1 on a closed port, and
+  `docker compose up -d --wait` passes. PR run 41583971484: `ankusa_kafka` job
+  125745049774 success, 203 s, five containers Healthy.
 
 - [ ] **CI-8 — Three flaky tests, not one assertion: make their *measurements* deterministic without touching what they assert** · P2 · Deps: —
   *Why:* in the 30-run sample plus today's runs, four red runs were a **single
@@ -644,6 +772,9 @@ priority, ID order.
   - `Ankusa.Sink.RabbitMQTest` "an idle connection is closed at the broker, and
     the next delivery opens a new one": `36/37 passed` on run 41546975710 on
     `main` — the idle-reaper window is raced against a `sleep`-based wait.
+  - `ankusa_redis` `SourceStore.RedisTest`: "condition was still false after the
+    deadline" (reported by a sibling on the 2026-11-03 runs) — an `assert
+    eventually`-style wait whose deadline is too short for a loaded runner.
   Each occurrence costs a ~13 min rerun plus a wrong attribution — two of this
   loop's own executors re-ran a red run believing their change broke it.
   *Change:* for each test, first record ten consecutive local/CI runs of the
@@ -734,6 +865,34 @@ priority, ID order.
   `.mise/tasks/check/package` (the `--lane test` step).
   *Evidence:* —
 
+- [ ] **CI-13 — Evaluate an arm64 runner for the Mix jobs, measured, not guessed** · P3 · Deps: CI-5
+  *Why:* the repository is public, so standard runners are free either way, and
+  GitHub offers `ubuntu-24.04-arm` at the same price for public repos. The
+  `ankusa (tests)` lane (9:47) is the pipeline, and its heaviest inputs —
+  RocksDB's C++ NIF compile and a 2 000-test BEAM suite — are exactly where
+  arm64 is usually faster than the emulated/x64 runners this repo has measured
+  so far. Nobody has measured it here, and a guess would be wrong in either
+  direction.
+  *Change:* one probe, no product changes: a throwaway branch that runs
+  `ankusa (tests)` (or `mise run check:package ankusa --lane test`) on
+  `ubuntu-24.04-arm` beside the same job on `ubuntu-latest`, three runs each,
+  recording the job duration, the deps-compile time and the test-only time.
+  If arm64 wins by ≥15 % on two of three measures, move the Mix jobs
+  (`ankusa (static)`, `ankusa (tests)`, the adapters, `ankusa_server`,
+  `conformance`, `integration`) to it in a follow-up PR — checking first that
+  every image in the image cache has an arm64 variant at the pinned digest
+  (`docker buildx imagetools inspect`), and keeping the cache keys keyed by
+  `runner.arch` so the two classes never share an entry. If it does not win,
+  record the numbers in *Evidence* and close the item.
+  *Done when:* either the migration PR is green with its before/after numbers,
+  or the item's Evidence carries the six measurements and says why not.
+  *Proof:* the six runs (three per runner class, ids and durations), the
+  `imagetools inspect` output for every pinned image if you migrate.
+  *Anchors:* `.github/workflows/ci.yml` (`runs-on` per job, the `mix-v19-…`
+  cache keys already include `runner.arch`), `packages/ankusa_server/Dockerfile`
+  (the image jobs stay where they are), `docs/testing.md` (runner class).
+  *Evidence:* —
+
 ## Backlog (not yet an item)
 
 - **Flaky tests that block merges** (each hit costs a full rerun; the `ankusa`
@@ -773,7 +932,7 @@ priority, ID order.
 
 ## Verification of this plan
 
-- `grep -cE '^- \[[ x]\] \*\*CI-' CI_PIPELINE_PLAN.md` → 10 (the number of
+- `grep -cE '^- \[[ x]\] \*\*CI-' CI_PIPELINE_PLAN.md` → 13 (the number of
   items; fewer ticked as they land, and the count matches the `Status:` line's
   denominator).
 - Every *Anchors* path exists at the commit the item is executed on (re-read the
