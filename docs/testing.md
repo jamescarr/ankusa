@@ -1504,6 +1504,17 @@ base leg of run 41586954095 had `512B-c32` round medians of 6.12, 5.77 and
 settles. The warm-up run's sample feeds neither the medians nor the spread; it
 is measured once per cell per leg, on the runner that leg runs on.
 
+The warm-up is a fixed small run: `@warmup_n` (2 000 hooks; `BENCH_WARMUP_N`
+overrides it) at the cell's own body size and concurrency, so it walks the
+cell's code path and fills its page cache, while the boot, module loading and
+allocator growth the drift came from are paid by its first hooks. It is smaller
+than the measured run because its numbers are discarded: at the measured 20 000
+hooks the four warm-ups cost about 84 s of each leg — a fifth of the `perf gate`
+job — and bought nothing the first 2 000 do not. The measured runs keep
+`N=20000`, and the log line names the warm-up's own size
+(`==> bench 512B warm-up (discarded, 2000 hooks)`) so a later measurement can
+see what settled the leg.
+
 Numbers only compare on the machine that recorded them. Hosted CI runners of
 one class differ by a factor of two in speed from job to job (the same code
 ran at 23 000 and at 50 000 hooks/s on two `ubuntu-latest` runners), so the CI
@@ -1554,9 +1565,9 @@ two runs of one tree there differ by 20 %. `STUB_INGEST=1` (above) is the
 check that the harness itself is not what a cell measures: at 10 KB it drives
 more than 100× the rate of the F1 code. Change the harness and the `f1_code`
 block has to be measured again, in the same PR.
-`BENCH_RUNS`, `BENCH_CONFIRM`, `BENCH_RUNNER`, `BENCH_BASELINE`,
-`BENCH_REBASELINE`, `BENCH_DATA_ROOT` and `BENCH_TRACE` are documented in the
-script's header.
+`BENCH_RUNS`, `BENCH_WARMUP_N`, `BENCH_CONFIRM`, `BENCH_RUNNER`,
+`BENCH_BASELINE`, `BENCH_REBASELINE`, `BENCH_DATA_ROOT` and `BENCH_TRACE` are
+documented in the script's header.
 
 [`bench/tenant_fairness_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/tenant_fairness_bench.exs)
 is the fairness bench of TEN-3, run by hand: it prints a light tenant's p99

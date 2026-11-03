@@ -55,6 +55,17 @@
 # settles a trend. The warm-up sample feeds neither the medians nor the
 # spread; it is measured on this runner, for this leg, once per cell.
 #
+# Its job is to load the code and warm the runner, not to measure, so it runs
+# at `@warmup_n` (2 000) hooks rather than the measured `@n` (20 000) — same
+# body size and concurrency as the cell, so it walks the same code path and
+# fills the same page cache, in a tenth of the time. At the measured size the
+# four warm-ups cost about 84 s of a leg, a fifth of the whole `perf gate`
+# job, while their samples are discarded; the boot, module loading and
+# allocator growth the drift came from are paid by the first 2 000 hooks just
+# as they were by 20 000. The measured runs keep N=20000: `BENCH_WARMUP_N`
+# raises the warm-up only. A cell the short warm-up left trending is measured
+# again by the same settle policy, so nothing is entrusted to it silently.
+#
 # A p99 over 20k samples is noisy on a shared machine, and noise only ever
 # adds latency and takes throughput away. So a cell over a limit after its
 # `BENCH_RUNS` runs is run `BENCH_RUNS` more times and judged on its best run
@@ -90,6 +101,9 @@
 # Env knobs:
 #
 #   BENCH_RUNS=3            runs per cell (the baseline is recorded with 3)
+#   BENCH_WARMUP_N=2000     hooks in each cell's discarded warm-up run (the
+#                           measured runs always use N=20000; see the warm-up
+#                           paragraph above)
 #   BENCH_CONFIRM=1         0 skips the second round for cells over a limit
 #   BENCH_RUNNER=<class>    override the detected runner class
 #   BENCH_BASELINE=<path>   the file to compare with, or with BENCH_REBASELINE
@@ -115,6 +129,10 @@
 
 defmodule Bench.Gate do
   @n 20_000
+  # The discarded warm-up's size (header): the same cell at a tenth of the
+  # hooks. `BENCH_WARMUP_N` raises it without a code change; nothing measured
+  # reads it.
+  @warmup_n 2_000
   @sink_latency_ms 5
   # {cell, BODY_BYTES, CONCURRENCY}; `512B-ordered` is `512B` with the source's sink
   # `ordered: true` over 64 keys (`ORDERED=1`, ADR 0004).
@@ -162,7 +180,7 @@ defmodule Bench.Gate do
 
     IO.puts("==> bench data root: #{root} (#{describe_root(root)}), a fresh directory per run")
 
-    warmup(@matrix, root, trace?)
+    warmup(@matrix, root, trace?, env_int("BENCH_WARMUP_N", @warmup_n))
     samples = collect(@matrix, runs, root, trace?, %{})
     {samples, inconclusive} = settle_spread(@matrix, runs, root, trace?, samples, cells)
     medians = medians(samples, cells)
@@ -377,12 +395,16 @@ defmodule Bench.Gate do
 
   # One discarded run per cell before the measured rounds (header): its sample
   # feeds neither the medians nor the spread, only the runner state the
-  # measured rounds inherit.
-  defp warmup(matrix, root, trace?) do
-    IO.puts("==> warm-up: one discarded run per cell (feeds neither the medians nor the spread)")
+  # measured rounds inherit. It runs at `n` hooks, `@warmup_n` by default —
+  # small because it warms, and its numbers are thrown away.
+  defp warmup(matrix, root, trace?, n) do
+    IO.puts(
+      "==> warm-up: one discarded run per cell at #{n} hooks " <>
+        "(feeds neither the medians nor the spread)"
+    )
 
     for {cell, bytes, concurrency} <- matrix do
-      IO.puts("==> bench #{cell} warm-up (discarded)")
+      IO.puts("==> bench #{cell} warm-up (discarded, #{n} hooks)")
 
       run_bench(
         root,
@@ -391,7 +413,8 @@ defmodule Bench.Gate do
         bytes,
         concurrency,
         String.ends_with?(cell, "-ordered"),
-        "warmup"
+        "warmup",
+        n
       )
     end
   end
@@ -413,7 +436,8 @@ defmodule Bench.Gate do
             bytes,
             concurrency,
             String.ends_with?(cell, "-ordered"),
-            run
+            run,
+            @n
           )
 
         sample = self_test_p99(sample, cell, round, run)
@@ -459,7 +483,9 @@ defmodule Bench.Gate do
 
   defp baseline_path, do: System.get_env("BENCH_BASELINE", @default_baseline)
 
-  defp run_bench(root, trace?, cell, body_bytes, concurrency, ordered?, run) do
+  # `n` is the run's hook count: `@n` for a measured run, the warm-up's own
+  # size for a discarded one (header).
+  defp run_bench(root, trace?, cell, body_bytes, concurrency, ordered?, run, n) do
     # The bench puts its store in `TMPDIR` and removes it on exit. A directory
     # of its own per run is what keeps one cell (or one leg) from inheriting
     # another's store, its size or its page cache.
@@ -471,7 +497,7 @@ defmodule Bench.Gate do
     env = [
       {"MIX_ENV", "test"},
       {"TMPDIR", dir},
-      {"N", Integer.to_string(@n)},
+      {"N", Integer.to_string(n)},
       {"CONCURRENCY", Integer.to_string(concurrency)},
       {"SINK_LATENCY_MS", Integer.to_string(@sink_latency_ms)},
       {"BODY_BYTES", Integer.to_string(body_bytes)},

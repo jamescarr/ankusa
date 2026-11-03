@@ -222,7 +222,7 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 17/20 done · closed without meeting the bar: CI-9 · next: CI-20, CI-13 · last updated: 2026-11-03
+Status: 18/21 done · closed without meeting the bar: CI-9 · next: CI-21, CI-13 · last updated: 2026-11-03
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -1486,7 +1486,7 @@ which it does when a measured red run outranks a slow pipeline.
 
 ### Phase J — The perf gate is now the critical path
 
-- [ ] **CI-20 — The perf gate's warm-up costs 84 s per leg, and the gate is now 2.3× the rest of the pipeline** · P2 · Deps: CI-14
+- [x] **CI-20 — The perf gate's warm-up costs 84 s per leg, and the gate is now 2.3× the rest of the pipeline** · P2 · Deps: CI-14
   *Why:* CI-17 took the test lane from 9.8 to ~4.9 min (four shards + merge, 292 s
   on run 41679004989), so a PR whose diff touches a hot-path file is now wall
   clocked by `perf gate` alone: **12.0 / 12.2 / 13.8 min** on the three runs
@@ -1527,6 +1527,48 @@ which it does when a measured red run outranks a slow pipeline.
   *Anchors:* `packages/ankusa/bench/gate.exs` (`@n`, `warmup/3`, `collect/5`,
   `@spread_retries`, the header's warm-up paragraph),
   `.github/workflows/ci.yml` (`bench` job), `docs/testing.md` "Perf gate".
+  *Evidence:* PR #268. Change: `@warmup_n` 2 000 — overridable with
+  `BENCH_WARMUP_N` — at each cell's own body size and concurrency; `warmup/4`
+  and `run_bench/8` take the hook count, and each line names it (`==> bench
+  512B warm-up (discarded, 2000 hooks)`); the measured runs keep `N=20000`.
+  `@gates`, `@matrix`, `@n`, `BENCH_RUNS` and `BENCH_CONFIRM`'s defaults, the
+  confirm round and CI-14's settle/omit policy are untouched (`git diff` is the
+  warm-up, `run_bench`'s arity, the header and `docs/testing.md`).
+  Measurement: three `BENCH_RUNS=3` gate runs per shape on throwaway probe PRs
+  #269 (2 000 hooks) and #270 (20 000 hooks) — same commit, `main`'s code under
+  the probe's bench scripts (both PRs closed unmerged, branches deleted). The
+  two three-run tables, per-cell p99 round medians in every round, are in
+  #268's body. Warm-up wall time per leg, from the gate's own timestamps (first
+  warm-up line → first measured run): **full 81.8 / 82.6, 81.5 / 81.8, 82.3 /
+  82.8 s; short 9.9 / 9.8, 11.5 / 11.5, 11.9 / 11.5 s** — per job 163–166 s →
+  20–23 s, **2m23s–2m26s** of job 125809478781's 12m9s. Job totals on the day
+  (runner speed varies by 2×, so the per-leg timestamps are the measurement):
+  full 14m09s / 18m06s / 12m13s, short 10m45s / 9m57s / 16m10s; #268's own
+  gates 11m31s (run 41689871611) and **9m28s** (run 41696475603, job
+  126138233723) against the 12m9s reference.
+  Worst round-median spread per cell over its three runs: short **512B 1.00×,
+  10240B 1.14×, 512B-c32 1.19×, 512B-ordered 1.00×**; full 1.03×, 1.08×, 1.14×,
+  1.00×. All four cells settled inside the 1.20× the limit can resolve in all
+  six runs and all six printed `PASS`; the retry path fired in both shapes
+  (512B-c32 on a slow runner: short 1.15× / 1.19×, full 1.14× / 1.11×), so the
+  short warm-up adds no instability — the same policy, unchanged, absorbs it.
+  `mise run bench:gate` locally runs with the 2 000-hook warm-up and exits 0
+  (`4 cells inconclusive`: this laptop settles no cell under load, as CI-14's
+  executor measured); `mise run lint:workflows` and `mise run lint:pins` pass.
+  #268's one red job (`sdk conformance`, run 41696475603) is external:
+  `org.clojure:clojure:jar:1.12.6` and `org.scala-sbt:sbt:2.0.10` unresolvable
+  from Maven Central on that attempt; the same SHA's rerun is green in 2m52s.
+
+- [ ] **CI-21 — The tenant-fairness p99 fails again now that the suite is sharded** · P1 · Deps: CI-17
+  *Why:* `Ankusa.Dispatch.IsolationTest` "tenant fairness" failed on `main` at `902e3dcb` (run 41689506568, `ankusa (tests, 4/4)` job 126104189792): `assert mixed_p99 <= max(2 * solo_p99, 25)`, `Result: 454/455 passed`, `Failed: 1 — per-tenant scheduling tenant fairness (Ankusa.Dispatch.IsolationTest) at test/ankusa/dispatch/isolation_test.exs:532` — the CI-8/#248 rewrite, which measured 20/20 green when the suite was one 2 080-test process. The test is `async: false` (isolation_test.exs:7) and pairs its solo and mixed measurements so ambient load cancels; what CI-17 changed is the *neighbour set* — shard 4/4 runs 455 tests in a different order, so a leftover process from an earlier test is background load the pairing cannot cancel (it inflates the mixed phase differently from the solo phase). One failure in the first ~10 shard-4 runs; CI-18's reporting change is what made the name visible at all.
+  *Change:* attribute before touching the bound — `mixed_p99 <= max(2 * solo_p99, 25)` stays verbatim, and no retry may swallow a regression.
+  1. Ten full `ankusa (tests)` runs of one commit (ten pushes to a probe branch) recording every printed `mixed_p99`/`solo_p99` pair per shard, so the distribution is known rather than one sample.
+  2. Find the neighbour: replay shard 4 with the seed the step summary recorded (CI-18 wrote it on failure) and bisect which preceding test's leftovers move the mixed phase — a scheduler-utilisation / `Process.info(:processes)` snapshot before the drill is the cheap instrument.
+  3. Fix the measurement, not the bound: the CI-8 heartbeat drops ≥25 ms host stalls, but a *continuously* busy neighbour is never a stall. Either make the drill immune (a paired idle baseline taken immediately before and after the measurement, subtracted from the light tenant's lag) or stop the neighbour (await its supervision tree) — say which and why.
+  4. If a 4-way shard genuinely cannot host a latency drill, report that with the numbers and propose the smallest change to the shard assignment (e.g. an `--only`-tagged timing shard) — a plan decision, never a silent retry.
+  *Done when:* ten consecutive shard-4 runs on the failing seed are green with the assertion unchanged, and a deliberate regression (`Process.sleep(40)` in dispatch's outcome handler — CI-8's own proof) still fails.
+  *Proof:* the ten runs' ids with their `mixed_p99`/`solo_p99` pairs; the deliberate-regression output; `mise run check:package ankusa --partition 4/4`.
+  *Anchors:* `packages/ankusa/test/ankusa/dispatch/isolation_test.exs` (the drill and its heartbeat), `.github/workflows/ci.yml` (`ankusa-test` matrix), `packages/ankusa/test/test_helper.exs`.
   *Evidence:* —
 
 ## Backlog (not yet an item)
@@ -1550,6 +1592,11 @@ which it does when a measured red run outranks a slow pipeline.
   re-measure once CI-20 lands and treat it as an item if the lead is a visible
   share of a 5-minute pipeline. The candidates are folding the nine single-
   minute SDK jobs into three, and dropping `bench-scope` into `changes`.
+- **`lint` failed on a mise download** — `main` 41689506568 (job 126104074391):
+  `mise ✗ ruby@4.0.9 … HTTP status server error (500) for
+  https://github.com/jdx/ruby/releases/download/4.0.9-1/…` after mise's own 3
+  retries. External and rare; if it recurs, pin/cache the ruby tool or drop
+  ruby from the jobs that do not lint Ruby. Not an item until it repeats.
 - **`ankusa_kafka` is now the longest non-shard job** — 3.8 min median but
   5.3–6.6 min on the long tail (runs 41681081948, 41683881288, 41679953968),
   where it decides the PR's wall clock. CI-12 fixed the readiness wait; the tail
@@ -1588,7 +1635,7 @@ bisect.
 
 ## Verification of this plan
 
-- `grep -cE '^- \[[ x]\] \*\*CI-' CI_PIPELINE_PLAN.md` → 20 (the number of
+- `grep -cE '^- \[[ x]\] \*\*CI-' CI_PIPELINE_PLAN.md` → 21 (the number of
   items; fewer ticked as they land, and the count matches the `Status:` line's
   denominator).
 - Every *Anchors* path exists at the commit the item is executed on (re-read the
