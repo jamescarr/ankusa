@@ -2258,6 +2258,65 @@ defmodule Ankusa.Admin.RouterTest do
              ]
     end
 
+    # The bound of the split budget, pinned: a tenant-scoped page through the
+    # router (`authorize_tenants` hands a multi-tenant principal's list to
+    # `dlq_index/2`) with both deferred predicates set — every candidate
+    # survives the `source_id` read (a global dead key) and none the
+    # `error_class` one (a delivery row) — reads 5 000 of each per tenant
+    # index: the call's 10 000 budget, not one budget per index. A revert of
+    # the split reads 10 000 of each per index and fails both asserts.
+    test "an HTTP two-tenant page with both deferred filters reads within the call's split budget" do
+      config = start_tenant_instance(failing_sources())
+      inst = config.instance
+      at = System.system_time(:millisecond) - 60_000
+      rows = 10_000
+
+      for {tenant, seqs} <- [{"acme", 1..rows}, {"globex", (rows + 1)..(2 * rows)}],
+          chunk <- Enum.chunk_every(seqs, 5_000) do
+        ops =
+          Enum.flat_map(chunk, fn seq ->
+            dead_index_ops(inst, seq, 0, at + seq, "common.hooks", "#{tenant}-#{seq}", tenant) ++
+              [
+                {:put, :deliveries, Keys.delivery(seq, 0),
+                 Deliveries.encode_row(%{
+                   module: Ankusa.Sink.Log,
+                   state: :dead,
+                   at: at + seq,
+                   error: "sink returned an error",
+                   attempts: 3,
+                   size: 2,
+                   source_id: "common.hooks",
+                   error_class: :transient,
+                   id: "#{tenant}-#{seq}"
+                 })}
+              ]
+          end)
+
+        :ok = Store.write(inst, ops)
+      end
+
+      {conn, calls} =
+        store_calls(fn ->
+          tcall(
+            inst,
+            :get,
+            "/v1/dlq?limit=10&source_id=common.hooks&error_class=throttled",
+            "both"
+          )
+        end)
+
+      assert conn.status == 200
+      assert %{"total" => nil, "entries" => [], "next_cursor" => cursor} = json(conn)
+      assert is_binary(cursor)
+
+      index_keys = for {:multi_get, :index, keys} <- calls, do: length(keys)
+      row_keys = for {:multi_get, :deliveries, keys} <- calls, do: length(keys)
+
+      assert for({:fold, family} <- calls, do: family) == [:dead_by_tenant, :dead_by_tenant]
+      assert Enum.sum(index_keys) == 10_000
+      assert Enum.sum(row_keys) == 10_000
+    end
+
     test "a listing for more than eight tenants scans the global family with the tenants as a predicate" do
       tenants = for i <- 1..10, do: "t#{i}"
 
