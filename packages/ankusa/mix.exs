@@ -20,7 +20,7 @@ defmodule Ankusa.MixProject do
       # The floor `mix test --cover` enforces in `mise run check:package`;
       # the shared test helpers are not product code.
       test_coverage: [
-        summary: [threshold: 85],
+        summary: [threshold: 99.9],
         ignore_modules: [~r/^Ankusa\.Test\./, Ankusa.TestHelpers]
       ],
       # Every PLT lives under _build, which CI caches (keyed on the toolchain pins
