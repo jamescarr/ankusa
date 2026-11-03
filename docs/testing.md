@@ -46,6 +46,9 @@ PR that touches no hot-path file they still start, spend a few seconds judging
 the diff, and skip the minutes of benching. If a skip looks wrong, read the
 `ci-summary` job's table and then the `changes` job's log: it prints the diff
 it read, the packages and flags it decided, and the rule that decided them.
+When a diff runs no package at all, that row is named `matrix.package` in the
+checks list and the summary: GitHub does not expand a matrix for a job whose
+`if:` skipped it. The job and its `skipped` conclusion are still there.
 
 ## Static analysis and coverage gates
 
