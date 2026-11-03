@@ -1,7 +1,13 @@
 # Quickstart
 
-Run Ankusa, a broker, and a worker you own, send webhooks, then stop the
-worker and the broker and watch what happens to the hooks already
+Ankusa is a webhook receiver. It verifies each hook against the provider's
+signature, commits it to local disk, answers `201`, and only then delivers it to
+a broker your workers already read from. The provider's `2xx` never waits on a
+broker or a worker.
+
+This page builds that whole path on one machine: Ankusa, a Redpanda topic, an
+SQS FIFO queue, and a Python worker. You then stop the worker, send a hook, stop
+the broker, send another, and watch what happens to hooks Ankusa has already
 acknowledged. You need Docker with Compose v2 and `curl`; nothing else.
 
 ## 1. Start Ankusa, a broker, and a worker
@@ -25,18 +31,20 @@ flowchart LR
 ```
 
 [`ankusa.yml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/ankusa.yml)
-declares one source (`demo`) with one Kafka sink producing to the
-`ankusa.events` topic, which
+declares one source, `demo`, with one Kafka sink producing to the
+`ankusa.events` topic.
 [`docker-compose.yml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/docker-compose.yml)
-creates before Ankusa starts: the sink never creates a topic. A Redpanda
-Connect bridge
+creates that topic before Ankusa starts, because the sink never creates one.
+
+A Redpanda Connect bridge
 ([`bridge/bridge.yaml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/bridge/bridge.yaml))
-carries each record into an SQS FIFO queue in floci, with the record key
-(tenant and source) as the FIFO group, so a source's hooks reach the worker in
-the order Ankusa produced them. That is not the order they arrived in: dispatch
-runs attempts concurrently and a retried hook goes out after later ones. For
-per-key order, set `ordered: true` and an `ordering_key` on the sink
-([Ordering lanes](delivery.md#ordering-lanes)).
+carries each record into an SQS FIFO queue in floci, using the record key
+(tenant and source) as the FIFO group. One source's hooks therefore reach the
+worker in the order Ankusa produced them. That is not the order they arrived
+in: dispatch runs attempts concurrently, and a hook that was retried goes out
+after hooks that arrived later. For per-key order, set `ordered: true` and an
+`ordering_key` on the sink ([Ordering lanes](delivery.md#ordering-lanes)).
+
 [`worker.py`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py)
 polls that queue with `boto3`, decodes each message with the `ankusa` Python
 SDK, and prints what it receives.
@@ -51,9 +59,9 @@ sleep 2 && docker compose logs worker
 # received id=01a0... source=demo via=inline bytes=36 body={"id":"evt_1","type":"invoice.paid"}
 ```
 
-A body over the sink's `inline_max_bytes` (8 KiB here) is checked in on the
-node instead, and the message carries a claim ref the worker redeems from the
-claim-check gateway, so the broker never carries a large payload:
+A body larger than the sink's `inline_max_bytes` (8 KiB in this config) never
+reaches the broker. The node stores it and the message carries a claim
+reference, which the worker redeems from the claim-check gateway:
 
 ```sh
 printf '{"id":"evt_2","pad":"%s"}' "$(head -c 20000 /dev/zero | tr '\0' x)" |
@@ -62,29 +70,32 @@ sleep 2 && docker compose logs worker | grep evt_2
 # received id=01a0... source=demo via=claim bytes=20023 body={"id":"evt_2","pad":"xxxx...
 ```
 
-The `201` returns only after the hook is durably accepted — here, after the
-node's store has fsynced it. That is
-[the core invariant](architecture.md#the-core-invariant), not a formality:
-neither the broker nor the worker is on the request path, and a hook the
-provider was told about cannot be lost to a slow or dead worker.
+The `201` comes back only after the hook is durably accepted, which here means
+the node's store has fsynced it. That is
+[the core invariant](architecture.md#the-core-invariant). Neither the broker nor
+the worker sits on the request path, so a slow or dead worker cannot cost the
+provider an acknowledgement.
 
 ## 3. A provider retry is a new hook
 
-Without a source [`dedupe:`](configuration.md#sources) setting, ingest does not
-collapse repeats. Send the identical request again and it is a new hook with a
-new `id`, stored and delivered a second time:
+Unless a source sets [`dedupe:`](configuration.md#sources), ingest collapses
+nothing. Send the identical request again and it is a new hook with a new `id`,
+stored and delivered a second time:
 
 ```sh
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
 # => {"id":"01b1...","status":"accepted"}
 ```
 
-That is at-least-once on purpose: the provider's retry contract is honored
+That is at-least-once on purpose. The provider's retry contract is satisfied
 without an ingest-side dedup table, and your worker is the idempotent receiver
-(see [Replay is safe](#replay-is-safe) below, and
-[`delivery.md`](delivery.md#idempotent-receivers)). Set `dedupe:` on a source
-whose provider sends a stable event id, and the second request answers `201
-{"status":"accepted","id":"01a0...","duplicate":true}` instead.
+(see [Replay is safe](#replay-is-safe) and
+[`delivery.md`](delivery.md#idempotent-receivers)).
+
+If your provider sends a stable event id, set `dedupe:` on the source instead.
+The second request then answers
+`201 {"status":"accepted","id":"01a0...","duplicate":true}` and stores nothing
+new.
 
 ## 4. When your worker goes down
 
@@ -97,13 +108,14 @@ docker compose start worker
 until docker compose logs worker | grep evt_3; do sleep 2; done
 ```
 
-Nothing was retried and nothing dead-lettered. The hook was produced to the
-topic and carried into the FIFO queue while the worker was away, and the queue
-held it until the worker came back: a worker outage is the queue's to absorb.
-It can take about 30 s to show up: the long poll the stopped worker left open
-may already have received the message, and SQS hides a received message for
-the queue's visibility timeout (30 s here) whether or not its receiver lives to
-process it, then hands it to the next poll.
+Nothing was retried and nothing was dead-lettered. Ankusa produced the hook to
+the topic and the bridge carried it into the FIFO queue while the worker was
+away, where the queue held it. A worker outage is the queue's to absorb.
+
+Allow it about 30 seconds to reappear. The stopped worker's long poll may
+already have received the message, and SQS hides a received message for the
+queue's visibility timeout (30 s here) whether or not its receiver lived to
+process it. Then the next poll gets it.
 
 ## 5. When the broker goes down
 
@@ -123,23 +135,24 @@ until docker compose logs worker | grep evt_4; do sleep 2; done
 ```
 
 The provider still got its `201` with the broker gone, because the ack never
-depended on it: Ankusa held the hook, retried the produce until the retry
-budget ran out, and dead-lettered it. `ankusa.yml` caps retries at 6 attempts
-(roughly 8–15 s, jitter included) and turns off the sink's circuit breaker so
-this drill takes seconds; the default retries for 24 hours
-(`dispatch.retry.max_elapsed_ms`), backing off to 5 min, and after 5 failures
-in a row parks the sink's hooks behind an open breaker without spending
-attempts ([A slow or dead sink](delivery.md#a-slow-or-dead-sink)). With the
-defaults, a broker outage this short is simply retried and never dead-letters.
+depended on the broker. Ankusa held the hook and retried the produce until the
+retry budget ran out, then dead-lettered it. This config caps retries at 6
+attempts (roughly 8–15 s, jitter included) and turns the sink's circuit breaker
+off, so the drill takes seconds.
+
+The defaults behave differently. They retry for 24 hours
+(`dispatch.retry.max_elapsed_ms`), backing off to 5 minutes, and after 5
+failures in a row they park the sink's hooks behind an open breaker without
+spending attempts ([A slow or dead sink](delivery.md#a-slow-or-dead-sink)).
+Under those defaults, an outage this short is retried and never dead-letters.
 
 ### Replay is safe
 
-A replay is a durable job, not a one-shot flip: it drips dead rows back into
-the delivery queue at `rate` items per second, and only while dispatch has
-spare capacity (the oldest-due lag stays under `max_lag_ms`, 2 s by default),
-so it cannot flood a recovering sink or starve live traffic. Each replayed
-delivery keeps the hook's original id and carries the job's `replay_id`. Watch
-it and stop it at any time:
+A replay is a durable job. It drips dead rows back into the delivery queue at
+`rate` items per second, and only while dispatch has spare capacity (the
+oldest-due lag stays under `max_lag_ms`, 2 s by default), so it cannot flood a
+recovering sink or starve live traffic. Each replayed delivery keeps the hook's
+original id and carries the job's `replay_id`. Watch the job or stop it:
 
 ```sh
 curl -s localhost:4002/v1/replays/<job-id>
@@ -147,12 +160,12 @@ curl -s localhost:4002/v1/replays/<job-id>
 curl -XPATCH localhost:4002/v1/replays/<job-id> -d '{"state":"cancelled"}'
 ```
 
-Redelivery is still at-least-once, so the receiver stays idempotent: a hook
-that reached the sink before it failed is delivered again as a message with
-the same `id` and the same `idempotency_key`, and the worker dedupes on the
-latter — here with an in-memory set, which a real worker replaces with a
-unique key in its database. In this drill the broker was down for every
-attempt, so replay delivers `evt_4` once and never again.
+Redelivery is still at-least-once, so the receiver stays idempotent. A hook that
+reached the sink before it failed is delivered again with the same `id` and the
+same `idempotency_key`; the worker dedupes on the latter, here with an
+in-memory set and in a real worker with a unique key in its database. In this
+drill the broker was down for every attempt, so replay delivers `evt_4` once
+and never again.
 
 ## 6. Inspect the node
 
@@ -168,15 +181,17 @@ curl localhost:4002/v1/quarantine  # hooks held after a failed verification
 curl -XPOST localhost:4002/v1/replays -d '{"kind":"quarantine"}'
 ```
 
-`/health` is liveness; `/ready` answers whether this node can take a hook right
-now (the store takes a synced write), which is the probe a load balancer
-should use. Port 4002 is the operator API: never publish it publicly. The
+`/health` is liveness. `/ready` answers whether this node can take a hook right
+now, which means the store took a synced write, and that is the probe a load
+balancer should use.
+
+Port 4002 is the operator API and should never be published publicly. The
 compose file binds it to `127.0.0.1` on the host, and `ankusa.yml` sets
-`admin.ip: 0.0.0.0` with `auth.allow_insecure: true` so that published port
-reaches the API inside the container; this demo is open to anything that can
-reach it. A real deployment sets `admin.auth` (a token, your OIDC provider, or
-client certificates; see
-[Control-plane authentication](configuration.md#control-plane-authentication)).
+`admin.ip: 0.0.0.0` with `auth.allow_insecure: true` so that the published port
+reaches the API inside the container. The result is a demo open to anything that
+can reach it. A real deployment sets `admin.auth` to a token, your OIDC
+provider, or client certificates; see
+[Control-plane authentication](configuration.md#control-plane-authentication).
 
 ## 7. Point a real provider at it
 
@@ -226,15 +241,15 @@ GitHub and Standard Webhooks sources are the same shape with a different
 | `429` | Over a rate limit, nothing stored: the tenant's (`rate_limited`) or, for a hook that would be quarantined, its source's quarantine bucket (`quarantine_rate_limited`). Retry after `Retry-After`. |
 | `503` | No durable destination right now: overload, the store could not take the commit (`store_unavailable`), the intake log could not confirm (`intake_unavailable`, `intake_pending`), or a sink refused under `wal.type: none`. Also a full quarantine pen (`quarantine_full`, `Retry-After: 60`). Retry later. |
 
-`201 accepted` is the only committed response, and it comes back only after a
+`201 accepted` is the only committed response, and it arrives only after a
 durable accept: the store's synced commit (`wal.type: disk`, the default), the
-store and the Kafka intake log (`wal.type: dual`), or every sink's confirm
-(`wal.type: none`). There is no `200`. Without a source `dedupe:` setting,
-every accepted POST is a new hook with a new `id`, and a provider retry after a
-lost ack is stored and delivered again.
+store plus the Kafka intake log (`wal.type: dual`), or every sink's confirm
+(`wal.type: none`). There is no `200`. Without a source `dedupe:` setting, every
+accepted POST is a new hook with a new `id`, and a provider retry after a lost
+ack is stored and delivered again.
 
-The catch URL is `/webhooks/:source_id` by default; a tenant-in-the-URL scheme
-is one config line away, see [`multi-tenancy.md`](multi-tenancy.md).
+The catch URL is `/webhooks/:source_id` by default. A tenant-in-the-URL scheme
+is one config line away; see [`multi-tenancy.md`](multi-tenancy.md).
 
 ## Clean up
 
@@ -244,10 +259,13 @@ docker compose down -v
 
 ## Where next
 
-- Every YAML key: [`configuration.md`](configuration.md)
-- Guarantees and failure modes: [`architecture.md`](architecture.md)
-- Roles, fleets, the container: [`deployment.md`](deployment.md)
-- Sinks, retries, the dead-letter queue, quarantine: [`delivery.md`](delivery.md)
-- Oban, Celery, and queue handoff: [`integrations.md`](integrations.md)
-- All the examples: [examples/README.md](https://github.com/jamescarr/ankusa/blob/main/examples/README.md)
-- Embedding in an Elixir app instead: [`elixir.md`](elixir.md)
+[`configuration.md`](configuration.md) has every YAML key. [`architecture.md`](architecture.md)
+explains the guarantee and the failure modes behind the drill you just ran.
+[`delivery.md`](delivery.md) covers sinks, retries, the dead-letter queue and
+quarantine, and [`deployment.md`](deployment.md) covers roles, fleets and the
+container. For a job framework, read [`integrations.md`](integrations.md); for
+the library instead of the container, [`elixir.md`](elixir.md).
+
+Runnable examples for every delivery transport are in
+[examples/README.md](https://github.com/jamescarr/ankusa/blob/main/examples/README.md),
+and the index of these pages is [`README.md`](README.md).
