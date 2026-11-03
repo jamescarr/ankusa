@@ -1041,7 +1041,7 @@ which it does when a measured red run outranks a slow pipeline.
   (`ankusa-test` job, `ci-summary`), `docs/testing.md`.
   *Evidence:* —
 
-- [ ] **CI-18 — A failed test lane names its tests where the report survives** · P1 · Deps: —
+- [x] **CI-18 — A failed test lane names its tests where the report survives** · P1 · Deps: —
   *Why:* on 2026-11-03 a failed `mise run check:package ankusa --lane test` exited 1 with "1 failed test" and **the failing test's name was lost**: the lane reports failures only on stdout, and stdout is what a CI log view or an agent's tool output clips. `mix test --failed` is the local recovery and CI cannot use it (a fresh VM every run). The lane already writes the ExUnit seed to `$GITHUB_STEP_SUMMARY` (`.mise/tasks/check/package`, `record_seed`, from the `$testlog` that `tee` already captures), so the names belong on the same page. The cost is real: 6 of 30 `ci.yml` runs were red in the 2026-11-03 window and two of those sites were attributed only by pulling job logs through the API, while a third (the run that motivated this item) was never named at all.
   *Change:*
   1. `.mise/tasks/check/package`, the `test` lane: after a non-zero `mix test`, append a bounded block to `$GITHUB_STEP_SUMMARY` — for up to 10 failures the `N) test <name> (<Module>)` line, its `file:line`, and the first 8 lines of its failure body (`code:`, `left:`, `right:`, `** (…)`), then a `Failed: N (showing M)` line; nothing when there are no failures. Parse from the existing `$testlog`; do not re-run anything.
@@ -1051,7 +1051,69 @@ which it does when a measured red run outranks a slow pipeline.
   *Done when:* a deliberately broken test (throwaway commit, never merged) makes the lane exit non-zero **and** the step summary contain that test's name, `file:line` and `code:` line plus the `Failed:` list, while stdout ends with the compact list; a green run appends only the seed line and no failure section; `mise run check:package ankusa --lane test` still runs the same tests with the same coverage floor and the same exit codes (0 green, non-zero red).
   *Proof:* the probe PR's step-summary excerpt and stdout tail (quoted in the PR body), a green run's summary page, `mise run lint:pins`, `mise run lint:workflows`.
   *Anchors:* `.mise/tasks/check/package` (`record_seed`, `testlog`, the `mix test --cover` step), `docs/testing.md` (the check:package / testing section).
-  *Evidence:* —
+  *Evidence:* PR #262. `.mise/tasks/check/package` grew `record_failures`
+  beside `record_seed`: one `awk` pass over the `$testlog` that `tee` already
+  captured (the suite is never re-run), called only when `mix test` exited
+  non-zero, so a green run's summary is byte-for-byte the old one. It parses
+  ExUnit's own block (`^ *[0-9]+\) (test|doctest) ` — doctests included — then
+  the `file:line` line, then the body until a blank line), appends up to 10
+  failures and ~60 excerpt lines plus `Failed: N (showing M)` to
+  `$GITHUB_STEP_SUMMARY`, and always prints one compact `Failed: — …` line on
+  stdout; when nothing parses it says
+  `Failed: N (names unparsed — see the job log)` instead of nothing. A green
+  run, with `GITHUB_STEP_SUMMARY` set, exited 0 and left exactly one line:
+  `- \`async_api_spex\`: ExUnit seed \`522092\``
+  (`mise run check:package async_api_spex --lane test`, local, 2026-11-03).
+
+  Probe PR #261 — a throwaway failing test, closed unmerged, branch deleted —
+  run [41657646044](https://github.com/jamescarr/ankusa/actions/runs/41657646044)
+  / job 125992235684, `mise run check:package ankusa --lane test` exit code 2,
+  and the `$GITHUB_STEP_SUMMARY` it wrote, printed by a probe-only `cat`
+  appended to the same workflow step (the summary file is per step, so this is
+  the page CI renders):
+
+  ~~~text
+  - `ankusa`: ExUnit seed `545988`
+  - `ankusa`: failing tests (names, locations and the head of each failure)
+
+  ````text
+    1) test CI-18 probe: a raise names itself (Ankusa.Ci18ProbeTest)
+       test/ci18_probe_test.exs:10
+       ** (RuntimeError) CI-18 probe boom
+       code: raise RuntimeError, "CI-18 probe boom"
+       stacktrace:
+         test/ci18_probe_test.exs:11: (test)
+
+    2) test CI-18 probe: an assertion names itself (Ankusa.Ci18ProbeTest)
+       test/ci18_probe_test.exs:6
+       Assertion with == failed
+       code:  assert 1 + 1 == 3
+       left:  2
+       right: 3
+       stacktrace:
+         test/ci18_probe_test.exs:7: (test)
+
+  Failed: 2 (showing 2)
+  ````
+  ~~~
+
+  and its stdout tail, after `mix test --cover`'s coverage table:
+
+  ~~~text
+  Failed: 2 — CI-18 probe: a raise names itself (Ankusa.Ci18ProbeTest) at test/ci18_probe_test.exs:10; CI-18 probe: an assertion names itself (Ankusa.Ci18ProbeTest) at test/ci18_probe_test.exs:6
+  [check:package] ERROR task failed
+  ~~~
+
+  A real (non-probe) red run reproduces the same shape: this worktree's own
+  `mise run check:package ankusa --lane test` on 2026-11-03 exited 2 on an
+  `assert_receive` timeout in `Ankusa.Sink.SQSTest` and ended with
+  `Failed: 1 — batched (a delivery from dispatch: ctx batch: true, an
+  instance's batchers) an ordered FIFO group is one request in flight, entries
+  in admission order (Ankusa.Sink.SQSTest) at test/ankusa/sink/sqs_test.exs:698`.
+  The lane's `mix test --cover`, its `--cover` floor, its `tee`, its step order
+  and its exit codes are untouched; the green run above and the merged PR's
+  `ankusa (tests)` job are the 0 side. `mise run lint:pins` and
+  `mise run lint:workflows` green.
 
 - [ ] **CI-19 — The `/ready` flip deadline: measure the flip, not the test's round trip** · P2 · Deps: —
   *Why:* `Ankusa.DrainTest` "SIGTERM with 200 requests in flight: ready flips, zero resets, every 201 survives a restart" failed on `main` (run 41625156213, `da3a7bb9` — a `docker.yml`-only diff) with `assert flip_ms <= 100, "/ready took #{flip_ms} ms to flip to draining"`, `Result: 2079/2080 passed`. Unlike every other site the measurement found, 100 ms is a **product promise** about how fast `/ready` flips after SIGTERM — the bound must not move. What is wrong is what `flip_ms` spans: `sent = System.monotonic_time(:millisecond)` → `System.cmd("kill", ["-TERM", …])` (a **fork/exec of a shell**) → the drainer → an HTTP poll of `/ready` **on the listener that holds 200 in-flight requests**, retried with no delay (`await_draining/2`). Three of those terms are the test harness's, not the drainer's, and on a loaded runner the fork alone can exceed 100 ms.
