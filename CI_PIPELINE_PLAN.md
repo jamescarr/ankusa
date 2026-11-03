@@ -945,7 +945,53 @@ which it does when a measured red run outranks a slow pipeline.
   `packages/ankusa/test/support/` (the store-boot helpers the properties use),
   `packages/ankusa/mix.exs` (`test_coverage`, `ex_unit` settings),
   `.mise/tasks/check/package` (the `--lane test` step).
-  *Evidence:* —
+  *Evidence:* **not met, not merged.** Probe PR #258 (closed unmerged, branch
+  deleted) ran the lane with `TEST_ARGS="--slowest 30"` (`--slowest` implies
+  `trace`, so `max_cases: 1`; both sides serialised). Before (run 41643183851):
+  `Finished in 613.3 s` (268.9 async / 344.4 sync), top 30 = 422.4 s = 68.9 %,
+  `Result: 2081 passed (51 properties, 2030 tests), 41 excluded`, coverage
+  89.25 %, job **11:08**. The attempted change (#259, closed unmerged): every
+  test store's data root on `/dev/shm` (CI-2's `BENCH_DATA_ROOT` pattern —
+  `ANKUSA_TEST_DATA_ROOT` overrides, system temp dir otherwise) plus
+  `TEST_ARGS` in the lane task. After (run 41648295752): `Finished in 489.6 s`
+  (221.6 / 268.0), top 30 = 306.0 s, rerun of the same commit 467.1 s
+  (207.6 / 259.5), coverage 89.17 %, job 8:57 — the five
+  `migrate_property_test.exs` properties 136.7 s → 64.3 s (−53 %), the two
+  `routes/snapshot_test.exs` cases 24.9 → 18.2 s.
+  Per case, which is what this item asked for: `test/test_helper.exs` sets
+  `:stream_data, :max_runs` from `PROPERTY_RUNS` (**5 000**), so a property is
+  5 000 cases and the 51 properties are ~47 % of the suite. Each
+  `migrate_property_test.exs` case writes 1–5 frames (23 B–4.8 KiB measured)
+  and calls `Migrate.run/1`, which is ~10 **synced** `Store.write/3` calls —
+  `:rocksdb.write_batch(…, sync: true)`, one fsync each: the
+  `reopen_for_import` format-2 downgrade, the import's final batch + marker,
+  and the 2→8 format ladder's seven migrations, one synced batch each. Measured
+  71 ms/case on this laptop's APFS (7.5 ms fsync), 10.6 ms/case on a RAM disk,
+  5.6 ms of the APFS case the ladder alone: the cost is the fsync, not the
+  payload. `pack_property_test.exs` has no store: 3.2 ms/case, of which the
+  property's own body is 0.26 ms — 92 % is `G.pack_claims()` generation
+  (0.55 MB of bodies/case after its own 2 MiB budget, 0.6 ms of that SHA-256),
+  so its ceiling only comes down by narrowing what is generated, which the
+  guardrail forbids. The routes snapshot pair is 400/400 `Routes.create/2`
+  calls, one at a time.
+  The real lane (`max_cases: 8`, no profile flags), one pair each: `main`
+  **394.8 s** (129.2 async / 265.5 sync), job **7:17**, 2081 passed, coverage
+  89.21 % → the change **465.8 s** (193.7 / 272.0), job **8:38**, 2080/2081,
+  coverage 89.17 %. The 758 RAM-backed stores bought the sync phase nothing in
+  that run and the async phase grew; `--max-cases 16` on the baseline (job
+  7:32) says the async half is CPU-bound, not short of ExUnit slots. The change
+  also met a fixture that is not deterministic on a faster store:
+  `Ankusa.Queue.DeliveriesTest` "a sink down for longer than retention keeps the
+  node's footprint flat" failed 3 of 3 runner runs (43/46/45 hooks where it
+  asserts 40) and passed 24 of 24 locally on both an APFS and a RAM-disk root;
+  an hour of `storage.interval_ms` in place of the drill's spinning background
+  compactor did not settle it.
+  So the ≥30 % *Done when* is **not reachable from cost per case**: the
+  profile-side win is real (fsync wait) but the real lane overlaps fsyncs with
+  other tests, and the properties' remaining cost is generator CPU and the
+  format ladder's RocksDB calls. The wall clock is one 8–9 min job, and **CI-17**
+  (partition into three shards and merge the coverage) is what takes it to
+  ~3.2 min.
 
 - [ ] **CI-17 — Partition the core suite across jobs and merge the coverage, so the pipeline stops being one 9.8 min job** · P2 · Deps: CI-9
   *Why:* `ankusa (tests)` is 9.8 min median of an 11.5 min PR wall clock and
