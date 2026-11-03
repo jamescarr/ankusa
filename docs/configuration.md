@@ -200,7 +200,7 @@ One source per provider endpoint; the key is the catch-URL segment
 | `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks` \| `shopify` \| `slack` \| `hmac` \| `standard_webhooks_asym` \| `asymmetric` \| `token` \| `client_cert`. The HMAC types (`stripe` through `hmac`) and `token` require `secret` (or `secret_file`): a non-empty string or a list of non-empty strings (at most 8), newest first — every key is tried, so a rotation is `secret: ["${NEW}", "${OLD}"]`. An empty key would verify whatever anyone signs with it, so an empty value (an unset `${VAR:-}` included) is a load error. `secret_file` is `secret` read from a file, a path or a list of paths, exclusive with `secret` ([Secret sources](#secret-sources)). `stripe`, `standard_webhooks`, and `slack` also take `tolerance_seconds` (default 300, at most 3600: see [Custom HMAC schemes](#custom-hmac-schemes)). `hmac` takes the descriptor keys below. `standard_webhooks_asym` and `asymmetric` (provider public key), `token` (static credential) and `client_cert` (mTLS certificate pin) have their own keys: see [Public-key, token and client-certificate verifiers](#public-key-token-and-client-certificate-verifiers). |
 | `on_verify_failure` | `reject` \| `quarantine` \| `accept_flag`: what happens when verification fails. |
 | `trust_url_tenant` | `true` \| `false` (default `false`). With `routing: tenant_path`, a source with `tenant: default` and `verify: {type: none}` files hooks under whatever tenant the URL names, unverified: boot, `check-config` and an admin API write refuse it unless it sets `trust_url_tenant: true`. See [`multi-tenancy.md`](multi-tenancy.md#tenant-scoping-what-tenant_id-actually-does). |
-| `sinks` | At least one; every sink is tried on every delivered hook. |
+| `sinks` | At least one; every sink is tried on every delivered hook, unless its entry has a [`filter`](#sink-filters). |
 | `dedupe` | Collapse provider retries at ingest. A preset name (`github`, `standard_webhooks`, `svix`, `shopify`, `stripe`, `salesforce`), or a mapping with exactly one of `preset` (same names), `header` (the event-id header, e.g. `X-GitHub-Delivery`) or `json` (a dot path into the body, e.g. `data.id`), plus an optional `ttl_seconds` (default 259 200 = 72 h). Hooks that share a key within the TTL get the same `201` and the original id, with `"duplicate": true` on the later ones. Keys are scoped to the tenant and the source, so two tenants behind one `tenant_path` source never collapse each other's events. The key travels into every delivery as `dedupe_key`. **`salesforce` is `json: id`, not a delivery id Salesforce documents** (unverified against Salesforce's documentation): Salesforce stamps no delivery-id header on any outbound mechanism, Outbound Messages are SOAP/XML (their `Notification/Id` is not a JSON path), and Flow/Apex HTTP callouts and Data 360 webhook targets send a body the org builds. The preset keys on the top-level `"id"` of a JSON body, which the callout must set to a value that is the same on every retry of one event; a body without it is never deduplicated, so use `json:` with your own path when the body is shaped otherwise. A source with no `dedupe` logs one `source <id> has no dedupe:` warning at boot (edge nodes), and the gauge `ankusa_sources_without_dedupe` counts the configured sources that have none. |
 | `event_type` | Where the provider's event name (`push`, `invoice.paid`) is read from; it is stored on the hook and carried to every consumer (`x-ankusa-event-type`, the message's `event_type`, the `ankusa_event_type` header). A preset name (`github` = the `X-GitHub-Event` header, `shopify` = `X-Shopify-Topic`, `stripe`, `standard_webhooks` and `svix` = the body's `type`, `slack` = the body's `event.type`), or a mapping with exactly one of `preset` (same names), `header` (a request header, at most 128 bytes) or `json` (a dot path of 1 to 16 segments into the body, e.g. `data.kind`). Only a non-empty string of at most 128 bytes is an event type: an integer, an object, a missing path, a body that is not JSON or is over `dedupe.max_json_bytes`, or a longer value leaves it `null` and counts in `ankusa_ingest_event_type_missing_total`. Read once at ingest from the complete header list and the one JSON decode `dedupe` and `ordering_key` share; a hook accepted *flagged* (`accept_flag`) still gets its event type, and still claims no dedupe key. Absent: no event type. |
 | `forward_headers` | Which provider request headers travel into sink messages (and `Sink.Http` requests): a list of names (lowercased; still minus the never-forwarded set below), or absent for the default set: every header except `authorization`, `proxy-authorization`, `cookie`, `x-api-key`, `host`, `content-length`, `content-type`, `connection`, `keep-alive`, `transfer-encoding`, `te`, `trailer`, `upgrade`, `expect`, and every `x-ankusa-*` header. (`:default` is the Elixir value only; YAML takes a list or nothing.) |
@@ -397,6 +397,9 @@ a `.fifo` queue; a `header` key must survive `store_headers` (the key is shown i
 `/v1/config`, it is not a secret). No instance key is added. See
 [Ordering lanes](delivery.md#ordering-lanes).
 
+Every sink, `log` included, also takes `filter`, read by core the same way: which
+hooks the sink gets. See [Sink filters](#sink-filters).
+
 The `sqs` and `google_pubsub` sinks batch what dispatch hands them: up to 10
 (SQS) or 1 000 (Pub/Sub) deliveries to one queue or topic go out as one request.
 Each takes these keys, all optional and range-checked when the first delivery
@@ -452,6 +455,65 @@ function of the envelope instead, to route a shared source's tenants to their
 own receivers; those connect through a bounded per-instance pool that takes no
 settings. See
 [`delivery.md`](delivery.md#sinkhttp-per-tenant-destinations).
+
+### Sink filters
+
+Every sink also takes `filter`, read by core like `ordered`: a data predicate over
+the hook that decides whether the sink gets a delivery row. A sink without a
+`filter` gets every hook. A hook that no sink selects is answered
+`201 {"status":"accepted","id":…,"filtered":true}` and not stored (nothing is
+claimed, committed, archived or replayable; the provider's retry is `filtered`
+again, not `duplicate`). See [Filters](delivery.md#filters).
+
+```yaml
+event_type: {json: type}
+sinks:
+  - type: kafka
+    brokers: [redpanda:9092]
+    topic: invoices
+    filter: {event_type: [invoice.paid, invoice.failed]}
+  - type: http
+    url: https://hooks.example.com/pushes
+    secret: whsec_…
+    filter:
+      all:
+        - {header.x-github-event: push}
+        - {not: {json.repository.private: "true"}}
+```
+
+A filter is a node: `all: [node, …]`, `any: [node, …]`, `not: node`, or one
+`field: matcher`. A mapping node has exactly one key.
+
+| Field | Reads |
+| --- | --- |
+| `event_type` | the hook's event type (the source's [`event_type`](#sources); a filter on it needs one) |
+| `tenant` | the hook's tenant, `default` without one |
+| `content_type` | the media type of `Content-Type` (before `;`, trimmed, lowercased) |
+| `header.<name>` | the first value of that request header (case-insensitive) |
+| `json.<a.b.c>` | the value at that dot path of the JSON body: a string, an integer as its decimal string, a boolean as `true`/`false`; anything else is absent |
+
+A matcher is a string (equals), a list of strings (in), or a mapping with exactly
+one operator: `eq`, `neq`, `in`, `not_in`, `prefix`, `suffix`, or `exists`
+(`true`/`false`). Comparisons are byte-exact and on strings (quote a number:
+`json.count: "5"`); there is no numeric comparison. On an absent value `eq`, `in`,
+`prefix`, `suffix` and `exists: true` are false, and `neq`, `not_in` and
+`exists: false` are true.
+
+A filter with a `json.*` condition cannot be judged when the body is over
+`dedupe.max_json_bytes` (1 MiB by default) or is not JSON: it selects the sink
+(a filter never loses a hook) and counts
+`ankusa_dispatch_filter_unevaluable_total{sink}`. A sink a filter did not select
+counts `ankusa_dispatch_filtered_total{sink}`.
+
+Ceilings, each a load error naming `sources.<id>.sinks[i].filter` when exceeded:
+32 conditions per filter, 4 levels of `all`/`any`/`not`, a literal of 256 bytes,
+64 values in an `in`/`not_in`, a header name of 128 bytes, a JSON path of 1 to 16
+segments. A `header.<name>` condition must survive the source's `store_headers`
+policy (a replay evaluates the filter on the stored hook), and an `event_type`
+condition needs the source's `event_type`; both are refused when the file loads,
+and by the admin API (`400`). The filter is shown as written in `/v1/config` and
+in `GET /v1/tenants/:t/sources/:name` (it is not a secret). No instance key is
+added. A `lifecycle.sinks` entry takes no `filter`.
 
 ### Environment overrides
 
@@ -1081,12 +1143,13 @@ restarts. A request for a source that does not exist never carries a label
 (`ankusa_ingest_refused_total{reason="unknown_source"}`), whatever the setting.
 
 Worst case, a scrape has up to `max_series_per_metric` series for each of the
-nine identity-carrying counters (`ankusa_ingest_requests_total`,
+eleven identity-carrying counters (`ankusa_ingest_requests_total`,
 `ankusa_ingest_event_type_missing_total`,
 `ankusa_verify_failures_total`, `ankusa_verifier_weak_hash_total`,
 `ankusa_quarantine_rate_limited_total`, `ankusa_quarantine_full_total`,
 `ankusa_rate_limit_rejected_total`, `ankusa_dispatch_deliveries_total`,
-`ankusa_dispatch_dead_lettered_total`) and each of the two gauges, whatever the
+`ankusa_dispatch_dead_lettered_total`, `ankusa_dispatch_filtered_total`,
+`ankusa_dispatch_filter_unevaluable_total`) and each of the two gauges, whatever the
 number of tenants. The platform's budget is 10 000 series per node: with many
 active tenants, lower `max_series_per_metric` to fit it, or set `detail:
 none`, which makes the series set independent of the tenant count (the number
@@ -1675,7 +1738,7 @@ config :ankusa,
 | `verifier` | `{Ankusa.Verifier.None, []}` | `{module, opts}` implementing `Ankusa.Verifier`. `Ankusa.Verifier.Hmac`'s `:secret` is a binary or a list of binaries, newest first — every key is tried, so a rotation is `secret: [new, old]`. `Ankusa.Verifier.Asymmetric` takes `:public_key` (one or a list) and `:scheme` (`:standard_webhooks_asym` or a `%Ankusa.Verifier.Asymmetric.Scheme{}`), `Ankusa.Verifier.Token` a `:secret` and a `:location`, `Ankusa.Verifier.ClientCert` `:fingerprints` and/or `:subjects`: see [Public-key, token and client-certificate verifiers](#public-key-token-and-client-certificate-verifiers). Every one of them that cannot work (no usable key, secret or pin) refuses the instance's boot, naming the source. |
 | `on_verify_failure` | `:reject` | `:reject` (`401`, nothing stored) / `:quarantine` (`202`, durable pen; see [`delivery.md#quarantine`](delivery.md#quarantine)) / `:accept_flag` (commits, envelope flagged). |
 | `trust_url_tenant` | `false` | Under a `route_resolver` other than `Ankusa.RouteResolver.Path`, a source with `tenant_id: "default"` and `Ankusa.Verifier.None` must set it to `true` (`Ankusa.Verifier.validate_shared!/1`); see [`multi-tenancy.md`](multi-tenancy.md#tenant-scoping-what-tenant_id-actually-does). |
-| `sinks` | `[{Ankusa.Sink.Log, []}]` | `[{module, opts}]` implementing `Ankusa.Sink`: one delivery per sink, each retried independently. |
+| `sinks` | `[{Ankusa.Sink.Log, []}]` | `[{module, opts}]` implementing `Ankusa.Sink`: one delivery per sink the hook selects, each retried independently. A sink entry's `filter:` (a map, see [Sink filters](#sink-filters)) decides which hooks it gets; core reads it off the opts, so the sink never sees it, and `%Ankusa.Source{}.filters` holds the parsed `Ankusa.Filter` of each sink (`nil` for one without). |
 | `dedupe` | `nil` | Collapse provider retries at ingest: `:github \| :standard_webhooks \| :svix \| :shopify \| :stripe \| :salesforce` (`:salesforce` is `json: "id"`, a convention rather than a Salesforce-documented delivery id; see [Sources](#sources)), or `%{header: "X-Event-Id"}` / `%{json: "data.id"}`, each with an optional `ttl_ms` (default `259_200_000`). A source with `nil` logs one `source <id> has no dedupe:` warning at boot and counts in `ankusa_sources_without_dedupe`. |
 | `event_type` | `nil` | Where the provider's event name is read from (`Ankusa.EventType`): `:github \| :shopify \| :stripe \| :standard_webhooks \| :svix \| :slack`, or `%{header: "X-Event"}` / `%{json: "data.kind"}`, exactly one of `preset`, `header`, `json`. Stored on the hook as `Ankusa.Envelope.event_type`; see [Sources](#sources). |
 | `forward_headers` | `:default` | `:default` (every header except the never-forwarded set; see [Sources](#sources)) or a list of header names. |

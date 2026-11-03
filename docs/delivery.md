@@ -1301,6 +1301,66 @@ long as its head keeps retrying (up to `retry.max_elapsed_ms`). Order is per nod
 and by `seq`: two nodes accepting hooks of one key have no common order, so route
 a key to one node. Metrics: `ankusa_dispatch_lanes`, `ankusa_dispatch_lanes_blocked`.
 
+## Filters
+
+Per sink entry of a source, in core and YAML: a data predicate over the hook that
+decides whether that sink gets a delivery row. The grammar, the fields
+(`event_type`, `tenant`, `content_type`, `header.<name>`, `json.<path>`), the
+operators and the ceilings are in [`configuration.md`](configuration.md#sink-filters).
+
+```elixir
+event_type: %{json: "type"},
+sinks: [
+  {Ankusa.Sink.Kafka, brokers: [...], topic: "invoices", filter: %{event_type: ["invoice.paid"]}},
+  {Ankusa.Sink.Http, url: "...", filter: %{"header.x-github-event" => "push"}}
+]
+```
+
+The filters are judged **at ingest**, once, from the complete header list and the
+body's one capped JSON decode (the same decode the dedupe key, the event type and
+an ordering key share), before anything is claimed or written. The sinks a hook
+selects get a delivery row; the others get none (`ankusa_dispatch_filtered_total{sink}`).
+A sink without a `filter` is selected for every hook.
+
+**A hook no sink selects is not stored.** It is answered
+`201 {"status":"accepted","id":…,"filtered":true}`: the provider is told the hook
+was received, because it was, and nothing more is owed. No dedupe key is claimed
+(an identical retry is `filtered` again, never `duplicate`), nothing is committed,
+archived or replayable, and it counts on the ingest metrics as `outcome="filtered"`.
+A hook with zero delivery rows would never be reclaimed (the queue deletes a hook
+once its last row and archive obligation clear), and a hook nobody
+wants has no durability promise to keep. A hook that selects at least one sink is
+stored as before, and is reclaimed when those rows settle.
+
+**A filter never loses a hook.** A `json.*` condition cannot be judged when the
+body is over `dedupe.max_json_bytes` (1 MiB by default) or is not JSON. The
+filter then selects its sink, and `ankusa_dispatch_filter_unevaluable_total{sink}`
+counts it. Every other condition is judged on its value or, when the hook has
+none, on its absence (`neq`, `not_in` and `exists: false` are true of an absent
+value). There is no numeric comparison: values are strings.
+
+**Direct mode** (`wal.type: none`): the request publishes only to the selected
+sinks and answers after those confirm. A hook that selects only sinks that are not
+durable (`log`, Redis pub/sub) is `503`, as a source with no durable sink is; one
+that selects nothing is `201 …"filtered":true`.
+
+**Replay.** A filter is evaluated again wherever delivery rows are made from a
+stored hook: a quarantine release (a hook no sink selects leaves the pen and
+counts as skipped), an archive replay (the sinks the job names, intersected with
+the sinks the filters select; a hook that selects none is skipped) and boot
+recovery of the intake log. The event type is the one stored on the hook, or
+read again from the stored hook when it has none (a hook archived before
+`event_type` existed). A DLQ replay revives rows that exist and
+is unchanged. A `header.<name>` condition must therefore survive the source's
+`store_headers` policy, and the source or the admin API write is refused if it
+does not. The 0.3 import path does not evaluate filters: an imported hook goes to
+every current sink of its source.
+
+`/v1/tenants/:t/sources/:name` shows each sink's filter as written, and
+`GET /asyncapi.json` appends `Filter: …` to the channel description of a filtered
+sink. Filters apply to hooks, not to lifecycle events (`lifecycle.sinks` takes
+none).
+
 
 ## `Ankusa.RetryPolicy`
 

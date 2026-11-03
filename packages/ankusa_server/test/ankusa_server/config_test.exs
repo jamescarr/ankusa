@@ -1625,6 +1625,147 @@ defmodule AnkusaServer.ConfigTest do
     end
   end
 
+  test "filter: every form and every rejected form" do
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          sources:
+            demo:
+              verify: {type: none}
+              event_type: {json: type}
+              sinks:
+                - type: log
+                - type: kafka
+                  brokers: [redpanda:9092]
+                  topic: invoices
+                  filter: {event_type: [invoice.paid, invoice.failed]}
+                - type: http
+                  url: https://hooks.example.com/pushes
+                  allow_unsigned: true
+                  filter:
+                    all:
+                      - {header.x-github-event: push}
+                      - {not: {json.repository.private: "true"}}
+                      - {any: [{tenant: acme}, {content_type: {prefix: application/}}]}
+                - type: log
+                  filter: {event_type: {exists: true}}
+          """),
+        env: %{}
+      ).config
+
+    sources = config.source_store |> elem(1) |> Keyword.fetch!(:sources)
+    [log, kafka, http, filtered_log] = sources["demo"][:sinks]
+
+    # The mapping is handed to core as written; core builds the filters.
+    assert log == {Ankusa.Sink.Log, []}
+    assert {Ankusa.Sink.Kafka, kafka_opts} = kafka
+    assert kafka_opts[:filter] == %{"event_type" => ["invoice.paid", "invoice.failed"]}
+    assert {Ankusa.Sink.Http, http_opts} = http
+    assert %{"all" => [_, _, _]} = http_opts[:filter]
+    assert {Ankusa.Sink.Log, [filter: %{"event_type" => %{"exists" => true}}]} = filtered_log
+
+    source = Ankusa.Source.new("demo", sources["demo"])
+    assert [nil, %Ankusa.Filter{}, %Ankusa.Filter{}, %Ankusa.Filter{}] = source.filters
+
+    assert Ankusa.Filter.describe(Enum.at(source.filters, 1)) ==
+             "event_type in [invoice.paid, invoice.failed]"
+
+    # The admin API's decoder is the same function, so it reads the same form.
+    spec = %{
+      "verify" => %{"type" => "none"},
+      "event_type" => "stripe",
+      "sinks" => [%{"type" => "log", "filter" => %{"event_type" => "invoice.paid"}}]
+    }
+
+    assert [{Ankusa.Sink.Log, [filter: %{"event_type" => "invoice.paid"}]}] =
+             Config.source_from_map!("api", spec)[:sinks]
+  end
+
+  test "filter: every rejected form names its path" do
+    leaf = fn n -> Enum.map_join(1..n, ", ", fn i -> "{event_type: v#{i}}" end) end
+    nest = fn node -> "{all: [#{node}]}" end
+    five = "{event_type: a}" |> nest.() |> nest.() |> nest.() |> nest.() |> nest.()
+    values = Enum.map_join(1..65, ", ", &"v#{&1}")
+
+    for {yaml, fragment} <- [
+          {"filter: nope", "node must be a map"},
+          {"filter: {}", "exactly one key, got 0"},
+          {"filter: {event_type: a, tenant: b}", "exactly one key, got 2"},
+          {"filter: {nope: a}", ~s(field "nope" is not one of)},
+          {"filter: {header.: a}", "needs a header name"},
+          {"filter: {json.a..b: a}", "needs non-empty segments"},
+          {"filter: {event_type: 5}", "takes a string, a list of strings or one operator"},
+          {"filter: {event_type: {like: a}}", ~s(unknown operator "like")},
+          {"filter: {event_type: {eq: 5}}", "must be a string (quote a number)"},
+          {"filter: {event_type: {exists: maybe}}", "exists takes true or false"},
+          {"filter: {event_type: {in: []}}", "needs at least one value"},
+          {"filter: {all: []}", "all needs a non-empty list of nodes"},
+          {"filter: {event_type: [#{values}]}", "at most 64 values"},
+          {"filter: {event_type: #{String.duplicate("e", 257)}}", "over 256 bytes"},
+          {"filter: {header.#{String.duplicate("h", 129)}: a}", "over 128 bytes"},
+          {"filter: {json.#{Enum.join(1..17, ".")}: a}", "more than 16 segments"},
+          {"filter: {all: [#{leaf.(33)}]}", "more than 32 conditions"},
+          {"filter: #{five}", "more than 4 deep"}
+        ] do
+      path =
+        tmp_config("""
+        sources:
+          demo:
+            verify: {type: none}
+            event_type: {json: type}
+            sinks:
+              - type: log
+              - type: log
+                #{yaml}
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ "sources.demo.sinks[1].filter: ", yaml
+      assert error.message =~ fragment, yaml
+    end
+  end
+
+  test "filter: a filter that the source cannot serve is refused with its source's path" do
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(
+          path:
+            tmp_config("""
+            sources:
+              demo:
+                verify: {type: none}
+                sinks:
+                  - type: log
+                    filter: {event_type: push}
+            """),
+          env: %{}
+        )
+      end
+
+    assert error.message =~ "sources.demo"
+    assert error.message =~ "sinks[0] filters on event_type"
+  end
+
+  test "filter: lifecycle sinks take none" do
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(
+          path:
+            tmp_config("""
+            lifecycle:
+              sinks:
+                - type: log
+                  filter: {tenant: acme}
+            """),
+          env: %{}
+        )
+      end
+
+    assert error.message =~ "lifecycle.sinks[0].filter"
+    assert error.message =~ "does not apply to lifecycle events"
+  end
+
   test "event_type accepts a preset, a header map and a json map" do
     config =
       Config.load!(

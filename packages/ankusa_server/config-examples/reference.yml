@@ -1026,7 +1026,8 @@ sources:
     # max_headers: 64   # at most this many forwarded headers per message; the rest are dropped (ankusa_sink_headers_dropped_total{reason="count"})
     # forward_headers_max_bytes: 16384   # at most this many bytes of forwarded header names and values per message; a header that would pass it is dropped whole (reason="bytes")
     # store_headers: {drop: [x-internal-auth], hash: [x-tenant-token]}   # absent = the http.store_headers lists above
-    # At least one. Every sink is tried on every delivered hook.
+    # At least one. Every sink is tried on every delivered hook it selects (a sink
+    # without a `filter` selects every hook).
     sinks:
       - {type: log}
       - type: http
@@ -1052,6 +1053,12 @@ sources:
         # unless allow_insecure_tls is true, which skips it for this one sink.
         # cacertfile: /etc/ankusa/ca.pem
         # allow_insecure_tls: false
+        # Which hooks this sink gets (any sink takes `filter`): a predicate over
+        # event_type (needs the source's event_type above), tenant, content_type,
+        # header.<name> and json.<dot.path>, with all / any / not and the matchers
+        # "literal", [list], {eq|neq|in|not_in|prefix|suffix|exists: …}. A hook that
+        # no sink selects is answered 201 {"filtered": true} and is not stored.
+        # filter: {event_type: [invoice.paid, invoice.failed]}
       - type: rabbitmq
         url: "${RABBITMQ_URL}"
         exchange: "${RABBITMQ_EXCHANGE}"

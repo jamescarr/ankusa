@@ -287,6 +287,54 @@ defmodule Ankusa.CryptoTest do
       assert {:ok, @spec_map} = Envelope.unseal(ring, sealed)
     end
 
+    test "a sink's filter is shown as written and stored in the clear, whatever its keys" do
+      ring = ring!(kek: @kek_a)
+
+      filter = %{
+        "any" => [
+          %{"event_type" => ["invoice.paid", "invoice.failed"]},
+          %{"header.x-github-event" => %{"eq" => "push"}},
+          %{"json.data.object.customer" => %{"prefix" => "cus_"}}
+        ]
+      }
+
+      spec = %{
+        "verify" => %{"type" => "stripe", "secret" => "whsec-canary"},
+        "sinks" => [%{"type" => "kafka", "topic" => "hooks", "filter" => filter}]
+      }
+
+      sealed = Envelope.seal(ring, spec)
+      refute JSON.encode!(sealed) =~ "whsec-canary"
+      assert [%{"filter" => ^filter}] = sealed["sinks"]
+
+      shown = Redact.source_entry(%{tenant: "acme", name: "n", source_id: "acme.n", spec: spec})
+      assert [%{"filter" => ^filter, "topic" => "hooks"}] = shown["sinks"]
+
+      assert {:ok, ^spec} = Envelope.unseal(ring, sealed)
+    end
+
+    test "/v1/config shows a static source's filter as written" do
+      config =
+        Ankusa.Config.new(
+          source_store:
+            {Ankusa.SourceStore.Static,
+             sources: %{
+               "billing" => [
+                 sinks: [
+                   {Ankusa.Sink.Http,
+                    url: "https://x.test/hook",
+                    allow_unsigned: true,
+                    filter: %{"event_type" => "invoice.paid"}}
+                 ]
+               ]
+             }}
+        )
+
+      json = config |> Redact.config() |> JSON.encode!()
+      assert json =~ "invoice.paid"
+      assert json =~ ~s("filter":{"event_type":"invoice.paid"})
+    end
+
     test "a rotation list of secrets is encrypted element by element" do
       ring = ring!(kek: @kek_a)
       spec = %{"verify" => %{"type" => "stripe", "secret" => ["new-canary", "old-canary"]}}
