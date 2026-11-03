@@ -1678,8 +1678,10 @@ which it does when a measured red run outranks a slow pipeline.
   claim refill — and the p99 printed before that assert was 107.19 / 4.808.
   Reverted; never merged.
 
-  *Final:* PR #NNN; `ankusa (tests, 4/4)` job JOBID green with
-  `ankusa (coverage)`; local `mise run check:package ankusa --partition 4/4`
+  *Final:* PR #272; `ankusa (tests, 4/4)` job 126176199402 green beside
+  `ankusa (coverage)` in run 41710247867, and green again on the text-only plan
+  push (`ankusa (tests, 4/4)`, `ankusa (coverage)` and the rest of the lane).
+  Local: `mise run check:package ankusa --partition 4/4`
   green (export only, nothing else changed), `mise run lint:pins`,
   `mise run lint:workflows`, and ten file-level drill runs at `--seed 628685`
   green. `main` is red on CI-26 (`ankusa_kafka`), not on this item's site.
