@@ -635,7 +635,15 @@ jobs:
       # ExUnit seed line in the step summary; the lane warms `test` only. The
       # audit and its `hex-audit-ankusa` artifact stay in the static lane —
       # `hex.audit` runs there, and two jobs must not upload one artifact name.
-      - run: mise run check:package ankusa --lane test
+      - name: probe — run the lane, then print the step summary it wrote
+        run: |
+          set +e
+          mise run check:package ankusa --lane test
+          rc=$?
+          echo "===== BEGIN GITHUB_STEP_SUMMARY ====="
+          cat "$GITHUB_STEP_SUMMARY"
+          echo "===== END GITHUB_STEP_SUMMARY ====="
+          exit "$rc"
 
   # Core's object-store adapters (and the S3 backup round trip) against the
   # floci emulators: `mix test --only integration` (the rest of core's suite
