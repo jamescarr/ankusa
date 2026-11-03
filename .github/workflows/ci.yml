@@ -901,13 +901,15 @@ jobs:
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
-          # What `check:examples` runs, no more: every example's `mix` app
-          # (RocksDB's NIF needs cmake), the npm SDKs' `npm ci`/`build` and the
-          # workers' `npx tsc` (node), the Python worker's `uv sync`, the Rust
-          # worker's `cargo fmt`/`clippy`, and the charts' `helm lint`/`template`
-          # + `kubeconform` (CI-22). It renders `examples/fleet-e2e/kind/`'s
-          # values with helm; it never calls `kind` or `kubectl`.
-          install_args: elixir erlang cmake node uv rust helm kubeconform
+          # What `check:examples` runs, plus the `examples/fleet-e2e/kind/`
+          # toolchain the job's chart render stands in for (CI-22's set): every
+          # example's `mix` app (RocksDB's NIF needs cmake), the npm SDKs'
+          # `npm ci`/`build` and the workers' `npx tsc` (node), the Python
+          # worker's `uv sync`, the Rust worker's `cargo fmt`/`clippy`, and the
+          # charts' `helm lint`/`template` + `kubeconform`. The task itself never
+          # shells out to `kind` or `kubectl` — it renders the fleet chart's
+          # values with helm — but they stay declared, as the plan lists them.
+          install_args: elixir erlang cmake node uv rust helm kubectl kubeconform kind
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
