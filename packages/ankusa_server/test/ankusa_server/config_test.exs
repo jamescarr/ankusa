@@ -1625,6 +1625,425 @@ defmodule AnkusaServer.ConfigTest do
     end
   end
 
+  test "filter: every form and every rejected form" do
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          sources:
+            demo:
+              verify: {type: none}
+              event_type: {json: type}
+              sinks:
+                - type: log
+                - type: kafka
+                  brokers: [redpanda:9092]
+                  topic: invoices
+                  filter: {event_type: [invoice.paid, invoice.failed]}
+                - type: http
+                  url: https://hooks.example.com/pushes
+                  allow_unsigned: true
+                  filter:
+                    all:
+                      - {header.x-github-event: push}
+                      - {not: {json.repository.private: "true"}}
+                      - {any: [{tenant: acme}, {content_type: {prefix: application/}}]}
+                - type: log
+                  filter: {event_type: {exists: true}}
+          """),
+        env: %{}
+      ).config
+
+    sources = config.source_store |> elem(1) |> Keyword.fetch!(:sources)
+    [log, kafka, http, filtered_log] = sources["demo"][:sinks]
+
+    # The mapping is handed to core as written; core builds the filters.
+    assert log == {Ankusa.Sink.Log, []}
+    assert {Ankusa.Sink.Kafka, kafka_opts} = kafka
+    assert kafka_opts[:filter] == %{"event_type" => ["invoice.paid", "invoice.failed"]}
+    assert {Ankusa.Sink.Http, http_opts} = http
+    assert %{"all" => [_, _, _]} = http_opts[:filter]
+    assert {Ankusa.Sink.Log, [filter: %{"event_type" => %{"exists" => true}}]} = filtered_log
+
+    source = Ankusa.Source.new("demo", sources["demo"])
+    assert [nil, %Ankusa.Filter{}, %Ankusa.Filter{}, %Ankusa.Filter{}] = source.filters
+
+    assert Ankusa.Filter.describe(Enum.at(source.filters, 1)) ==
+             "event_type in [invoice.paid, invoice.failed]"
+
+    # The admin API's decoder is the same function, so it reads the same form.
+    spec = %{
+      "verify" => %{"type" => "none"},
+      "event_type" => "stripe",
+      "sinks" => [%{"type" => "log", "filter" => %{"event_type" => "invoice.paid"}}]
+    }
+
+    assert [{Ankusa.Sink.Log, [filter: %{"event_type" => "invoice.paid"}]}] =
+             Config.source_from_map!("api", spec)[:sinks]
+  end
+
+  test "filter: every rejected form names its path" do
+    leaf = fn n -> Enum.map_join(1..n, ", ", fn i -> "{event_type: v#{i}}" end) end
+    nest = fn node -> "{all: [#{node}]}" end
+    five = "{event_type: a}" |> nest.() |> nest.() |> nest.() |> nest.() |> nest.()
+    values = Enum.map_join(1..65, ", ", &"v#{&1}")
+
+    for {yaml, fragment} <- [
+          {"filter: nope", "node must be a map"},
+          {"filter: {}", "exactly one key, got 0"},
+          {"filter: {event_type: a, tenant: b}", "exactly one key, got 2"},
+          {"filter: {nope: a}", ~s(field "nope" is not one of)},
+          {"filter: {header.: a}", "needs a header name"},
+          {"filter: {json.a..b: a}", "needs non-empty segments"},
+          {"filter: {event_type: 5}", "takes a string, a list of strings or one operator"},
+          {"filter: {event_type: {like: a}}", ~s(unknown operator "like")},
+          {"filter: {event_type: {eq: 5}}", "must be a string (quote a number)"},
+          {"filter: {event_type: {exists: maybe}}", "exists takes true or false"},
+          {"filter: {event_type: {in: []}}", "needs at least one value"},
+          {"filter: {all: []}", "all needs a non-empty list of nodes"},
+          {"filter: {event_type: [#{values}]}", "at most 64 values"},
+          {"filter: {event_type: #{String.duplicate("e", 257)}}", "over 256 bytes"},
+          {"filter: {header.#{String.duplicate("h", 129)}: a}", "over 128 bytes"},
+          {"filter: {json.#{Enum.join(1..17, ".")}: a}", "more than 16 segments"},
+          {"filter: {all: [#{leaf.(33)}]}", "more than 32 conditions"},
+          {"filter: #{five}", "more than 4 deep"}
+        ] do
+      path =
+        tmp_config("""
+        sources:
+          demo:
+            verify: {type: none}
+            event_type: {json: type}
+            sinks:
+              - type: log
+              - type: log
+                #{yaml}
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ "sources.demo.sinks[1].filter: ", yaml
+      assert error.message =~ fragment, yaml
+    end
+  end
+
+  test "filter: a filter that the source cannot serve is refused with its source's path" do
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(
+          path:
+            tmp_config("""
+            sources:
+              demo:
+                verify: {type: none}
+                sinks:
+                  - type: log
+                    filter: {event_type: push}
+            """),
+          env: %{}
+        )
+      end
+
+    assert error.message =~ "sources.demo"
+    assert error.message =~ "sinks[0] filters on event_type"
+  end
+
+  test "filter: lifecycle sinks take none" do
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(
+          path:
+            tmp_config("""
+            lifecycle:
+              sinks:
+                - type: log
+                  filter: {tenant: acme}
+            """),
+          env: %{}
+        )
+      end
+
+    assert error.message =~ "lifecycle.sinks[0].filter"
+    assert error.message =~ "does not apply to lifecycle events"
+  end
+
+  test "event_type accepts a preset, a header map and a json map" do
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          sources:
+            a: {verify: {type: none}, event_type: github, sinks: [{type: log}]}
+            b: {verify: {type: none}, event_type: {header: X-Custom-Event}, sinks: [{type: log}]}
+            c: {verify: {type: none}, event_type: {json: data.kind}, sinks: [{type: log}]}
+            d: {verify: {type: none}, event_type: {preset: slack}, sinks: [{type: log}]}
+            e: {verify: {type: none}, sinks: [{type: log}]}
+          """),
+        env: %{}
+      ).config
+
+    sources = config.source_store |> elem(1) |> Keyword.fetch!(:sources)
+
+    assert sources["a"][:event_type] == %{preset: :github}
+    assert sources["b"][:event_type] == %{header: "X-Custom-Event"}
+    assert sources["c"][:event_type] == %{json: "data.kind"}
+    assert sources["d"][:event_type] == %{preset: :slack}
+    refute Keyword.has_key?(sources["e"], :event_type)
+
+    assert Ankusa.Source.new("a", sources["a"]).event_type.from == {:header, "x-github-event"}
+    assert Ankusa.Source.new("b", sources["b"]).event_type.from == {:header, "x-custom-event"}
+    assert Ankusa.Source.new("c", sources["c"]).event_type.from == {:json, ["data", "kind"]}
+    assert Ankusa.Source.new("d", sources["d"]).event_type.from == {:json, ["event", "type"]}
+    assert Ankusa.Source.new("e", sources["e"]).event_type == nil
+
+    # The admin API's decoder is the same function, so it reads the same forms.
+    spec = %{"verify" => %{"type" => "none"}, "sinks" => [%{"type" => "log"}]}
+
+    assert Config.source_from_map!("api", Map.put(spec, "event_type", "stripe"))[:event_type] ==
+             %{preset: :stripe}
+
+    assert Config.source_from_map!("api", Map.put(spec, "event_type", %{"json" => "kind"}))[
+             :event_type
+           ] == %{json: "kind"}
+  end
+
+  test "event_type: every rejected form names its path" do
+    for {yaml, fragment} <- [
+          {"event_type: {}", "set exactly one of preset, header, json"},
+          {"event_type: {header: x-id, json: data.id}",
+           "set exactly one of preset, header, json"},
+          {"event_type: {preset: github, header: x-id}",
+           "set exactly one of preset, header, json"},
+          {"event_type: {preset: nope}", ~s(unknown value "nope")},
+          {"event_type: nope", ~s(unknown value "nope")},
+          {"event_type: {header: ''}", "header must be a non-empty string"},
+          {"event_type: {header: #{String.duplicate("h", 129)}}", "at most 128 bytes"},
+          {"event_type: {json: a..b}", "json path must be 1 to 16 non-empty"},
+          {"event_type: {json: '#{Enum.join(1..17, ".")}'}",
+           "json path must be 1 to 16 non-empty"},
+          {"event_type: {nope: 1}", ~s(unknown key "nope")},
+          {"event_type: 5", "sources.demo.event_type"},
+          {"event_type: [github]", "sources.demo.event_type"}
+        ] do
+      path =
+        tmp_config("""
+        sources:
+          demo:
+            verify: {type: none}
+            #{yaml}
+            sinks: [{type: log}]
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ "sources.demo.event_type", yaml
+      assert error.message =~ fragment, yaml
+      # The core module's own prefix is not repeated in the config error.
+      refute error.message =~ ~s(source "demo": event_type), yaml
+    end
+
+    assert_raise ConfigError, ~r/sources\.api\.event_type/, fn ->
+      Config.source_from_map!("api", %{
+        "verify" => %{"type" => "none"},
+        "event_type" => %{"json" => "a..b"},
+        "sinks" => [%{"type" => "log"}]
+      })
+    end
+  end
+
+  test "templated sinks load with the strings as written, and Source.new compiles them" do
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          sources:
+            demo:
+              verify: {type: none}
+              event_type: {json: type}
+              sinks:
+                - {type: kafka, brokers: ["k:9092"], topic: "events.{{ event_type ?? other }}", key: "{{ tenant }}"}
+                - {type: rabbitmq, exchange: x, routing_key: "{{ event_type }}"}
+                - {type: nats, servers: ["n:4222"], subject: "hooks.{{ tenant }}.{{ source }}"}
+                - {type: redis, url: "redis://r:6379", channel: "c.{{ source }}"}
+                - {type: sqs, queue_url: "https://sqs.us-east-1.amazonaws.com/1/q.fifo", region: us-east-1, message_group_id: "{{ tenant }}"}
+                - {type: google_pubsub, project: p, topic: t, ordering_key: "{{ id }}"}
+                - type: http
+                  url: "https://hooks.example.com/t/{{ tenant }}?e={{ header.x-github-event ?? none }}"
+                  headers: {x-event: "{{ event_type }}", x-static: "1"}
+                  allow_unsigned: true
+          """),
+        env: %{}
+      ).config
+
+    opts = config.source_store |> elem(1) |> Keyword.fetch!(:sources) |> Map.fetch!("demo")
+    assert [{Ankusa.Sink.Kafka, kafka} | _] = opts[:sinks]
+    assert kafka[:topic] == "events.{{ event_type ?? other }}"
+
+    sinks = Ankusa.Source.new("demo", opts).sinks
+
+    assert [
+             {_, kafka},
+             {_, rabbit},
+             {_, nats},
+             {_, redis},
+             {_, sqs},
+             {_, pubsub},
+             {_, http}
+           ] = sinks
+
+    assert {:template, ["events.", {:var, "event_type", "other"}]} = kafka[:topic]
+    assert {:template, [{:var, "tenant", nil}]} = kafka[:key]
+    assert {:template, [{:var, "event_type", nil}]} = rabbit[:routing_key]
+    assert {:template, ["hooks.", _, ".", _]} = nats[:subject]
+    assert {:template, ["c.", {:var, "source", nil}]} = redis[:channel]
+    assert {:template, [{:var, "tenant", nil}]} = sqs[:message_group_id]
+    assert {:template, [{:var, "id", nil}]} = pubsub[:ordering_key]
+
+    assert {:template, ["https://hooks.example.com/t/", {:var, "tenant", nil}, "?e=", _]} =
+             http[:url]
+
+    assert [{"x-event", {:template, _}}, {"x-static", "1"}] = http[:headers]
+  end
+
+  test "templated url: host rule" do
+    http = fn url ->
+      """
+      sources:
+        demo:
+          verify: {type: none}
+          sinks:
+            - type: http
+              url: "#{url}"
+              allow_unsigned: true
+      """
+    end
+
+    for url <- [
+          "https://hooks.example.com/{{ tenant }}",
+          "https://hooks.example.com:8443/t/{{ tenant }}/{{ event_type ?? x }}?a=1",
+          "https://hooks.example.com/t?e={{ id }}",
+          "HTTPS://hooks.example.com/{{ tenant }}"
+        ] do
+      assert %{config: _} = Config.load!(path: tmp_config(http.(url)), env: %{}), url
+    end
+
+    for url <- [
+          "https://{{ tenant }}.example.com/x",
+          "https://hooks.{{ tenant }}.example.com/x",
+          "https://hooks.example.com{{ tenant }}",
+          "https://hooks.example.com?e={{ id }}",
+          "https://user:{{ tenant }}@hooks.example.com/x",
+          "{{ tenant }}://hooks.example.com/x",
+          "{{ tenant }}"
+        ] do
+      error =
+        assert_raise ConfigError, fn -> Config.load!(path: tmp_config(http.(url)), env: %{}) end
+
+      assert error.message ==
+               "sources.demo.sinks[0].url: templates are allowed after the host, not in it",
+             url
+    end
+
+    # the literal prefix is still held to the scheme rule
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config(http.("http://hooks.example.com/{{ tenant }}")), env: %{})
+      end
+
+    assert error.message =~ "sources.demo.sinks[0].url: must be an https:// URL"
+
+    # the admin API's decoder runs the same checks
+    assert_raise ConfigError,
+                 ~r/sources\.api\.sinks\[0\]\.url: templates are allowed after the host/,
+                 fn ->
+                   Config.source_from_map!("api", %{
+                     "verify" => %{"type" => "none"},
+                     "sinks" => [
+                       %{
+                         "type" => "http",
+                         "url" => "https://{{ tenant }}.example.com/",
+                         "allow_unsigned" => true
+                       }
+                     ]
+                   })
+                 end
+  end
+
+  test "templates on a non-templatable key are refused" do
+    for {sink, key} <- [
+          {"{type: sqs, queue_url: \"https://sqs.us-east-1.amazonaws.com/{{ tenant }}\", region: us-east-1}",
+           "queue_url"},
+          {"{type: google_pubsub, project: p, topic: \"{{ tenant }}\"}", "topic"},
+          {"{type: google_pubsub, project: \"{{ tenant }}\", topic: t}", "project"},
+          {"{type: rabbitmq, exchange: \"{{ tenant }}\"}", "exchange"},
+          {"{type: rabbitmq, exchange: x, url: \"amqp://{{ tenant }}\"}", "url"},
+          {"{type: redis, url: \"redis://{{ tenant }}\", channel: c}", "url"},
+          {"{type: kafka, brokers: [\"{{ tenant }}:9092\"], topic: t}", "brokers"},
+          {"{type: nats, servers: [\"{{ tenant }}:4222\"], subject: s}", "servers"}
+        ] do
+      path =
+        tmp_config("""
+        sources:
+          demo:
+            verify: {type: none}
+            sinks: [#{sink}]
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+
+      assert error.message == "sources.demo.sinks[0]: templates are not supported on #{key}",
+             sink
+    end
+
+    # lifecycle events have no hook to read a variable from
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(
+          path:
+            tmp_config("""
+            lifecycle:
+              sinks: [{type: kafka, brokers: ["k:9092"], topic: "events.{{ source }}"}]
+            sources:
+              demo: {verify: {type: none}, sinks: [{type: log}]}
+            """),
+          env: %{}
+        )
+      end
+
+    assert error.message == "lifecycle.sinks: templates are not supported on lifecycle sinks"
+  end
+
+  test "a malformed template names the sink key it is on" do
+    for {sink, fragment} <- [
+          {"{type: kafka, brokers: [\"k:9092\"], topic: \"{{ nope }}\"}",
+           ~s(sources.demo.sinks[0].topic: unknown variable "nope")},
+          {"{type: nats, servers: [\"n:4222\"], subject: \"a.{{ tenant\"}",
+           "sources.demo.sinks[0].subject: unclosed {{"},
+          {"{type: redis, url: \"redis://r\", channel: \"{{ }}\"}",
+           "sources.demo.sinks[0].channel: empty {{ }}"},
+          {"{type: kafka, brokers: [\"k:9092\"], topic: t, key: \"{{ tenant ?? a b }}\"}",
+           "sources.demo.sinks[0].key: the fallback of {{ tenant }}"},
+          {"{type: http, url: \"https://h.example.com/\", allow_unsigned: true, headers: {x-e: \"{{ header. }}\"}}",
+           "sources.demo.sinks[0].headers.x-e: header. needs a header name"}
+        ] do
+      path =
+        tmp_config("""
+        sources:
+          demo:
+            verify: {type: none}
+            sinks: [#{sink}]
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ fragment, sink
+    end
+
+    assert_raise ConfigError, ~r/sources\.api\.sinks\[0\]\.topic: unknown variable/, fn ->
+      Config.source_from_map!("api", %{
+        "verify" => %{"type" => "none"},
+        "sinks" => [%{"type" => "kafka", "brokers" => ["k:9092"], "topic" => "{{ nope }}"}]
+      })
+    end
+  end
+
   test "forward_headers accepts a list (lowercased) or nothing, and rejects other shapes" do
     config =
       Config.load!(

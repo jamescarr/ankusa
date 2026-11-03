@@ -284,7 +284,7 @@ See [`claim-check.md`](claim-check.md).
 | Adapter | Deps | What it does |
 | --- | --- | --- |
 | `Sink.Log` | none | Default. Logs the delivery; nothing leaves the process. |
-| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-idempotency-key`/`x-ankusa-verification`/`x-ankusa-tenant` (when set) headers, and a Standard Webhooks signature: `secret` is required unless `allow_unsigned: true`. The URL, headers and secret may be computed per tenant ([below](#sinkhttp-per-tenant-destinations)). Status mapping below. |
+| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-idempotency-key`/`x-ankusa-verification`/`x-ankusa-tenant` (when set) headers, and a Standard Webhooks signature: `secret` is required unless `allow_unsigned: true`. The URL, headers and secret may be computed per tenant ([below](#sinkhttp-per-tenant-destinations)), and the URL and header values may be `{{ var }}` templates ([below](#templated-addresses)). Status mapping below. |
 | `Sink.RabbitMQ` | `:amqp`, separate `ankusa_rabbitmq` package | Publishes to an exchange. Detailed below. |
 | `Sink.Kafka` | `:brod` (native `crc32cer` NIF), separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
 | `Sink.NATS` | `:gnat`, separate `ankusa_nats` package | Publishes to a JetStream subject, acknowledged by the stream. Detailed below. |
@@ -344,6 +344,52 @@ does not leave its connection open for the life of the node. The next
 delivery opens a new one; a delivery caught by the close fails that attempt
 and is retried.
 
+### Routing by content
+
+Three keys, each described in its own section below, decide where a hook goes
+from what the hook says. They compose, and they are read in a fixed order:
+
+```yaml
+sources:
+  billing:
+    verify: { type: none }
+    event_type: { json: type }                    # 1. name the hook
+    sinks:
+      - type: kafka
+        brokers: [redpanda:9092]
+        topic: "events.{{ event_type ?? other }}" # 3. address it, at delivery
+      - type: http
+        url: http://receiver:3000/invoices
+        filter: { event_type: [invoice.paid] }    # 2. choose the sinks, at ingest
+        secret: ${SINK_WHSEC}
+```
+
+1. **The event type** (`event_type:`, [`configuration.md`](configuration.md#sources))
+   is read once at ingest, from a header or a path in the body's one capped JSON
+   decode, and stored on the hook. A hook that carries none stores `null`
+   (`ankusa_ingest_event_type_missing_total`).
+2. **The filters** ([Filters](#filters)) are judged at ingest, once, on that
+   event type and the rest of the hook. A sink whose filter does not select the
+   hook gets no delivery row; a hook no sink selects is answered `201` with
+   `"filtered": true` and is not stored.
+3. **The templates** ([Templated addresses](#templated-addresses)) are rendered
+   on every delivery attempt, from the stored hook, for the sinks that do have a
+   row. A replay renders the same way, and the topic or URL follows the hook.
+
+What each one does when it cannot do its job:
+
+| Situation | Result |
+| --- | --- |
+| The source reads no event type from a hook | `event_type` is `null`. A filter on it does not match `eq`/`in`; a template with a `?? fallback` renders the fallback. |
+| No sink's filter selects the hook | `201 {"status":"accepted","id":…,"filtered":true}`. Nothing is claimed, stored or replayable, and an identical retry is `filtered` again. |
+| A `json.*` filter condition on a body over `dedupe.max_json_bytes`, or not JSON | The filter selects its sink (a filter never loses a hook), and `ankusa_dispatch_filter_unevaluable_total` counts it. |
+| A template variable has no value and no fallback | That delivery dead-letters at once as `permanent`, reason `{:template_missing, var}`. Add a fallback to the source, then replay the DLQ. |
+
+[`examples/event-routing/`](https://github.com/jamescarr/ankusa/tree/main/examples/event-routing/)
+runs this source end to end: `invoice.paid` goes to `events.invoice.paid` and to
+an HTTP receiver, any other hook goes to `events.other` only, and a source whose
+only sink is the filtered one answers `filtered: true`.
+
 ### `Sink.Http`: per-tenant destinations
 
 On a shared source (one `stripe` source behind `/webhooks/:tenant/stripe`) the
@@ -367,9 +413,100 @@ no secret is never sent unsigned. A function returns `{:error, reason}` to fail
 the attempt (`{:error, {:permanent, reason}}` to dead-letter a tenant with no
 endpoint); a raise is a transient failure; a value of the wrong shape is
 `{:permanent, {:computed, key, :invalid}}`, which never echoes the value. YAML
-and the admin API build static sinks only. `Ankusa.Sink.describe/3` reports
+and the admin API state a per-hook value as a [template](#templated-addresses)
+instead of a function. `Ankusa.Sink.describe/3` reports
 the options that are `computed`; the sink stays out of the AsyncAPI document,
 which describes the envelope and not the raw body this sink sends.
+
+### Templated addresses
+
+A function cannot be written in YAML or sent to the admin API. A `{{ var }}`
+template can, so a shared source routes each hook to an address that depends
+on it: one Kafka topic per event type, one NATS subject per tenant, one HTTP
+path per tenant. The strings are compiled when the source is built
+(`Ankusa.Sink.Template`) and rendered on every delivery attempt from the stored
+hook, so a replay renders the same way.
+
+```yaml
+sources:
+  billing:
+    verify: { type: none }
+    event_type: { json: type }        # the variable below
+    sinks:
+      - type: kafka
+        brokers: [redpanda:9092]
+        topic: "events.{{ event_type ?? other }}"
+      - type: http
+        url: "https://hooks.example.com/t/{{ tenant }}"
+        headers: { x-event: "{{ event_type }}" }
+        secret: whsec_…
+```
+
+**Syntax.** `{{ var }}` and `{{ var ?? fallback }}`, whitespace inside the
+braces optional. The variables:
+
+| `var` | Value |
+| --- | --- |
+| `tenant` | the hook's tenant (`default` without one) |
+| `source` | the source id |
+| `id` | the hook id |
+| `event_type` | the source's [`event_type`](configuration.md#sources), as extracted at ingest |
+| `header.<name>` | the first value of that request header (case-insensitive), from the stored header list |
+
+A `fallback` is a literal of `A-Z a-z 0-9 . _ : / -`. A variable with no value,
+an empty one, or one with a control character in it, takes the fallback. A
+string that contains `{{` must parse entirely: an unknown variable, an unclosed
+`{{`, an empty `{{ }}`, a fallback with other characters or an empty `header.`
+name is a config error that names the key (`sources.billing.sinks[0].topic: …`).
+`}}` outside a template is literal, and a literal `{{` cannot be written on a
+templatable key. A value is rendered as it is, never encoded or sanitised: a
+name the broker refuses is the broker's error.
+
+**Which keys.** Only these take a template; a `{{` in any other option of the
+sink is a config error (`templates are not supported on <key>`), because those
+are a connection's or a batcher's identity (credentials such as `password` and
+`token` are never read for templates):
+
+| Sink | Templatable | Not templatable |
+| --- | --- | --- |
+| `kafka` | `topic`, `key` | `brokers` |
+| `rabbitmq` | `routing_key` | `exchange`, `url` |
+| `nats` | `subject` | `servers` |
+| `redis` | `channel` | `url` |
+| `sqs` | `message_group_id` | `queue_url` |
+| `google_pubsub` | `ordering_key` (an unordered sink's own key) | `project`, `topic` |
+| `http` | `url`, every value of `headers` | `secret`, header names |
+
+`lifecycle.sinks` take no templates: a lifecycle event has no source's hook to
+read a variable from.
+
+**A missing value is a permanent dead letter.** A variable with no value and
+no fallback fails that delivery as `{:permanent, {:template_missing, var}}`
+(`error_class: permanent`, reason `{:template_missing, "event_type"}` in `GET
+/v1/dlq`): retrying cannot fix a hook that lacks the field. Fix the source
+(add a fallback), then replay the DLQ and the hooks deliver. A `header.<name>`
+variable on a header the source's `store_headers` policy drops or hashes is
+refused when the source is written (and at boot), because a replay renders
+from the stored hook.
+
+**The host stays literal.** An `http` `url` may hold templates in its path and
+query only: the literal text before the first `{{` must be an absolute
+`http(s)://host/` (with the `/`). `https://{{ tenant }}.example.com` is refused
+(`url: templates are allowed after the host, not in it`), because the host is
+what the egress policy and the connection pools key on. The rendered URL is
+still checked against the egress policy on every attempt. Elixir code that
+builds a source directly may template anything, and a URL that fans out to N
+hosts opens up to N pools, bounded by `egress.pools.max_pools` and
+`max_pools_per_tenant` ([connection pools](#sinkhttp-connection-pools)).
+
+**The AsyncAPI document** shows a templated address as a dynamic one: a
+channel with no `address`, since no one string serves every hook
+([`asyncapi.md`](asyncapi.md)). Kafka's `topic` is the sole topic option that
+was never per hook before; the sink still never creates a topic, so every topic
+a template can render must already exist. Tests: `sink/template_test.exs`,
+`sink/http_test.exs` (`templated destinations`), `dispatch_test.exs`
+(`template_missing`), the adapters' `templated …` cases and
+`ankusa_server/config_test.exs` (`templated url: host rule`).
 
 ### `Sink.Http`: connection pools
 
@@ -465,10 +602,12 @@ and as `dedupe_key` when the source extracts it. `Sink.Http` adds its own
 `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-idempotency-key`,
 `x-ankusa-verification`, `x-ankusa-received-at` (unix milliseconds, the
 message's `received_at`), `x-ankusa-body-sha256` (the lowercase hex SHA-256 of
-the body sent) and (when set) `x-ankusa-tenant`, `x-ankusa-dedupe-key`
-and `x-ankusa-replay-id`; a message carries `id`, `source_id`, `tenant_id`,
-`received_at`, `content_type`, `size`, `sha256`, `dedupe_key`, `replay_id`,
-`idempotency_key`, `verification`, `headers` and the body (or claim).
+the body sent) and (when set) `x-ankusa-tenant`, `x-ankusa-dedupe-key`,
+`x-ankusa-replay-id` and `x-ankusa-event-type` (the hook's event type, when the
+source has an [`event_type`](configuration.md#sources) and the hook carries
+one); a message carries `id`, `source_id`, `tenant_id`,
+`received_at`, `content_type`, `size`, `sha256`, `dedupe_key`, `event_type`,
+`replay_id`, `idempotency_key`, `verification`, `headers` and the body (or claim).
 
 **Trace context travels with the hook.** A request's W3C `traceparent` (and
 `tracestate`) is stored on the hook and delivered by every sink: the
@@ -632,7 +771,9 @@ so a field added to the encoder without a vector update fails the build, and
 every SDK has to decode what the encoder writes.
 
 Every message carries `sha256` (lowercase hex, inline bodies too), the
-provider event `dedupe_key` (or `null`), the `replay_id` of the replay job when
+provider event `dedupe_key` (or `null`), the `event_type` the source reads from
+the hook (or `null`: the source has none, or the hook carries none; a
+consumer routes on it instead of re-parsing the headers or the body), the `replay_id` of the replay job when
 this delivery is a replay (else `null`), the `idempotency_key` (below), the
 `verification` result (see [Idempotent receivers](#idempotent-receivers) above),
 the forwarded provider request `headers` (lowercased; the source's
@@ -731,7 +872,9 @@ on a different partition than a Java producer would choose.
 free; a topic's partition count is a capacity and ordering contract that can
 only grow, remapping keys when it does. An unknown topic is an error that
 flows into `Ankusa.RetryPolicy`, never a silently auto-created
-single-partition topic.
+single-partition topic. `topic` may be per hook, a function of the envelope or
+a [`{{ var }}` template](#templated-addresses) (`events.{{ event_type ?? other }}`);
+every topic it can render must already exist.
 
 **`deliver/3` returns `:ok` only once every in-sync replica has the record**
 (`required_acks: -1`, then a synchronous wait bounded by
@@ -811,8 +954,8 @@ Raise `:max_message_bytes` together with the server's `max_payload`.
 **The subject is the address, the headers are the metadata.** Each message
 carries the same headers the Kafka sink sets — always `ankusa_id`,
 `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`,
-`ankusa_idempotency_key` and `content_type`, plus `ankusa_dedupe_key` and
-`ankusa_replay_id` when present — and `Nats-Msg-Id` (below), so a consumer
+`ankusa_idempotency_key` and `content_type`, plus `ankusa_dedupe_key`,
+`ankusa_replay_id` and `ankusa_event_type` when present — and `Nats-Msg-Id` (below), so a consumer
 parses one set of fields regardless of
 transport. Unlike Kafka, there is no separate record key: NATS has no
 partition-ordering contract to lean on and no partition count to change under
@@ -1021,8 +1164,11 @@ stub that answers in 20 ms.
 **The queue is the address, message attributes are the metadata.** Each
 message carries `String` attributes `ankusa_id`, `ankusa_source_id`,
 `ankusa_tenant_id`, `ankusa_message_version`, `ankusa_idempotency_key` and
-`content_type`, plus `ankusa_dedupe_key` and `ankusa_replay_id` when present:
-the Kafka header set, at most 8 of SQS's 10 attributes. `ankusa_tenant_id` is
+`content_type`, plus `ankusa_dedupe_key`, `ankusa_replay_id` and
+`ankusa_event_type` when present:
+the Kafka header set, within SQS's limit of 10 attributes (a hook that would pass
+10, say a replayed, traced one, is sent without `ankusa_event_type`: the body
+carries it too). `ankusa_tenant_id` is
 left out when the hook has no tenant, because SQS refuses an empty attribute
 value. SQS counts attributes toward the size limit, so `max_message_bytes`
 checks body plus attributes.
@@ -1133,7 +1279,7 @@ mode) publishes one message per request.
 **The topic is the address, message attributes are the metadata.** Each message
 carries attributes `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
 `ankusa_message_version`, `ankusa_idempotency_key` and `content_type`, plus
-`ankusa_dedupe_key` and `ankusa_replay_id` when present: the same set
+`ankusa_dedupe_key`, `ankusa_replay_id` and `ankusa_event_type` when present: the same set
 `Sink.SQS` sends (`Ankusa.Sink.Message.attributes/2`). `ankusa_tenant_id` is
 left out when the hook has no tenant. Pub/Sub counts attributes and the
 ordering key toward the size limit, so `max_message_bytes` checks all three
@@ -1158,7 +1304,7 @@ sinks: [{Ankusa.Sink.Http, url: "...", ordered: true, ordering_key: {:header, "x
 ```
 
 `ordered: true` and `ordering_key`: `{:header, name}`, `{:json, "data.object.customer"}`
-(a dot path into the JSON body, read up to 1 MiB) or `{mod, fun, args}` (called
+(a dot path into the JSON body, read up to `dedupe.max_json_bytes`, 1 MiB by default) or `{mod, fun, args}` (called
 as `apply(mod, fun, [envelope | args])`). In YAML: `ordered: true` and
 `ordering_key: {header: x-entity-id}` or `{json: data.object.customer}`.
 Without a key every hook of the sink is one lane. A hook whose key cannot be
@@ -1200,6 +1346,66 @@ A lane's throughput is one delivery round trip per hook; a lane is blocked for a
 long as its head keeps retrying (up to `retry.max_elapsed_ms`). Order is per node
 and by `seq`: two nodes accepting hooks of one key have no common order, so route
 a key to one node. Metrics: `ankusa_dispatch_lanes`, `ankusa_dispatch_lanes_blocked`.
+
+## Filters
+
+Per sink entry of a source, in core and YAML: a data predicate over the hook that
+decides whether that sink gets a delivery row. The grammar, the fields
+(`event_type`, `tenant`, `content_type`, `header.<name>`, `json.<path>`), the
+operators and the ceilings are in [`configuration.md`](configuration.md#sink-filters).
+
+```elixir
+event_type: %{json: "type"},
+sinks: [
+  {Ankusa.Sink.Kafka, brokers: [...], topic: "invoices", filter: %{event_type: ["invoice.paid"]}},
+  {Ankusa.Sink.Http, url: "...", filter: %{"header.x-github-event" => "push"}}
+]
+```
+
+The filters are judged **at ingest**, once, from the complete header list and the
+body's one capped JSON decode (the same decode the dedupe key, the event type and
+an ordering key share), before anything is claimed or written. The sinks a hook
+selects get a delivery row; the others get none (`ankusa_dispatch_filtered_total{sink}`).
+A sink without a `filter` is selected for every hook.
+
+**A hook no sink selects is not stored.** It is answered
+`201 {"status":"accepted","id":…,"filtered":true}`: the provider is told the hook
+was received, because it was, and nothing more is owed. No dedupe key is claimed
+(an identical retry is `filtered` again, never `duplicate`), nothing is committed,
+archived or replayable, and it counts on the ingest metrics as `outcome="filtered"`.
+A hook with zero delivery rows would never be reclaimed (the queue deletes a hook
+once its last row and archive obligation clear), and a hook nobody
+wants has no durability promise to keep. A hook that selects at least one sink is
+stored as before, and is reclaimed when those rows settle.
+
+**A filter never loses a hook.** A `json.*` condition cannot be judged when the
+body is over `dedupe.max_json_bytes` (1 MiB by default) or is not JSON. The
+filter then selects its sink, and `ankusa_dispatch_filter_unevaluable_total{sink}`
+counts it. Every other condition is judged on its value or, when the hook has
+none, on its absence (`neq`, `not_in` and `exists: false` are true of an absent
+value). There is no numeric comparison: values are strings.
+
+**Direct mode** (`wal.type: none`): the request publishes only to the selected
+sinks and answers after those confirm. A hook that selects only sinks that are not
+durable (`log`, Redis pub/sub) is `503`, as a source with no durable sink is; one
+that selects nothing is `201 …"filtered":true`.
+
+**Replay.** A filter is evaluated again wherever delivery rows are made from a
+stored hook: a quarantine release (a hook no sink selects leaves the pen and
+counts as skipped), an archive replay (the sinks the job names, intersected with
+the sinks the filters select; a hook that selects none is skipped) and boot
+recovery of the intake log. The event type is the one stored on the hook, or
+read again from the stored hook when it has none (a hook archived before
+`event_type` existed). A DLQ replay revives rows that exist and
+is unchanged. A `header.<name>` condition must therefore survive the source's
+`store_headers` policy, and the source or the admin API write is refused if it
+does not. The 0.3 import path does not evaluate filters: an imported hook goes to
+every current sink of its source.
+
+`/v1/tenants/:t/sources/:name` shows each sink's filter as written, and
+`GET /asyncapi.json` appends `Filter: …` to the channel description of a filtered
+sink. Filters apply to hooks, not to lifecycle events (`lifecycle.sinks` takes
+none).
 
 
 ## `Ankusa.RetryPolicy`
@@ -1404,13 +1610,24 @@ docker run --rm -e ANKUSA_ADMIN_TOKEN jamescarr/ankusa replay \
 ```
 
 `--nodes` takes `[scheme://]host[:port]` entries (port `4002`), or one DNS name
-that resolves to every node (a headless service): each address is a node. A node
+that resolves to every node (a headless service; the chart's headless Service
+publishes a pod's address whether or not it is ready, so a draining node is
+still found). A name
+with several addresses is one node per address, each pinned to its address,
+over `http`; a name with one is requested by name. Names are resolved once, at
+start, IPv4 first and IPv6 when a name has no IPv4 address. `--expect-nodes N`
+turns that resolution into a check: when `--nodes` comes to any other number of
+nodes, the command sends nothing and fails, naming the nodes it found. A node
 that does not answer is asked again every second until `--timeout` (default
 3600 s); a node that was killed resumes its job from the cursor it committed,
 and one that comes back with an empty store is given the job again under the
-same id. Started again with the same `--job-id` after the command itself died,
-it finds the jobs where they are. It exits `0` when every node is `done`, `1`
-otherwise, and prints the totals either way. `--filter` takes `tenant`,
+same id. A pinned address that stops answering and is no longer in the name's
+DNS answer (its pod was replaced or removed) is `gone` at once instead of
+polled until the timeout; the replacement is not adopted mid-run, so run the
+command again with the same `--job-id` to reach it. Started again with the same
+`--job-id` after the command itself died, it finds the jobs where they are. It
+exits `0` when every node is `done`, `1` otherwise, and prints the totals
+either way. `--filter` takes `tenant`,
 `source_id`, `id`, `error_class`, `sink`, `since`, `until` (and `from`, `to`,
 `sinks=0+2` for an `archive` job); `--kind`, `--rate`, `--max-lag-ms`, `--token`
 (default `ANKUSA_ADMIN_TOKEN`) and `--cacertfile` as in the admin API. The

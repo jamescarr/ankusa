@@ -186,7 +186,9 @@ the wire said it. A `v: 2` message is a `v: 1` message plus additive fields, so
 a consumer reads it the same way; any other `v` is `unsupported_version`
 (permanent: dead-letter it). `$message->instance` and `$message->region` are the
 Ankusa instance that published the message and the region it is configured with
-(`null` for none). A message from the instance's lifecycle sinks carries a
+(`null` for none). `$message->eventType` is the provider's event name as the
+source's `event_type` key read it, for example `invoice.paid` (`null` for none).
+A message from the instance's lifecycle sinks carries a
 CloudEvents event as its body: `LifecycleEvent::decode($body)`.
 
 A queue consumer (Redis or a broker; the HTTP sink sends the original body
@@ -296,7 +298,7 @@ use Ankusa\Admin\AdminClient;
 $admin = new AdminClient(getenv('ADMIN_URL') ?: 'http://localhost:4002');
 
 $admin->health();                          // ['status' => 'ok', 'instance' => ..., 'roles' => [...]]
-$admin->listDeadLetters(['limit' => 10]);  // ['total' => ..., 'entries' => [...]]
+$admin->listDeadLetters(['limit' => 10]);  // ['total' => ..., 'entries' => [...], 'next_cursor' => ...]
 $admin->listQuarantined();
 
 // Replay jobs. A job is node-local, so a fleet replay is one job per node:

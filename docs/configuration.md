@@ -95,7 +95,7 @@ is the [key reference](#ankusa-config) below.
 | `source_store` | `type` (`static` \| `persistent` \| `redis`; `persistent` adds API-managed sources kept in this node's store, `redis` keeps them in Redis, shared by every node with the same namespace; a `url` with no `type` means `redis`), `url`, `namespace` (`ankusa:sources:<instance>`), `tick_ms` (30000), `timeout_ms` (5000), `load_timeout_ms` (300000) — the last five only with `type: redis`. See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
 | `secrets` | `kek` (a 32-byte key, base64, optionally `<id>:<base64>`; use `${VAR}`), `kek_previous` (a list, or one comma-separated string, of keys that may still decrypt). With a `kek`, the secrets of API-managed sources are encrypted before they are stored (`source_store.type: persistent` or `redis`); unset, they are stored as plain JSON. See [Encryption at rest](storage.md#encryption-at-rest). `providers.<name>` (`type: aws` or `vault`, and their settings) and `cache_ttl_ms` (`0`) name the secret managers `${sm:<name>:<ref>}` reads from; see [Secret sources](#secret-sources) |
 | `rate_limits` | `default` (`null` = unlimited; **required** with `routing: tenant_path`), `tenants` (`{tenant_id: {rate, burst, ...}}`; a limit may add `bytes_per_second`, `burst_bytes`, `max_body_bytes`, `max_queue`, `max_queue_bytes`), `per_ip` (`{rate, burst}` or `null`), `node` (`{rate, burst}` or `null`), `sources` (`default: {bytes_per_second, burst_bytes}`; 100 MB/s, `null` = off), `scope` (`node` \| `fleet`; default `node`). Per node, except the tenant quota under `scope: fleet`. `per_ip`, `node` and `sources` are charged before the body is read; the tenant's after verification. See [Rate limits](#rate-limits) |
-| `dedupe` | `scope` (`node` \| `fleet`; default `node`). Where a source's provider event key (its `dedupe:`) collapses: `fleet` claims it in `fleet.store` first. Needs `fleet.store`. See [Fleet scope](#fleet-scope). `max_entries` (100000000) and `max_entries_per_tenant` (30000000), integers ≥ 1: the most live dedupe keys the node, and one tenant, holds; past either a new key is `503 dedupe_quota`, `Retry-After: 60`. `max_json_bytes` (1048576), an integer ≥ 1: the biggest body a `json` dedupe source decodes; a larger body is stored with no dedupe key |
+| `dedupe` | `scope` (`node` \| `fleet`; default `node`). Where a source's provider event key (its `dedupe:`) collapses: `fleet` claims it in `fleet.store` first. Needs `fleet.store`. See [Fleet scope](#fleet-scope). `max_entries` (100000000) and `max_entries_per_tenant` (30000000), integers ≥ 1: the most live dedupe keys the node, and one tenant, holds; past either a new key is `503 dedupe_quota`, `Retry-After: 60`. `max_json_bytes` (1048576), an integer ≥ 1: the biggest body the request path decodes as JSON, for a source's `json` dedupe, `event_type` or `ordering_key`; a larger body is stored with no dedupe key, no event type and a keyless lane |
 | `fleet` | `store` (`{type: redis, url, namespace, pool_size}`; absent with both scopes `node`), `timeout_ms` (20; 1–1000), `pending_ttl_ms` (30000), `breaker_window_ms` (1000), `breaker_min_calls` (20), `breaker_failure_rate` (0.5), `breaker_open_ms` (5000). The shared store behind `rate_limits.scope: fleet` and `dedupe.scope: fleet`. See [Fleet scope](#fleet-scope) |
 | `quarantine` | `burst` (100), `rate` (20 per second), `max_bytes` (1 GiB). The pen for hooks whose source has `on_verify_failure: quarantine`: one token bucket per source (over it, `429 quarantine_rate_limited`), and a byte cap (a full pen answers `503 quarantine_full`; it never evicts). At most 1 000 writes may wait for the pen's disk write at once (fixed, not a key; past it `503 overload` with `Retry-After: 1`; gauge `ankusa_quarantine_pending`). Per node. See [`delivery.md#quarantine`](delivery.md#quarantine) |
 | `audit` | `retention_days` (365, an integer ≥ 1). How long the [audit trail](architecture.md#guarantees-by-component) keeps its rows: an hourly sweep deletes older ones, but never a row a lifecycle sink has not yet seen (`m:lifecycle_cursor`). Read with `GET /v1/audit` (scope `audit:read`). Per node |
@@ -200,8 +200,9 @@ One source per provider endpoint; the key is the catch-URL segment
 | `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks` \| `shopify` \| `slack` \| `hmac` \| `standard_webhooks_asym` \| `asymmetric` \| `token` \| `client_cert`. The HMAC types (`stripe` through `hmac`) and `token` require `secret` (or `secret_file`): a non-empty string or a list of non-empty strings (at most 8), newest first — every key is tried, so a rotation is `secret: ["${NEW}", "${OLD}"]`. An empty key would verify whatever anyone signs with it, so an empty value (an unset `${VAR:-}` included) is a load error. `secret_file` is `secret` read from a file, a path or a list of paths, exclusive with `secret` ([Secret sources](#secret-sources)). `stripe`, `standard_webhooks`, and `slack` also take `tolerance_seconds` (default 300, at most 3600: see [Custom HMAC schemes](#custom-hmac-schemes)). `hmac` takes the descriptor keys below. `standard_webhooks_asym` and `asymmetric` (provider public key), `token` (static credential) and `client_cert` (mTLS certificate pin) have their own keys: see [Public-key, token and client-certificate verifiers](#public-key-token-and-client-certificate-verifiers). |
 | `on_verify_failure` | `reject` \| `quarantine` \| `accept_flag`: what happens when verification fails. |
 | `trust_url_tenant` | `true` \| `false` (default `false`). With `routing: tenant_path`, a source with `tenant: default` and `verify: {type: none}` files hooks under whatever tenant the URL names, unverified: boot, `check-config` and an admin API write refuse it unless it sets `trust_url_tenant: true`. See [`multi-tenancy.md`](multi-tenancy.md#tenant-scoping-what-tenant_id-actually-does). |
-| `sinks` | At least one; every sink is tried on every delivered hook. |
+| `sinks` | At least one; every sink is tried on every delivered hook, unless its entry has a [`filter`](#sink-filters). |
 | `dedupe` | Collapse provider retries at ingest. A preset name (`github`, `standard_webhooks`, `svix`, `shopify`, `stripe`, `salesforce`), or a mapping with exactly one of `preset` (same names), `header` (the event-id header, e.g. `X-GitHub-Delivery`) or `json` (a dot path into the body, e.g. `data.id`), plus an optional `ttl_seconds` (default 259 200 = 72 h). Hooks that share a key within the TTL get the same `201` and the original id, with `"duplicate": true` on the later ones. Keys are scoped to the tenant and the source, so two tenants behind one `tenant_path` source never collapse each other's events. The key travels into every delivery as `dedupe_key`. **`salesforce` is `json: id`, not a delivery id Salesforce documents** (unverified against Salesforce's documentation): Salesforce stamps no delivery-id header on any outbound mechanism, Outbound Messages are SOAP/XML (their `Notification/Id` is not a JSON path), and Flow/Apex HTTP callouts and Data 360 webhook targets send a body the org builds. The preset keys on the top-level `"id"` of a JSON body, which the callout must set to a value that is the same on every retry of one event; a body without it is never deduplicated, so use `json:` with your own path when the body is shaped otherwise. A source with no `dedupe` logs one `source <id> has no dedupe:` warning at boot (edge nodes), and the gauge `ankusa_sources_without_dedupe` counts the configured sources that have none. |
+| `event_type` | Where the provider's event name (`push`, `invoice.paid`) is read from; it is stored on the hook and carried to every consumer (`x-ankusa-event-type`, the message's `event_type`, the `ankusa_event_type` header). A preset name (`github` = the `X-GitHub-Event` header, `shopify` = `X-Shopify-Topic`, `stripe`, `standard_webhooks` and `svix` = the body's `type`, `slack` = the body's `event.type`), or a mapping with exactly one of `preset` (same names), `header` (a request header, at most 128 bytes) or `json` (a dot path of 1 to 16 segments into the body, e.g. `data.kind`). Only a non-empty string of at most 128 bytes is an event type: an integer, an object, a missing path, a body that is not JSON or is over `dedupe.max_json_bytes`, or a longer value leaves it `null` and counts in `ankusa_ingest_event_type_missing_total`. Read once at ingest from the complete header list and the one JSON decode `dedupe` and `ordering_key` share; a hook accepted *flagged* (`accept_flag`) still gets its event type, and still claims no dedupe key. Absent: no event type. |
 | `forward_headers` | Which provider request headers travel into sink messages (and `Sink.Http` requests): a list of names (lowercased; still minus the never-forwarded set below), or absent for the default set: every header except `authorization`, `proxy-authorization`, `cookie`, `x-api-key`, `host`, `content-length`, `content-type`, `connection`, `keep-alive`, `transfer-encoding`, `te`, `trailer`, `upgrade`, `expect`, and every `x-ankusa-*` header. (`:default` is the Elixir value only; YAML takes a list or nothing.) |
 | `max_headers` | The most forwarded headers one sink message carries (default 64, a positive integer). Names are kept in order of arrival; one past the limit is dropped and counted (`ankusa_sink_headers_dropped_total{reason="count"}`). |
 | `forward_headers_max_bytes` | The most bytes of forwarded header names plus values one sink message carries (default 16384, a positive integer). A header that would pass it is dropped whole, never truncated, and counted (`reason="bytes"`); later, smaller headers are still considered. The message then stays near `inline_max_bytes × 4/3` plus about 1 KiB plus this, however large the provider's headers are. |
@@ -380,11 +381,11 @@ and `public_key`.
 | `log` | none |
 | `http` | `url` (`https://` unless `egress.allow_insecure_http`), `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000), `secret` (**required** unless `allow_unsigned: true`: a `whsec_` secret, or a list while rotating, signs every delivery the Standard Webhooks way; `secret_file` reads it from a file instead, see [Secret sources](#secret-sources)), `allow_unsigned` (`false`; `true` sends deliveries with no signature, so any host that can reach the URL can inject hooks. A `secret` still signs when both are set. A sink with neither does not load, and the admin API answers `400 invalid_source` for a source that has one), `max_response_bytes` (65536; only the status is used), `cacertfile` (a PEM CA bundle to verify the receiver's certificate against, for a private CA; the file must exist at load), `allow_insecure_tls` (`false`; `true` skips certificate verification for this sink). `/v1/config` shows `allow_unsigned` (a boolean) and hides `secret`. Deliveries are not ordered; a consumer that needs order has to rebuild it from data it receives and tolerate redelivery. The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
 | `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (65536), `max_message_bytes` (134217728, RabbitMQ's default `max_message_size`), `max_inflight` (256 unconfirmed publishes per connection; past it a publish fails fast and is retried), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least 16000). |
-| `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (65536), `max_record_bytes` (1000000; a record over it is never produced: see below), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`), `idle_timeout_ms` (600000; the client closes after this long with no delivery, `0` never; at least the produce timeout plus 1000). |
+| `kafka` | `brokers` (a list, or one comma-separated string), `topic` (a string, or a `{{ var }}` template), `key` (a string, or a template), `inline_max_bytes` (65536), `max_record_bytes` (1000000; a record over it is never produced: see below), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`), `idle_timeout_ms` (600000; the client closes after this long with no delivery, `0` never; at least the produce timeout plus 1000). |
 | `nats` | `servers` (a list, or one comma-separated string; failover, one server at a time, picked at random per connect), `subject`, `inline_max_bytes` (65536), `max_message_bytes` (1048576, NATS's default `max_payload`; see below), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least `publish_timeout_ms` plus 1000). The stream must already exist. See [`delivery.md`](delivery.md#sinknats-subject-delivery). |
-| `redis` | `url` (credentials and db go in it: `redis://:password@host:6379/0`, `rediss://` for TLS), `channel` (a static string), `inline_max_bytes` (65536), `max_message_bytes` (536870912, Redis's bulk limit), `publish_timeout_ms` (5000), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least `publish_timeout_ms` plus 1000). Pub/sub keeps no copy, so a publish nobody is subscribed to is an error and the sink is never durable. See [`delivery.md`](delivery.md#sinkredis-pubsub-delivery). |
-| `sqs` | `queue_url`, `region`, `endpoint` (default: the queue URL's origin; set it for a VPC endpoint or an emulator), `message_group_id` (a static string), `inline_max_bytes` (65536), `max_message_bytes` (1048576, SQS's limit; body plus message attributes, a larger message is dead-lettered at once), `timeout_ms` (5000), `access_key_id` / `secret_access_key` / `session_token` (omit for the `AWS_*` env, IRSA, or the EC2 instance role). FIFO when `queue_url` ends `.fifo`: the group defaults to `tenant/source` and the deduplication id is the hook id (SQS dedupes for 5 minutes). The queue must already exist. See [`delivery.md`](delivery.md#sinksqs-queue-delivery). |
-| `google_pubsub` | `project`, `topic` (the id, not `projects/…/topics/…`), `endpoint` (default `https://pubsub.googleapis.com`; set it for a regional endpoint or an emulator), `ordering_key` (a static string; default none), `inline_max_bytes` (65536), `max_message_bytes` (10000000, Pub/Sub's limit; data plus attributes plus ordering key, a larger message is dead-lettered at once), `timeout_ms` (5000), `auth` = `metadata` \| `token` \| `none` (default `metadata`: the GCE/GKE metadata server; `token` is required when `auth: token`; `none` sends no credential, for an emulator). The topic must already exist, and a topic with no subscription drops the message. See [`delivery.md`](delivery.md#sinkgooglepubsub-google-cloud-pubsub-delivery). |
+| `redis` | `url` (credentials and db go in it: `redis://:password@host:6379/0`, `rediss://` for TLS), `channel` (a string, or a `{{ var }}` template), `inline_max_bytes` (65536), `max_message_bytes` (536870912, Redis's bulk limit), `publish_timeout_ms` (5000), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least `publish_timeout_ms` plus 1000). Pub/sub keeps no copy, so a publish nobody is subscribed to is an error and the sink is never durable. See [`delivery.md`](delivery.md#sinkredis-pubsub-delivery). |
+| `sqs` | `queue_url`, `region`, `endpoint` (default: the queue URL's origin; set it for a VPC endpoint or an emulator), `message_group_id` (a string, or a `{{ var }}` template), `inline_max_bytes` (65536), `max_message_bytes` (1048576, SQS's limit; body plus message attributes, a larger message is dead-lettered at once), `timeout_ms` (5000), `access_key_id` / `secret_access_key` / `session_token` (omit for the `AWS_*` env, IRSA, or the EC2 instance role). FIFO when `queue_url` ends `.fifo`: the group defaults to `tenant/source` and the deduplication id is the hook id (SQS dedupes for 5 minutes). The queue must already exist. See [`delivery.md`](delivery.md#sinksqs-queue-delivery). |
+| `google_pubsub` | `project`, `topic` (the id, not `projects/…/topics/…`), `endpoint` (default `https://pubsub.googleapis.com`; set it for a regional endpoint or an emulator), `ordering_key` (a string, or a `{{ var }}` template; default none), `inline_max_bytes` (65536), `max_message_bytes` (10000000, Pub/Sub's limit; data plus attributes plus ordering key, a larger message is dead-lettered at once), `timeout_ms` (5000), `auth` = `metadata` \| `token` \| `none` (default `metadata`: the GCE/GKE metadata server; `token` is required when `auth: token`; `none` sends no credential, for an emulator). The topic must already exist, and a topic with no subscription drops the message. See [`delivery.md`](delivery.md#sinkgooglepubsub-google-cloud-pubsub-delivery). |
 
 Every sink except `log` also takes `ordered` (default `false`) and `ordering_key`
 (`{header: x-entity-id}` or `{json: data.object.customer}`), read by core, not by
@@ -395,6 +396,9 @@ keeps its meaning. `ordered: true` needs `wal.type` `disk` or `dual` and, on `sq
 a `.fifo` queue; a `header` key must survive `store_headers` (the key is shown in
 `/v1/config`, it is not a secret). No instance key is added. See
 [Ordering lanes](delivery.md#ordering-lanes).
+
+Every sink, `log` included, also takes `filter`, read by core the same way: which
+hooks the sink gets. See [Sink filters](#sink-filters).
 
 The `sqs` and `google_pubsub` sinks batch what dispatch hands them: up to 10
 (SQS) or 1 000 (Pub/Sub) deliveries to one queue or topic go out as one request.
@@ -431,11 +435,85 @@ message: `inline_max_bytes × 4/3` plus about 1 KiB of envelope plus the
 forwarded headers (at most `forward_headers_max_bytes`, 16 KiB by default); the
 64 KiB default is about 106 KiB, under every transport's limit.
 
-The `http` sink's `url`, `headers` and `secret` are static strings here. An
-embedding app can set each to a function of the envelope instead, to route a
-shared source's tenants to their own receivers; those connect through a bounded
-per-instance pool that takes no settings. See
+Per-hook addresses are `{{ var }}` templates ([`delivery.md`](delivery.md#templated-addresses)),
+on these keys and no others: `kafka` `topic` and `key`, `rabbitmq`
+`routing_key`, `nats` `subject`, `redis` `channel`, `sqs` `message_group_id`,
+`google_pubsub` `ordering_key`, and `http` `url` and every value of `headers`.
+`{{ var }}` or `{{ var ?? fallback }}`, where `var` is `tenant`, `source`, `id`,
+`event_type` or `header.<name>`: `topic: "events.{{ event_type ?? other }}"`,
+`url: "https://hooks.example.com/t/{{ tenant }}"`. A `{{` on any other key
+(`queue_url`, `exchange`, `brokers`, `servers`, a broker `url`, `secret`, …) is
+an error naming the key, as is a malformed template. An `http` `url` takes
+templates after its host only (`https://{{ tenant }}.example.com` is refused).
+A hook whose variable has no value and no fallback is dead-lettered as
+`permanent` (`{:template_missing, var}`) and delivers after the fix and a DLQ
+replay. A `header.<name>` variable must name a header `store_headers` keeps.
+No instance key is added, and `/v1/config` shows the string you wrote.
+
+An embedding app can set the `http` sink's `url`, `headers` and `secret` to a
+function of the envelope instead, to route a shared source's tenants to their
+own receivers; those connect through a bounded per-instance pool that takes no
+settings. See
 [`delivery.md`](delivery.md#sinkhttp-per-tenant-destinations).
+
+### Sink filters
+
+Every sink also takes `filter`, read by core like `ordered`: a data predicate over
+the hook that decides whether the sink gets a delivery row. A sink without a
+`filter` gets every hook. A hook that no sink selects is answered
+`201 {"status":"accepted","id":…,"filtered":true}` and not stored (nothing is
+claimed, committed, archived or replayable; the provider's retry is `filtered`
+again, not `duplicate`). See [Filters](delivery.md#filters).
+
+```yaml
+event_type: {json: type}
+sinks:
+  - type: kafka
+    brokers: [redpanda:9092]
+    topic: invoices
+    filter: {event_type: [invoice.paid, invoice.failed]}
+  - type: http
+    url: https://hooks.example.com/pushes
+    secret: whsec_…
+    filter:
+      all:
+        - {header.x-github-event: push}
+        - {not: {json.repository.private: "true"}}
+```
+
+A filter is a node: `all: [node, …]`, `any: [node, …]`, `not: node`, or one
+`field: matcher`. A mapping node has exactly one key.
+
+| Field | Reads |
+| --- | --- |
+| `event_type` | the hook's event type (the source's [`event_type`](#sources); a filter on it needs one) |
+| `tenant` | the hook's tenant, `default` without one |
+| `content_type` | the media type of `Content-Type` (before `;`, trimmed, lowercased) |
+| `header.<name>` | the first value of that request header (case-insensitive) |
+| `json.<a.b.c>` | the value at that dot path of the JSON body: a string, an integer as its decimal string, a boolean as `true`/`false`; anything else is absent |
+
+A matcher is a string (equals), a list of strings (in), or a mapping with exactly
+one operator: `eq`, `neq`, `in`, `not_in`, `prefix`, `suffix`, or `exists`
+(`true`/`false`). Comparisons are byte-exact and on strings (quote a number:
+`json.count: "5"`); there is no numeric comparison. On an absent value `eq`, `in`,
+`prefix`, `suffix` and `exists: true` are false, and `neq`, `not_in` and
+`exists: false` are true.
+
+A filter with a `json.*` condition cannot be judged when the body is over
+`dedupe.max_json_bytes` (1 MiB by default) or is not JSON: it selects the sink
+(a filter never loses a hook) and counts
+`ankusa_dispatch_filter_unevaluable_total{sink}`. A sink a filter did not select
+counts `ankusa_dispatch_filtered_total{sink}`.
+
+Ceilings, each a load error naming `sources.<id>.sinks[i].filter` when exceeded:
+32 conditions per filter, 4 levels of `all`/`any`/`not`, a literal of 256 bytes,
+64 values in an `in`/`not_in`, a header name of 128 bytes, a JSON path of 1 to 16
+segments. A `header.<name>` condition must survive the source's `store_headers`
+policy (a replay evaluates the filter on the stored hook), and an `event_type`
+condition needs the source's `event_type`; both are refused when the file loads,
+and by the admin API (`400`). The filter is shown as written in `/v1/config` and
+in `GET /v1/tenants/:t/sources/:name` (it is not a secret). No instance key is
+added. A `lifecycle.sinks` entry takes no `filter`.
 
 ### Environment overrides
 
@@ -1065,11 +1143,13 @@ restarts. A request for a source that does not exist never carries a label
 (`ankusa_ingest_refused_total{reason="unknown_source"}`), whatever the setting.
 
 Worst case, a scrape has up to `max_series_per_metric` series for each of the
-eight identity-carrying counters (`ankusa_ingest_requests_total`,
+eleven identity-carrying counters (`ankusa_ingest_requests_total`,
+`ankusa_ingest_event_type_missing_total`,
 `ankusa_verify_failures_total`, `ankusa_verifier_weak_hash_total`,
 `ankusa_quarantine_rate_limited_total`, `ankusa_quarantine_full_total`,
 `ankusa_rate_limit_rejected_total`, `ankusa_dispatch_deliveries_total`,
-`ankusa_dispatch_dead_lettered_total`) and each of the two gauges, whatever the
+`ankusa_dispatch_dead_lettered_total`, `ankusa_dispatch_filtered_total`,
+`ankusa_dispatch_filter_unevaluable_total`) and each of the two gauges, whatever the
 number of tenants. The platform's budget is 10 000 series per node: with many
 active tenants, lower `max_series_per_metric` to fit it, or set `detail:
 none`, which makes the series set independent of the tenant count (the number
@@ -1658,8 +1738,9 @@ config :ankusa,
 | `verifier` | `{Ankusa.Verifier.None, []}` | `{module, opts}` implementing `Ankusa.Verifier`. `Ankusa.Verifier.Hmac`'s `:secret` is a binary or a list of binaries, newest first — every key is tried, so a rotation is `secret: [new, old]`. `Ankusa.Verifier.Asymmetric` takes `:public_key` (one or a list) and `:scheme` (`:standard_webhooks_asym` or a `%Ankusa.Verifier.Asymmetric.Scheme{}`), `Ankusa.Verifier.Token` a `:secret` and a `:location`, `Ankusa.Verifier.ClientCert` `:fingerprints` and/or `:subjects`: see [Public-key, token and client-certificate verifiers](#public-key-token-and-client-certificate-verifiers). Every one of them that cannot work (no usable key, secret or pin) refuses the instance's boot, naming the source. |
 | `on_verify_failure` | `:reject` | `:reject` (`401`, nothing stored) / `:quarantine` (`202`, durable pen; see [`delivery.md#quarantine`](delivery.md#quarantine)) / `:accept_flag` (commits, envelope flagged). |
 | `trust_url_tenant` | `false` | Under a `route_resolver` other than `Ankusa.RouteResolver.Path`, a source with `tenant_id: "default"` and `Ankusa.Verifier.None` must set it to `true` (`Ankusa.Verifier.validate_shared!/1`); see [`multi-tenancy.md`](multi-tenancy.md#tenant-scoping-what-tenant_id-actually-does). |
-| `sinks` | `[{Ankusa.Sink.Log, []}]` | `[{module, opts}]` implementing `Ankusa.Sink`: one delivery per sink, each retried independently. |
+| `sinks` | `[{Ankusa.Sink.Log, []}]` | `[{module, opts}]` implementing `Ankusa.Sink`: one delivery per sink the hook selects, each retried independently. A sink entry's `filter:` (a map, see [Sink filters](#sink-filters)) decides which hooks it gets; core reads it off the opts, so the sink never sees it, and `%Ankusa.Source{}.filters` holds the parsed `Ankusa.Filter` of each sink (`nil` for one without). |
 | `dedupe` | `nil` | Collapse provider retries at ingest: `:github \| :standard_webhooks \| :svix \| :shopify \| :stripe \| :salesforce` (`:salesforce` is `json: "id"`, a convention rather than a Salesforce-documented delivery id; see [Sources](#sources)), or `%{header: "X-Event-Id"}` / `%{json: "data.id"}`, each with an optional `ttl_ms` (default `259_200_000`). A source with `nil` logs one `source <id> has no dedupe:` warning at boot and counts in `ankusa_sources_without_dedupe`. |
+| `event_type` | `nil` | Where the provider's event name is read from (`Ankusa.EventType`): `:github \| :shopify \| :stripe \| :standard_webhooks \| :svix \| :slack`, or `%{header: "X-Event"}` / `%{json: "data.kind"}`, exactly one of `preset`, `header`, `json`. Stored on the hook as `Ankusa.Envelope.event_type`; see [Sources](#sources). |
 | `forward_headers` | `:default` | `:default` (every header except the never-forwarded set; see [Sources](#sources)) or a list of header names. |
 | `max_headers` | `64` | The most forwarded headers one sink message carries; a name past it is dropped (`ankusa_sink_headers_dropped_total{reason="count"}`). A positive integer. |
 | `forward_headers_max_bytes` | `16_384` | The most bytes of forwarded header names and values one sink message carries; a header that would pass it is dropped whole (`reason="bytes"`). A positive integer. |

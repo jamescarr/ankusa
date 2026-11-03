@@ -239,6 +239,79 @@ defmodule Ankusa.DispatchTest do
     assert stored_ids(inst) == []
   end
 
+  describe "filter" do
+    defp filtered_source do
+      %{
+        "src1" => %{
+          event_type: %{json: "type"},
+          sinks: [
+            {TagSink, tag: :invoices, pid: self(), filter: %{event_type: ["invoice.paid"]}},
+            {TagSink, tag: :pushes, pid: self(), filter: %{"header.x-github-event" => "push"}}
+          ]
+        }
+      }
+    end
+
+    defp post(inst, body, headers \\ []),
+      do: Ankusa.Edge.Ingest.ingest(inst, request("src1", body, headers))
+
+    test "filter: a hook is delivered to the sinks it selects only, and reclaimed when they settle" do
+      inst = start(filtered_source())
+
+      assert {:ok, env} = post(inst, ~s({"type":"invoice.paid"}))
+      id = env.id
+
+      # One delivery row, for sink 0: the second sink has none.
+      assert {:ok, [stored]} = Ankusa.Queue.hooks(inst, 0, 10)
+      assert {:ok, rows} = Deliveries.existing_sinks(inst, stored.seq)
+      assert rows == MapSet.new([0])
+
+      assert {:ok, _} = Pipeline.tick(inst)
+      assert_receive {:delivered, :invoices, ^id}
+      refute_receive {:delivered, :pushes, ^id}, 100
+
+      # No storage role: its single row settled, so the hook has no obligation left.
+      assert stored_ids(inst) == []
+    end
+
+    test "filter: a hook selecting the other sink only is delivered to it only" do
+      inst = start(filtered_source())
+
+      assert {:ok, env} = post(inst, ~s({"type":"other"}), [{"x-github-event", "push"}])
+      id = env.id
+      assert {:ok, _} = Pipeline.tick(inst)
+
+      assert_receive {:delivered, :pushes, ^id}
+      refute_receive {:delivered, :invoices, ^id}, 100
+    end
+
+    test "filter: a hook no sink selects is filtered, stores nothing, and is filtered again" do
+      inst = start(filtered_source())
+      test = self()
+      handler = "dispatch-filtered-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:ankusa, :dispatch, :filtered],
+        fn _event, _measurements, metadata, _config -> send(test, {:filtered, metadata.sink}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      assert {:filtered, %Envelope{event_type: "customer.created"}} =
+               post(inst, ~s({"type":"customer.created"}))
+
+      assert {:filtered, _} = post(inst, ~s({"type":"customer.created"}))
+      assert stored_ids(inst) == []
+      assert {:ok, _} = Pipeline.tick(inst)
+      refute_receive {:delivered, _, _}, 100
+
+      # Two hooks, two sinks each.
+      for _ <- 1..4, do: assert_receive({:filtered, TagSink})
+    end
+  end
+
   @doc false
   # Runs in the queue's syncer, before its fsync: tells the test and waits.
   def hold_sync(_event, _measurements, %{instance: inst}, {inst, test_pid}) do
@@ -1123,11 +1196,44 @@ defmodule Ankusa.DispatchTest do
     assert {:ok, %{total: 1, entries: [entry]}} = Ankusa.Queue.dead(inst, limit: 10)
     assert entry.envelope.id == old.id
     assert entry.reason == inspect({:retry_horizon, AlwaysFail})
+    assert entry.error_class == :transient
     assert %{state: :dead, attempts: 4} = row!(inst, 8)
 
     # inside it: parked, attempts unchanged, but due no later than the horizon
     assert %{state: :pending, attempts: 2, at: at} = row!(inst, 9)
     assert at == near + 24 * @hour
+  end
+
+  test "a row parked behind a breaker a throttling sink opened is dead-lettered as throttled at its horizon" do
+    inst =
+      start(%{"src1" => %{sinks: [{ThrottleSink, ms: 60_000}]}},
+        dispatch: %{
+          breaker_failures: 1,
+          breaker_open_ms: 60_000,
+          breaker_max_open_ms: 60_000,
+          retry: retry(base_ms: 60_000, max_attempts: nil)
+        }
+      )
+
+    now = System.system_time(:millisecond)
+    write_row!(inst, 7, build_env("src1"), ThrottleSink, now, %{})
+    assert {:ok, _} = Pipeline.tick(inst)
+    # one throttled answer opened the breaker
+    assert %{state: :pending, attempts: 1} = row!(inst, 7)
+
+    old = build_env("src1")
+
+    write_row!(inst, 8, old, ThrottleSink, now, %{
+      attempts: 4,
+      first_attempt_at: now - 25 * @hour
+    })
+
+    assert {:ok, _} = Pipeline.tick(inst)
+
+    assert {:ok, %{entries: [entry]}} = Ankusa.Queue.dead(inst, limit: 10)
+    assert entry.envelope.id == old.id
+    assert entry.reason == inspect({:retry_horizon, ThrottleSink})
+    assert entry.error_class == :throttled
   end
 
   test "DEL-2: auth and config errors dead-letter at once and are counted per sink" do
@@ -1164,6 +1270,68 @@ defmodule Ankusa.DispatchTest do
              ])
   end
 
+  defmodule AddressSink do
+    @moduledoc false
+    @behaviour Ankusa.Sink
+
+    # What a messaging sink does with a per-hook address: resolve it, then publish.
+    @impl true
+    def deliver(env, _ctx, opts) do
+      address = Ankusa.Sink.Messaging.resolve(Keyword.fetch!(opts, :address), env)
+      send(Keyword.fetch!(opts, :pid), {:address, env.id, address})
+      :ok
+    end
+  end
+
+  test "template: a variable with no value is a permanent dead letter that delivers after a fix and a replay" do
+    inst = unique_instance()
+    dir = unique_data_dir(inst)
+    on_exit(fn -> File.rm_rf(dir) end)
+    :persistent_term.put({__MODULE__, :address_pid}, self())
+    on_exit(fn -> :persistent_term.erase({__MODULE__, :address_pid}) end)
+
+    start_supervised!(
+      {Ankusa.Instance,
+       persistent_config(inst, dir, [:edge, :dispatch], %{retry: retry(max_attempts: 5)})}
+    )
+
+    assert {:ok, _} =
+             Ankusa.SourceStore.put(
+               inst,
+               "acme",
+               "billing",
+               %{"address" => "ev.{{ event_type }}"},
+               :create
+             )
+
+    env = enqueue!(inst, build_env("acme.billing"))
+    assert {:ok, _} = Pipeline.tick(inst)
+
+    # dead after its first attempt, not retried five times: the hook lacks the field
+    assert {:ok, %{total: 1, entries: [entry]}} = Ankusa.Queue.dead(inst, limit: 10)
+    assert entry.envelope.id == env.id
+    assert entry.error_class == :permanent
+
+    assert entry.reason ==
+             inspect({:sink, AddressSink, {:permanent, {:template_missing, "event_type"}}})
+
+    refute_receive {:address, _, _}, 100
+
+    # the source is fixed with a fallback; the replay renders from the stored hook
+    assert {:ok, _} =
+             Ankusa.SourceStore.put(
+               inst,
+               "acme",
+               "billing",
+               %{"address" => "ev.{{ event_type ?? other }}"},
+               :update
+             )
+
+    assert {:ok, :created, _job} = Ankusa.Replay.start(inst, %{kind: :dlq, rate: 1_000})
+    id = env.id
+    assert_receive {:address, ^id, "ev.other"}, 5_000
+  end
+
   @doc false
   def forward_config_error(_event, _measurements, meta, pid),
     do: send(pid, {:config_error, meta})
@@ -1196,6 +1364,16 @@ defmodule Ankusa.DispatchTest do
   defp decode_source(_source_id, %{"fail" => true} = spec) do
     retry = for {key, value} <- Map.get(spec, "retry", %{}), do: {String.to_atom(key), value}
     [sinks: [{AlwaysFail, []}]] ++ if(retry == [], do: [], else: [retry: retry])
+  end
+
+  defp decode_source(_source_id, %{"address" => address}) do
+    [
+      sinks: [
+        {AddressSink,
+         pid: :persistent_term.get({__MODULE__, :address_pid}),
+         address: Ankusa.Sink.Template.compile!("address", address)}
+      ]
+    ]
   end
 
   defp decode_source(_source_id, %{"sinks" => [_ | _]}), do: [sinks: [{Ankusa.Sink.Log, []}]]

@@ -172,7 +172,9 @@ the one `Message`, with `v` as the wire said it. A `v: 2` message is a `v: 1`
 message plus additive fields, so a consumer reads it the same way; any other
 `v` is `unsupported_version` (permanent: dead-letter it). `message.instance` and
 `message.region` are the Ankusa instance that published the message and the
-region it is configured with (`None` for none). A message from the instance's
+region it is configured with (`None` for none). `message.event_type` is the
+provider's event name as the source's `event_type` key read it, for example
+`invoice.paid` (`None` for none). A message from the instance's
 lifecycle sinks carries a `CloudEvents` event as its body:
 `decode_lifecycle(body)` returns a `LifecycleEvent`.
 
@@ -276,7 +278,7 @@ let page = admin
         ..ListDeadLettersParams::default()
     })
     .await?;
-println!("{} of {} dead letters", page.entries.len(), page.total);
+println!("{} dead letters (of {:?}), next page: {:?}", page.entries.len(), page.total, page.next_cursor);
 # Ok(())
 # }
 ```

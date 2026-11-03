@@ -54,6 +54,30 @@ defmodule Ankusa.Intake.KafkaTest do
     }
   ]
 
+  # A topic a test can publish to at once: the fixture waits for the cluster to
+  # commit to a topic of its own until this long, then fails with the metadata
+  # (see `create_topic/1`).
+  @commit_timeout_ms 20_000
+
+  # The producer the adapter runs (`Ankusa.Intake.Kafka.init/1`, whose
+  # `request_timeout` is `publish_timeout_ms + 3_000`; the tests publish with
+  # `timeout: 2_000`), one attempt per call. `max_batch_size` is the adapter's
+  # floor: the probe record is small.
+  @probe_client [
+    auto_start_producers: true,
+    allow_topic_auto_creation: false,
+    connect_timeout: 3_000,
+    request_timeout: 5_000,
+    default_producer_config: [
+      required_acks: -1,
+      ack_timeout: 2_000,
+      partition_onwire_limit: 1,
+      max_retries: 0,
+      max_linger_ms: 0,
+      max_batch_size: 1_048_576
+    ]
+  ]
+
   setup do
     instance = :"intake_kafka_#{System.unique_integer([:positive])}"
     on_exit(fn -> :persistent_term.erase({Ankusa, :config, instance}) end)
@@ -90,9 +114,7 @@ defmodule Ankusa.Intake.KafkaTest do
     on_exit(fn -> :brod.delete_topics(@hosts, [topic], 5_000) end)
 
     # Every broker has to know the topic before a test asks one of them about
-    # it, and every replica has to be in the in-sync set before a test
-    # produces with `acks=all`: a fresh topic's followers fetch asynchronously,
-    # and a produce that beats them is `not_enough_replicas` (unavailable).
+    # it, and every replica has to be in the in-sync set.
     for host <- @hosts do
       wait(
         fn -> topic_replicated?(host, topic, Keyword.fetch!(opts, :replication_factor)) end,
@@ -101,7 +123,100 @@ defmodule Ankusa.Intake.KafkaTest do
       )
     end
 
+    # That metadata is not yet a topic a produce is *acked* on, which is the
+    # only thing a test needs. Two windows remain, both of which the first
+    # publish of a test can fall into and both of which `publish_batch` reports
+    # as `:unavailable`:
+    #
+    #   * a broker serves the topic in its metadata image while the elected
+    #     leader has not applied its own assignment yet, so the produce routed
+    #     there is `not_leader_for_partition`
+    #   * a replica is in the in-sync set from creation, before it has fetched
+    #     anything, and an `acks=-1` produce is committed only when every
+    #     in-sync replica has fetched it: ~1 s on an idle cluster, which the
+    #     tests' 2 s publish deadline does not comfortably cover
+    #
+    # So the fixture waits until the cluster commits a record to a topic created
+    # *after* this one (see `wait_for_commit/1`): a produce to this topic is
+    # then acked on the next follower fetch turn instead of racing the first.
+    wait_for_commit(topic)
+
     topic
+  end
+
+  # A topic of the probe's own, so the tests' offsets stay theirs: three
+  # replicas, one record with the adapter's producer settings, one attempt after
+  # another until an `acks=-1` produce is acked. Every broker has then applied
+  # the probe topic's assignment (the leader appended it, both followers fetched
+  # it) and, the metadata log being ordered per broker and this topic being
+  # newer than the test's, the test's assignment as well; and both followers
+  # have just fetched, so the test's own publish is committed on the next turn.
+  defp wait_for_commit(topic) do
+    probe =
+      "ankusa.intake.probe.#{System.system_time(:microsecond)}.#{System.unique_integer([:positive])}"
+
+    spec = %{
+      name: probe,
+      num_partitions: 1,
+      replication_factor: 3,
+      assignments: [],
+      configs: for({name, value} <- @good_topic[:configs], do: %{name: name, value: value})
+    }
+
+    :ok = :brod.create_topics(@hosts, [spec], %{timeout: 15_000})
+
+    committed =
+      try do
+        wait_until(fn -> commit_probe(probe) end, @commit_timeout_ms)
+      after
+        :brod.delete_topics(@hosts, [probe], 5_000)
+      end
+
+    case committed do
+      :ok ->
+        :ok
+
+      :timeout ->
+        flunk("""
+        timed out waiting for the cluster to commit an acks=-1 record to #{probe} \
+        within #{@commit_timeout_ms} ms, which a produce to #{topic} needs before it \
+        can be acked. Broker metadata:\n\
+        #{inspect(metadata_per_broker(topic), pretty: true, limit: :infinity)}
+        """)
+    end
+  end
+
+  # One attempt: a client of its own, because a brod client caches a topic it
+  # could not find at the broker for two minutes (`unknown_topic_cache_ttl`),
+  # which a topic created a moment ago hits; a fresh client's cache is empty. A
+  # produce that fails kills its producer (`max_retries: 0`, as in the
+  # adapter), so a failed attempt stops here and the poll starts a new one.
+  defp commit_probe(probe) do
+    client = :"ankusa_intake_probe_#{System.unique_integer([:positive])}"
+
+    case :brod.start_client(@hosts, client, @probe_client) do
+      :ok ->
+        try do
+          with {:ok, producer} <- :brod.get_producer(client, probe, 0),
+               {:ok, ref} <- :brod.produce(producer, "readiness", "readiness"),
+               {:ok, offset} <- :brod.sync_produce_request_offset(ref, 2_000) do
+            offset >= 0
+          else
+            _ -> false
+          end
+        catch
+          _kind, _reason -> false
+        after
+          :brod.stop_client(client)
+        end
+
+      {:error, _reason} ->
+        false
+    end
+  end
+
+  defp metadata_per_broker(topic) do
+    Enum.map(@hosts, fn host -> {host, get_metadata([host], [topic])} end)
   end
 
   # `brod` throws `{:failed_to_connect, ...}` when no broker answers instead of

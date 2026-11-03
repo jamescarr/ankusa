@@ -156,6 +156,40 @@ defmodule Ankusa.Sink.RedisTest do
     assert channels == [fixed, dynamic]
   end
 
+  test "templated channel: rendered per hook, and a missing variable is permanent", %{
+    instance: inst,
+    suffix: suffix
+  } do
+    paid = "ankusa.test.#{suffix}.invoice.paid"
+    none = "ankusa.test.#{suffix}.none"
+    {ps, ref} = subscribe!([paid, none])
+
+    channel =
+      Ankusa.Sink.Template.compile!("test", "ankusa.test.#{suffix}.{{ event_type ?? none }}")
+
+    assert :ok =
+             deliver(envelope(%{event_type: "invoice.paid"}), ctx(inst),
+               url: @url,
+               channel: channel
+             )
+
+    assert :ok = deliver(envelope(), ctx(inst), url: @url, channel: channel)
+
+    assert for(_ <- 1..2, do: receive_message(ps, ref)) == [paid, none]
+
+    strict = Ankusa.Sink.Template.compile!("test", "ankusa.test.#{suffix}.{{ event_type }}")
+
+    assert {:error, {:permanent, {:template_missing, "event_type"}}} =
+             Ankusa.Sink.safe_deliver(Redis, envelope(), ctx(inst), url: @url, channel: strict)
+  end
+
+  test "templated channel: describe/2 names no address" do
+    template = Ankusa.Sink.Template.compile!("test", "c.{{ source }}")
+    subject = %{source_id: "src", tenant_id: nil}
+
+    assert %{address: nil} = Redis.describe(subject, url: @url, channel: template)
+  end
+
   test "the sink is not durable: pub/sub keeps no copy" do
     assert Redis.durable?([]) == false
     assert Ankusa.Sink.durable?(Redis, url: @url, channel: "any") == false

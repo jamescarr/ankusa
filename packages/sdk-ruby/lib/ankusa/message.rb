@@ -64,7 +64,8 @@ module Ankusa
   # message carries none): continue the trace from them. `instance` and `region`
   # are the name of the Ankusa instance that published the message and the
   # region it is configured with (nil when the message says null or predates
-  # the fields).
+  # the fields). `event_type` is the provider's event name (for example
+  # `invoice.paid`) as the source's `event_type` key read it (nil when none).
   #
   # `idempotency_key` is the one value a consumer should dedupe on, as
   # `Message#idempotency_key` (the field is nil only for a message from a node
@@ -72,7 +73,7 @@ module Ankusa
   Message = Data.define(
     :v, :id, :source_id, :tenant_id, :received_at, :content_type, :size,
     :body, :claim, :sha256, :dedupe_key, :replay_id, :idempotency_key, :headers, :verification,
-    :traceparent, :tracestate, :instance, :region
+    :traceparent, :tracestate, :instance, :region, :event_type
   ) do
     # `Data.define` made `idempotency_key` the reader of the decoded field; keep
     # that value reachable here and let the helper below take over the name.
@@ -107,7 +108,7 @@ module Ankusa
   # The optional string-keyed fields that may be a string, null, or absent.
   # Checked in this order, so the first offending key is the one reported.
   MESSAGE_STRING_FIELDS = %w[
-    tenant_id content_type dedupe_key replay_id idempotency_key traceparent tracestate instance region
+    tenant_id content_type dedupe_key replay_id idempotency_key traceparent tracestate instance region event_type
   ].freeze
   private_constant :MESSAGE_STRING_FIELDS
 
@@ -217,7 +218,8 @@ module Ankusa
       traceparent: parsed["traceparent"],
       tracestate: parsed["tracestate"],
       instance: parsed["instance"],
-      region: parsed["region"]
+      region: parsed["region"],
+      event_type: parsed["event_type"]
     )
   end
 

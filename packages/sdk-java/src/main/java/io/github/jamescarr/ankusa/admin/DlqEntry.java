@@ -14,6 +14,10 @@ import org.jspecify.annotations.Nullable;
  * @param deadLetteredAt when the delivery was dead-lettered, in Unix milliseconds
  * @param size the stored body's size in bytes
  * @param contentType the hook's content type, or null when it carried none
+ * @param sink the index of the sink that was due this row in the source's {@code sinks} list, 0
+ *     being the first, or null from a node older than 0.7
+ * @param errorClass {@code "permanent"}, {@code "throttled"} or {@code "transient"}, or null for a
+ *     row dead-lettered before the node recorded a class
  * @param reason why the delivery was dead-lettered
  */
 public record DlqEntry(
@@ -25,6 +29,8 @@ public record DlqEntry(
     long deadLetteredAt,
     long size,
     @Nullable String contentType,
+    @Nullable Integer sink,
+    @Nullable String errorClass,
     String reason) {
 
   /**

@@ -91,6 +91,8 @@ defmodule Ankusa.Instance do
     Ankusa.Routes.validate_config!(config)
     Ankusa.Queue.validate_config!(config)
     Ankusa.Ordering.validate_config!(config)
+    Ankusa.Filter.validate_config!(config)
+    Ankusa.Sink.Template.validate_config!(config)
     Ankusa.Lifecycle.validate_config!(config)
     Ankusa.Edge.RateLimiter.validate_config!(config)
     Ankusa.Edge.Quarantine.validate_config!(config)

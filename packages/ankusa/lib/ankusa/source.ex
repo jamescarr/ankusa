@@ -21,14 +21,22 @@ defmodule Ankusa.Source do
     # with no verifier must set this: it accepts that the request names the
     # tenant, unverified (see `Ankusa.Verifier.validate_shared!/1`)
     trust_url_tenant: false,
-    # [{module, opts}] implementing Ankusa.Sink. `ordered` and `ordering_key` are
-    # read off each entry by `Ankusa.Ordering` and are not in the opts a sink sees
+    # [{module, opts}] implementing Ankusa.Sink. `ordered`, `ordering_key` and
+    # `filter` are read off each entry by `Ankusa.Ordering` and `Ankusa.Filter` and
+    # are not in the opts a sink sees; a `{{ var }}` string on an address option is
+    # compiled by `Ankusa.Sink.Template`
     sinks: [{Ankusa.Sink.Log, []}],
     # nil (no sink is ordered), or one `Ankusa.Ordering.sink_ordering()` per sink
     # (ADR 0004): `nil` for an unordered sink, `{:ordered, key spec | nil}` else
     ordering: nil,
+    # nil (every sink gets every hook), or one `Ankusa.Filter.t()` per sink, `nil`
+    # for a sink without a `filter`: the sinks a hook's content selects
+    filters: nil,
     # %Ankusa.Dedupe{} or nil; the provider event key collapsed at ingest
     dedupe: nil,
+    # %Ankusa.EventType{} or nil; the provider's event name, read at ingest from a
+    # header or a JSON path and stored on the hook (`Ankusa.Routing`)
+    event_type: nil,
     # :default | [header names]; provider request headers forwarded to sinks
     forward_headers: :default,
     # caps on the forwarded headers per message: at most this many names, and
@@ -56,7 +64,9 @@ defmodule Ankusa.Source do
           trust_url_tenant: boolean(),
           sinks: [{module(), keyword()}],
           ordering: [Ankusa.Ordering.sink_ordering()] | nil,
+          filters: [Ankusa.Filter.t() | nil] | nil,
           dedupe: Ankusa.Dedupe.t() | nil,
+          event_type: Ankusa.EventType.t() | nil,
           forward_headers: :default | [String.t()],
           max_headers: pos_integer(),
           forward_headers_max_bytes: pos_integer(),
@@ -78,6 +88,9 @@ defmodule Ankusa.Source do
     {sinks, ordering} =
       Ankusa.Ordering.normalize_sinks!(id, Map.get(opts, :sinks, [{Ankusa.Sink.Log, []}]))
 
+    {sinks, filters} = Ankusa.Filter.normalize_sinks!(id, sinks)
+    sinks = Ankusa.Sink.Template.normalize_sinks!(id, sinks)
+
     unless Ankusa.ClaimCheck.Ref.valid_tenant?(tenant_id) do
       raise ArgumentError,
             "source #{inspect(id)}: tenant_id #{inspect(tenant_id)} must match [A-Za-z0-9_-]{1,64}"
@@ -96,7 +109,9 @@ defmodule Ankusa.Source do
       trust_url_tenant: trust,
       sinks: sinks,
       ordering: ordering,
+      filters: filters,
       dedupe: Ankusa.Dedupe.new!(Map.get(opts, :dedupe)),
+      event_type: Ankusa.EventType.new!(Map.get(opts, :event_type), id),
       forward_headers: forward_headers(id, Map.get(opts, :forward_headers, :default)),
       max_headers:
         positive_integer!(

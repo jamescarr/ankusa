@@ -27,6 +27,10 @@ defmodule Ankusa.Envelope do
     # provider event key extracted at ingest (Ankusa.Dedupe.key/2); nil when
     # the source has no dedupe or the stamp is missing
     :dedupe_key,
+    # The provider's event name (Ankusa.EventType.extract/3); nil when the source
+    # has no event_type or the hook carries none. Additive: a node that predates
+    # it ignores it.
+    :event_type,
     # The W3C trace context the hook travels under (`Ankusa.Trace`): the
     # request's `traceparent`/`tracestate`, or the ingest span's when an SDK
     # runs; nil without either. Additive (F7): a node that predates it ignores it.
@@ -59,6 +63,7 @@ defmodule Ankusa.Envelope do
           seq: non_neg_integer() | nil,
           verification: Ankusa.Verification.t() | nil,
           dedupe_key: String.t() | nil,
+          event_type: String.t() | nil,
           trace: Ankusa.Trace.t() | nil,
           size: non_neg_integer()
         }

@@ -7,6 +7,55 @@ own ([`docs/releasing.md`](../../docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- **`{{ var }}` templates on sink addresses (CR-3).** Any sink of a source (YAML
+  or the admin API) may template its per-hook address keys: `kafka` `topic` /
+  `key`, `rabbitmq` `routing_key`, `nats` `subject`, `redis` `channel`, `sqs`
+  `message_group_id`, `google_pubsub` `ordering_key`, and `http` `url` and
+  `headers` values: `topic: "events.{{ event_type ?? other }}"`. No new key.
+  A `{{` on any other key, or a malformed template, is refused naming
+  `sources.<id>.sinks[i].<key>`; an `http` `url` takes templates after its host
+  only (`url: templates are allowed after the host, not in it`);
+  `lifecycle.sinks` take none. `/v1/config` and the source routes show the
+  string as written. A hook with a variable that has no value and no fallback
+  is dead-lettered as `permanent` (`{:template_missing, var}`).
+
+- **`sources.<id>.event_type` (CR-1).** Where the provider's event name is read
+  from: a preset (`github`, `shopify`, `stripe`, `standard_webhooks`, `svix`,
+  `slack`) or exactly one of `header` / `json` (a dot path). The admin API's
+  source routes read and show the same forms. The event type is stored on the
+  hook and reaches every consumer (`x-ankusa-event-type`, the message's
+  `event_type`); a hook that carries none counts in
+  `ankusa_ingest_event_type_missing_total`. Every rejected form names
+  `sources.<id>.event_type`.
+
+- **`sinks[].filter` (CR-2).** Every sink entry (not `lifecycle.sinks`) takes a
+  `filter`: `all` / `any` / `not` and `field: matcher` over `event_type`,
+  `tenant`, `content_type`, `header.<name>` and `json.<path>`, which decides
+  whether the sink gets a delivery row. A hook no sink selects is answered
+  `201 {"filtered": true}` and not stored. The admin API reads and shows the
+  same form; every ceiling and every malformed node is refused naming
+  `sources.<id>.sinks[i].filter`. New series
+  `ankusa_dispatch_filtered_total{sink}` and
+  `ankusa_dispatch_filter_unevaluable_total{sink}`; `outcome="filtered"` on
+  `ankusa_ingest_requests_total`.
+
+- **`replay --expect-nodes N`.** The number of nodes `--nodes` must resolve to; on any
+  other count the command sends nothing and exits `1`, naming the nodes it found
+  (`--nodes resolved to 2 node(s) (…), --expect-nodes is 3`).
+
+### Fixed
+
+- **Fleet replay no longer skips nodes or waits out a replaced pod.** The chart's
+  headless Service sets `publishNotReadyAddresses: true`, so a draining node, or one
+  failing a `/ready` check, is still in the name `docker-entrypoint replay --nodes`
+  resolves. A name with no IPv4 address is resolved over IPv6 (bracketed labels and
+  URLs, `inet6` connections). A pinned address (one of a multi-address answer) that
+  fails to connect and is no longer in the name's DNS answer ends as `gone` at once,
+  rather than being polled until `--timeout`; the summary line gains `gone=N` after
+  `unreachable=`, and the command exits `1`. Run it again with the same `--job-id` to
+  reach the replacement.
 ### Changed
 
 - The image's HTTP server is `bandit 1.14.1` (was `1.14.0`, affected by

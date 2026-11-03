@@ -58,6 +58,12 @@ defmodule Ankusa.AsyncApi.SinkMessage do
             "The provider event key extracted at ingest, or `null`. Null does not mean no key: " <>
               "check whether the source is configured with one."
         },
+        "event_type" => %{
+          "type" => ["string", "null"],
+          "description" =>
+            "The provider's event name, read as the source's event_type says; null when the " <>
+              "source has none or the hook carries none."
+        },
         "replay_id" => %{
           "type" => ["string", "null"],
           "description" => "The replay job id when this delivery is a replay, else `null`."
@@ -144,7 +150,7 @@ defmodule Ankusa.AsyncApi.SinkMessageHeaders do
   SQS and Pub/Sub (both refuse an empty value), so it is not required, and a
   consumer reads the tenant from the message body's `tenant_id` when the
   header is missing. Redis carries none; RabbitMQ sends only
-  `ankusa_idempotency_key` and the optional dedupe, replay and ordering keys as
+  `ankusa_idempotency_key` and the optional dedupe, replay, ordering and event type keys as
   AMQP headers, which this schema does not describe for it. The document's
   description of each channel (`Ankusa.AsyncApi`) says which set it carries.
   """
@@ -187,6 +193,10 @@ defmodule Ankusa.AsyncApi.SinkMessageHeaders do
         "ankusa_ordering_key" => %{
           "type" => "string",
           "description" => "The lane's key, on a hook of an ordered sink (ordering lanes)."
+        },
+        "ankusa_event_type" => %{
+          "type" => "string",
+          "description" => "The hook's event type, when the source reads one."
         },
         "traceparent" => %{
           "type" => "string",

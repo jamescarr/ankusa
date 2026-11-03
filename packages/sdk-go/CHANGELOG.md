@@ -7,6 +7,22 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Message.EventType`: the provider's event name (for example `invoice.paid`)
+  from the message (`nil` when none); a non-string value is `invalid_field`.
+
+- `ListDeadLettersParams` gained `Tenant`, `Sink` (`*int`: `0` is the first sink),
+  `ErrorClass` and `Cursor`; the query goes out as `source_id, tenant, sink,
+  error_class, since, limit, cursor`. `DLQEntry` gained `Sink` and `ErrorClass`,
+  `DLQPage` gained `NextCursor`, and `ReplaySpec` gained `Tenant`, `Sink`, `ErrorClass`
+  and `JobID` (the DEL-6 admin contract).
+
+### Fixed
+
+- **Breaking:** `DLQPage.Total` is `*int`. A node answers `total: null` on a filtered
+  listing (any filter but `Tenant`), which the `int` field silently reported as `0`.
+
 ## [0.6.0] - 2026-10-28
 
 ### Added

@@ -23,6 +23,23 @@ defmodule Ankusa.ReplayTest do
     @impl true
     def deliver(env, ctx, opts) do
       send(Keyword.fetch!(opts, :pid), {:replayed, env.id, ctx[:replay_id]})
+      send(Keyword.fetch!(opts, :pid), {:event_type, env.id, env.event_type})
+      :ok
+    end
+  end
+
+  defmodule TagSink do
+    @moduledoc "Records `{tag, id, replay_id}` to the test pid and confirms."
+
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(env, ctx, opts) do
+      send(
+        Keyword.fetch!(opts, :pid),
+        {:archived, Keyword.fetch!(opts, :tag), env.id, ctx[:replay_id]}
+      )
+
       :ok
     end
   end
@@ -602,6 +619,69 @@ defmodule Ankusa.ReplayTest do
     assert {:ok, [], false} = Ankusa.Queue.Archive.pending(inst, 0, 1_000_000)
   end
 
+  test "filter: an archive redrive re-drives only the sinks a hook's filters select" do
+    pid = self()
+
+    sinks = [
+      {TagSink, tag: :a, pid: pid, filter: %{event_type: "a"}},
+      {TagSink, tag: :b, pid: pid, filter: %{event_type: "b"}},
+      {TagSink, tag: :all, pid: pid}
+    ]
+
+    config =
+      start(
+        %{"arc" => [event_type: %{json: "type"}, sinks: sinks]},
+        roles: [:edge, :dispatch, :storage],
+        storage: %{roll_ms: 0, interval_ms: 0}
+      )
+
+    inst = config.instance
+    from = System.system_time(:millisecond)
+
+    ids =
+      for type <- ~w(a b c), into: %{} do
+        assert {:ok, env} =
+                 Ankusa.Edge.Ingest.ingest(inst, request("arc", ~s({"type":"#{type}"})))
+
+        {type, env.id}
+      end
+
+    to = System.system_time(:millisecond)
+
+    # The first delivery: a to :a and :all, b to :b and :all, c (selected by no
+    # filtered sink) to :all only.
+    for {tag, type} <- [a: "a", b: "b", all: "a", all: "b", all: "c"] do
+      id = ids[type]
+      assert_receive {:archived, ^tag, ^id, nil}, 5_000
+    end
+
+    refute_receive {:archived, _, _, _}, 200
+
+    assert {:ok, _} = Pipeline.tick(inst)
+    assert {:ok, _} = Compactor.tick(inst)
+    assert {:ok, [], false} = Ankusa.Queue.Archive.pending(inst, 0, 1_000_000)
+
+    # Redrive to the two filtered sinks: c selects neither, so it is skipped.
+    assert {:ok, :created, job} =
+             Replay.start(inst, %{
+               kind: :archive,
+               from: from - 1,
+               to: to,
+               sinks: [0, 1],
+               rate: 100
+             })
+
+    job_id = job.id
+    a_id = ids["a"]
+    b_id = ids["b"]
+    assert_receive {:archived, :a, ^a_id, ^job_id}, 5_000
+    assert_receive {:archived, :b, ^b_id, ^job_id}, 5_000
+
+    job = poll_job_state(inst, job_id, &(&1.state == :done))
+    assert {job.moved, job.skipped} == {2, 1}
+    refute_receive {:archived, _, _, _}, 300
+  end
+
   test "validation: a too-recent archive `to` and an unknown kind are rejected" do
     config = start(%{"src" => [sinks: [{RecordSink, pid: self()}]]})
     inst = config.instance
@@ -693,6 +773,86 @@ defmodule Ankusa.ReplayTest do
     third = poll_job_state(inst, third.id, &(&1.state == :done))
     assert {third.moved, third.scanned} == {0, 0}
     refute_receive {:replayed, _, _}, 200
+  end
+
+  test "event_type: a released quarantine hook gets its event type from the current source" do
+    pid = self()
+
+    decoder = fn _source_id, spec ->
+      [
+        verifier: {Ankusa.Verifier.Hmac, scheme: :standard_webhooks, secret: spec["secret"]},
+        on_verify_failure: :quarantine,
+        event_type: %{json: "type"},
+        sinks: [{RecordSink, pid: pid}]
+      ]
+    end
+
+    config = start(%{}, source_store: {Ankusa.SourceStore.Persistent, decoder: decoder})
+    inst = config.instance
+    {old, new} = {swh_secret(), swh_secret()}
+
+    assert {:ok, _} = Ankusa.SourceStore.put(inst, "acme", "billing", %{"secret" => old}, :create)
+
+    body = ~s({"type":"invoice.paid"})
+    headers = standard_webhooks_headers("msg_1", body, new)
+
+    assert {:quarantined, :no_match} =
+             Ankusa.Edge.Ingest.ingest(inst, request("acme.billing", body, headers))
+
+    # Held, not resolved: the event type is read when the hook is released.
+    assert {:ok, [held]} = Ankusa.Edge.Quarantine.recent(inst, 10)
+
+    assert {:ok, _} = Ankusa.SourceStore.put(inst, "acme", "billing", %{"secret" => new}, :update)
+    assert {:ok, :created, job} = Replay.start(inst, kind: :quarantine)
+    job = poll_job_state(inst, job.id, &(&1.state == :done))
+    assert {job.moved, job.skipped} == {1, 0}
+
+    held_id = held.id
+    assert_receive {:event_type, ^held_id, "invoice.paid"}, 5_000
+  end
+
+  test "filter: a released quarantine hook goes to the sinks its filter selects, and one no sink selects leaves the pen" do
+    pid = self()
+
+    decoder = fn _source_id, spec ->
+      [
+        verifier: {Ankusa.Verifier.Hmac, scheme: :standard_webhooks, secret: spec["secret"]},
+        on_verify_failure: :quarantine,
+        event_type: %{json: "type"},
+        sinks: [{RecordSink, pid: pid, filter: %{event_type: "invoice.paid"}}]
+      ]
+    end
+
+    config = start(%{}, source_store: {Ankusa.SourceStore.Persistent, decoder: decoder})
+    inst = config.instance
+    {old, new} = {swh_secret(), swh_secret()}
+
+    assert {:ok, _} = Ankusa.SourceStore.put(inst, "acme", "billing", %{"secret" => old}, :create)
+
+    for {msg, type} <- [{"msg_1", "invoice.paid"}, {"msg_2", "customer.created"}] do
+      body = ~s({"type":"#{type}"})
+
+      assert {:quarantined, :no_match} =
+               Ankusa.Edge.Ingest.ingest(
+                 inst,
+                 request("acme.billing", body, standard_webhooks_headers(msg, body, new))
+               )
+    end
+
+    assert {:ok, held} = Ankusa.Edge.Quarantine.recent(inst, 10)
+    assert length(held) == 2
+
+    assert {:ok, _} = Ankusa.SourceStore.put(inst, "acme", "billing", %{"secret" => new}, :update)
+    assert {:ok, :created, job} = Replay.start(inst, kind: :quarantine)
+    job = poll_job_state(inst, job.id, &(&1.state == :done))
+
+    # One moved, one skipped: the hook no sink selects leaves the pen, uncommitted.
+    assert {job.moved, job.skipped} == {1, 1}
+    assert {:ok, []} = Ankusa.Edge.Quarantine.recent(inst, 10)
+
+    assert_receive {:event_type, id, "invoice.paid"}, 5_000
+    assert_receive {:replayed, ^id, _replay_id}, 5_000
+    refute_receive {:replayed, _, _}, 300
   end
 
   test "quarantine release judges the signature's timestamp at the hook's receive time" do

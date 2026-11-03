@@ -6,9 +6,51 @@ different infrastructure dependency (none, RabbitMQ, Redpanda, NATS, Redis).
 `mise run check:package <pkg>` runs one package's full CI check (format,
 warnings-as-errors, credo, dialyzer, sobelow, tests with a coverage floor,
 docs), starting and stopping that package's own `docker-compose.yml` around the
-suite; `mise run check` runs all of them. The
-eight client SDKs are also checked against one shared, language-neutral vector
-suite — `mise run check:conformance`, below.
+suite; `mise run check` runs all of them. `check:package` also takes
+`--lane static` / `--lane test`, which run the two halves of a Mix package
+separately — with no flag it runs both, in the original order, and `mise run
+check` and every other caller pass no flag. CI uses it for `ankusa` alone: the
+`ankusa (static)` job runs `mise run check:package ankusa --lane static` (deps,
+`hex.audit`, format, `compile --warnings-as-errors`, credo, dialyzer, sobelow,
+docs, `hex.build`) and `ankusa (tests)` runs `--lane test` (`mix test --cover`
+and its seed line), side by side instead of the suite waiting behind dialyzer.
+The eight client SDKs are also checked against one shared, language-neutral
+vector suite — `mise run check:conformance`, below.
+
+## What a pull request runs
+
+`ci.yml` opens with a `changes` job that reads the pull request's diff and tells
+every other job whether its input can have changed; a job it turns off reports
+`skipped` and blocks nothing. `changes`, `lint` (workflow pins, links,
+monitoring) and `ci-summary`, which writes the run's job table to the summary,
+always run. A push to `main`, a release tag and `workflow_call` run **every**
+job — their diff was already gated on a pull request, or is not a diff at all.
+So does any diff the filter cannot classify, an empty or unreadable diff, and
+any error inside the step: a broken filter costs a slow run, never a missing
+gate.
+
+| the diff touches | the jobs that run |
+| --- | --- |
+| `docs/**`, any `*.md`, `marketing/**`, `static/**` | none of the package jobs; `lint` is the guard, and the summary says "docs-only" |
+| `deploy/monitoring/**` | none of the package jobs; `check:monitoring` is one of `lint`'s steps |
+| `packages/ankusa/**` | the whole Mix group — `ankusa (static)`, `ankusa (tests)`, the five adapters, `ankusa_server`, `async_api_spex`, `sdk-elixir` — plus `core integration`, `sdk conformance`, both crash drills and `examples`. Every adapter package and `ankusa_server` path-depend on `ankusa`, so a core change is not finished until they pass, and the producer vectors `sdk conformance` regenerates are core's encoder's output |
+| `packages/async_api_spex/**` | the whole Mix group (`ankusa`'s `Ankusa.AsyncApi` and every project that pins it by path) and `examples` |
+| `packages/sdk-*` | that SDK alone; its `check:package` runs its own `conformance_test`, so the shared `sdk conformance` job is only for `conformance/**` and the producer vectors core generates |
+| an adapter (`packages/ankusa_kafka`, `…_nats`, `…_rabbitmq`, `…_redis`) | that package, both crash drills (they ack through the image), and `examples` for the two an example path-depends on |
+| `packages/ankusa_server/**` | `ankusa_server` and both crash drills |
+| `conformance/**` | `sdk conformance` |
+| `examples/**`, `deploy/helm/**` | `examples` |
+| `tools/**` | `tools` and `examples` |
+| `.mise.toml`, `.mise/**`, `scripts/**`, `.github/**`, or a path the filter does not know | every job |
+
+The perf gate and `bench-tenant` keep their own scope decision (below): on a
+PR that touches no hot-path file they still start, spend a few seconds judging
+the diff, and skip the minutes of benching. If a skip looks wrong, read the
+`ci-summary` job's table and then the `changes` job's log: it prints the diff
+it read, the packages and flags it decided, and the rule that decided them.
+When a diff runs no package at all, that row is named `matrix.package` in the
+checks list and the summary: GitHub does not expand a matrix for a job whose
+`if:` skipped it. The job and its `skipped` conclusion are still there.
 
 ## Static analysis and coverage gates
 
@@ -247,7 +289,8 @@ The always-on tests cover:
   (`Ankusa.TestHelpers.store_calls/1`). `a tick visits only tenants with work`
   puts 1 000 tenants in the queue with 3 due and reads the scan's
   `active_tenants` gauge. `bench/gauges_bench.exs` and
-  `bench/dispatch_tick_bench.exs` are self-asserting and run by `bench:gate`
+  `bench/dispatch_tick_bench.exs` are self-asserting and run by
+  `bench:tenants`, which `bench:gate` runs too
   (see [Perf gate](#perf-gate-mise-run-benchgate)).
 - **HTTP adapters** (outbound): the SigV4 signing `BlobStore.S3` puts on the
   wire, pinned against AWS's published reference signatures and against the
@@ -422,6 +465,20 @@ The always-on tests cover:
   counters equal a fold). `source_ordering_test.exs` is the option grammar and
   lane resolution; the 7 → 8 migration and the `store-v8` fixture (a busy lane,
   a lane whose head waits out a retry, a keyless lane) are in the upgrade test.
+- **Sink filters (CR-2)** (`filter_test.exs`, `edge_test.exs`, `edge_direct_test.exs`,
+  `dispatch_test.exs`, `dispatch/isolation_test.exs`, `replay_test.exs`,
+  `metrics_test.exs`, `async_api_test.exs`, `admin/router_test.exs`,
+  `crypto_test.exs`; `config_test.exs` in `ankusa_server`): every accepted and
+  every rejected form of the grammar and each ceiling at its edge, each operator on a
+  present and an absent value, the unevaluable rule (a `json.*` condition on a body
+  past `dedupe.max_json_bytes` or not JSON selects its sink and counts), a hook
+  getting delivery rows for the sinks it selects only, a hook no sink selects
+  answered `201 filtered` with nothing stored and no dedupe key claimed (the same
+  hook again is `filtered`, not `duplicate`), `wal: :none` publishing to the
+  selected sinks (none durable is `503`), an archive replay and a quarantine
+  release honouring the filters, a filter on `tenant` in a shared source, the
+  filter shown as written in the admin view and never encrypted at rest, and the
+  `ankusa_dispatch_filtered_total` / `_filter_unevaluable_total` series.
 - **Dispatch, retry horizon and error classes (DEL-2)** (`dispatch_test.exs`,
   `retry_policy_exponential_test.exs`, `retry_policy_test.exs`,
   `sink/{sqs,google_pubsub,http}_test.exs`): a row 7 h in with 200 attempts
@@ -739,6 +796,12 @@ the bucket/container bootstrap, runs `mix test --only integration` (the tagged t
 `check:package ankusa`'s) in
 `packages/ankusa`, and tears the emulators down. CI runs it as the
 `core integration (floci)` job.
+
+CI keeps these images, and the four packages' own compose images, in the
+Actions cache (`scripts/ci/images.sh`): the job loads them and
+`docker compose up` pulls nothing, so a Docker Hub rate limit fails neither
+run. Nothing changes locally — `mise run test:integration` and
+`mise run check:package <pkg>` pull from whatever your daemon already has.
 
 Every floci emulator runs in `persistent` storage mode (the images default to
 in-memory) with its state on a named Docker volume, so it survives an emulator
@@ -1059,6 +1122,18 @@ docker compose logs worker   # via=inline, then via=claim:<id>
 docker compose down -v
 ```
 
+[`examples/event-routing/`](https://github.com/jamescarr/ankusa/tree/main/examples/event-routing/) is self-checking:
+its `run.sh` posts three hooks and exits non-zero unless the routing (a templated
+Kafka topic, a filtered HTTP sink, a hook no sink selects) landed each one where
+it should. CI does only what `mise run check:examples` does for its worker and
+receiver (install, typecheck); the stack itself is run by hand:
+
+```sh
+cd examples/event-routing
+docker compose up --build -d --wait && ./run.sh
+docker compose down -v
+```
+
 [`examples/jetstream-k8s/`](https://github.com/jamescarr/ankusa/tree/main/examples/jetstream-k8s/)
 is a manual drill on a real `kind` cluster. CI only does what
 `mise run check:examples` does for it: builds and typechecks the consumer,
@@ -1100,6 +1175,10 @@ mise run test:crash
 # acked=14940 recovered=14940 missing=0 enospc_503=1 resumed=true
 ```
 
+CI caches that base image between runs the same way as the compose images
+(`scripts/ci/images.sh`), so a drill job does not pull it from Docker Hub; a
+local run uses whatever your daemon already has.
+
 - **ENOSPC** (`mise run test:crash`, CI job `crash`): `/data` is a 192 MiB
   tmpfs. The harness ingests `RATE` (default 1000) hooks/s of `BODY_BYTES`
   (default 10 KiB) each; at +5 s a filler file takes every free byte. RocksDB
@@ -1124,7 +1203,8 @@ mise run test:crash
   `acked=9344 recovered=5600 missing=3744` and exit status 1. It needs `docker run
   --privileged` with loop and device-mapper support in the Docker host's
   kernel and exits `2` where it has neither. CI runs it as the job
-  `crash-powerloss` on every PR and every push to `main` (GitHub's
+  `crash-powerloss` on every push to `main` and on every PR whose diff touches
+  core's or an adapter's `lib`, or `packages/ankusa_server/Dockerfile` (GitHub's
   `ubuntu-latest` allows it; on a runner that does not, the job reports a
   skip), and `release:preflight` reads that job's result line for the commit
   being tagged before a core tag, instead of running the drill. When the job
@@ -1232,7 +1312,7 @@ sink's deliveries, the log's records):
   `admin/router_test.exs` that `/v1/config` shows the new keys.
 
 `bench/intake_bench.exs` (`MIX_ENV=test mix run bench/intake_bench.exs`, also run
-by `mise run bench:gate`) compares `wal: :dual` with `wal: :disk` in one VM:
+by `mise run bench:tenants`, and by `mise run bench:gate` locally) compares `wal: :dual` with `wal: :disk` in one VM:
 `Ankusa.Intake.Memory` confirms after 5 ms, one client measures the ack p50 over
 200 requests with 1 KB bodies, 512 clients measure throughput over 6 000 (the best of three rounds), and the log's mean batch is printed. It passes only if the
 dual p50 is within `max(disk p50, 5 ms) + 5 ms` (the parallel commit costs the
@@ -1342,12 +1422,50 @@ neither gated number; the 256-worker cells catch CPU cost per hook as lost
 `ingest_per_s`. At 32 workers latency is the service time, so the same delay
 shows up in `p99_ms`.
 
+Each run of a cell measures a store of its own: the gate makes a fresh
+directory per run, hands it to the bench as `TMPDIR`, and removes it
+afterwards, so no cell and no leg inherits another's store, its size or its
+page cache. By default that directory is on `/dev/shm` (or `BENCH_DATA_ROOT`):
+an ingest commit ends in an fsync (`Store.write(..., sync: true)`) and one
+group commit carries up to `batcher.group_commit_max_records` hooks, so on the
+runner's disk a single slow fsync *is* the `p99_ms` tail — the perf gate's
+failing leg on PR 213 spanned 22–202 ms inside one cell, and its base leg's
+`512B-ordered` came out 7× faster than its `512B`. A tmpfs is the "an fsync
+costs nothing" regime this section describes, and it is what makes the base
+and branch legs comparable. `BENCH_TRACE=1` prints each run's data directory
+and its peak size (diagnostics, off by default).
+
 A p99 over 20 000 samples is noisy on a shared machine, and noise only adds
 latency and takes throughput away. A cell that is over a limit after its
 three runs is therefore run three more times and judged on its best run of the
 six (lowest `p99_ms`, highest `ingest_per_s`): a real regression raises every
 run, noise rarely does. `last.json` and the table show those best-run numbers
 for such a cell.
+
+The limits are ratios, so the measurements have to be tighter than the ratio
+for a verdict to mean anything. A cell whose own `p99_ms` over one round of
+three runs spans more than the limit's headroom (max ÷ min above 1.2×), or
+whose rounds' medians do, is measured again: at most two more rounds of three
+runs each. What is still wider than 1.2× after that is **inconclusive** — the
+measurement could not decide, which is neither a pass nor a regression: the
+run prints `INCONCLUSIVE p99_ms <cell>: samples span N× across rounds (...)`
+with every run's sample, the table's verdict column says `inconclusive`, a
+`::warning::` annotation and a line in the job's step summary name the cell,
+its samples and the fact that it was not judged, and the job does not fail on
+it (a cell that is also over its limit keeps saying so: `inconclusive (over
+limit by X%)`). A failure the measurement can resolve still exits 1. (The
+rounds' own max ÷ min is a noise detector, not the decision: a tail statistic
+over 20 000 samples jumps between runs by more than 20 % on a shared runner
+even when the cell's median is steady.)
+
+Before its measured runs every cell gets one **discarded warm-up run** of its
+own. The first run of a cell pays costs that are not the code's — the `mix
+run` boot, module loading, allocator growth, a cold page cache and the CPU
+governor ramping — and they showed up as a trend across rounds: the failing
+base leg of run 41586954095 had `512B-c32` round medians of 6.12, 5.77 and
+4.78 ms with the first round always slowest, which no number of extra rounds
+settles. The warm-up run's sample feeds neither the medians nor the spread; it
+is measured once per cell per leg, on the runner that leg runs on.
 
 Numbers only compare on the machine that recorded them. Hosted CI runners of
 one class differ by a factor of two in speed from job to job (the same code
@@ -1360,19 +1478,30 @@ scripts), then gates the change against that. When the pull request changes
 `mix deps.get` materialises the base's own dependency set before the
 measurement (the branch's are restored afterwards), so a dependency change is
 also measured base-against-branch on one runner rather than against a baseline
-recorded on another one. It falls back to the checked-in `baseline.json` only
-when there is no base commit to measure. A release tag skips the gate: its
+recorded on another one. That base leg is a `BENCH_REBASELINE=1` run, so it
+writes the cells it could settle to the temp baseline and leaves a cell it
+could not settle out of it, printing the same `INCONCLUSIVE p99_ms <cell>: …`
+line, `::warning::` annotation and step-summary line as a comparison run and
+exiting 0: it never records a baseline from samples that wide, and it never
+fails the job over a measurement it cannot make (no diff is involved, and the
+branch leg still has to run). The branch leg then treats that cell as **not
+judged**, never as passed: it prints the `INCONCLUSIVE p99_ms <cell>: absent
+from the baseline …` line, shows `inconclusive` in the table and does not fail
+on it, while every cell the baseline does carry keeps its judgement — a cell
+over its limit still fails. It falls back to the checked-in `baseline.json`
+only when there is no base commit to measure. A release tag skips the gate: its
 commit was gated on its pull request and its push to `main`, and a new tag has
 no base commit, so the fallback would judge a hosted runner against a laptop.
 `baseline.json` is the reference for
 local runs on a comparable machine; a run on another runner class prints a
 `WARN`. The checked-in one was recorded (DUR-4.b.b.a, `runner:
 local-darwin-aarch64`) on an Apple-silicon laptop with the bench's data
-directory on a RAM disk (`TMPDIR=/Volumes/<ram disk>`: `hdiutil attach
--nomount ram://8388608`, then `diskutil erasevolume HFS+ <name> <device>`): an
-fsync that costs nothing is the regime of a CI runner, whereas on this laptop's
-disk (4.3 ms fsync) the `512B-c32` cell is fsync-bound and misses 0.8× the
-baseline however the code is.
+directory on a RAM disk (`BENCH_DATA_ROOT=/Volumes/<ram disk>`: `hdiutil attach
+-nomount ram://8388608`, then `diskutil erasevolume HFS+ <name> <device>`):
+an fsync that costs nothing is the regime the gate measures in on CI (where it
+picks `/dev/shm`), whereas on this laptop's disk (4.3 ms fsync) the
+`512B-c32` cell is fsync-bound and misses 0.8× the baseline however the code
+is. A macOS run has no `/dev/shm`, so `BENCH_DATA_ROOT` is how to give it one.
 
 `baseline.json` also holds an `f1_code` block: the F1 baseline's code
 (`b25506f6`, before DUR-4) measured with this harness, interleaved with
@@ -1388,8 +1517,9 @@ two runs of one tree there differ by 20 %. `STUB_INGEST=1` (above) is the
 check that the harness itself is not what a cell measures: at 10 KB it drives
 more than 100× the rate of the F1 code. Change the harness and the `f1_code`
 block has to be measured again, in the same PR.
-`BENCH_RUNS`, `BENCH_CONFIRM`, `BENCH_RUNNER`, `BENCH_BASELINE` and
-`BENCH_REBASELINE` are documented in the script's header.
+`BENCH_RUNS`, `BENCH_CONFIRM`, `BENCH_RUNNER`, `BENCH_BASELINE`,
+`BENCH_REBASELINE`, `BENCH_DATA_ROOT` and `BENCH_TRACE` are documented in the
+script's header.
 
 [`bench/tenant_fairness_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/tenant_fairness_bench.exs)
 is the fairness bench of TEN-3, run by hand: it prints a light tenant's p99
@@ -1421,8 +1551,10 @@ the full 10 000-key budget, `error_class=throttled`), and for every tenant
 index at once with it (`Ankusa.Queue.dead/2` directly, `TENANTS=8` is the
 bound), and exits 1 unless every case's p99 is under 100 ms.
 
-`mise run bench:gate` also runs four self-asserting scripts first, with no
-baseline entry (the fourth, [`bench/intake_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/intake_bench.exs), is under [Dual commit](#dual-commit-wal-type-dual)):
+`mise run bench:tenants` runs four self-asserting scripts, with no
+baseline entry (the fourth, [`bench/intake_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/intake_bench.exs), is under [Dual commit](#dual-commit-wal-type-dual)) —
+`mise run bench:gate` runs them too, before the matrix, unless
+`BENCH_SKIP_TENANTS=1` (which only CI sets, below):
 [`bench/gauges_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/gauges_bench.exs)
 times `Ankusa.Metrics.Gauges.measure/1` and
 [`bench/dispatch_tick_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/dispatch_tick_bench.exs)
@@ -1452,17 +1584,38 @@ Redis half (boot and reload through `HSCAN`) is
 (`BENCH_REBASELINE=1`) skips them: it measures the
 base commit's sources, which have neither the layout nor these APIs.
 
-CI runs it as the `perf gate` job in `ci.yml`: on every push to `main`, and on
-a pull request whose diff touches a hot-path file: anything under
+CI runs it as three jobs in `ci.yml`, and the split is what decides the
+pipeline's length. `bench-scope` is the decision on its own: a checkout, the
+run's file list from the API (a PR) or `github.event.before..github.sha` (a
+push), and one `grep -E` against `HOT_PATHS` — seconds. `perf gate` is
+`mise run bench:gate` with `BENCH_SKIP_TENANTS=1`: the matrix and its two
+base-against-branch legs. `bench-tenant` is `mise run bench:tenants`: the
+self-asserting scripts above, which compare against no baseline, so they have
+no leg to measure and are a job of their own rather than the gate's first step.
+Both `need` `bench-scope` and start together, so neither is on the other's
+critical path: CI-7 split them and CI-10 took the scope step out of the gate,
+because with it inside, the tenant job waited for the whole gate and a merge
+push's wall clock went to 14:24 from 10:04. Both obey that one decision over
+the run's diff: anything under
 `packages/ankusa/lib/ankusa/{edge,queue,store,dispatch,verifier,routes}/`,
 `store.ex`, `queue.ex`, `dedupe.ex`, `envelope.ex`, `http.ex`,
 `route_resolver.ex`, `sink/message.ex`, `sink/http.ex`, or the gate's own files
-(`packages/ankusa/bench/`, `.mise/tasks/bench/`, `ci.yml`). The job always
-reports a status (it can be a required check); on a PR that touches none of
-those paths its steps are skipped. The run's `last.json` and the base
-commit's numbers are attached as the `bench-last` artifact. If the gate goes
-red on a change that touches no hot-path code, re-run the job once; a real
-regression fails again.
+(`packages/ankusa/bench/`, `.mise/tasks/bench/`) runs both; a pull request that
+touches none of them runs neither, and neither does a push to `main` whose
+range (`github.event.before..github.sha`) touches none of them. (`bench-scope`
+runs in either case — it is what computes the decision, and a job skipped by
+`if:` could not publish it.) That second rule is the one `main` needs: a
+merge's push carries the diff its pull request already gated, so re-measuring
+it on the default branch buys nothing (CI-7). A workflow file is not a hot
+path: it cannot change the measured program, and an invocation it gets wrong
+surfaces on the next push to `main` within minutes. A release tag runs neither
+(its commit was gated on its pull request and its push to `main`), and a
+`workflow_call`, a `workflow_dispatch`, a first push or force-push with no
+`before` commit, and any error in the scope step run both: a filter that
+breaks must run the gate, never skip it. The run's `last.json` and the base
+commit's numbers are attached as the `bench-last` artifact. A run that cannot
+resolve the limits says so (`INCONCLUSIVE`, above) instead of passing or
+failing; re-running it re-measures.
 
 A hot-path PR states before/after numbers in its description. The checked-in
 baseline changes only in a pull request titled `perf: rebaseline <reason>`

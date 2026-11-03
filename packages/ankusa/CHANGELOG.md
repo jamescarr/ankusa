@@ -11,7 +11,86 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Added
+
+- **`{{ var }}` templates on per-hook sink addresses (CR-3).**
+  `Ankusa.Sink.Template` compiles `{{ var }}` / `{{ var ?? fallback }}` strings
+  (`tenant`, `source`, `id`, `event_type`, `header.<name>`) when
+  `Ankusa.Source.new/2` builds a source, so a YAML or API-managed source can
+  name an address per hook, which only an Elixir function could before. The
+  keys that take one: `Sink.Kafka` `topic` and `key`, `Sink.RabbitMQ`
+  `routing_key`, `Sink.NATS` `subject`, `Sink.Redis` `channel`, `Sink.SQS`
+  `message_group_id`, `Sink.GooglePubSub` `ordering_key`, and `Sink.Http` `url`
+  and every value of `headers`; a `{{` on any other option of those sinks is an
+  `ArgumentError` naming the key. `Messaging.resolve/2` renders a template and
+  `Messaging.static/1` reports none, so the AsyncAPI document shows a dynamic
+  address. A variable with no value and no fallback raises
+  `Ankusa.Sink.Template.MissingError`, which `Sink.safe_deliver/4` turns into
+  `{:permanent, {:template_missing, var}}`: dead-lettered at once, replayable
+  after the fix. `Ankusa.Sink.Template.check/2` (called beside `Ordering.check/2`
+  when a source is written, and at boot) refuses a `header.<name>` variable on a
+  header the source's `store_headers` policy drops or hashes. A value that is
+  empty or holds a control character counts as no value.
+
+- **`event_type:` per source (CR-1).** `Ankusa.EventType` reads the provider's
+  event name at ingest, from a request header or a JSON path (presets `github`,
+  `shopify`, `stripe`, `standard_webhooks`, `svix`, `slack`; a value must be a
+  non-empty string of at most 128 bytes), and `Ankusa.Envelope.event_type`
+  stores it on the hook (additive: a node that predates it ignores it, a hook
+  stored before it decodes with `nil`). Every consumer gets it: `Sink.Http`
+  sends `x-ankusa-event-type`, a queue message carries `"event_type"` (always,
+  `null` without one; `SinkMessageV1` and the AsyncAPI document describe it),
+  `Message.headers/2` and `attributes/2` add `ankusa_event_type`, and
+  `Sink.Log` logs it. A source with an `event_type` whose hook carries none is
+  counted in `ankusa_ingest_event_type_missing_total`
+  (`[:ankusa, :ingest, :event_type_missing]`). The admin view of a source shows
+  `event_type`. `Sink.SQS` leaves `ankusa_event_type` off a message that would
+  pass SQS's 10 attributes (the body carries it too).
+
+- **Per-sink `filter:` (CR-2).** A sink entry may carry a data predicate
+  (`Ankusa.Filter`: `all` / `any` / `not` over `event_type`, `tenant`,
+  `content_type`, `header.<name>` and `json.<path>`, with `eq`, `neq`, `in`,
+  `not_in`, `prefix`, `suffix` and `exists`; 32 conditions, 4 levels, 256-byte
+  literals) that decides whether the sink gets a delivery row.
+  `Ankusa.Source` gains `filters`, aligned with `sinks`, and `Ankusa.Routing`
+  judges them at ingest on the one shared body decode and returns `selected`.
+  A hook no sink selects is answered `201 {"filtered": true}`
+  (`Ankusa.Edge.Ingest` returns `{:filtered, env}`, ingest outcome `:filtered`)
+  and is not stored: no dedupe claim, no commit, nothing to replay. A filter with
+  a `json.*` condition on a body over `dedupe.max_json_bytes` or not JSON selects
+  its sink and counts `ankusa_dispatch_filter_unevaluable_total{sink}`; a sink a
+  filter drops counts `ankusa_dispatch_filtered_total{sink}`. `Ankusa.Queue`
+  entries take `selected`, `Queue.Writer` writes no row for an unselected sink
+  (indexes kept), `Edge.Publish.publish/4` publishes to the selected sinks only
+  (`wal: :none`: none durable is `503`, none selected is `201 filtered`), and a
+  quarantine release, an archive replay and the intake log's recovery honour the
+  filters. `Ankusa.Filter.check/2` refuses a source whose `header.<name>`
+  condition is dropped by its `store_headers` policy or whose `event_type`
+  condition has no `event_type` to read. The admin view of a source shows each
+  filter as written (it is neither redacted nor encrypted at rest), and the
+  AsyncAPI channel description names it.
+
+### Fixed
+
+- **A row parked behind a breaker that a throttling sink opened is dead-lettered as
+  `throttled`.** At its retry horizon such a row was filed as `transient`, so
+  `GET /v1/dlq?error_class=throttled` and an `error_class: throttled` replay missed it.
+  A key's breaker now records the `Ankusa.Sink.error_class/1` of each failure it counts,
+  and a row that dies behind it is filed under the class of the last one.
 ### Changed
+
+- **`Ankusa.Routing` takes over resolving a hook at ingest.** One capped JSON
+  decode now serves a `dedupe` path, an `ordering_key` path and an `event_type`
+  path (`Ankusa.Routing.resolve/4`, `Ankusa.Routing.decode/3`). The old
+  `resolve` and three-argument `lanes` of `Ankusa.Ordering` are gone, and
+  `Ankusa.Ordering.lanes/4` takes the decoded body. The body cap of an
+  `ordering_key: {:json, _}` is now `dedupe.max_json_bytes` (1 MiB by default,
+  as before) instead of a fixed 1 MiB.
+- `Ankusa.Routing.resolve/4` takes `telemetry: false` (a replay or a recovery
+  counts nothing again) and keeps the event type a stored hook already carries;
+  `Ankusa.Ordering.lanes/5` takes the selected sinks and reads no key for a sink
+  a filter dropped; `Ankusa.Edge.Publish.publish` takes the selected sinks (four
+  arguments, was three).
 
 - Requires `bandit ~> 1.14 and >= 1.14.1` (was `~> 1.14`): 1.14.0 is affected
   by EEF-CVE-2026-116078 (High: an HTTP/2 request body sent as 1-byte DATA

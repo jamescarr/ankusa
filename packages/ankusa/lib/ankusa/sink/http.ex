@@ -115,8 +115,16 @@ defmodule Ankusa.Sink.Http do
   dead-letter it, for a tenant with no endpoint); a raise is a transient
   failure. A value of the wrong shape is `{:permanent, {:computed, key,
   :invalid}}`. The function runs on the delivery task: it must not block on
-  slow I/O. These are Elixir options; the YAML loader and the admin API only
-  build static sinks.
+  slow I/O. Functions and `{mod, fun, args}` are Elixir options.
+
+  The YAML loader and the admin API state the same thing as data: a `:url` or
+  a `:headers` value with `{{ var }}` in it (`Ankusa.Sink.Template`:
+  `https://hooks.example.com/t/{{ tenant }}`, `x-event: "{{ event_type }}"`) is
+  compiled when the source is built and rendered from the envelope on every
+  attempt. A variable with no value and no fallback is `{:permanent,
+  {:template_missing, var}}`. The YAML loader allows a template in the URL's
+  path and query, not its host; an Elixir-built source may put one anywhere.
+  A URL that fans out to N hosts opens up to N pools (see "Connection pools").
 
   The resolved URL is a target like any other: the egress policy above is
   applied to it on every attempt, so a tenant-supplied URL cannot reach the
@@ -152,6 +160,7 @@ defmodule Ankusa.Sink.Http do
   alias Ankusa.Sink.Description
   alias Ankusa.Sink.Http.Signer
   alias Ankusa.Sink.Message
+  alias Ankusa.Sink.Template
 
   @permanent [400, 401, 403, 404, 410, 413, 422, 451]
   @default_max_response_bytes 65_536
@@ -191,9 +200,16 @@ defmodule Ankusa.Sink.Http do
 
   defp destination(_computed_or_missing), do: {"http", nil}
 
-  defp computed?(spec), do: is_function(spec, 1) or mfa?(spec)
+  defp computed?(spec),
+    do: is_function(spec, 1) or mfa?(spec) or Template.compiled?(spec) or templated_headers?(spec)
+
   defp mfa?({mod, fun, args}), do: is_atom(mod) and is_atom(fun) and is_list(args)
   defp mfa?(_other), do: false
+
+  defp templated_headers?(headers) when is_list(headers),
+    do: Enum.any?(headers, &match?({_name, {:template, _parts}}, &1))
+
+  defp templated_headers?(_other), do: false
 
   # `:url`, `:headers` and `:secret` as this envelope's attempt sees them. A
   # static option is left alone; a computed one is called and checked.
@@ -211,11 +227,41 @@ defmodule Ankusa.Sink.Http do
   end
 
   defp compute(spec, env, key) do
-    value = if is_function(spec, 1), do: spec.(env), else: apply_mfa(spec, env)
-
-    case value do
+    case run(spec, env, key) do
       {:error, _reason} = error -> error
       value -> checked(key, value)
+    end
+  end
+
+  # A `{{ var }}` template (compiled by `Ankusa.Sink.Template` from a YAML or API
+  # source): a variable with no value is the delivery's permanent failure, not a
+  # retry. `:headers` renders the values that are templates and leaves the rest.
+  defp run({:template, _parts} = template, env, _key), do: render(template, env)
+
+  defp run(headers, env, :headers) when is_list(headers) do
+    Enum.reduce_while(headers, {:ok, []}, fn
+      {name, {:template, _parts} = template}, {:ok, acc} ->
+        case render(template, env) do
+          {:error, _reason} = error -> {:halt, error}
+          value -> {:cont, {:ok, [{name, value} | acc]}}
+        end
+
+      header, {:ok, acc} ->
+        {:cont, {:ok, [header | acc]}}
+    end)
+    |> case do
+      {:ok, reversed} -> Enum.reverse(reversed)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp run(spec, env, _key) when is_function(spec, 1), do: spec.(env)
+  defp run({_mod, _fun, _args} = spec, env, _key), do: apply_mfa(spec, env)
+
+  defp render(template, env) do
+    case Template.render(template, env) do
+      {:ok, value} -> value
+      {:error, {:template_missing, _var} = reason} -> {:error, {:permanent, reason}}
     end
   end
 
@@ -431,6 +477,7 @@ defmodule Ankusa.Sink.Http do
         dedupe_header(env.dedupe_key) ++
         replay_header(ctx[:replay_id]) ++
         ordering_header(ctx[:ordering_key]) ++
+        event_type_header(env.event_type) ++
         trace_headers(env.trace) ++
         signature
 
@@ -575,6 +622,12 @@ defmodule Ankusa.Sink.Http do
     do: [{"x-ankusa-ordering-key", key}]
 
   defp ordering_header(_), do: []
+
+  # The provider's event name (`Ankusa.EventType`), when the source reads one.
+  defp event_type_header(event_type) when is_binary(event_type) and event_type != "",
+    do: [{"x-ankusa-event-type", event_type}]
+
+  defp event_type_header(_), do: []
 
   # The hook's W3C trace context (`Ankusa.Trace`), as the standard headers. Owned
   # like the identity headers: a provider's own `traceparent` is not forwarded

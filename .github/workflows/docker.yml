@@ -8,7 +8,10 @@ name: Docker image
 #
 # Note on the filters below: path filters are not evaluated for tag pushes, so
 # `ankusa_server-v*` always builds regardless of which files the tagged commit
-# touched — which is what a release needs.
+# touched — which is what a release needs. `.github/workflows/ci.yml` is
+# deliberately not among the filters: a CI-only diff cannot change the image,
+# and the only job here that reads it (`ci`) is `if: github.ref_type == 'tag'`,
+# where filters do not apply — so a release still runs the full suite first.
 
 on:
   push:
@@ -19,14 +22,14 @@ on:
       - "packages/async_api_spex/**"
       - ".dockerignore"
       - ".github/workflows/docker.yml"
-      - ".github/workflows/ci.yml"
+      # Not `.github/workflows/ci.yml` — see the note above.
   pull_request:
     paths:
       - "packages/ankusa*/**"
       - "packages/async_api_spex/**"
       - ".dockerignore"
       - ".github/workflows/docker.yml"
-      - ".github/workflows/ci.yml"
+      # Not `.github/workflows/ci.yml` — see the note above.
 
 concurrency:
   group: docker-${{ github.ref }}

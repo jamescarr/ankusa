@@ -111,6 +111,24 @@ defmodule Ankusa.Sink.SQSIntegrationTest do
     assert replay["MessageAttributes"]["ankusa_replay_id"]["StringValue"] == "r1"
   end
 
+  test "sqs templated message_group_id: the group is rendered per hook and stored", %{
+    fifo: fifo
+  } do
+    group = Ankusa.Sink.Template.compile!("test", "{{ tenant }}.{{ event_type ?? none }}")
+
+    assert :ok =
+             SQS.deliver(
+               %{envelope() | event_type: "invoice.paid"},
+               %{attempt: 1},
+               opts(fifo) ++ [message_group_id: group]
+             )
+
+    assert :ok = SQS.deliver(envelope(), %{attempt: 1}, opts(fifo) ++ [message_group_id: group])
+
+    groups = peek(fifo) |> Enum.map(& &1["Attributes"]["MessageGroupId"]) |> Enum.sort()
+    assert groups == ["acme.invoice.paid", "acme.none"]
+  end
+
   test "a queue that was never created is a permanent config error, dead-lettered at once", %{
     fifo: fifo
   } do

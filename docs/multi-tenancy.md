@@ -127,6 +127,11 @@ An unresolvable URL shape returns `:error`, which the router turns into a
   take a function of the envelope, so one shared source delivers each tenant's
   hooks to that tenant's receiver (see
   [`delivery.md`](delivery.md#sinkhttp-per-tenant-destinations)).
+- **Filtering**: `tenant` is a field of a sink's [`filter`](configuration.md#sink-filters)
+  (`filter: {tenant: acme}`, or `{tenant: {not_in: [globex]}}`), read from the
+  hook's tenant (`default` without one). On a shared source behind
+  `routing: tenant_path` it lets one sink take some tenants' hooks and another
+  sink the rest; a hook no sink selects is answered `201 filtered` and not stored.
 
 Resolution order for a given request: `route.tenant_id` (if the resolver set
 one) wins; otherwise `source.tenant_id` (if the source's config set one);

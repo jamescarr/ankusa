@@ -2,6 +2,7 @@
 #MISE description="Every CI check for one package; brings its docker-compose.yml up and down around the suite"
 #USAGE arg "<pkg>" help="directory name under packages/"
 #USAGE flag "--keep-infra" help="leave the package's docker-compose services running afterwards"
+#USAGE flag "--lane <lane>" help="Mix packages: 'static' (deps, lint, analysis, docs, build) or 'test' (the suite); no flag runs both"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 source "$MISE_PROJECT_ROOT/.mise/lib/mix_cache.sh"
@@ -10,6 +11,20 @@ cd "$ROOT"
 pkg="$usage_pkg"
 dir=$(pkg_dir "$pkg")
 kind=$(pkg_kind "$pkg")
+
+# The two halves CI runs `ankusa` as, in separate jobs, so the suite no longer
+# queues behind dialyzer and a static failure reports in three minutes instead
+# of ten. No flag is every step in the original order: `mise run check`,
+# `.mise/tasks/check/_default` and every other package's CI job pass none.
+lane="${usage_lane:-}"
+case "$lane" in
+  "") ;;
+  static | test)
+    [ "$kind" = hex ] || [ "$kind" = docker ] ||
+      fail "--lane $lane is the Mix split of check:package; $pkg is $kind"
+    ;;
+  *) fail "unknown --lane '$lane' (static or test)" ;;
+esac
 cd "$dir"
 
 tmp=""
@@ -37,7 +52,7 @@ if [ -f docker-compose.yml ]; then
   if [ "${usage_keep_infra:-false}" != true ]; then infra=1; fi
 fi
 
-echo "==> $pkg ($kind)"
+echo "==> $pkg ($kind${lane:+, $lane lane})"
 case "$kind" in
   hex | docker)
     # Deps come from the shared cache `mise run build` keeps (see
@@ -47,44 +62,56 @@ case "$kind" in
     # again in test for the suite — which is what held the repo-wide check's
     # lock for those minutes. The subshells keep MIX_ENV local. Restore comes
     # before `deps.get`: the cache pairs sources with their compiled priv/,
-    # while deps.get alone leaves source-only directories.
-    for env in dev test; do
+    # while deps.get alone leaves source-only directories. A lane warms only
+    # the env its own steps use.
+    case "$lane" in
+      static) envs="dev" ;;
+      test) envs="test" ;;
+      *) envs="dev test" ;;
+    esac
+    for env in $envs; do
       (MIX_ENV="$env" mix_cache_warm "$dir" "$pkg" "$env" --check-locked)
     done
     mix deps.get --check-locked
-    mix deps.unlock --check-unused
-    # Retired packages and published security advisories fail the build. CI sets
-    # HEX_AUDIT_LOG so the report is uploaded as the `hex-audit-<pkg>` artifact.
-    if [ -n "${HEX_AUDIT_LOG:-}" ]; then
-      mkdir -p "$(dirname "$HEX_AUDIT_LOG")"
-      mix hex.audit 2>&1 | tee "$HEX_AUDIT_LOG"
-    else
-      mix hex.audit
+    if [ "$lane" != test ]; then
+      mix deps.unlock --check-unused
+      # Retired packages and published security advisories fail the build. CI
+      # sets HEX_AUDIT_LOG so the report is uploaded as the `hex-audit-<pkg>`
+      # artifact, which is why the audit and its upload live in the static lane.
+      if [ -n "${HEX_AUDIT_LOG:-}" ]; then
+        mkdir -p "$(dirname "$HEX_AUDIT_LOG")"
+        mix hex.audit 2>&1 | tee "$HEX_AUDIT_LOG"
+      else
+        mix hex.audit
+      fi
+      mix format --check-formatted
+      mix compile --warnings-as-errors
+      # Static analysis. The credo config is the repo's .credo.exs; dialyzer's
+      # PLTs live under _build (see each mix.exs), which CI caches. The shared
+      # cache hands a fresh worktree the toolchain's core PLT, so only this
+      # project's dependency PLT is built here.
+      mix credo --strict
+      mix_plt_restore "$pkg"
+      mix dialyzer
+      mix_plt_save "$pkg"
+      # Plug applications only: the packages that serve HTTP.
+      case "$pkg" in
+        ankusa | ankusa_server) mix sobelow --exit --skip ;;
+      esac
     fi
-    mix format --check-formatted
-    mix compile --warnings-as-errors
-    # Static analysis. The credo config is the repo's .credo.exs; dialyzer's PLTs
-    # live under _build (see each mix.exs), which CI caches. The shared cache
-    # hands a fresh worktree the toolchain's core PLT, so only this project's
-    # dependency PLT is built here.
-    mix credo --strict
-    mix_plt_restore "$pkg"
-    mix dialyzer
-    mix_plt_save "$pkg"
-    # Plug applications only: the packages that serve HTTP.
-    case "$pkg" in
-      ankusa | ankusa_server) mix sobelow --exit --skip ;;
-    esac
-    # `--cover` enforces the package's `test_coverage: [summary: [threshold: n]]`
-    # floor (core 85, every other package 80).
-    testlog=$(mktemp)
-    status=0
-    mix test --cover 2>&1 | tee "$testlog" || status=$?
-    record_seed
-    [ "$status" -eq 0 ] || exit "$status"
-    # The one package-specific step: async_api_spex is for other projects, so
-    # its gate is a project that is not this repo.
-    if [ "$pkg" = async_api_spex ]; then scripts/standalone.sh; fi
+    if [ "$lane" != static ]; then
+      # `--cover` enforces the package's
+      # `test_coverage: [summary: [threshold: n]]` floor (core 85, every other
+      # package 80).
+      testlog=$(mktemp)
+      status=0
+      mix test --cover 2>&1 | tee "$testlog" || status=$?
+      record_seed
+      [ "$status" -eq 0 ] || exit "$status"
+      # The one package-specific step: async_api_spex is for other projects, so
+      # its gate is a project that is not this repo.
+      if [ "$pkg" = async_api_spex ]; then scripts/standalone.sh; fi
+    fi
     ;;
   npm)
     npm ci
@@ -146,11 +173,13 @@ case "$kind" in
     ;;
 esac
 
-if [ "$kind" = hex ]; then
+if [ "$kind" = hex ] && [ "$lane" != test ]; then
   mix docs --warnings-as-errors
   # Build the package the way release.yml publishes it, under :prod: Hex
   # rejects path deps, so `ankusa` resolves `async_api_spex` and the adapters
-  # resolve `ankusa` from Hex rather than the path dep.
+  # resolve `ankusa` from Hex rather than the path dep. Only the tarball is
+  # built — no `:prod` tree is compiled or needed, so the static lane warms
+  # `dev` alone.
   tmp=$(mktemp -d)
   MIX_ENV=prod mix hex.build --output "$tmp/$pkg.tar"
 fi

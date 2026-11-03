@@ -15,6 +15,7 @@ defmodule Ankusa.Telemetry do
   | --- | --- | --- |
   | `[:ankusa, :ingest]` (span) | `:duration` | `:instance`, `:source_id`, `:tenant_id`, `:route_id` (the route the guard matched, `nil` with routes off; never a metric label), `:size`, `:outcome`, `:dropped_headers` (request headers the stored-header policy removed from the hook; `0` when it was not stored) |
   | `[:ankusa, :ingest, :refused]` | — | `:instance`, `:reason` (`:unknown_source`, `:payload_too_large`, `:body_read_failed`, `:invalid_header`, `:store_unavailable`) |
+  | `[:ankusa, :ingest, :event_type_missing]` | — | `:instance`, `:source_id`, `:tenant_id`. One per hook of a source with an `event_type` that carries none (no such header, a body that is not JSON or is over `dedupe.max_json_bytes`, a missing path, a value that is not a string or is over 128 bytes); `ankusa_ingest_event_type_missing_total` |
   | `[:ankusa, :verify]` (span) | `:duration` | `:instance`, `:source_id`, `:tenant_id`, `:provider`, `:scheme`, `:status`, `:weak_hash` |
   | `[:ankusa, :commit]` (span) | `:duration`, `:batch_size`, `:bytes` | `:instance` (a batch spans tenants, so it names none). The span is the write of a group into the store (`sync: false`); the fsync that makes it durable is `[:ankusa, :wal_sync]` |
   | `[:ankusa, :wal_sync]` (span) | `:duration`, `:groups` (groups this one fsync covered) | `:instance`. One WAL fsync by `Ankusa.Queue.Syncer`; a failed one emits `:exception` and acks none of its groups |
@@ -29,7 +30,9 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :dispatch, :stop]` | `:attempt_ms` (the final attempt's wall time, as a float; absent when the delivery was dead-lettered without one: its source was deleted, or its hook is missing), `:since_received_ms` (the hook's age when the delivery settled, by `received_at`: the SLI behind `ankusa_delivery_latency_seconds`; absent for a replayed delivery, whose age is the replay's doing, and for a hook that did not decode) | `:instance`, `:result` (`:ok`, `:dlq`; direct mode: `:ok`, `:error`), `:attempts`, `:sink`, `:source_id`, `:tenant_id`, `:ordered` (the delivery was a lane head of an `ordered: true` sink). One per delivery that settled |
   | `[:ankusa, :dispatch, :attempt]` | `:attempt_ms` (float: from the attempt's task starting, its claim-check write included, to dispatch recording its outcome; a sink that hits `dispatch.attempt_timeout_ms` reports the timeout) | `:instance`, `:result` (`:ok`, `:error`, `:timeout`), `:attempt` (1-based), `:sink`, `:source_id`, `:tenant_id`. One per attempt, retried or not; `ankusa_dispatch_attempt_duration_seconds{sink,result}`. Direct mode emits one per sink, timed inside the sink's own task |
   | `[:ankusa, :dispatch, :dlq]` | — | `:instance`, `:source_id`, `:tenant_id`, `:sink` |
-  | `[:ankusa, :dispatch, :lane_key_missing]` | — | `:instance`, `:sink`. One per hook of an `ordered: true` sink whose `ordering_key` yielded nothing (no such header, a body that is not JSON or is over 1 MiB, a missing path, an MFA that raised): the hook went into the sink's keyless lane; `ankusa_dispatch_lane_key_missing_total{sink}` |
+  | `[:ankusa, :dispatch, :lane_key_missing]` | — | `:instance`, `:sink`. One per hook of an `ordered: true` sink whose `ordering_key` yielded nothing (no such header, a body that is not JSON or is over `dedupe.max_json_bytes`, a missing path, an MFA that raised): the hook went into the sink's keyless lane; `ankusa_dispatch_lane_key_missing_total{sink}` |
+  | `[:ankusa, :dispatch, :filtered]` | — | `:instance`, `:source_id`, `:tenant_id`, `:sink`. One per sink whose `filter` did not select a hook (`Ankusa.Filter`): the sink got no delivery row. Not emitted for an archive replay; `ankusa_dispatch_filtered_total{sink}` |
+  | `[:ankusa, :dispatch, :filter_unevaluable]` | — | `:instance`, `:source_id`, `:tenant_id`, `:sink`. One per sink whose `filter` reads the JSON body when the body is over `dedupe.max_json_bytes` or is not JSON: the hook is delivered to that sink; `ankusa_dispatch_filter_unevaluable_total{sink}` |
   | `[:ankusa, :dispatch, :config_error]` | — | `:instance`, `:sink`, `:source_id`, `:tenant_id`. One per delivery dead-lettered as `{:permanent, {:config, _}}` (a credential or destination the sink's service refuses); `ankusa_dispatch_config_errors_total{sink}` |
   | `[:ankusa, :dispatch, :breaker]` | — | `:instance`, `:sink`, `:source_id`, `:tenant_id`, `:state` (`:open`, `:closed`) |
   | `[:ankusa, :sink, :headers_dropped]` | `:count` | `:instance`, `:source_id`, `:tenant_id`, `:reason` (`:count`: the source's `max_headers` was reached; `:bytes`: `forward_headers_max_bytes` would be passed). One per reason per message a sink built (`Ankusa.Sink.Message.forwarded_headers/2`) |
@@ -85,7 +88,7 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :archive, :pruned]` | `:segments`, `:objects`, `:legacy` | `:instance`. Catalogue rows (and segment objects) the retention sweep deleted |
   | `[:ankusa, :audit, :state]` | `:rows`, `:bytes`, `:outbox_backlog` | `:instance`. The trail's size and the lifecycle outbox's lag |
 
-  `:outcome` on `:ingest` is one of `:committed`, `:duplicate`, `:quarantined`,
+  `:outcome` on `:ingest` is one of `:committed`, `:duplicate`, `:filtered`, `:quarantined`,
   `:rejected`, `:rate_limited`, `:tenant_overload`, `:quarantine_rate_limited`,
   `:dedupe_pending`, `:quarantine_full`, `:overload` or `:store_unavailable`. `:source_id` on
   `[:ankusa, :ingest]` is

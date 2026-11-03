@@ -81,13 +81,14 @@ defmodule Ankusa.Sink.RabbitMQ do
   end
 
   # `env.id` rides as `message_id`; the idempotency key always travels as an
-  # AMQP header, the dedupe key and the replay marker only when present, so
-  # consumers see the same identity as the message JSON.
+  # AMQP header, the dedupe key, the replay marker, the lane key and the event
+  # type only when present, so consumers see the same identity as the message JSON.
   defp amqp_headers(env, ctx) do
     [{"ankusa_idempotency_key", :longstr, Envelope.idempotency_key(env)}]
     |> maybe_put_amqp("ankusa_dedupe_key", env.dedupe_key)
     |> maybe_put_amqp("ankusa_replay_id", ctx[:replay_id])
     |> maybe_put_amqp("ankusa_ordering_key", ctx[:ordering_key])
+    |> maybe_put_amqp("ankusa_event_type", env.event_type)
   end
 
   defp maybe_put_amqp(headers, _name, nil), do: headers

@@ -55,7 +55,7 @@ defmodule Ankusa.Admin.Redact do
                  queue_url message_group_id client_name inbox_prefix username mechanism
                  type method exchange_type parse hash encoding secret_decode on_verify_failure
                  algorithm location param fingerprints subjects
-                 project ordering_key)
+                 project ordering_key event_type)
 
   @doc "A redacted, JSON-encodable view of the whole config."
   @spec config(Ankusa.Config.t()) :: map()
@@ -146,6 +146,14 @@ defmodule Ankusa.Admin.Redact do
         _ -> entry
       end
 
+    # The event type: a preset name, or the name of a header or a JSON path to
+    # read the provider's event name from. No secret in any of them.
+    entry =
+      case Map.get(spec, "event_type") do
+        nil -> entry
+        event_type -> Map.put(entry, "event_type", open(event_type))
+      end
+
     # The source's change counter, for a store that keeps one.
     case Map.get(stored, :revision) do
       revision when is_integer(revision) -> Map.put(entry, "revision", revision)
@@ -186,6 +194,12 @@ defmodule Ankusa.Admin.Redact do
 
     {Map.new(pairs), acc}
   end
+
+  # A sink's `filter` (`Ankusa.Filter`) is a predicate over the event type, the
+  # tenant, headers and JSON paths: its keys are dynamic (`header.<name>`,
+  # `json.<path>`), so no allowlist can name them, and none of it is a secret.
+  # It is neither hidden nor encrypted at rest.
+  defp hide_entry("filter", value, acc, _fun) when is_map(value), do: {value, acc}
 
   # Header names stay, so a spec still says which headers a sink sends.
   defp hide_entry("headers", headers, acc, fun) when is_map(headers) do
@@ -272,6 +286,8 @@ defmodule Ankusa.Admin.Redact do
   defp closed_entry(key, value), do: closed(key_string(key), value)
 
   defp closed("headers", value), do: redact_headers(value)
+
+  defp closed("filter", value) when is_map(value), do: open(value)
 
   defp closed(key, value) do
     case structural(value) do

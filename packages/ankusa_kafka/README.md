@@ -37,6 +37,14 @@ config :ankusa,
 Sinks belong to a source. `Ankusa.Config.new/1` takes the same `sources` for a
 non-default instance.
 
+`topic` (and `key`) may be per hook: a function of the `Ankusa.Envelope`, or a
+`{{ var }}` template that a YAML or API-managed source can state, such as
+`topic: "events.{{ event_type ?? other }}"` (`tenant`, `source`, `id`,
+`event_type` and `header.<name>` are the variables; see
+`Ankusa.Sink.Template`). The sink never creates a topic, so every topic a
+template can render must already exist; a hook whose variable has no value and
+no fallback is dead-lettered as permanent (`{:template_missing, var}`).
+
 ## The intake log of `wal.type: dual`
 
 `Ankusa.Intake.Kafka` is the adapter of the dual-commit intake log

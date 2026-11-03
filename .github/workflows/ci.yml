@@ -12,16 +12,269 @@ on:
   pull_request:
   workflow_call:
 
+concurrency:
+  # A newer push to the same PR supersedes the older run; a push to main (or
+  # a tag) never cancels, because its result is the record for the commit.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  discover:
-    name: discover packages
+  # CI-5: which jobs can this diff possibly need? This job decides once, every
+  # other job reads its outputs, and `ci-summary` reports the result. The
+  # filter lives at job level and never in the workflow's `paths:`: a skipped
+  # job reports `skipped`, which blocks nothing (`main` has no protection and
+  # no rulesets), so the workflow must always run and always report — the
+  # guard is the executor's own `gh pr checks --watch`, and `ci-summary`
+  # failing the run when this job did not finish.
+  #
+  # Everything here is fail-safe: a non-pull_request event, an empty or
+  # unreadable diff, an unknown path and any error inside the step all resolve
+  # to "run everything", never to "skip everything". A filter that breaks must
+  # cost a slow run, not a missing gate.
+  changes:
+    name: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
-      packages: ${{ steps.discover.outputs.packages }}
+      # The JSON matrices: every package to run, and the same list without
+      # `ankusa`, whose analysis and suite are the two lane jobs below. An
+      # empty matrix is a workflow error, so "nothing" is `["-"]` and the
+      # `package` job's `if:` is what keeps it from expanding.
+      packages: ${{ steps.filter.outputs.packages }}
+      packages_rest: ${{ steps.filter.outputs.packages_rest }}
+      # `ankusa` is one of the packages to run (a core change, or a diff that
+      # touched core): the two lane jobs' whole condition.
+      core: ${{ steps.filter.outputs.core }}
+      docs_only: ${{ steps.filter.outputs.docs_only }}
+      examples: ${{ steps.filter.outputs.examples }}
+      tools: ${{ steps.filter.outputs.tools }}
+      conformance: ${{ steps.filter.outputs.conformance }}
+      integration: ${{ steps.filter.outputs.integration }}
+      drills: ${{ steps.filter.outputs.drills }}
+      # One line for `ci-summary` and the log: what the diff touched and what
+      # it decided.
+      reason: ${{ steps.filter.outputs.reason }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - id: discover
-        run: source .mise/lib/pkg.sh && echo "packages=$(pkg_json)" >> "$GITHUB_OUTPUT"
+        with:
+          # The diff needs two commits: HEAD, and (on a pull request) the base.
+          # A base that is still missing — the merge ref's parent is the branch
+          # tip, but a base moved on — is fetched below; a failed fetch runs
+          # everything.
+          fetch-depth: 2
+      - id: filter
+        name: which jobs can this diff need?
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          source .mise/lib/pkg.sh
+
+          # Every package, in `pkg_names` order (`ankusa` first, then the Mix
+          # adapters, then the images and the SDKs). Space separated: it is
+          # word-split for the membership tests below.
+          all=$(pkg_names | tr '\n' ' ')
+
+          # $1: the packages to run, space separated, in any order (it is
+          # reordered and deduplicated by the caller); then examples, tools,
+          # conformance, integration, drills, docs_only, and a one-line reason.
+          emit() {
+            local pkgs="$1" name out="" rest="" core=false
+            for name in $pkgs; do
+              out="$out${out:+,}\"$name\""
+              if [ "$name" = ankusa ]; then
+                core=true
+              else
+                rest="$rest${rest:+,}\"$name\""
+              fi
+            done
+            # An empty matrix is a workflow error, so "nothing to run" is the
+            # one-element `["-"]`; the `package` job's `if:` is what keeps it
+            # from expanding. Quoted, because `[-]` is not JSON and
+            # `fromJSON('[-]')` fails the run with no job to show for it.
+            [ -n "$out" ] || out='"-"'
+            [ -n "$rest" ] || rest='"-"'
+            {
+              echo "packages=[$out]"
+              echo "packages_rest=[$rest]"
+              echo "core=$core"
+              echo "examples=$2"
+              echo "tools=$3"
+              echo "conformance=$4"
+              echo "integration=$5"
+              echo "drills=$6"
+              echo "docs_only=$7"
+              echo "reason=$8"
+            } >> "$GITHUB_OUTPUT"
+            printf 'packages=[%s]\ncore=%s; examples=%s tools=%s conformance=%s integration=%s drills=%s docs_only=%s\n%s\n' \
+              "$out" "$core" "$2" "$3" "$4" "$5" "$6" "$7" "$8"
+          }
+
+          # Both failure modes have the same answer: run everything. The guard
+          # variable stops a failure inside `emit` from re-entering this.
+          failed=0
+          everything() {
+            if [ "$failed" = 1 ]; then exit 0; fi
+            failed=1
+            echo "$1"
+            if [ -z "$all" ]; then
+              # Without the package list there is no "everything" to run, and
+              # "skip everything" is the one answer this step must never give:
+              # fail the job instead, and `ci-summary` fails the run.
+              echo "::error::cannot list packages/*, so the all-jobs fallback is impossible"
+              exit 1
+            fi
+            emit "$all" true true true true true false "$1"
+            exit 0
+          }
+          trap 'everything "::warning::the diff filter failed; every job runs"' ERR
+
+          if [ "$EVENT" != pull_request ]; then
+            everything "not a pull request (event: $EVENT): a push to main, a tag or workflow_call runs every job"
+          fi
+          if [ -z "$BASE" ] || [ -z "${BASE//0/}" ] || [ -z "$HEAD" ]; then
+            everything "no base and head to diff: every job runs"
+          fi
+          changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || true)
+          if [ -z "$changed" ]; then
+            # Most likely a shallow clone without the base commit. Not fatal:
+            # the retry below decides, and a still-empty diff runs everything.
+            git fetch --depth=1 --quiet origin "$BASE" >/dev/null 2>&1 || true
+            changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || true)
+          fi
+          if [ -z "$changed" ]; then
+            everything "the diff $BASE..$HEAD is empty or could not be read: every job runs"
+          fi
+          echo "the diff $BASE..$HEAD touches:"
+          printf '%s\n' "$changed"
+
+          # One pass over the diff, setting the flags each job reads. The
+          # order of the patterns matters: a Markdown file is prose wherever it
+          # lives (`*.md` comes before `packages/*`), and anything this list
+          # does not recognise runs everything.
+          every=0
+          core=0
+          touched=""
+          conformance=false
+          integration=false
+          drills=false
+          examples=false
+          tools=false
+          docs_only=true
+
+          while IFS= read -r path; do
+            case "$path" in
+              # Prose, the site, the housekeeping files: `lint` (which also runs
+              # check:monitoring and check:links) is what guards them.
+              docs/* | *.md | marketing/* | static/* | LICENSE | .gitignore | .gitattributes | .editorconfig)
+                ;;
+              # The toolchain, the tasks, and CI itself: every job's outcome
+              # can change without a package changing.
+              .mise.toml | .mise/* | scripts/* | .github/*)
+                every=1
+                ;;
+              packages/*/*)
+                name=${path#packages/}
+                name=${name%%/*}
+                case " $all " in
+                  *" $name "*) touched="$touched $name" ;;
+                  *) every=1 ;;
+                esac
+                case "$path" in
+                  packages/ankusa/* | packages/async_api_spex/*) core=1 ;;
+                esac
+                # The producer vectors are core's encoder's output, and the
+                # shared job is the only thing that regenerates and validates
+                # them. Each SDK's own `check:package` already runs that SDK's
+                # `conformance_test`, so an SDK-only diff does not need it.
+                case "$path" in
+                  packages/ankusa/*) conformance=true ;;
+                esac
+                case "$path" in
+                  packages/ankusa/*) integration=true ;;
+                esac
+                # The crash drills ack through the built image: the ack path
+                # by name first (`queue/writer.ex`, `store.ex`,
+                # `edge/batcher.ex` and their `queue/`, `store/`, `edge/`
+                # siblings), then anything else under core's `lib`, the image
+                # and every adapter. Deliberately a superset: the drills are
+                # the ack-path gate, so only a diff that touched none of it
+                # skips them.
+                case "$path" in
+                  packages/ankusa/lib/ankusa/queue/writer.ex | packages/ankusa/lib/ankusa/store.ex | packages/ankusa/lib/ankusa/edge/batcher.ex)
+                    drills=true ;;
+                  packages/ankusa/lib/ankusa/queue/* | packages/ankusa/lib/ankusa/store/* | packages/ankusa/lib/ankusa/edge/*)
+                    drills=true ;;
+                  packages/ankusa/lib/* | packages/ankusa/mix.exs | packages/ankusa/mix.lock)
+                    drills=true ;;
+                  packages/ankusa_server/* | packages/ankusa_*/lib/* | packages/ankusa_*/mix.exs)
+                    drills=true ;;
+                esac
+                # `check:examples` builds every example's Mix app; these are
+                # the packages those apps path-depend on.
+                case "$path" in
+                  packages/ankusa/* | packages/async_api_spex/* | packages/ankusa_kafka/* | packages/ankusa_rabbitmq/*)
+                    examples=true ;;
+                esac
+                docs_only=false
+                ;;
+              conformance/*)
+                conformance=true
+                docs_only=false
+                ;;
+              examples/* | deploy/helm/*)
+                examples=true
+                docs_only=false
+                ;;
+              tools/*)
+                tools=true
+                examples=true
+                docs_only=false
+                ;;
+              # `check:monitoring` runs in `lint`, which always runs.
+              deploy/monitoring/*)
+                docs_only=false
+                ;;
+              *)
+                every=1
+                ;;
+            esac
+          done <<EOF
+          $changed
+          EOF
+
+          if [ "$every" = 1 ]; then
+            everything "a toolchain, CI or script file, or a path this filter does not know, changed: every job runs"
+          fi
+
+          # The dependency rule from AGENTS.md: every adapter package and
+          # `ankusa_server` path-depend on `ankusa` core, so a core change is
+          # not finished until they pass — the whole Mix group, which is every
+          # `hex` package (`ankusa`, the five adapters, `async_api_spex`,
+          # `sdk-elixir`) plus `ankusa_server` (kind `docker`).
+          if [ "$core" = 1 ]; then
+            for name in $all; do
+              case "$(pkg_kind "$name")" in
+                hex | docker) touched="$touched $name" ;;
+              esac
+            done
+          fi
+
+          # `pkg_names` order, no duplicates.
+          ordered=""
+          for name in $all; do
+            case " $touched " in *" $name "*) ordered="$ordered $name" ;; esac
+          done
+
+          if [ "$docs_only" = true ]; then
+            reason="docs-only diff: every package job and every drill is skipped; lint still runs"
+          else
+            reason="packages:${ordered:- none}; examples=$examples tools=$tools conformance=$conformance integration=$integration drills=$drills"
+          fi
+
+          emit "$ordered" "$examples" "$tools" "$conformance" "$integration" "$drills" "$docs_only" "$reason"
 
   lint:
     name: lint
@@ -45,7 +298,11 @@ jobs:
 
   package:
     name: ${{ matrix.package }}
-    needs: discover
+    needs: changes
+    # `["-"]` is the changes job's "no package to run"; the matrix would be a
+    # workflow error (`Matrix vector 'package' does not contain any values`),
+    # so the job is skipped instead of expanded.
+    if: needs.changes.outputs.packages_rest != '["-"]'
     runs-on: ubuntu-latest
     env:
       # Fork PRs get no secrets; skip the login there rather than fail it.
@@ -53,7 +310,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: ${{ fromJSON(needs.discover.outputs.packages) }}
+        # Every package the diff can need, but `ankusa` — it has the two lane
+        # jobs below.
+        package: ${{ fromJSON(needs.changes.outputs.packages_rest) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # A package job needs one toolchain, not the repo's whole set: the
@@ -87,6 +346,14 @@ jobs:
             echo "tools=$tools"
             echo "cache=$cache"
           } >> "$GITHUB_OUTPUT"
+          # `check:package` brings a package's own docker-compose.yml up and
+          # nothing else (`ankusa`'s integration emulators are a different
+          # file, `ankusa_server` has none): only those packages cache images.
+          if [ -f "$(pkg_dir "${{ matrix.package }}")/docker-compose.yml" ]; then
+            echo "has_compose=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_compose=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
@@ -127,15 +394,31 @@ jobs:
       # only the delta, and Mix recompiles only the deps that changed. Without
       # that, every dep bump was a total miss that rebuilt every dep — RocksDB
       # from source, ~8 min (PR 110: `ankusa` 5.6 -> 18.4 min).
+      # `mix-v18-`: entries under `mix-v17-…-ankusa-…` were written by the
+      # `sdk conformance` job (2.4 min, test env only) before this job could
+      # save its `dev`+`test`+`prod` tree, and actions/cache never overwrites
+      # an existing key — so the restored tree lacked `dev` and RocksDB's NIF
+      # was rebuilt from source every run. The rule now: **exactly one job
+      # saves a given cache key; every other job restores it by prefix** (the
+      # conformance job has its own `…-ankusa-conformance-…` key and restores
+      # this tree through its second `restore-keys` prefix). Because
+      # actions/cache never re-saves an existing key, a poisoned (partial)
+      # entry is escaped only by bumping this version again (`mix-v20-`, …).
+      # `mix-v19-`: CR-1 — `Ankusa.EventType.new!/2`, called by the image's
+      # loader, is new, so the stale PLT failed `ankusa_server`'s dialyzer.
+      # `mix-v20-`: CR-2 — `Ankusa.Filter`, called by the image's loader, is new
+      # (same failure).
+      # `mix-v21-`: CR-3 — `Ankusa.Sink.Template.normalize_sink!/2` and
+      # `templated?/1`, called by the image's loader, are new, same failure.
       - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             packages/${{ matrix.package }}/deps
             packages/${{ matrix.package }}/_build
-          key: mix-v17-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
+          key: mix-v21-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
           restore-keys: |
-            mix-v17-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
+            mix-v21-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
       # sdk-go has no dependencies outside the standard library, but
       # `go test -race -count=1` rebuilds the race-instrumented standard
       # library and the package on every run — 39 s of a 77 s job; locally the
@@ -188,10 +471,48 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # The four packages with a compose file pull from Docker Hub every run,
+      # and anonymous pulls from shared runner IPs get `toomanyrequests` (11 of
+      # the last 21 failed jobs). Carry the images between runs instead:
+      # `scripts/ci/images.sh` keeps one tar per digest-qualified ref, the key
+      # hashes the compose file so a digest bump re-pulls exactly once, and
+      # `docker compose up` finds the loaded images and pulls nothing
+      # (`pull_policy` defaults to `missing`). A failed check still saves.
+      - name: use the containerd image store
+        if: steps.toolchain.outputs.has_compose == 'true'
+        run: scripts/ci/images.sh containerd
+      - name: cache the package's compose images
+        if: steps.toolchain.outputs.has_compose == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/docker-images
+          key: images-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles(format('packages/{0}/docker-compose.yml', matrix.package)) }}
+          restore-keys: |
+            images-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-
+      - name: load the package's compose images
+        if: steps.toolchain.outputs.has_compose == 'true'
+        run: |
+          set -euo pipefail
+          # The refs come from the compose file, not from a list kept here:
+          # `config --images` is what `docker compose up` resolves.
+          refs=()
+          while IFS= read -r ref; do refs+=("$ref"); done < <(
+            docker compose -f "packages/${{ matrix.package }}/docker-compose.yml" config --images
+          )
+          scripts/ci/images.sh sync "${{ runner.temp }}/docker-images" "${refs[@]}"
       - run: mise run check:package ${{ matrix.package }}
         env:
           # `mix hex.audit`'s report (retired packages, advisories), kept below.
           HEX_AUDIT_LOG: ${{ runner.temp }}/hex-audit-${{ matrix.package }}.txt
+      - name: save the package's compose images
+        if: always() && steps.toolchain.outputs.has_compose == 'true'
+        run: |
+          set -euo pipefail
+          refs=()
+          while IFS= read -r ref; do refs+=("$ref"); done < <(
+            docker compose -f "packages/${{ matrix.package }}/docker-compose.yml" config --images
+          )
+          scripts/ci/images.sh save "${{ runner.temp }}/docker-images" "${refs[@]}"
       # Even when the audit failed the job: the report says which dependency.
       - name: Upload the hex audit report
         if: ${{ !cancelled() }}
@@ -202,11 +523,127 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  # `ankusa` — the package everything else depends on — was the whole critical
+  # path of a run: one job ran compile + credo + PLT + dialyzer + sobelow
+  # (2:30–3:15) and then `mix test --cover` (6:24–8:14) one after the other. The
+  # two halves share nothing but `deps/` and the compiled project, so they run
+  # as two jobs, each calling the same task a developer runs with `--lane`, and
+  # a static failure now reports in ~3 min instead of after the suite.
+  #
+  # One writer per key (CI-1's rule): `ankusa-static` saves
+  # `…-ankusa-static-…`, `ankusa-test` saves `…-ankusa-test-…`, and neither
+  # writes the pre-split `…-ankusa-<toolchain>-<lock>` entry. The first run of
+  # each lane therefore restores that full tree (`dev`+`test`+`prod`,
+  # everything the old job kept warm) through its second restore prefix: that
+  # is the warm start. `v19` is the version the pre-split entry was written
+  # under — the escape hatch (one writer per key, actions/cache never re-saves
+  # a key) is to bump it here and in the `package` job together.
+  ankusa-static:
+    name: ankusa (static)
+    needs: changes
+    # The same condition the matrix would apply to `ankusa`: core is in the
+    # packages to run.
+    if: needs.changes.outputs.core == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # Fork PRs get no secrets; skip the login there rather than fail it.
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `ankusa` is kind `hex`, so this is exactly what the `package` job's
+      # `toolchain` step resolves for that kind — `elixir erlang cmake` (cmake
+      # for the RocksDB NIF) — instead of restoring the 655 MB shared cache.
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.12
+          install_args: elixir erlang cmake
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-hex" # the default key skips .mise/conf.d/
+      - name: cache mix deps
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            packages/ankusa/deps
+            packages/ankusa/_build
+          key: mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-static-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          restore-keys: |
+            mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-static-${{ hashFiles('.mise.toml') }}-
+            mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-${{ hashFiles('.mise.toml') }}-
+      # Only the Mix projects compile rocksdb's NIF (see the `package` job).
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - run: mix local.hex --force && mix local.rebar --force
+      - name: Log in to Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # deps, `hex.audit`, format, `compile --warnings-as-errors`, credo, PLT
+      # restore/save, dialyzer, sobelow, `mix docs`, `mix hex.build` — the lane
+      # warms the `dev` env these run in.
+      - run: mise run check:package ankusa --lane static
+        env:
+          # `mix hex.audit`'s report (retired packages, advisories), kept below.
+          HEX_AUDIT_LOG: ${{ runner.temp }}/hex-audit-ankusa.txt
+      # Even when the audit failed the job: the report says which dependency.
+      - name: Upload the hex audit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hex-audit-ankusa
+          path: ${{ runner.temp }}/hex-audit-ankusa.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+  ankusa-test:
+    name: ankusa (tests)
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # Fork PRs get no secrets; skip the login there rather than fail it.
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.12
+          install_args: elixir erlang cmake
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-hex" # the default key skips .mise/conf.d/
+      # Same shape as the static lane, its own key: `deps/` plus `_build` with
+      # the `test` env compiled (the suite never reads `dev`).
+      - name: cache mix deps
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            packages/ankusa/deps
+            packages/ankusa/_build
+          key: mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-test-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          restore-keys: |
+            mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-test-${{ hashFiles('.mise.toml') }}-
+            mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-${{ hashFiles('.mise.toml') }}-
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - run: mix local.hex --force && mix local.rebar --force
+      - name: Log in to Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # `mix test --cover` (the coverage floor is the package's own) and the
+      # ExUnit seed line in the step summary; the lane warms `test` only. The
+      # audit and its `hex-audit-ankusa` artifact stay in the static lane —
+      # `hex.audit` runs there, and two jobs must not upload one artifact name.
+      - run: mise run check:package ankusa --lane test
+
   # Core's object-store adapters (and the S3 backup round trip) against the
   # floci emulators: `mix test --only integration` (the rest of core's suite
-  # runs in the `ankusa` package job).
+  # runs in the `ankusa-test` job).
   integration:
     name: core integration (floci)
+    needs: changes
+    if: needs.changes.outputs.integration == 'true'
     runs-on: ubuntu-latest
     env:
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
@@ -234,10 +671,41 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # The floci emulators and the AWS/GCS/Azure/OCI bootstrap containers are
+      # ~390 MB pulled from Docker Hub on every run; keep them between runs
+      # (see the `package` job for the shape of this).
+      - name: use the containerd image store
+        run: scripts/ci/images.sh containerd
+      - name: cache the emulators' images
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/docker-images
+          key: images-v1-${{ runner.os }}-${{ runner.arch }}-integration-${{ hashFiles('packages/ankusa/docker-compose.integration.yml') }}
+          restore-keys: |
+            images-v1-${{ runner.os }}-${{ runner.arch }}-integration-
+      - name: load the emulators' images
+        run: |
+          set -euo pipefail
+          refs=()
+          while IFS= read -r ref; do refs+=("$ref"); done < <(
+            docker compose -f packages/ankusa/docker-compose.integration.yml config --images
+          )
+          scripts/ci/images.sh sync "${{ runner.temp }}/docker-images" "${refs[@]}"
       - run: mise run test:integration
+      - name: save the emulators' images
+        if: always()
+        run: |
+          set -euo pipefail
+          refs=()
+          while IFS= read -r ref; do refs+=("$ref"); done < <(
+            docker compose -f packages/ankusa/docker-compose.integration.yml config --images
+          )
+          scripts/ci/images.sh save "${{ runner.temp }}/docker-images" "${refs[@]}"
 
   conformance:
     name: sdk conformance
+    needs: changes
+    if: needs.changes.outputs.conformance == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -258,17 +726,21 @@ jobs:
             cargo-v1-${{ runner.os }}-${{ runner.arch }}-sdk-rust-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-
       # `check.mjs` regenerates the producer vectors with core's own encoder
       # (`mix ankusa.conformance.gen`, MIX_ENV=test), which compiles RocksDB:
-      # restore the `ankusa` package job's entry (same key and prefix, so keep
-      # the `mix-v` here and there in step; whichever job saves first wins).
+      # restore the `ankusa` package job's tree. Exactly one job saves a given
+      # cache key; every other job restores it by prefix. This job saves its
+      # own `…-ankusa-conformance-…` entry (test env only) and reads the
+      # package job's full `dev`+`test`+`prod` entry through the second
+      # prefix, so sharing the prefix no longer costs the package job a save.
       - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             packages/ankusa/deps
             packages/ankusa/_build
-          key: mix-v17-${{ runner.os }}-${{ runner.arch }}-ankusa-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          key: mix-v18-${{ runner.os }}-${{ runner.arch }}-ankusa-conformance-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
           restore-keys: |
-            mix-v17-${{ runner.os }}-${{ runner.arch }}-ankusa-${{ hashFiles('.mise.toml') }}-
+            mix-v18-${{ runner.os }}-${{ runner.arch }}-ankusa-conformance-${{ hashFiles('.mise.toml') }}-
+            mix-v18-${{ runner.os }}-${{ runner.arch }}-ankusa-${{ hashFiles('.mise.toml') }}-
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
@@ -278,6 +750,8 @@ jobs:
   # packages, and where a lockfile goes stale without anyone noticing.
   examples:
     name: examples
+    needs: changes
+    if: needs.changes.outputs.examples == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -315,6 +789,8 @@ jobs:
 
   tools:
     name: tools
+    needs: changes
+    if: needs.changes.outputs.tools == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -329,28 +805,34 @@ jobs:
       - run: mix local.hex --force && mix local.rebar --force
       - run: mise run check:tools
 
-  # The perf regression gate (ground rule 10 of ANKUSA_HARDENING_PLAN.md,
-  # docs/testing.md "Perf gate"): on every push to main, and on a PR only when
-  # its diff touches a hot-path file. The job itself always runs (so a
-  # branch-protection rule can require it); the steps that cost minutes are
-  # skipped on a PR that does not touch the hot path. Hosted runners of one
-  # class differ by a factor of two in speed from job to job, so the gate
-  # compares against the base commit measured on this very runner (see the
-  # "measure the base commit" step); the checked-in
-  # packages/ankusa/bench/baseline.json (recorded on a laptop with the bench's
-  # data directory on a RAM disk, see docs/testing.md "Perf gate") is the
-  # fallback when there is no base commit to measure.
-  bench:
-    name: perf gate
+  # The one scope decision the two bench jobs obey (CI-7, CI-10). A pull
+  # request is judged by its diff from the API; a push to `main` by
+  # `github.event.before..sha`, which is the PR diff that was already gated
+  # plus whatever else landed in the range — so a main push that touches no
+  # hot-path file runs neither job, and its commit keeps the verdict its PR
+  # run gave it. Every failure in here resolves to `run=true`: a filter that
+  # breaks must run the gate, never skip it. It is a job of its own because a
+  # job reads another job's output only through `needs:`, and keeping the step
+  # inside `bench` made `bench-tenant` wait for the whole gate (CI-10: the
+  # merge push's wall clock went to 14:24 from 10:04). A checkout, a `gh api`
+  # or `git diff`, and a `grep`: seconds, and both jobs start together after it.
+  bench-scope:
+    name: bench-scope
     runs-on: ubuntu-latest
+    outputs:
+      # The scope decision, for `perf gate` and `bench-tenant`.
+      run: ${{ steps.scope.outputs.run }}
     env:
-      # Ground rule 10's hot-path files, plus the gate's own files.
+      # Ground rule 10's hot-path files, plus the gate's own files. `ci.yml` is
+      # not one of them: a workflow file cannot change the measured program, and
+      # an invocation it gets wrong shows up on the next push to `main` within
+      # minutes (CI-2 in CI_PIPELINE_PLAN.md).
       HOT_PATHS: >-
         ^packages/ankusa/lib/ankusa/(
         (edge|queue|store|dispatch|verifier|routes)/.*|
         (store|queue|dedupe|envelope|http|route_resolver)\.ex|
         sink/(message|http)\.ex
-        )$|^packages/ankusa/bench/|^\.mise/tasks/bench/|^\.github/workflows/ci\.yml$
+        )$|^packages/ankusa/bench/|^\.mise/tasks/bench/
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: scope
@@ -361,39 +843,82 @@ jobs:
           EVENT: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
           PR: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          decide() {
+            echo "run=$1" >> "$GITHUB_OUTPUT"
+            echo "$2"
+            exit 0
+          }
           # A release tag runs this workflow on a commit its PR and its push to
           # main already gated. A new tag has no `before` commit to measure, so
           # the gate would compare a hosted runner with the checked-in laptop
           # baseline, which fails on any runner (the 0.7.0 tags did, 11 times).
           if [ "$REF_TYPE" = tag ]; then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "a release tag: its commit was gated on its pull request and its push to main"
-            exit 0
+            decide false "a release tag: its commit was gated on its pull request and its push to main"
           fi
-          if [ "$EVENT" != pull_request ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "not a pull request: gate runs"
-            exit 0
-          fi
+          # Only a PR or a push carries a diff to judge. `workflow_call` and
+          # `workflow_dispatch` have none: gate.
+          case "$EVENT" in
+            pull_request)
+              files=$(gh api "repos/$REPO/pulls/$PR/files" --paginate -q '.[].filename') \
+                || decide true "::notice::cannot list the pull request's files: gate runs"
+              ;;
+            push)
+              # The previous head. A first push to a branch or a force-push
+              # leaves it empty or all zeros: no diff to judge.
+              if [ -z "$BEFORE" ] || [ -z "${BEFORE//0/}" ]; then
+                decide true "::notice::no base commit (a first push or a force-push): gate runs"
+              fi
+              git fetch --depth=1 --quiet origin "$BEFORE" \
+                || decide true "::notice::cannot fetch $BEFORE: gate runs"
+              files=$(git diff --name-only "$BEFORE" "$SHA") \
+                || decide true "::notice::cannot diff $BEFORE..$SHA: gate runs"
+              ;;
+            *)
+              decide true "not a pull request or a push: gate runs"
+              ;;
+          esac
           pattern=$(echo "$HOT_PATHS" | tr -d ' ')
-          touched=$(gh api "repos/$REPO/pulls/$PR/files" --paginate -q '.[].filename' | grep -E "$pattern" || true)
+          touched=$(printf '%s\n' "$files" | grep -E "$pattern" || true)
           if [ -n "$touched" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             echo "hot-path files touched:"
             echo "$touched"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "no hot-path file touched: gate skipped"
+            echo "no hot-path file touched: perf gate and bench-tenant skipped"
           fi
-      - if: steps.scope.outputs.run == 'true'
-        uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+
+  # The perf regression gate (ground rule 10 of ANKUSA_HARDENING_PLAN.md,
+  # docs/testing.md "Perf gate"): on a push to main and on a PR only when the
+  # diff touches a hot-path file, which `bench-scope` decides. It runs beside
+  # `bench-tenant` (both `needs: bench-scope`), so neither job's duration is on
+  # the other's critical path, and a diff that touches nothing skips both.
+  # Hosted runners of one class differ by a factor of two in speed from job to
+  # job, so the gate compares against the base commit measured on this very
+  # runner (see the "measure the base commit" step); the checked-in
+  # packages/ankusa/bench/baseline.json (recorded on a laptop with the bench's
+  # data directory on a RAM disk, see docs/testing.md "Perf gate") is the
+  # fallback when there is no base commit to measure.
+  bench:
+    name: perf gate
+    needs: bench-scope
+    if: needs.bench-scope.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # `bench:gate` runs the tenant benches locally too; here `bench-tenant`
+      # runs them in parallel, so the matrix task must not run them again.
+      BENCH_SKIP_TENANTS: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
-      - if: steps.scope.outputs.run == 'true'
-        name: cache mix deps
+      - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -402,13 +927,10 @@ jobs:
           key: mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
           restore-keys: |
             mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml') }}-
-      - if: steps.scope.outputs.run == 'true'
-        name: rocksdb system deps
+      - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
-      - if: steps.scope.outputs.run == 'true'
-        run: mix local.hex --force && mix local.rebar --force
-      - if: steps.scope.outputs.run == 'true'
-        name: measure the base commit on this runner
+      - run: mix local.hex --force && mix local.rebar --force
+      - name: measure the base commit on this runner
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
@@ -433,9 +955,8 @@ jobs:
           # shellcheck disable=SC2086
           rm -rf $src && git checkout HEAD -- $src $deps
           echo "BENCH_BASELINE=$RUNNER_TEMP/base-baseline.json" >> "$GITHUB_ENV"
-      - if: steps.scope.outputs.run == 'true'
-        run: mise run bench:gate
-      - if: always() && steps.scope.outputs.run == 'true'
+      - run: mise run bench:gate
+      - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bench-last
@@ -444,10 +965,51 @@ jobs:
             ${{ runner.temp }}/base-baseline.json
           if-no-files-found: ignore
 
+  # The tenant benches (gauges, dispatch tick, intake, routes:
+  # docs/testing.md "Perf gate") assert their own flatness and budgets and have
+  # no baseline entry, so they are not part of the base-against-branch
+  # measurement — they only rode along inside `mise run bench:gate` until
+  # CI-7, where they were 2:33 of the gate's 10.6 min. They are their own job
+  # here, obeying the same `bench-scope` decision as the gate and starting with
+  # it (CI-10: `needs: bench` made this job wait for the whole gate, 14:24 of
+  # wall clock instead of 10:04), so the two benches overlap and share the warm
+  # `MIX_ENV=test` tree. Nothing else about the benches changes: same commands,
+  # same `BENCH_REBASELINE` skip, same assertions (`mise run bench:tenants`).
+  bench-tenant:
+    name: bench-tenant
+    needs: bench-scope
+    if: needs.bench-scope.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.12
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+      # The same entry the `bench` job keeps: both compile the same
+      # `MIX_ENV=test` tree with the same task, so both restore it and the
+      # first to finish saves (as the two crash drills do with the image
+      # cache) — one entry, never two copies of the same `_build`.
+      - name: cache mix deps
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            packages/ankusa/deps
+            packages/ankusa/_build
+          key: mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          restore-keys: |
+            mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml') }}-
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - run: mix local.hex --force && mix local.rebar --force
+      - run: mise run bench:tenants
+
   # The crash-consistency drill (scripts/drills/crash_drill.sh): ENOSPC on a
   # 192 MiB tmpfs, then kill -9 under load; every acked hook must read back.
   crash:
     name: crash drill (ENOSPC, kill -9)
+    needs: changes
+    if: needs.changes.outputs.drills == 'true'
     runs-on: ubuntu-latest
     env:
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
@@ -475,7 +1037,35 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # The drill runs the image packages/ankusa_server/Dockerfile's build
+      # stage pins (`crash.sh` reads the same `FROM` line). ~100 MB a run from
+      # Docker Hub, and the two drill jobs use one entry: both restore, the
+      # first to finish saves.
+      - name: the drill's base image
+        id: base-image
+        run: |
+          set -euo pipefail
+          ref=$(sed -n 's/^FROM \(elixir:[^ ]*\) AS build$/\1/p' packages/ankusa_server/Dockerfile)
+          [ -n "$ref" ] || {
+            echo "::error::no 'FROM elixir:… AS build' line in packages/ankusa_server/Dockerfile"
+            exit 1
+          }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: use the containerd image store
+        run: scripts/ci/images.sh containerd
+      - name: cache the drill's base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/docker-images
+          key: images-v1-${{ runner.os }}-${{ runner.arch }}-crash-${{ hashFiles('packages/ankusa_server/Dockerfile') }}
+          restore-keys: |
+            images-v1-${{ runner.os }}-${{ runner.arch }}-crash-
+      - name: load the drill's base image
+        run: scripts/ci/images.sh sync "${{ runner.temp }}/docker-images" "${{ steps.base-image.outputs.ref }}"
       - run: mise run test:crash
+      - name: save the drill's base image
+        if: always()
+        run: scripts/ci/images.sh save "${{ runner.temp }}/docker-images" "${{ steps.base-image.outputs.ref }}"
       # The drill runs as root inside its container, so every file it wrote to
       # the .cache/crash mount is root-owned — and the cache action's post step
       # (a tar as the runner user) cannot read them, so the cache was never
@@ -495,6 +1085,8 @@ jobs:
   # that does not, and the step reports a skip; any other failure fails the job.
   crash-powerloss:
     name: crash drill (power-loss cut, device-mapper)
+    needs: changes
+    if: needs.changes.outputs.drills == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -519,6 +1111,29 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Same base image and cache entry as the tmpfs drill above: both
+      # restore, the first to finish saves.
+      - name: the drill's base image
+        id: base-image
+        run: |
+          set -euo pipefail
+          ref=$(sed -n 's/^FROM \(elixir:[^ ]*\) AS build$/\1/p' packages/ankusa_server/Dockerfile)
+          [ -n "$ref" ] || {
+            echo "::error::no 'FROM elixir:… AS build' line in packages/ankusa_server/Dockerfile"
+            exit 1
+          }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: use the containerd image store
+        run: scripts/ci/images.sh containerd
+      - name: cache the drill's base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/docker-images
+          key: images-v1-${{ runner.os }}-${{ runner.arch }}-crash-${{ hashFiles('packages/ankusa_server/Dockerfile') }}
+          restore-keys: |
+            images-v1-${{ runner.os }}-${{ runner.arch }}-crash-
+      - name: load the drill's base image
+        run: scripts/ci/images.sh sync "${{ runner.temp }}/docker-images" "${{ steps.base-image.outputs.ref }}"
       - name: scripts/drills/flakey.sh
         run: |
           rc=0
@@ -528,6 +1143,9 @@ jobs:
           elif [ "$rc" != 0 ]; then
             exit "$rc"
           fi
+      - name: save the drill's base image
+        if: always()
+        run: scripts/ci/images.sh save "${{ runner.temp }}/docker-images" "${{ steps.base-image.outputs.ref }}"
       # Same root-owned cache as the tmpfs job above; the `if:` keeps this step
       # after a skipped drill too (a runner without device-mapper still warms
       # nothing, and the chown is a no-op when the container never wrote).
@@ -536,3 +1154,87 @@ jobs:
         run: |
           [ -d .cache/crash ] || exit 0
           sudo chown -R "$(id -u):$(id -g)" .cache/crash
+
+  # CI-5: what the run did, and the one job that fails when the filter itself
+  # did not work. `if: always()` so it reports even when every other job was
+  # skipped: without it, a `changes` job that broke would leave a run that is
+  # green because nothing ran.
+  ci-summary:
+    name: ci-summary
+    needs:
+      - changes
+      - lint
+      - package
+      - ankusa-static
+      - ankusa-test
+      - integration
+      - conformance
+      - examples
+      - tools
+      - bench-scope
+      - bench
+      - bench-tenant
+      - crash
+      - crash-powerloss
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: the per-job result table
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          CHANGES: ${{ needs.changes.result }}
+          REASON: ${{ needs.changes.outputs.reason }}
+        run: |
+          set -uo pipefail
+          # The jobs API is where a matrix job appears leg by leg (`needs`
+          # only aggregates it) and where the real durations are. Read with the
+          # run's own token: no third-party action to pin, no extra permission.
+          rows=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" --paginate \
+            -q '.jobs[]
+                | select(.name != "ci-summary")
+                | [.name, (.conclusion // "-"),
+                   (if .started_at and .completed_at
+                    then (((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601)) / 60 * 10 | round / 10 | tostring)
+                    else "-" end)]
+                | @tsv' 2>/dev/null) || rows=""
+
+          table() {
+            echo "| job | result | minutes |"
+            echo "| --- | --- | --- |"
+            if [ -n "$rows" ]; then
+              printf '%s\n' "$rows" | while IFS=$'\t' read -r name result minutes; do
+                printf '| %s | %s | %s |\n' "$name" "$result" "$minutes"
+              done
+            else
+              echo "| (the jobs API returned nothing) | - | - |"
+            fi
+          }
+
+          {
+            echo "## CI"
+            echo
+            if [ -n "$REASON" ]; then
+              echo "**The \`changes\` job decided:** $REASON"
+              echo
+            fi
+            table
+            echo
+            echo "A job reported \`skipped\` because the diff cannot have touched it; the decision, the diff it read and the jobs it chose are in the \`changes\` job's log."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          # The filter is the only thing standing between a diff and its gates,
+          # so a `changes` job that did not finish fails the run instead of
+          # leaving it green with every gated job skipped. A run cancelled by a
+          # newer push is not a filter failure.
+          case "$CHANGES" in
+            success) ;;
+            cancelled)
+              echo "::notice::the changes job was cancelled with the run; nothing to judge"
+              ;;
+            *)
+              echo "::error::the changes job did not succeed ($CHANGES), so every gated job was skipped"
+              exit 1
+              ;;
+          esac

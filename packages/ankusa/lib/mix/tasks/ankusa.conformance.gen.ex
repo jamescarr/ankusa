@@ -34,7 +34,7 @@ defmodule Mix.Tasks.Ankusa.Conformance.Gen do
   # to `{}`; the message's other keys (`ordering_key`, …) are not decoded.
   @output_keys ~w(v id source_id tenant_id received_at content_type size body_base64 claim
                   sha256 dedupe_key replay_id idempotency_key headers verification
-                  traceparent tracestate instance region)
+                  traceparent tracestate instance region event_type)
 
   @traceparent "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 
@@ -101,6 +101,7 @@ defmodule Mix.Tasks.Ankusa.Conformance.Gen do
           body: ~s({"id":"evt_1"}),
           size: 14,
           dedupe_key: "evt_1",
+          event_type: "invoice.paid",
           verification: %Verification{status: :ok, provider: Ankusa.Verifier.Hmac},
           trace: %{traceparent: @traceparent, tracestate: "vendor=1"}
         }

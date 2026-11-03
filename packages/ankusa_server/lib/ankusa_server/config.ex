@@ -173,7 +173,7 @@ defmodule AnkusaServer.Config do
   # A rotation window needs two keys; a handful covers any overlap a provider
   # forces. More is a misconfiguration (each key costs an HMAC per hook).
   @max_secrets 8
-  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers max_headers forward_headers_max_bytes store_headers trust_url_tenant retry)
+  @source_keys ~w(tenant on_verify_failure verify sinks dedupe event_type forward_headers max_headers forward_headers_max_bytes store_headers trust_url_tenant retry)
   @dedupe_keys ~w(preset header json ttl_seconds)
   @dedupe_presets %{
     "github" => :github,
@@ -183,25 +183,42 @@ defmodule AnkusaServer.Config do
     "stripe" => :stripe,
     "salesforce" => :salesforce
   }
+  @event_type_keys ~w(preset header json)
+  @event_type_presets %{
+    "github" => :github,
+    "shopify" => :shopify,
+    "stripe" => :stripe,
+    "standard_webhooks" => :standard_webhooks,
+    "svix" => :svix,
+    "slack" => :slack
+  }
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
   @verify_asym_preset_keys ~w(type public_key tolerance_seconds)
   @verify_asym_keys ~w(type public_key tolerance_seconds signature_header parse sig_prefix sig_key version signed algorithm encoding timestamp_header)
   @verify_token_keys ~w(type secret location header param)
   @verify_client_cert_keys ~w(type fingerprints subjects)
-  @log_sink_keys ~w(type)
-  @http_sink_keys ~w(type url method headers timeout_ms secret allow_unsigned max_response_bytes cacertfile allow_insecure_tls ordered ordering_key)
-  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_message_bytes max_inflight idle_timeout_ms ordered ordering_key)
-  @kafka_sink_keys ~w(type brokers topic key inline_max_bytes max_record_bytes ssl sasl idle_timeout_ms ordered ordering_key)
+  # Read by core, not by the sink module: `ordered` and `ordering_key`
+  # (`Ankusa.Ordering`) and `filter` (`Ankusa.Filter`).
+  @core_sink_keys ~w(ordered ordering_key filter)
+  @log_sink_keys ~w(type filter)
+  @http_sink_keys ~w(type url method headers timeout_ms secret allow_unsigned max_response_bytes cacertfile allow_insecure_tls) ++
+                    @core_sink_keys
+  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_message_bytes max_inflight idle_timeout_ms) ++
+                        @core_sink_keys
+  @kafka_sink_keys ~w(type brokers topic key inline_max_bytes max_record_bytes ssl sasl idle_timeout_ms) ++
+                     @core_sink_keys
   @sasl_keys ~w(mechanism username password)
-  @nats_sink_keys ~w(type servers subject inline_max_bytes max_message_bytes publish_timeout_ms tls auth idle_timeout_ms ordered ordering_key)
+  @nats_sink_keys ~w(type servers subject inline_max_bytes max_message_bytes publish_timeout_ms tls auth idle_timeout_ms) ++
+                    @core_sink_keys
   @nats_auth_keys ~w(username password token nkey_seed jwt)
-  @redis_sink_keys ~w(type url channel inline_max_bytes max_message_bytes publish_timeout_ms idle_timeout_ms ordered ordering_key)
+  @redis_sink_keys ~w(type url channel inline_max_bytes max_message_bytes publish_timeout_ms idle_timeout_ms) ++
+                     @core_sink_keys
   @batch_sink_keys ~w(batch batch_linger_ms batch_max_entries batch_max_bytes batch_queue_max batch_queue_max_bytes batch_queue_tenant_max batch_max_inflight)
-  @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token ordered ordering_key) ++
-                   @batch_sink_keys
-  @google_pubsub_sink_keys ~w(type project topic endpoint ordering_key inline_max_bytes max_message_bytes timeout_ms auth token ordered) ++
-                             @batch_sink_keys
+  @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token) ++
+                   @core_sink_keys ++ @batch_sink_keys
+  @google_pubsub_sink_keys ~w(type project topic endpoint inline_max_bytes max_message_bytes timeout_ms auth token) ++
+                             @core_sink_keys ++ @batch_sink_keys
 
   @roles ~w(edge dispatch storage claim_check)
   @routes_store_types ~w(ets redis)
@@ -2053,6 +2070,10 @@ defmodule AnkusaServer.Config do
 
   # `https` only, unless `egress.allow_insecure_http`. Judged on the URL's shape,
   # not its address: a name resolves at delivery, where the egress policy decides.
+  # A URL with a `{{ var }}` template (`Ankusa.Sink.Template`) is judged on the
+  # literal text before the first one, which must hold the whole origin: a host is
+  # what the egress policy and the connection pools key on, so a template may
+  # only follow it, in the path or the query.
   # The message never echoes the URL, which may carry credentials.
   defp check_sink_schemes!(sinks, egress, path) do
     sinks
@@ -2067,6 +2088,22 @@ defmodule AnkusaServer.Config do
   end
 
   defp check_sink_scheme!(url, egress, path) do
+    case :binary.match(url, "{{") do
+      :nomatch -> check_url_shape!(url, egress, path)
+      {at, _length} -> check_templated_url!(binary_part(url, 0, at), egress, path)
+    end
+  end
+
+  defp check_templated_url!(literal_prefix, egress, path) do
+    unless Regex.match?(~r{\A[A-Za-z][A-Za-z0-9+.\-]*://[^/?#]+/}, literal_prefix) do
+      raise ConfigError,
+        message: "#{render_path(path)}: templates are allowed after the host, not in it"
+    end
+
+    check_url_shape!(literal_prefix, egress, path)
+  end
+
+  defp check_url_shape!(url, egress, path) do
     case URI.parse(url) do
       %URI{scheme: scheme, host: host}
       when is_binary(scheme) and is_binary(host) and host != "" ->
@@ -2148,6 +2185,8 @@ defmodule AnkusaServer.Config do
       _ ->
         lifecycle = section!(doc, "lifecycle", @lifecycle_keys, [])
         sinks = sinks!(lifecycle, ["lifecycle"])
+        refuse_filters!(sinks, ["lifecycle"])
+        reject_lifecycle_templates!(sinks)
         check_sink_schemes!(sinks, egress, ["lifecycle"])
         [lifecycle: %{sinks: sinks}]
     end
@@ -2206,6 +2245,7 @@ defmodule AnkusaServer.Config do
       |> put_opt(:verifier, verifier(source, path))
       |> Keyword.put(:sinks, sinks!(source, path))
       |> put_opt(:dedupe, dedupe(source, path))
+      |> put_opt(:event_type, event_type(source, path))
       |> put_opt(:forward_headers, forward_headers(source, path))
       |> put_opt(:max_headers, positive_int_opt(source, "max_headers", path))
       |> put_opt(
@@ -2218,7 +2258,31 @@ defmodule AnkusaServer.Config do
 
     check_sink_schemes!(opts[:sinks], egress, path)
     check_ordering!(opts[:sinks], path)
+    check_filters!(opts, path)
+    check_templates!(opts[:sinks], path)
     opts
+  end
+
+  # The grammar of `{{ var }}` templates is core's (`Ankusa.Sink.Template`), like
+  # the ordering options': a bad one, or one on an option that takes none, is
+  # refused here, with the path of the sink's key.
+  defp check_templates!(sinks, path) do
+    sinks
+    |> Enum.with_index()
+    |> Enum.each(fn {sink, index} ->
+      Ankusa.Sink.Template.normalize_sink!(render_path(path ++ ["sinks", index]), sink)
+    end)
+  rescue
+    error in ArgumentError ->
+      reraise ConfigError, [message: error.message], __STACKTRACE__
+  end
+
+  # A lifecycle event has no source's hook to read a variable from.
+  defp reject_lifecycle_templates!(sinks) do
+    if Ankusa.Sink.Template.templated?(sinks) do
+      raise ConfigError,
+        message: "lifecycle.sinks: templates are not supported on lifecycle sinks"
+    end
   end
 
   # The grammar of `ordered` / `ordering_key` is core's (`Ankusa.Ordering`): a bad
@@ -2230,6 +2294,34 @@ defmodule AnkusaServer.Config do
   rescue
     error in ArgumentError ->
       reraise ConfigError, [message: "#{render_path(path)}: #{error.message}"], __STACKTRACE__
+  end
+
+  # A filter on `event_type` needs a source that reads one. The grammar was
+  # checked with its path in `filter!/2`; the instance's boot check
+  # (`Ankusa.Filter.check/2`) repeats this one and adds the stored-header policy.
+  defp check_filters!(opts, path) do
+    id = List.last(path)
+    {_sinks, filters} = Ankusa.Filter.normalize_sinks!(id, opts[:sinks])
+
+    case Ankusa.Filter.check_event_type(id, filters, opts[:event_type] != nil) do
+      :ok -> :ok
+      {:error, message} -> raise ConfigError, message: "#{render_path(path)}: #{message}"
+    end
+  end
+
+  # A filter selects hooks by their content; a lifecycle event is not a hook, and
+  # nothing would read the option.
+  defp refuse_filters!(sinks, path) do
+    sinks
+    |> Enum.with_index()
+    |> Enum.each(fn {{_module, opts}, index} ->
+      if Keyword.has_key?(opts, :filter) do
+        raise ConfigError,
+          message:
+            "#{render_path(path ++ ["sinks", index, "filter"])}: " <>
+              "a filter selects hooks by their content and does not apply to lifecycle events"
+      end
+    end)
   end
 
   # `nil`, a preset name (`github`, `stripe`, …), or a map with exactly one of
@@ -2303,6 +2395,68 @@ defmodule AnkusaServer.Config do
       end
 
     [from, ttl_ms] |> Enum.reject(&is_nil/1) |> Map.new()
+  end
+
+  # `nil`, a preset name (`github`, `stripe`, …), or a map with exactly one of
+  # preset/header/json: where the provider's event name is read from
+  # (`Ankusa.EventType`). Returns `%{preset: atom}`, `%{header: binary}` or
+  # `%{json: binary}`, which `Ankusa.EventType.new!/2` accepts.
+  defp event_type(source, path) do
+    path = path ++ ["event_type"]
+
+    spec =
+      case source["event_type"] do
+        nil ->
+          nil
+
+        preset when is_binary(preset) ->
+          %{
+            preset:
+              Map.fetch!(@event_type_presets, enum!(preset, Map.keys(@event_type_presets), path))
+          }
+
+        value ->
+          event_type_section!(value, path)
+      end
+
+    if spec, do: check_event_type!(spec, path)
+    spec
+  end
+
+  defp event_type_section!(value, path) do
+    spec = section!(value, @event_type_keys, path)
+
+    case {spec["preset"], spec["header"], spec["json"]} do
+      {nil, nil, nil} ->
+        raise ConfigError,
+          message: "#{render_path(path)}: set exactly one of preset, header, json"
+
+      {preset, nil, nil} ->
+        preset = enum!(preset, Map.keys(@event_type_presets), path ++ ["preset"])
+        %{preset: Map.fetch!(@event_type_presets, preset)}
+
+      {nil, _header, nil} ->
+        %{header: string_opt(spec, "header", path)}
+
+      {nil, nil, _json} ->
+        %{json: string_opt(spec, "json", path)}
+
+      _other ->
+        raise ConfigError,
+          message: "#{render_path(path)}: set exactly one of preset, header, json"
+    end
+  end
+
+  # The ranges (a header of at most 128 bytes, a dot path of 1 to 16 non-empty
+  # segments) are core's: a bad one is refused here, with the path, when the file
+  # is read or the API call arrives, not when the source is built.
+  defp check_event_type!(spec, path) do
+    Ankusa.EventType.new!(spec, path |> Enum.at(-2))
+    :ok
+  rescue
+    error in ArgumentError ->
+      message = String.replace(error.message, ~r/^source .*?: event_type: /, "")
+      reraise ConfigError, [message: "#{render_path(path)}: #{message}"], __STACKTRACE__
   end
 
   defp forward_headers(source, path) do
@@ -2756,6 +2910,11 @@ defmodule AnkusaServer.Config do
 
   defp sink!(sink, path) do
     sink = expect_map(sink, path)
+    {module, opts} = typed_sink!(sink, path)
+    {module, put_opt(opts, :filter, filter!(sink["filter"], path ++ ["filter"]))}
+  end
+
+  defp typed_sink!(sink, path) do
     type = enum!(required_string!(sink, "type", path), @sink_types, path ++ ["type"])
 
     case type do
@@ -2918,6 +3077,18 @@ defmodule AnkusaServer.Config do
   end
 
   defp ordering_key(key, path), do: expect_string(key, path)
+
+  # `filter` (`Ankusa.Filter`): a sink option read by core. The grammar is core's;
+  # a bad one is refused here with its path (`sources.<id>.sinks[1].filter: …`),
+  # and a good one is handed on as the mapping it was written as.
+  defp filter!(nil, _path), do: nil
+
+  defp filter!(filter, path) do
+    case Ankusa.Filter.parse(filter) do
+      {:ok, _filter} -> filter
+      {:error, reason} -> raise ConfigError, message: "#{render_path(path)}: #{reason}"
+    end
+  end
 
   # The batching options of `Ankusa.Sink.SQS` and `Ankusa.Sink.GooglePubSub`
   # (`Ankusa.Sink.Batcher`). Types only here; the ranges are the sink's, checked

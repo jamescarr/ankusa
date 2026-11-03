@@ -63,7 +63,7 @@ defmodule Ankusa.Metrics do
   (`:unavailable`), modules become strings (`"Ankusa.Sink.Http"`), integers are
   rendered as numbers (only ever a store index or an HTTP status, both
   bounded), and anything else becomes `:other`. `:outcome` on ingest is already
-  one of a fixed set (`:committed`, `:duplicate`, `:quarantined`, `:rejected`,
+  one of a fixed set (`:committed`, `:duplicate`, `:filtered`, `:quarantined`, `:rejected`,
   `:rate_limited`, `:tenant_overload`, `:quarantine_rate_limited`,
   `:dedupe_pending`, `:quarantine_full`, `:overload`, `:tenant_limit`,
   `:dedupe_quota`, `:tenant_erasing`, `:store_unavailable`, and under `wal: :dual`
@@ -167,6 +167,13 @@ defmodule Ankusa.Metrics do
       counter(
         "ankusa.ingest.refused.total",
         scoped(own, event_name: [:ankusa, :ingest, :refused], tags: [:instance, :reason])
+      ),
+      counter(
+        "ankusa.ingest.event_type_missing.total",
+        scoped(own,
+          event_name: [:ankusa, :ingest, :event_type_missing],
+          tags: [:instance] ++ ids
+        )
       ),
       counter(
         "ankusa.verify.failures.total",
@@ -390,6 +397,20 @@ defmodule Ankusa.Metrics do
         scoped(own,
           event_name: [:ankusa, :dispatch, :lane_key_missing],
           tags: [:instance, :sink]
+        )
+      ),
+      counter(
+        "ankusa.dispatch.filtered.total",
+        scoped(own,
+          event_name: [:ankusa, :dispatch, :filtered],
+          tags: [:instance] ++ ids ++ [:sink]
+        )
+      ),
+      counter(
+        "ankusa.dispatch.filter_unevaluable.total",
+        scoped(own,
+          event_name: [:ankusa, :dispatch, :filter_unevaluable],
+          tags: [:instance] ++ ids ++ [:sink]
         )
       ),
       counter(

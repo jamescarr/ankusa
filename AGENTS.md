@@ -89,7 +89,7 @@ one; CI runs the same tasks this table does.
 | Task | What |
 | --- | --- |
 | `mise run check` | everything CI checks, every package/example/tool |
-| `mise run check:package <pkg>` | one package: format, warnings-as-errors, `credo --strict`, dialyzer, sobelow (core, `ankusa_server`), tests with a coverage floor (core 85 %, others 80 %), docs; starts/stops that package's own `docker-compose.yml` |
+| `mise run check:package <pkg>` | one package: format, warnings-as-errors, `credo --strict`, dialyzer, sobelow (core, `ankusa_server`), tests with a coverage floor (core 85 %, others 80 %), docs; starts/stops that package's own `docker-compose.yml`. `--lane static` / `--lane test` run the Mix halves separately (CI runs `ankusa` as two jobs); no flag runs both |
 | `mise run check:examples` | `examples/*`, and `deploy/helm/*` (`helm lint`, `helm template` for every mode, `kubeconform -strict`) |
 | `mise run check:tools` | `tools/*` |
 | `mise run check:monitoring` | `promtool check rules` and `test rules` on `deploy/monitoring/`, an existing runbook behind every alert's `runbook_url`, an alert for every row of the SLO table, the dashboard; also part of `mise run check` |
@@ -105,8 +105,22 @@ one; CI runs the same tasks this table does.
 | `mise run docker:smoke` | build `jamescarr/ankusa:dev`, run `packages/ankusa_server/scripts/smoke.sh` against it (`SMOKE_COSIGN_IMAGE=<published image>` also runs `cosign verify` on it) |
 | `mise run bench` | core's in-process ingest → dispatch bench (`N`, `CONCURRENCY`, `BODY_BYTES`, `SINK_LATENCY_MS` pass through) |
 | `mise run bench:gate` | the perf regression gate: bench matrix (512 B / 10 KB), median of 3, vs. `packages/ankusa/bench/baseline.json`; p99 > 1.2× or ingest/s < 0.8× fails ([`testing.md`](docs/testing.md#perf-gate-mise-run-benchgate)) |
+| `mise run bench:tenants` | the self-asserting tenant benches (gauges, dispatch tick, intake, routes): no baseline entry, each asserts its own flatness and budgets; `bench:gate` runs them too, and CI runs them as the `bench-tenant` job beside `perf gate` (`BENCH_SKIP_TENANTS=1`) |
 | `mise run bench:soak` | build the image and soak it under loadgen (`DURATION`, default 3600 s); fails on `missing > 0` or RSS growth > 5 % |
 | `mise run build [pkg]` | local only: build one Mix package from source (default `ankusa_server`); compiled Hex deps come from a cache in `~/.cache/ankusa/mix` shared by every worktree, their warnings go to `_build/<env>/deps-compile.log`, ours stay fatal |
+
+CI keeps the compose, floci-emulator and drill images in the Actions cache
+(`scripts/ci/images.sh`) and only pulls one when its digest pin changes;
+locally `mise run check:package` / `test:integration` are unchanged.
+
+`ci.yml` runs only the jobs a pull request's diff can need: the touched
+package (or, for a core change, the whole Mix group, because every adapter and
+`ankusa_server` path-depend on it), the crash drills for core or adapter code,
+`examples` for `examples/`, `deploy/helm/` or a package an example
+path-depends on; `changes`, `lint` and `ci-summary` always run, and a job the
+diff cannot need reports `skipped`. A push to `main`, a tag and `workflow_call`
+run every job. The pattern → job table and the fail-safe are in
+[`testing.md`](docs/testing.md#what-a-pull-request-runs).
 
 ## Run the checks before calling work done
 
@@ -139,7 +153,7 @@ every one of them:
 
 | Drill | Where CI runs it |
 | --- | --- |
-| `test:crash`, `scripts/drills/flakey.sh` | `ci.yml`'s two `crash drill` jobs: every PR, every push to `main` |
+| `test:crash`, `scripts/drills/flakey.sh` | `ci.yml`'s two `crash drill` jobs: every push to `main`, and every PR whose diff touches core's `lib`, an adapter's `lib`, or `packages/ankusa_server/Dockerfile` — which includes the ack path (`queue/writer.ex`, `store.ex`, `edge/batcher.ex`) |
 | `examples/fleet-e2e/run.sh` (`--replay-drill`, `--wal dual\|disk --kill-node`) | `e2e.yml`'s `fleet end to end (compose)`: nightly, every release tag, and PRs that touch `examples/fleet-e2e/**`, `tools/loadgen/**` or the server `Dockerfile` |
 | `mise run e2e` (kind: the Oban consumer, the Helm fleet) | `e2e.yml`'s `kind end to end`: nightly, every release tag |
 | `bench:soak` (3600 s) | `soak.yml`: nightly |

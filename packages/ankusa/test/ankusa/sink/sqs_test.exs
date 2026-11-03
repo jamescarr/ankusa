@@ -194,6 +194,71 @@ defmodule Ankusa.Sink.SQSTest do
     assert request["MessageGroupId"] == "acme/stripe"
   end
 
+  test "template: message_group_id renders per hook, on a standard and a FIFO queue", %{
+    capture: capture
+  } do
+    group = Ankusa.Sink.Template.compile!("test", "{{ tenant }}.{{ event_type ?? none }}")
+
+    for queue <- ["hooks.fifo", "hooks"] do
+      assert :ok =
+               SQS.deliver(
+                 envelope(%{event_type: "invoice.paid"}),
+                 %{attempt: 1},
+                 opts(queue, message_group_id: group)
+               )
+
+      assert :ok = SQS.deliver(envelope(), %{attempt: 1}, opts(queue, message_group_id: group))
+    end
+
+    assert capture
+           |> Agent.get(& &1)
+           |> Enum.map(fn {_m, _host, _path, _headers, body} ->
+             JSON.decode!(body)["MessageGroupId"]
+           end)
+           |> Enum.sort() == ["acme.invoice.paid", "acme.invoice.paid", "acme.none", "acme.none"]
+  end
+
+  test "template: a message_group_id variable with no value is a permanent failure and sends nothing",
+       %{capture: capture} do
+    group = Ankusa.Sink.Template.compile!("test", "{{ event_type }}")
+
+    assert {:error, {:permanent, {:template_missing, "event_type"}}} =
+             Ankusa.Sink.safe_deliver(
+               SQS,
+               envelope(),
+               %{attempt: 1},
+               opts("hooks.fifo", message_group_id: group)
+             )
+
+    assert Agent.get(capture, & &1) == []
+  end
+
+  test "event_type: it travels as an attribute, unless the hook would pass SQS's 10 attributes",
+       %{capture: capture} do
+    trace = %{
+      traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      tracestate: "v=1"
+    }
+
+    env = envelope(%{dedupe_key: "evt_1", event_type: "invoice.paid", trace: trace})
+
+    # 6 always + dedupe + event type + traceparent + tracestate = 10: it fits.
+    assert :ok = SQS.deliver(env, %{attempt: 1}, opts())
+    {_, _, _, _, _, request} = sent(capture)
+    assert map_size(request["MessageAttributes"]) == 10
+    assert request["MessageAttributes"]["ankusa_event_type"]["StringValue"] == "invoice.paid"
+
+    # A replay adds an 11th: the event type, which the body carries too, goes.
+    Agent.update(capture, fn _ -> [] end)
+    assert :ok = SQS.deliver(env, %{attempt: 1, replay_id: "r1"}, opts())
+    {_, _, _, _, _, request} = sent(capture)
+    assert map_size(request["MessageAttributes"]) == 10
+    refute Map.has_key?(request["MessageAttributes"], "ankusa_event_type")
+    assert request["MessageAttributes"]["ankusa_replay_id"]["StringValue"] == "r1"
+    assert request["MessageAttributes"]["traceparent"]["StringValue"] == trace.traceparent
+    assert JSON.decode!(request["MessageBody"])["event_type"] == "invoice.paid"
+  end
+
   test "the signature reproduces from what was sent: service sqs, these headers, these bytes",
        %{capture: capture} do
     assert :ok = SQS.deliver(envelope(), %{attempt: 1}, opts())

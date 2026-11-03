@@ -261,7 +261,9 @@ message is a `v: 1` message plus additive fields, so nothing else changes for a
 consumer when the producer moves to it; a `v` outside the range is
 `unsupported_version` (permanent: dead-letter it). `message.instance` and
 `message.region` are the Ankusa instance that published the message and the
-region it is configured with (`nil` for none).
+region it is configured with (`nil` for none). `message.event_type` is the
+provider's event name as the source's `event_type` key read it, for example
+`invoice.paid` (`nil` for none).
 
 ### Lifecycle events
 

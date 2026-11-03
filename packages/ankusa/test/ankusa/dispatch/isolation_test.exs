@@ -46,7 +46,8 @@ defmodule Ankusa.Dispatch.IsolationTest do
   end
 
   # Holds its slot for `ms` and counts, in `atomics` (1: running now, 2: the
-  # most that ever ran at once), how many attempts overlapped.
+  # most that ever ran at once, 3: attempts finished), how many attempts
+  # overlapped.
   defmodule CountingSleepSink do
     @behaviour Ankusa.Sink
 
@@ -56,6 +57,7 @@ defmodule Ankusa.Dispatch.IsolationTest do
       bump_max(ref, :atomics.add_get(ref, 1, 1))
       Process.sleep(Keyword.fetch!(opts, :ms))
       :atomics.sub(ref, 1, 1)
+      :atomics.add(ref, 3, 1)
       :ok
     end
 
@@ -67,6 +69,29 @@ defmodule Ankusa.Dispatch.IsolationTest do
         :atomics.compare_exchange(ref, 2, seen, now) == :ok -> :ok
         true -> bump_max(ref, now)
       end
+    end
+  end
+
+  # Ticks every millisecond and records every gap between ticks of at least
+  # `bound_us`: such a gap means the host stopped running this VM for that
+  # long (a busy CI host, the OS descheduling the whole VM), which is not
+  # something a scheduler can be fair or unfair about.
+  defmodule Heartbeat do
+    @moduledoc false
+
+    def start(pauses, bound_us) do
+      spawn(fn -> loop(pauses, bound_us, System.monotonic_time(:microsecond)) end)
+    end
+
+    defp loop(pauses, bound_us, last) do
+      Process.sleep(1)
+      now = System.monotonic_time(:microsecond)
+
+      if now - last >= bound_us do
+        :ets.insert(pauses, {System.unique_integer([:positive]), last, now})
+      end
+
+      loop(pauses, bound_us, now)
     end
   end
 
@@ -406,28 +431,98 @@ defmodule Ankusa.Dispatch.IsolationTest do
       end
     end
 
-    # The p99 of `n` hooks of `tenant` committed 15 ms apart: milliseconds from
-    # just before the commit to the sink call. `sample` runs once per hook.
-    defp light_p99(inst, tenant, n, sample) do
-      starts =
-        for _ <- 1..n do
-          env = build_env("light", tenant)
-          t0 = System.monotonic_time(:microsecond)
-          enqueue!(inst, env)
+    # The lag of `n` hooks of `tenant` on each of the two instances, in ms,
+    # from just before the commit to the sink call. The hooks alternate
+    # between the instances 15 ms apart, so one is in flight while the other
+    # is committed: what the two instances share (the host descheduling the
+    # VM, a lazy GC) lands in both numbers and cancels in their comparison,
+    # while the interference of `mixed`'s other tenant can only move that
+    # side. `sample` runs once per pair.
+    #
+    # A delivery whose window overlaps a gap in `pauses` is not counted at
+    # all: the stall, not the scheduler, is what it measured, and the gap is
+    # recorded by a heartbeat no tenant's load can stop -- so a light tenant
+    # held behind a heavy one is still counted (the heartbeat keeps ticking).
+    defp light_lags_pair(mixed, solo, tenant, n, sample, pauses) do
+      {mixed_lags, solo_lags} =
+        Enum.reduce_while(1..(4 * n), {[], []}, fn _, {mixed_lags, solo_lags} ->
+          {mixed_lag, solo_lag} = lag_pair(mixed, solo, tenant, pauses)
           sample.()
           Process.sleep(15)
-          {env.id, t0}
-        end
-        |> Map.new()
 
-      lags =
-        for _ <- 1..n do
-          assert_receive {:stamp, id, t1}, 10_000
-          (t1 - Map.fetch!(starts, id)) / 1000
-        end
+          mixed_lags = if mixed_lag, do: [mixed_lag | mixed_lags], else: mixed_lags
+          solo_lags = if solo_lag, do: [solo_lag | solo_lags], else: solo_lags
 
-      lags |> Enum.sort() |> Enum.at(ceil(0.99 * n) - 1)
+          acc = {mixed_lags, solo_lags}
+
+          if length(mixed_lags) >= n and length(solo_lags) >= n,
+            do: {:halt, acc},
+            else: {:cont, acc}
+        end)
+
+      # The counts are the test's: a window that shrank (because too many
+      # deliveries overlapped a stall) fails there, it does not pass quietly.
+      %{
+        mixed: mixed_lags |> Enum.take(n) |> Enum.reverse(),
+        solo: solo_lags |> Enum.take(n) |> Enum.reverse()
+      }
     end
+
+    defp lag_pair(mixed, solo, tenant, pauses) do
+      mixed_env = build_env("light", tenant)
+      mixed_at = System.monotonic_time(:microsecond)
+      enqueue!(mixed, mixed_env)
+
+      solo_env = build_env("light", tenant)
+      solo_at = System.monotonic_time(:microsecond)
+      enqueue!(solo, solo_env)
+
+      stamps =
+        for _ <- 1..2, into: %{} do
+          assert_receive {:stamp, id, at}, 10_000
+          {id, at}
+        end
+
+      {lag(pauses, mixed_at, Map.fetch!(stamps, mixed_env.id)),
+       lag(pauses, solo_at, Map.fetch!(stamps, solo_env.id))}
+    end
+
+    defp lag(pauses, t0, t1) do
+      if stalled?(pauses, t0, t1), do: nil, else: (t1 - t0) / 1000
+    end
+
+    defp stalled?(pauses, t0, t1) do
+      Enum.any?(:ets.tab2list(pauses), fn {_id, from, to} -> from <= t1 and to >= t0 end)
+    end
+
+    # The nearest-rank p99 of `lags`.
+    defp p99(lags) do
+      sorted = Enum.sort(lags)
+      Enum.at(sorted, ceil(0.99 * length(sorted)) - 1)
+    end
+
+    # The measurement window: `@warmup` pairs of hooks are delivered and
+    # dropped, then the p99 is taken over `@measured` pairs.
+    #
+    # A p99 of a couple of dozen samples *is* its worst sample, so a hiccup
+    # that stalls one or two deliveries becomes the number; over 200 it is the
+    # third worst, and the count is asserted so the window cannot quietly
+    # shrink.
+    #
+    # The window also opens on steady state instead of on the one-off cost of
+    # opening it: the first hooks of a fresh instance pay for a cold store and
+    # a cold scheduler, and on the mixed instance the scan that claims the
+    # heavy tenant's first window and fills its slow sink. Neither is a
+    # per-tenant scheduling property, and both used to be the p99 (the CI
+    # failure this replaced was one such sample, 62.8 ms against a 1.2 ms solo
+    # p99).
+    @warmup 20
+    @measured 200
+
+    # A gap between heartbeats this long is the host, not the scheduler: a
+    # delivery measured across it cannot tell the two apart, and the bound's
+    # floor is 25 ms anyway.
+    @pause_us 25_000
 
     # Ground rule 4's check, on dispatch: a tenant with 99 times another's load,
     # whose sink is slow, must not move the light tenant's p99 by more than 2x
@@ -436,7 +531,8 @@ defmodule Ankusa.Dispatch.IsolationTest do
     # hold more than its own window.
     test "tenant fairness" do
       window = 16
-      atomics = :atomics.new(2, [])
+      slots = 4
+      atomics = :atomics.new(3, [])
 
       sources = %{
         "heavy" => %{sinks: [{CountingSleepSink, ms: 150, atomics: atomics}]},
@@ -445,28 +541,46 @@ defmodule Ankusa.Dispatch.IsolationTest do
 
       dispatch = %{
         concurrency: 8,
-        sink_concurrency: 4,
+        sink_concurrency: slots,
         max_inflight: 64,
         batch: 16,
         tenants: %{default: %{max_inflight: window, concurrency: 4}}
       }
 
+      pauses = :ets.new(:pauses, [:public, :set])
+      heartbeat = Heartbeat.start(pauses, @pause_us)
+      on_exit(fn -> Process.exit(heartbeat, :kill) end)
+
+      # `mixed` carries the heavy tenant beside the light one; `solo` carries
+      # the light one only. Both are measured together (`light_lags_pair/6`).
+      mixed = start(sources, dispatch)
       solo = start(sources, dispatch)
-      solo_p99 = light_p99(solo, "light-tenant", 24, fn -> :ok end)
+      heavy = 99 * @measured
+      enqueue_many!(mixed, for(_ <- 1..heavy, do: build_env("heavy", "heavy-tenant")))
+      {:ok, ord} = Ankusa.Queue.Tenants.ord(mixed, "heavy-tenant")
 
-      inst = start(sources, dispatch)
-      light = 24
-      heavy = 99 * light
-      enqueue_many!(inst, for(_ <- 1..heavy, do: build_env("heavy", "heavy-tenant")))
-      {:ok, ord} = Ankusa.Queue.Tenants.ord(inst, "heavy-tenant")
+      # Warm-up, not part of the p99: light hooks go through while the heavy
+      # tenant's window fills and its first attempts run.
+      _ = light_lags_pair(mixed, solo, "light-tenant", @warmup, fn -> :ok end, pauses)
 
-      # the heavy tenant has filled its window and is queueing behind its slots
-      await(fn -> claimed_rows(inst, ord) == window end)
+      # Both tenants are in steady state: the heavy tenant's window is full,
+      # its slow sink has had all its slots busy at once, and two full waves of
+      # its attempts have finished and been claimed again, so what follows is
+      # not a snapshot of the opening storm.
+      await(fn -> claimed_rows(mixed, ord) == window end)
+      assert :atomics.get(atomics, 2) == slots, "the heavy sink never saturated"
+      assert :atomics.get(atomics, 3) >= 2 * slots, "the heavy tenant never finished a wave"
 
       samples = :ets.new(:window_samples, [:public])
-      sample = fn -> :ets.insert(samples, {System.unique_integer(), claimed_rows(inst, ord)}) end
+      sample = fn -> :ets.insert(samples, {System.unique_integer(), claimed_rows(mixed, ord)}) end
 
-      mixed_p99 = light_p99(inst, "light-tenant", light, sample)
+      %{mixed: mixed_lags, solo: solo_lags} =
+        light_lags_pair(mixed, solo, "light-tenant", @measured, sample, pauses)
+
+      assert length(mixed_lags) == @measured
+      assert length(solo_lags) == @measured
+      solo_p99 = p99(solo_lags)
+      mixed_p99 = p99(mixed_lags)
 
       widest = samples |> :ets.tab2list() |> Enum.map(&elem(&1, 1)) |> Enum.max()
       assert widest == window, "the heavy tenant never filled its window (#{widest})"
@@ -484,6 +598,41 @@ defmodule Ankusa.Dispatch.IsolationTest do
         tries == 0 -> flunk("condition never became true")
         true -> Process.sleep(10) && await(fun, tries - 1)
       end
+    end
+
+    test "filter: a filter on a tenant keeps its hooks off the other tenants' sinks, and the reverse" do
+      inst =
+        start(
+          %{
+            "s" => %{
+              trust_url_tenant: true,
+              sinks: [
+                {TagSink, tag: :acme_only, pid: self(), filter: %{tenant: "acme"}},
+                {TagSink, tag: :rest, pid: self(), filter: %{tenant: %{neq: "acme"}}},
+                {TagSink, tag: :everyone, pid: self()}
+              ]
+            }
+          },
+          %{}
+        )
+
+      ingest = fn tenant ->
+        assert {:ok, env} =
+                 Ankusa.Edge.Ingest.ingest(inst, Map.put(request("s", "{}"), :tenant_id, tenant))
+
+        env.id
+      end
+
+      acme = ingest.("acme")
+      globex = ingest.("globex")
+
+      assert_receive {:delivered, :acme_only, ^acme, 1}, 5_000
+      assert_receive {:delivered, :everyone, ^acme, 1}, 5_000
+      assert_receive {:delivered, :rest, ^globex, 1}, 5_000
+      assert_receive {:delivered, :everyone, ^globex, 1}, 5_000
+
+      refute_receive {:delivered, :rest, ^acme, _}, 200
+      refute_receive {:delivered, :acme_only, ^globex, _}, 200
     end
 
     test "a page is shared across the active tenants, not taken by the oldest" do
@@ -664,11 +813,15 @@ defmodule Ankusa.Dispatch.IsolationTest do
       opened_at = System.system_time(:millisecond)
       assert {:ok, 0} = Pipeline.tick(inst)
 
-      # Exactly three attempts ran; everything else waits for the breaker.
+      # Exactly three attempts ran before the breaker opened; everything else
+      # waits for it without spending one. Which rows spent the three is not
+      # promised: a retry is due at once (`base_ms: 0`), so the scheduler can
+      # claim the row that just failed again instead of the next one, and the
+      # three can land on one row as easily as on three.
       first = rows(inst, seqs)
       assert Enum.sum_by(first, & &1.attempts) == 3
-      assert Enum.count(first, &(&1.attempts == 1)) == 3
-      assert Enum.count(first, &(&1.attempts == 0)) == 7
+      assert Enum.count(first, &(&1.attempts > 0)) in 1..3
+      assert Enum.count(first, &(&1.attempts == 0)) in 7..9
       assert Enum.all?(first, &(&1.state == :pending and &1.at >= opened_at + 400))
 
       # Half-open: one probe, which fails and opens it again.

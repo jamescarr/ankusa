@@ -203,8 +203,77 @@ defmodule Ankusa.Edge.DirectTest do
                Ankusa.Edge.Publish.publish(
                  config.instance,
                  %Ankusa.Source{id: "demo", sinks: sinks},
-                 env
+                 env,
+                 :all
                )
+    end
+  end
+
+  describe "filter" do
+    defp route_with(config, body, headers) do
+      conn =
+        Enum.reduce(headers, Plug.Test.conn(:post, "/webhooks/demo", body), fn {k, v}, conn ->
+          Plug.Conn.put_req_header(conn, k, v)
+        end)
+
+      Router.call(conn, Router.init(instance: config.instance))
+    end
+
+    defp filtered_sinks do
+      [
+        {CaptureSink, [to: self(), filter: %{"header.x-route" => "capture"}]},
+        {Ankusa.Sink.Log, [filter: %{"header.x-route" => "log"}]}
+      ]
+    end
+
+    test "filter: only the selected sinks are published to" do
+      config = start_direct(filtered_sinks())
+
+      conn = route_with(config, "{}", [{"x-route", "capture"}])
+
+      assert conn.status == 201
+      assert %{"status" => "accepted", "id" => id} = JSON.decode!(conn.resp_body)
+      refute JSON.decode!(conn.resp_body)["filtered"]
+      assert_received {:delivered, %{id: ^id}, _ctx}
+      refute_received {:delivered, _, _}
+    end
+
+    test "filter: a hook no sink selects is 201 filtered and nothing is published" do
+      config = start_direct(filtered_sinks())
+
+      conn = route_with(config, "{}", [{"x-route", "elsewhere"}])
+
+      assert conn.status == 201
+
+      assert %{"status" => "accepted", "id" => _, "filtered" => true} =
+               JSON.decode!(conn.resp_body)
+
+      refute_received {:delivered, _, _}
+    end
+
+    @tag :capture_log
+    test "filter: a hook whose selected sinks are none durable is a 503, though the source has one" do
+      config = start_direct(filtered_sinks())
+
+      conn = route_with(config, "{}", [{"x-route", "log"}])
+
+      assert conn.status == 503
+      assert %{"error" => "store_unavailable"} = JSON.decode!(conn.resp_body)
+      refute_received {:delivered, _, _}
+    end
+
+    test "filter: publish/4 with no sink selected is {:filtered, env} and publishes nothing" do
+      config = start_direct([{CaptureSink, [to: self(), outcome: :ok]}])
+      assert route(config, "demo", "{}").status == 201
+      assert_received {:delivered, env, _ctx}
+
+      source = %Ankusa.Source{id: "demo", sinks: [{CaptureSink, [to: self()]}]}
+
+      assert {:filtered, ^env} = Ankusa.Edge.Publish.publish(config.instance, source, env, [])
+      refute_received {:delivered, _, _}
+
+      assert {:ok, ^env} = Ankusa.Edge.Publish.publish(config.instance, source, env, [0])
+      assert_received {:delivered, ^env, _ctx}
     end
   end
 

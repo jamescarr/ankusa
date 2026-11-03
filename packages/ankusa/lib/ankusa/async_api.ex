@@ -45,7 +45,7 @@ defmodule Ankusa.AsyncApi do
   | --- | --- | --- |
   | Kafka, NATS | record / message headers, `Ankusa.Sink.Message.headers/2` (NATS adds `Nats-Msg-Id`) | `""` |
   | SQS, Google Pub/Sub | message attributes, `Ankusa.Sink.Message.attributes/2` | absent (both refuse an empty value) |
-  | RabbitMQ | AMQP `message_id` and the `ankusa_idempotency_key`, `ankusa_dedupe_key`, `ankusa_replay_id`, `ankusa_ordering_key` headers; not described by the schema | not sent |
+  | RabbitMQ | AMQP `message_id` and the `ankusa_idempotency_key`, `ankusa_dedupe_key`, `ankusa_replay_id`, `ankusa_ordering_key`, `ankusa_event_type` headers; not described by the schema | not sent |
   | Redis pub/sub | none: the body is all there is | not sent |
   | HTTP | `x-ankusa-*` request headers (`Ankusa.Sink.Http`); not in this document, the body is the provider's | `x-ankusa-tenant` absent |
 
@@ -122,7 +122,13 @@ defmodule Ankusa.AsyncApi do
     |> Enum.flat_map(fn source_id ->
       case SourceStore.fetch(instance, source_id) do
         {:ok, source} ->
-          describe_all(source.sinks, source_id, tenant_for(resolver, source), false)
+          describe_all(
+            source.sinks,
+            source.filters,
+            source_id,
+            tenant_for(resolver, source),
+            false
+          )
 
         # A miss, or a store that cannot answer right now: nothing to describe.
         _error_or_unavailable ->
@@ -133,7 +139,7 @@ defmodule Ankusa.AsyncApi do
 
   defp lifecycle_entries(instance) do
     case Lifecycle.source(instance) do
-      {:ok, source} -> describe_all(source.sinks, source.id, nil, true)
+      {:ok, source} -> describe_all(source.sinks, nil, source.id, nil, true)
       :error -> []
     end
   end
@@ -143,13 +149,20 @@ defmodule Ankusa.AsyncApi do
   defp tenant_for({Ankusa.RouteResolver.Path, _opts}, source), do: source.tenant_id
   defp tenant_for(_resolver, _source), do: nil
 
-  defp describe_all(sinks, source_id, tenant_id, lifecycle?) do
+  defp describe_all(sinks, filters, source_id, tenant_id, lifecycle?) do
     subject = %{source_id: source_id, tenant_id: tenant_id}
+    filters = filters || List.duplicate(nil, length(sinks))
 
-    for {mod, opts} <- sinks,
+    for {{mod, opts}, filter} <- Enum.zip(sinks, filters),
         description = Sink.describe(mod, subject, opts),
         description != nil and description.payload == :message do
-      %{source_id: source_id, tenant_id: tenant_id, lifecycle?: lifecycle?, d: description}
+      %{
+        source_id: source_id,
+        tenant_id: tenant_id,
+        lifecycle?: lifecycle?,
+        d: description,
+        filter: filter
+      }
     end
   end
 
@@ -239,11 +252,31 @@ defmodule Ankusa.AsyncApi do
             "durable, in commit order, at least once, replayable"
       ),
       if(Enum.any?(entries, &(&1.d.address == nil)),
-        do: "The address is computed per hook by a configured function and cannot be advertised."
-      )
+        do:
+          "The address is computed per hook (by a configured function or a template) and " <>
+            "cannot be advertised."
+      ),
+      filter_text(hooks)
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join(". ")
+  end
+
+  # The sink entries of this channel that select hooks by content (`Ankusa.Filter`).
+  # One entry: `Filter: …`; several (a channel shared by sources) name their source.
+  defp filter_text(entries) do
+    case Enum.filter(entries, & &1.filter) do
+      [] ->
+        nil
+
+      filtered ->
+        shared? = length(entries) > 1
+
+        Enum.map_join(filtered, ". ", fn entry ->
+          prefix = if shared?, do: "Filter (#{entry.source_id}): ", else: "Filter: "
+          prefix <> Ankusa.Filter.describe(entry.filter)
+        end)
+    end
   end
 
   defp source_list(entries),

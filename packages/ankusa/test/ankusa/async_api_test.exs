@@ -96,6 +96,58 @@ defmodule Ankusa.AsyncApiTest do
     assert properties["region"]["type"] == ["string", "null"]
   end
 
+  test "event_type: SinkMessageV1 describes it as an optional string or null" do
+    map = document_map(source_store: static(%{"stripe" => source(address: "ankusa.hooks")}))
+
+    assert %{"SinkMessageV1" => %{"properties" => properties, "required" => required}} =
+             map["components"]["schemas"]
+
+    assert properties["event_type"]["type"] == ["string", "null"]
+    refute "event_type" in required
+  end
+
+  test "filter: the channel description names a filtered sink's filter" do
+    map =
+      document_map(
+        source_store:
+          static(%{
+            "stripe" => [
+              event_type: :stripe,
+              sinks: [
+                {DescribedSink,
+                 address: "ankusa.hooks",
+                 filter: %{event_type: ["invoice.paid", "invoice.failed"]}}
+              ]
+            ],
+            "plain" => source(address: "ankusa.plain")
+          })
+      )
+
+    descriptions = map["channels"] |> Map.values() |> Map.new(&{&1["address"], &1["description"]})
+
+    assert descriptions["ankusa.hooks"] ==
+             "Hooks from: stripe. Filter: event_type in [invoice.paid, invoice.failed]"
+
+    assert descriptions["ankusa.plain"] == "Hooks from: plain"
+  end
+
+  test "filter: sources sharing a channel name whose filter is whose" do
+    map =
+      document_map(
+        source_store:
+          static(%{
+            "stripe" => [
+              event_type: :stripe,
+              sinks: [{DescribedSink, address: "ankusa.hooks", filter: %{event_type: "a"}}]
+            ],
+            "github" => source(address: "ankusa.hooks")
+          })
+      )
+
+    assert [%{"description" => description}] = Map.values(map["channels"])
+    assert description == "Hooks from: github, stripe. Filter (stripe): event_type = a"
+  end
+
   test "different addresses, brokers, and bindings are different channels and servers" do
     map =
       document_map(
@@ -231,6 +283,8 @@ defmodule Ankusa.AsyncApiTest do
       refute "ankusa_tenant_id" in schema["required"]
       assert schema["properties"]["ankusa_tenant_id"]["type"] == "string"
       assert schema["properties"]["ankusa_ordering_key"]["type"] == "string"
+      assert schema["properties"]["ankusa_event_type"]["type"] == "string"
+      refute "ankusa_event_type" in schema["required"]
     end
 
     test "every header set a described transport sends satisfies the required names" do
@@ -277,6 +331,46 @@ defmodule Ankusa.AsyncApiTest do
            ]
 
     assert Enum.all?(dynamic, &(&1["description"] =~ "computed per hook"))
+    assert [%{"address" => "fixed.topic"}] = fixed
+  end
+
+  defmodule TemplatedSink do
+    @moduledoc false
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(_env, _ctx, _opts), do: :ok
+
+    # What `Sink.Kafka` does: the address is the topic when one string serves
+    # every hook.
+    @impl true
+    def describe(_subject, opts) do
+      %Ankusa.Sink.Description{
+        protocol: "kafka",
+        host: "broker:9092",
+        address: Ankusa.Sink.Messaging.static(Keyword.fetch!(opts, :address)),
+        ankusa_headers: true
+      }
+    end
+  end
+
+  test "template: a {{ var }} address is a dynamic channel, a static one keeps its address" do
+    templated = Ankusa.Sink.Template.compile!("test", "events.{{ event_type ?? other }}")
+
+    map =
+      document_map(
+        source_store:
+          static(%{
+            "a" => [sinks: [{TemplatedSink, address: templated}]],
+            "fixed" => [sinks: [{TemplatedSink, address: "fixed.topic"}]]
+          })
+      )
+
+    {dynamic, fixed} =
+      map["channels"] |> Map.values() |> Enum.split_with(&(not Map.has_key?(&1, "address")))
+
+    assert [%{"title" => "Dynamic address (a)", "description" => description}] = dynamic
+    assert description =~ "computed per hook (by a configured function or a template)"
     assert [%{"address" => "fixed.topic"}] = fixed
   end
 

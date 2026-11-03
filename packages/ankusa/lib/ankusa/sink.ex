@@ -252,7 +252,11 @@ defmodule Ankusa.Sink do
 
   A sink is user code: it may raise, throw, or exit (a `GenServer.call` into a
   dead process). Any of those is a delivery failure, not a caller crash. Any
-  other return value is `{:error, {:bad_return, value}}`. Every ack path —
+  other return value is `{:error, {:bad_return, value}}`. The one raise that is
+  not transient is `Ankusa.Sink.Template.MissingError`, a `{{ var }}` template
+  with no value and no fallback for this hook: `{:error, {:permanent,
+  {:template_missing, var}}}`, dead-lettered now and replayable after the
+  source's config is fixed. Every ack path —
   `Ankusa.Dispatch.Pipeline`, `Ankusa.Lifecycle.Publisher` and
   `Ankusa.Edge.Publish` — delivers through here so they agree on what "the sink
   failed" means, and each can match on `:ok | {:error, _}` exhaustively.
@@ -265,7 +269,11 @@ defmodule Ankusa.Sink do
       other -> {:error, {:bad_return, other}}
     end
   rescue
-    error -> {:error, {:raised, error}}
+    error in Ankusa.Sink.Template.MissingError ->
+      {:error, {:permanent, {:template_missing, error.var}}}
+
+    error ->
+      {:error, {:raised, error}}
   catch
     :exit, reason -> {:error, {:exit, reason}}
     :throw, value -> {:error, {:throw, value}}

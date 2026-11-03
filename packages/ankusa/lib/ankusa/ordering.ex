@@ -27,7 +27,8 @@ defmodule Ankusa.Ordering do
   `store_headers` policy (`check/2`).
 
   A key longer than 128 bytes (the SQS group id limit) becomes `"sha256:" <> hex`.
-  A missing key (no such header, a body that is not JSON, over 1 MiB, a missing or
+  A missing key (no such header, a body that is not JSON or is over
+  `dedupe.max_json_bytes` (1 MiB by default), a missing or
   non-string path value, an MFA that raised or returned a non-binary) puts the hook
   in the sink's shared keyless lane, counted in
   `ankusa_dispatch_lane_key_missing_total{sink}`: an ordered sink never silently
@@ -37,7 +38,6 @@ defmodule Ankusa.Ordering do
   alias Ankusa.{Dedupe, Envelope, Source}
   alias Ankusa.Edge.StoredHeaders
 
-  @json_key_max_bytes 1_048_576
   @max_key_bytes 128
 
   @typedoc "How one sink's lane key is read."
@@ -195,7 +195,12 @@ defmodule Ankusa.Ordering do
     end)
   end
 
-  defp stored_policy(config, %Source{store_headers: override, verifier: verifier}) do
+  @doc false
+  # The stored-header policy this source runs under: the instance's, overridden by
+  # the source's, plus the credential headers of a token verifier. Shared with
+  # `Ankusa.Filter.check/2` and `Ankusa.Sink.Template.check/2`.
+  @spec stored_policy(Ankusa.Config.t(), Source.t()) :: StoredHeaders.policy()
+  def stored_policy(config, %Source{store_headers: override, verifier: verifier}) do
     policy = StoredHeaders.resolve(override, config.store_headers)
 
     case verifier do
@@ -220,30 +225,29 @@ defmodule Ankusa.Ordering do
   # ── resolving a hook's lanes ──────────────────────────────────────────────
 
   @doc """
-  The provider event key and the lanes of `env` for `source`, resolved from the
-  complete header list and the body: `{dedupe_key, lanes}`. `lanes` is `nil` for
-  a source with no ordered sink, else a list aligned with the source's sinks, each
-  `nil` (unordered) or `{lane, key}`. One JSON decode serves a `dedupe: json` and
-  an `ordering_key: {:json, _}` on the same source.
+  The lanes of `env` for `source`, from the complete header list and `decoded`,
+  the body's JSON as `Ankusa.Routing` decodes it (`:skip`: not decoded,
+  so a `{:json, _}` key is missing). `nil` for a source with no ordered sink,
+  else a list aligned with the source's sinks, each `nil` (unordered) or
+  `{lane, key}`. One decode serves an `ordering_key: {:json, _}`, a
+  `dedupe: json` and an `event_type: json` on the same source.
+
+  `selected` is the sinks that get a delivery row (`Ankusa.Filter`): a sink a
+  filter dropped has no row, so its lane is `nil` and its key is not read (no
+  `lane_key_missing` for a hook that never joins the lane).
   """
-  @spec resolve(atom(), Source.t(), Envelope.t()) :: {String.t() | nil, [lane() | nil] | nil}
-  def resolve(instance, %Source{ordering: nil, dedupe: dedupe}, env),
-    do: {Dedupe.key(dedupe, env, :skip, Dedupe.max_json_bytes(instance)), nil}
+  @spec lanes(
+          atom(),
+          Source.t(),
+          Envelope.t(),
+          {:ok, term()} | {:error, term()} | :skip,
+          :all | [non_neg_integer()]
+        ) :: [lane() | nil] | nil
+  def lanes(instance, source, env, decoded, selected \\ :all)
 
-  def resolve(instance, %Source{ordering: ordering, dedupe: dedupe} = source, env) do
-    decoded = decode_for(ordering, env)
-    key = Dedupe.key(dedupe, env, decoded, Dedupe.max_json_bytes(instance))
-    {key, lanes(instance, source, env, decoded)}
-  end
+  def lanes(_instance, %Source{ordering: nil}, _env, _decoded, _selected), do: nil
 
-  @doc "The lanes of `env` for `source` alone (see `resolve/3`)."
-  @spec lanes(atom(), Source.t(), Envelope.t()) :: [lane() | nil] | nil
-  def lanes(_instance, %Source{ordering: nil}, _env), do: nil
-
-  def lanes(instance, %Source{ordering: ordering} = source, env),
-    do: lanes(instance, source, env, decode_for(ordering, env))
-
-  defp lanes(instance, %Source{id: id, sinks: sinks, ordering: ordering}, env, decoded) do
+  def lanes(instance, %Source{id: id, sinks: sinks, ordering: ordering}, env, decoded, selected) do
     sinks
     |> Enum.zip(ordering)
     |> Enum.with_index()
@@ -252,25 +256,19 @@ defmodule Ankusa.Ordering do
         nil
 
       {{{mod, _opts}, {:ordered, spec}}, index} ->
-        key = key(spec, env, decoded)
+        if selected == :all or index in selected do
+          key = key(spec, env, decoded)
 
-        if spec != nil and key == nil,
-          do:
-            Ankusa.Telemetry.emit([:dispatch, :lane_key_missing], %{}, %{
-              instance: instance,
-              sink: mod
-            })
+          if spec != nil and key == nil,
+            do:
+              Ankusa.Telemetry.emit([:dispatch, :lane_key_missing], %{}, %{
+                instance: instance,
+                sink: mod
+              })
 
-        {lane_id(index, id, key), key || ""}
+          {lane_id(index, id, key), key || ""}
+        end
     end)
-  end
-
-  # The body is decoded at most once, and only for a `{:json, _}` key.
-  defp decode_for(ordering, env) do
-    if Enum.any?(ordering, &match?({:ordered, {:json, _}}, &1)) and
-         byte_size(env.body) <= @json_key_max_bytes,
-       do: JSON.decode(env.body),
-       else: :skip
   end
 
   defp key(nil, _env, _decoded), do: nil

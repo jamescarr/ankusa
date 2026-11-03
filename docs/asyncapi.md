@@ -29,9 +29,11 @@ SASL password, no header value.
 
 Every message's payload is [`SinkMessageV1`](delivery.md): the `Ankusa.Sink.Message`
 envelope (`id`, `source_id`, `tenant_id`, `received_at`, `content_type`, `size`,
-`sha256`, `dedupe_key`, `replay_id`, `idempotency_key`, `verification`, `headers`,
+`sha256`, `dedupe_key`, `event_type`, `replay_id`, `idempotency_key`, `verification`, `headers`,
 `instance`, `region`, and `body_base64` or `claim`), narrowed to the source. The
 provider's own body is opaque bytes inside it; the document does not describe it.
+`event_type` is the provider's event name as the source's
+[`event_type`](configuration.md#sources) reads it, or `null`; it is not required.
 `instance` is the name of the instance that publishes and `region` the one its
 config sets (`node.region`; `null` when it sets none). An instance that sets a
 region also says so once for the whole document, in its top-level `x-ankusa-region`
@@ -45,8 +47,8 @@ What a consumer learns per transport:
 
 | Sink | Address | Bindings and headers |
 | --- | --- | --- |
-| `kafka` | the `topic` | record key (`<tenant>/<source_id>` unless `key:` is set), five always-present headers (`ankusa_id`, `ankusa_source_id`, `ankusa_message_version`, `ankusa_idempotency_key`, `content_type`), `ankusa_tenant_id` (`""` without a tenant), plus optional `ankusa_dedupe_key`, `ankusa_replay_id` and `ankusa_ordering_key` |
-| `rabbitmq` | the routing key (`ankusa.<source_id>` unless `routing_key:` is set) | exchange name, type, vhost; the document advertises no headers, though the wire carries AMQP `message_id` and an `ankusa_idempotency_key` header (plus optional `ankusa_dedupe_key`, `ankusa_replay_id` and `ankusa_ordering_key`), which it does not describe |
+| `kafka` | the `topic` | record key (`<tenant>/<source_id>` unless `key:` is set), five always-present headers (`ankusa_id`, `ankusa_source_id`, `ankusa_message_version`, `ankusa_idempotency_key`, `content_type`), `ankusa_tenant_id` (`""` without a tenant), plus optional `ankusa_dedupe_key`, `ankusa_replay_id`, `ankusa_ordering_key` and `ankusa_event_type` |
+| `rabbitmq` | the routing key (`ankusa.<source_id>` unless `routing_key:` is set) | exchange name, type, vhost; the document advertises no headers, though the wire carries AMQP `message_id` and an `ankusa_idempotency_key` header (plus optional `ankusa_dedupe_key`, `ankusa_replay_id`, `ankusa_ordering_key` and `ankusa_event_type`), which it does not describe |
 | `nats` | the `subject` | the same headers as Kafka, plus `Nats-Msg-Id` |
 | `redis` | the `channel` | none: pub/sub has no headers |
 | `sqs` | the queue name (`hooks.fifo`) | the `sqs` channel binding (`queue.name`, `queue.fifoQueue`); the Kafka header set as SQS message attributes, except that `ankusa_tenant_id` is absent when the hook has no tenant (SQS refuses an empty value) |
@@ -65,10 +67,17 @@ trace headers) are described in [`integrations.md`](integrations.md#http-handoff
 
 Kafka is one topic with the source in the record key, not a topic per source, so
 two Kafka sources on one topic are one channel with two messages. When a
-function (an embedding-only option) computes the address per hook, there is
+function (an embedding-only option) or a `{{ var }}` template
+([`delivery.md`](delivery.md#templated-addresses), e.g. `events.{{ event_type }}`)
+computes the address per hook, there is
 nothing to advertise: the channel has no address and says so. `log` and `http`
 sinks are not channels and are left out (an `http` sink's description says it
 carries the provider's raw body, not the envelope this document describes).
+
+A sink with a [`filter`](configuration.md#sink-filters) receives only the hooks
+its filter selects, so its channel's description says so: `Filter: event_type in
+[invoice.paid, invoice.failed]` (a channel several sources share names the source
+each filter belongs to). The messages themselves are described as for any hook.
 
 Validate it with the AsyncAPI CLI:
 

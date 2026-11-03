@@ -7,6 +7,24 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Message.eventType`: the provider's event name (for example `invoice.paid`)
+  from the message (`null` when none); a non-string value is `invalid_field`. The
+  record's canonical constructor gained the component after `region`.
+
+- `ListDeadLettersParams` gained `tenant`, `sink`, `errorClass` and `cursor` (components
+  and builder setters); the query goes out as `source_id, tenant, sink, error_class,
+  since, limit, cursor`. `DlqEntry` gained `sink` and `errorClass`, `DlqPage` gained
+  `nextCursor`, and `ReplaySpec` gained `tenant`, `sink`, `errorClass` and `jobId` (the
+  DEL-6 admin contract). The records' canonical constructors changed accordingly.
+
+### Fixed
+
+- **Breaking:** `DlqPage.total()` is a nullable `Integer`. A node answers
+  `total: null` on a filtered listing (any filter but `tenant`), which the `int`
+  component failed to decode (`AdminUnavailableError: invalid JSON body`).
+
 ## [0.2.0] - 2026-10-28
 
 ### Added
