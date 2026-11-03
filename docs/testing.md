@@ -678,10 +678,15 @@ The always-on tests cover:
   the real `:ankusa` application with one edge + dispatch instance and a slow
   sink, and a `STALL` command suspends its queue writer so 200 POSTs sit in
   the batchers. The test sends `SIGTERM` and asserts what the clients and the
-  store saw: `/ready` answers `503` with `"status":"draining"` within 100 ms of
-  the signal, every request is answered `201` or `503` with **zero connection
-  resets**, the child exits `0`, and every `201`'s hook id is in the store
-  after a restart (it prints `drain: ready flips in <n> ms; zero resets; …`).
+  store saw: the drainer flips `/ready` to `503 draining` within 100 ms of the
+  **harness receiving** the signal — the harness prints a `SIGTERM` and a
+  `DRAINING` timestamp of its own, so the test's `kill` fork/exec and its
+  polled `/ready` round trip on the loaded listener are not counted — and,
+  separately and untimed, that `/ready` really answers `503` with
+  `"status":"draining"`. Every request is answered `201` or `503` with
+  **zero connection resets**, the child exits `0`, and every `201`'s hook id
+  is in the store after a restart (it prints
+  `drain: SIGTERM to draining in <n> ms; …`).
   The `in process` tests cover `Ankusa.Instance.Drain` (it closes the ingress
   listener, waits while a batcher still holds a record, and is a no-op for an
   instance that never started) and `Ankusa.Edge.Batcher.queued/2`; the same
