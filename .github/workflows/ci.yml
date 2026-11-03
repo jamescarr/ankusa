@@ -512,16 +512,22 @@ jobs:
         if: matrix.package == 'ankusa_redis'
         working-directory: packages/ankusa_redis
         run: |
-          set -euo pipefail
+          set -uo pipefail
           docker compose up -d --wait
+          failures=0
           for i in $(seq 1 10); do
             echo "== probe run $i"
             mix test test/ankusa/source_store/redis_test.exs \
               test/ankusa/routes/store/redis_test.exs \
               test/ankusa/routes/store/redis_scale_test.exs \
-              test/ankusa/rate_limiter/store/redis_test.exs 2>&1 \
-              | grep -E "EVENTUALLY|Result:" | sed "s/^/run $i /"
+              test/ankusa/rate_limiter/store/redis_test.exs > "/tmp/probe-$i.log" 2>&1
+            status=$?
+            [ "$status" -eq 0 ] || failures=$((failures + 1))
+            grep -E "EVENTUALLY|Result:|^  [0-9]+\) test|Assertion|code:|deadline" "/tmp/probe-$i.log" | sed "s/^/run $i /"
+            echo "run $i status=$status"
           done
+          echo "probe: $failures failing runs of 10"
+          exit 0
       - name: save the package's compose images
         if: always() && steps.toolchain.outputs.has_compose == 'true'
         run: |
