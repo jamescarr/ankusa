@@ -228,8 +228,10 @@ median of three such samples cannot support a 1.2× decision.
   merge — a `bench/gate.exs` + docs diff) failed `ankusa_kafka` 40/42
   (CI-26: two `publish_batch` tests, `{:error, :unavailable}` after a
   `{:reached_max_retries, :shutdown}` producer crash) and its `perf gate` was
-  still running at 19:25Z. AGENTS.md blocks a tag on a red `main` until
-  diagnosed.
+  still running at 19:25Z. The next `main` run (41712366064, `7ba2866d` —
+  CI-21's merge) is **green**: the fairness shard and the coverage merge pass,
+  and `ankusa_kafka` passed, so CI-26 did not recur. AGENTS.md blocks a tag on a
+  red `main` until diagnosed, which is what these three items are.
 - **Wall clock after CI-17: 5.35 min** on a green `main` run (41688133998) and
   6.15 min on the red one; the two `main` runs are the only non-gate runs in the
   window. The CI-20 probe PRs read 11.9 / 16.7 / 12.7 / 21.4 / 12.0 min because
@@ -257,11 +259,15 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 19/26 done · closed without meeting the bar: CI-9 · next: CI-26, CI-22 · main: **red** (41702699820 `e53e3d32`: CI-26 `ankusa_kafka` 40/42; CI-21's `ankusa (tests, 4/4)` and `ankusa (coverage)` were green in that run) · last updated: 2026-11-03
+Status: 19/26 done · closed without meeting the bar: CI-9 · next: CI-22, CI-26 · last updated: 2026-11-03
 
-`main` is red at `e53e3d32` (run 41702699820) on CI-26 alone — the two
-`publish_batch` tests after a brod `{:reached_max_retries, :shutdown}` — not on
-CI-21's site; run 41689506568 (`902e3dcb`) was red on CI-21 and CI-22.
+`main` is **green** at `7ba2866d` (CI-21's merge, run 41712366064): the whole
+graph, including `ankusa (tests, 4/4)` and `ankusa (coverage)`. The two earlier
+reds: run 41689506568 (`902e3dcb`) failed `ankusa (tests, 4/4)` (CI-21, fixed by
+#272) and `lint` (CI-22); run 41702699820 (`e53e3d32`) failed `ankusa_kafka`
+40/42 (CI-26 — two `publish_batch` tests after a brod
+`{:reached_max_retries, :shutdown}`), which did **not** recur on the next
+`main` run, so CI-26 is a flake to attribute, not a standing red.
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -1718,12 +1724,17 @@ which it does when a measured red run outranks a slow pipeline.
      `env:` (every job inherits it), so `mise run` never installs anything the
      job's `install_args` did not. CI only: local `mise run check` keeps its
      on-demand installs.
-  2. Complete every job's `install_args`: the six jobs above get exactly what
+  2. Complete every job's `install_args`: the five jobs above get exactly what
      their tasks use (`integration`, `bench`, `bench-tenant`, `crash`:
-     `elixir erlang cmake`; `conformance`: the tools `mise run check:conformance`
-     actually invokes — measure it, do not copy the whole list; `examples`:
-     `node kubectl helm kubeconform kind elixir erlang cmake`). A missing tool
-     must fail at the command that needs it, not start a 19-tool download.
+     `elixir erlang cmake`; `examples`: `elixir erlang cmake node uv rust helm
+     kubectl kubeconform kind`). `conformance` is the exception and keeps a
+     near-full set, spelled out rather than implied: `conformance/check.mjs`
+     spawns every SDK's own toolchain (`node`, `uv`, `cargo`, `go`, `ruby`,
+     `java` + `sbt`, `clojure`, `http:php` + `http:composer`) besides core's
+     `elixir erlang cmake` — measure it from that file, do not copy the whole
+     repo list (`helm`, `kind`, `kubectl`, `kubeconform` and `promtool` are not
+     used there). A missing tool must fail at the command that needs it, not
+     start a 19-tool download.
   3. `MISE_HTTP_RETRIES: "6"` beside it, so the downloads that remain (a
      package job's three tools) ride out a 5xx burst (~50 s of backoff) instead
      of reddening a run.
@@ -1888,6 +1899,11 @@ which it does when a measured red run outranks a slow pipeline.
   (`compose(["restart" | all])`, `kafka_test.exs:340-400`), where nothing
   re-probes. `main` is red on it, and it is the second `main` failure this
   window after a diff (`bench/gate.exs` + docs) that cannot touch the adapter.
+  It did not recur on the next `main` run (`7ba2866d`, 41712366064 green), so it
+  is a flake to attribute rather than a standing red. It is also not a one-off:
+  CI-15's evidence already found the same class once ("`ankusa_kafka` (`replay
+  without a stamped partition … {:error, :unavailable}` after a brod producer
+  crash)", run 41630250047 attempt 7) and deliberately did not paper over it.
   *Change:* the CI-12 rule — make the *wait* right, never the assertion:
   1. Attribute on CI first: ten reruns of the failing job on the same commit (or
      a probe branch), recording for each whether the failure follows a restart
