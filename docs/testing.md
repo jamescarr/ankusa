@@ -1518,10 +1518,10 @@ base commit's sources, which have neither the layout nor these APIs.
 CI runs it as two jobs in `ci.yml`. `perf gate` is `mise run bench:gate` with
 `BENCH_SKIP_TENANTS=1`: the matrix and its two base-against-branch legs.
 `bench-tenant` is `mise run bench:tenants`: the self-asserting scripts above,
-which compare against no baseline, so they have no leg to measure and are a job
-of their own instead of the gate's first step (it starts when `perf gate`
-finishes, because the scope decision it obeys is that job's output). Both jobs
-obey one scope decision over the run's diff: anything under
+which compare against no baseline, so they have no leg to measure and run as a
+job of their own rather than as the gate's first step (it starts when `perf
+gate` finishes, because the scope decision it obeys is that job's output). Both
+jobs obey one scope decision over the run's diff: anything under
 `packages/ankusa/lib/ankusa/{edge,queue,store,dispatch,verifier,routes}/`,
 `store.ex`, `queue.ex`, `dedupe.ex`, `envelope.ex`, `http.ex`,
 `route_resolver.ex`, `sink/message.ex`, `sink/http.ex`, or the gate's own files

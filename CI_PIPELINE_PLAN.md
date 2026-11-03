@@ -553,7 +553,25 @@ priority, ID order.
   *Anchors:* `.github/workflows/ci.yml` (`bench` job), `.mise/tasks/bench/gate`,
   `packages/ankusa/bench/{gauges_bench,dispatch_tick_bench,intake_bench,routes_bench}.exs`,
   `docs/testing.md:1310-1400`, `AGENTS.md` (Commands table, `bench:gate` row).
-  *Evidence:* —
+  *Evidence:* 2026-11-03 · PR #225 · `mise run lint:workflows`, `mise run
+  lint:pins`, `mise run check:links`; `mise run bench:tenants` (PASS gauge
+  0.79×, dispatch 1.41×, intake dual p50 6.01 ms vs disk 3.95 ms, routes boot
+  1.02 s / miss p99 15 µs); `BENCH_DATA_ROOT=<4 GiB RAM disk> mise run
+  bench:gate` ran the tenant benches first, then the matrix (every cell `ok`;
+  `INCONCLUSIVE p99_ms 512B-ordered: samples span 1.21×`, CI-2's noise verdict
+  on a laptop); the scope step over real diffs — a `ci.yml`-only push
+  (`0ce8cec7`) `run=false`, a `dispatch/pipeline.ex` push (`2129c5cc`)
+  `run=true`, and an all-zero `before`, an unfetchable sha, a release tag,
+  `workflow_dispatch` and a `gh api` 404 all `run=true` (PR #213 `false`,
+  #204 `true`). CI: PR #225, run 41555660515 — `perf gate` 10:36 → **8:43**
+  and `bench-tenant` **4:29**, both `success` on the rerun (attempt 1 was
+  CI-2's `INCONCLUSIVE`, 512B-c32 spanning 1.31×; its only red job was
+  `ankusa_kafka`'s known `Intake.KafkaTest` readiness flake, CI-8).
+  Throwaway PR #226, closed unmerged, run 41555668527: `perf gate` green and
+  `bench-tenant` red on `FAIL p50: dual 37.0 ms > max(disk 0.49, 5) + 5 =
+  10.0 ms` — the split catches a dual-commit regression the matrix cannot.
+  The `main`-push table (`gh run view <id> --json jobs`) is in PR #225; the
+  merge's own push is a hot-path one (`.mise/tasks/bench/`).
 
 ### Phase E — Make a single-test flake stop costing a pipeline
 
