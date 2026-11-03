@@ -141,7 +141,30 @@ defmodule Ankusa.Intake.KafkaTest do
     # then acked on the next follower fetch turn instead of racing the first.
     wait_for_commit(topic)
 
+    # PROBE (throwaway): leader + ISR per broker for the topic the test is
+    # about to publish to, printed with a failing test's captured log.
+    Logger.info("[probe] create_topic #{topic}: #{inspect(probe_state(topic))}")
+
     topic
+  end
+
+  defp probe_state(topic) do
+    Enum.map(@hosts, fn host ->
+      with {:ok, metadata} <- get_metadata([host], [topic]),
+           [t] <- :kpro.find(:topics, metadata),
+           :no_error <- :kpro.find(:error_code, t) do
+        state =
+          Enum.map(:kpro.find(:partitions, t), fn p ->
+            {(:kpro.find(:partition_index, p, nil) || :kpro.find(:partition, p, nil)),
+             (:kpro.find(:leader_id, p, nil) || :kpro.find(:leader, p, nil)),
+             (:kpro.find(:isr_nodes, p, nil) || :kpro.find(:isr, p, []))}
+          end)
+
+        {host, state}
+      else
+        other -> {host, other}
+      end
+    end)
   end
 
   # A topic of the probe's own, so the tests' offsets stay theirs: three
@@ -354,6 +377,8 @@ defmodule Ankusa.Intake.KafkaTest do
         stderr_to_stdout: true
       )
 
+    # PROBE (throwaway): which drill ran before a failure.
+    Logger.info("[probe] docker compose #{Enum.join(args, " ")}: exit #{status}")
     assert status == 0, "docker compose #{Enum.join(args, " ")}: #{out}"
   end
 

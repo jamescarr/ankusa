@@ -1,0 +1,169 @@
+name: probe-kafka
+
+# CI-26 probe — throwaway, deleted with the branch. It measures the
+# `ankusa_kafka` suite on the CI runner: per-test timings idle vs. loaded
+# (`timings`), and ten independent runs of one commit (`flake`) to attribute
+# the `:unavailable` after the restart drills. Nothing here is a gate.
+
+on:
+  push:
+    branches: [ci/probe-CI26-kafka]
+
+env:
+  MISE_AUTO_INSTALL: "false"
+  MISE_HTTP_RETRIES: "6"
+
+jobs:
+  timings:
+    name: timings
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+    steps:
+      - &checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - &mise
+        uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.12
+          install_args: elixir erlang cmake
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-hex"
+      - &mixcache
+        name: cache mix deps
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            packages/ankusa_kafka/deps
+            packages/ankusa_kafka/_build
+          key: probe-mix-v1-${{ runner.os }}-${{ runner.arch }}-ankusa_kafka-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa_kafka/mix.lock') }}
+          restore-keys: |
+            mix-v21-${{ runner.os }}-${{ runner.arch }}-ankusa_kafka-${{ hashFiles('.mise.toml') }}-
+            probe-mix-v1-${{ runner.os }}-${{ runner.arch }}-ankusa_kafka-${{ hashFiles('.mise.toml') }}-
+      - &systemdeps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - &hex
+        run: mix local.hex --force && mix local.rebar --force
+      - &dockerlogin
+        name: Log in to Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - &containerd
+        run: scripts/ci/images.sh containerd
+      - &imagescache
+        name: cache the package's compose images
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/docker-images
+          key: images-v1-${{ runner.os }}-${{ runner.arch }}-ankusa_kafka-${{ hashFiles('packages/ankusa_kafka/docker-compose.yml') }}
+          restore-keys: |
+            images-v1-${{ runner.os }}-${{ runner.arch }}-ankusa_kafka-
+      - &imagessync
+        name: load the package's compose images
+        run: |
+          set -euo pipefail
+          refs=()
+          while IFS= read -r ref; do refs+=("$ref"); done < <(
+            docker compose -f packages/ankusa_kafka/docker-compose.yml config --images
+          )
+          scripts/ci/images.sh sync "${{ runner.temp }}/docker-images" "${refs[@]}"
+      - &cluster
+        name: cluster
+        run: cd packages/ankusa_kafka && docker compose up -d --wait
+      - &deps
+        name: deps and compile
+        run: |
+          set -euo pipefail
+          cd packages/ankusa_kafka
+          export MIX_ENV=test
+          mix deps.get --check-locked
+          mix compile
+      - name: run A — idle
+        run: |
+          set -euo pipefail
+          cd packages/ankusa_kafka
+          export MIX_ENV=test
+          mix test --seed 47493 --slowest 42 2>&1 | tee /tmp/run-a.log
+      - name: run B — every core busy
+        run: |
+          set -euo pipefail
+          pids=()
+          for _ in $(seq "$(nproc)"); do (while :; do :; done) & pids+=($!); done
+          ( cd packages/ankusa_kafka && export MIX_ENV=test && mix test --seed 47493 --slowest 42 2>&1 | tee /tmp/run-b.log ) || true
+          for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
+      - name: report
+        if: always()
+        run: |
+          for f in /tmp/run-a.log /tmp/run-b.log; do
+            echo "===== $f"
+            grep -E '^(Finished in|Result:|Failed:)' "$f" || true
+            sed -n '/slowest tests/,$p' "$f" | head -60 || true
+          done
+      - &imagessave
+        name: save the package's compose images
+        if: always()
+        run: |
+          set -euo pipefail
+          refs=()
+          while IFS= read -r ref; do refs+=("$ref"); done < <(
+            docker compose -f packages/ankusa_kafka/docker-compose.yml config --images
+          )
+          scripts/ci/images.sh save "${{ runner.temp }}/docker-images" "${refs[@]}"
+
+  flake:
+    name: flake ${{ matrix.run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    steps:
+      - *checkout
+      - *mise
+      - *mixcache
+      - *systemdeps
+      - *hex
+      - *dockerlogin
+      - *containerd
+      - *imagescache
+      - *imagessync
+      - *cluster
+      - *deps
+      - name: suite
+        id: suite
+        run: |
+          set +e
+          cd packages/ankusa_kafka
+          export MIX_ENV=test
+          mix test --slowest 42 > /tmp/suite.log 2>&1
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+      - name: report
+        if: always()
+        run: |
+          echo "===== suite"
+          grep -E '^(Running ExUnit|Finished in|Result:|Failed:)' /tmp/suite.log || true
+          sed -n '/slowest tests/,$p' /tmp/suite.log | head -60 || true
+          echo "===== reached_max_retries: $(grep -c reached_max_retries /tmp/suite.log || true)"
+          echo "===== first failure block"
+          sed -n '/^  1) test/,/^     The following output was logged/p' /tmp/suite.log | head -40 || true
+          echo "===== drill and topic log (probe instrumentation)"
+          grep -E '\[probe\]' /tmp/suite.log | tail -80 || true
+          echo "===== crash and its context"
+          grep -n -B 8 -A 24 'reached_max_retries' /tmp/suite.log | head -120 || true
+          echo "===== cluster"
+          docker compose -f packages/ankusa_kafka/docker-compose.yml ps || true
+          for b in kafka-1 kafka-2 kafka-3; do
+            echo "--- $b quorum"
+            docker compose -f packages/ankusa_kafka/docker-compose.yml exec -T "$b" \
+              /opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server localhost:9092 describe --status || true
+            echo "--- $b topics"
+            docker compose -f packages/ankusa_kafka/docker-compose.yml exec -T "$b" \
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list | wc -l || true
+          done
+      - *imagessave
