@@ -533,15 +533,18 @@ The always-on tests cover:
   retry_exceeds_claim_expiry`.
 - **Dispatch, per tenant** (`dispatch/isolation_test.exs`, `describe "per-tenant
   scheduling"`): `tenant fairness` runs a tenant at 99 times another's load
-  behind a slow sink and asserts the light tenant's p99 delivery lag is within
-  2× of its solo p99 (floor 25 ms), the heavy tenant never holds more claimed
-  rows than its window and never runs more attempts than its concurrency; a
-  page is split across the active tenants instead of going to the one with the
-  oldest rows; a breaker, and `sink_concurrency`, are per tenant (one tenant's
-  failing or slow sink parks or holds nothing of another's); a tenant's own
-  `dispatch.tenants` window caps what it claims, and
-  `ankusa_dispatch_tenant_inflight` reports it and then reports 0. The new
-  keys' ranges are in `config_test.exs`. `bench/tenant_fairness_bench.exs`
+  behind a slow sink and asserts the light tenant's p99 delivery lag — measured
+  from the hook's store commit returning to the sink call, so the mixed
+  instance's RocksDB write is a number printed beside the failure instead of
+  inside the window — is within 2× of its solo p99 (floor 25 ms), the heavy
+  tenant never holds more claimed rows than its window and never runs more
+  attempts than its concurrency; a page is split across the active tenants
+  instead of going to the one with the oldest rows; a breaker, and
+  `sink_concurrency`, are per tenant (one tenant's failing or slow sink parks
+  or holds nothing of another's); a tenant's own `dispatch.tenants` window caps
+  what it claims, and `ankusa_dispatch_tenant_inflight` reports it and then
+  reports 0. The new keys' ranges are in `config_test.exs`.
+  `bench/tenant_fairness_bench.exs`
   (`MIX_ENV=test mix run bench/tenant_fairness_bench.exs`, not part of
   `bench:gate`) runs the same 99:1 load through the edge and prints both
   tenants' p99.
