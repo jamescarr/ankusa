@@ -259,13 +259,13 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 19/26 done · closed without meeting the bar: CI-9 · next: CI-22, CI-26 · last updated: 2026-11-03
+Status: 20/26 done · closed without meeting the bar: CI-9 · next: CI-26 · last updated: 2026-11-03
 
-`main` is **green** at `7ba2866d` (CI-21's merge, run 41712366064): the whole
-graph, including `ankusa (tests, 4/4)` and `ankusa (coverage)`. The two earlier
-reds: run 41689506568 (`902e3dcb`) failed `ankusa (tests, 4/4)` (CI-21, fixed by
-#272) and `lint` (CI-22); run 41702699820 (`e53e3d32`) failed `ankusa_kafka`
-40/42 (CI-26 — two `publish_batch` tests after a brod
+`main` is **green** at `5e9d5cc7` (#273's merge, run 41713817512): the whole
+graph. The two earlier reds: run 41689506568 (`902e3dcb`) failed `ankusa (tests,
+4/4)` (CI-21, fixed by #272) and `lint` (CI-22, fixed by #274 — the 17-tool
+`mise run` auto-install behind it is gone); run 41702699820 (`e53e3d32`) failed
+`ankusa_kafka` 40/42 (CI-26 — two `publish_batch` tests after a brod
 `{:reached_max_retries, :shutdown}`), which did **not** recur on the next
 `main` run, so CI-26 is a flake to attribute, not a standing red.
 
@@ -1694,7 +1694,7 @@ which it does when a measured red run outranks a slow pipeline.
 
 ### Phase K — The toolchain, the shards and the gate's legs
 
-- [ ] **CI-22 — Every `mise run` installs the whole 19-tool monorepo toolchain, and one 500 from a tool download reddens the run** · P1 · Deps: —
+- [x] **CI-22 — Every `mise run` installs the whole 19-tool monorepo toolchain, and one 500 from a tool download reddens the run** · P1 · Deps: —
   *Why:* mise loads `.mise/conf.d/*.toml` repo-wide, so the config declares 19
   tools in every directory, and its task runner auto-installs every missing
   declared tool before a task runs (`auto_install` / `task.run_auto_install`,
@@ -1755,7 +1755,53 @@ which it does when a measured red run outranks a slow pipeline.
   mise-action step, the package job's `the package's toolchain` step, the six
   `uses: jdx/mise-action` steps without `install_args`), `.mise.toml`
   (`[tools]`), `.mise/conf.d/*.toml`, `docs/testing.md`, `AGENTS.md` (Commands).
-  *Evidence:* —
+  *Evidence:* PR #274. `env: MISE_AUTO_INSTALL: "false"` and
+  `MISE_HTTP_RETRIES: "6"` at `ci.yml`'s top level; the six jobs that passed no
+  `install_args` now name their set — `integration`, `bench`, `bench-tenant`,
+  `crash`: `elixir erlang cmake` (on the `-hex` cache entry the `ankusa` package
+  job keeps); `examples`: `elixir erlang cmake node uv rust helm kubectl
+  kubeconform kind` (`check:examples` itself never shells out to `kind` or
+  `kubectl` — it renders the fleet chart's values with helm — but the set is
+  the one this item lists); `conformance`: `elixir erlang cmake node uv rust
+  ruby go java sbt clojure http:php http:composer`, read off
+  `.mise/tasks/check/conformance` + `conformance/sdks.json`. `docs/testing.md`
+  gained "The job's toolchain, and nothing else (CI-22)"; `AGENTS.md`'s Commands
+  rows make no claim about `mise run` bringing the toolchain, so they are
+  unchanged. Measured on run **41715254649** (the PR's own run, every job green;
+  `bench` and `bench-tenant` correctly skipped by `bench-scope`): 26 mise-action
+  steps, **each logging exactly one `mise by @jdx – installing N tools` line —
+  the action's own — and no job a second one** (run 41700744695 logged 32, two
+  per job). `ankusa_server` `3/3 · installed 0 tools · 3 already installed in
+  226ms` (was: a second `installing 16 tools` at 19:11:09.971 → `installed 16
+  tools in 11.3s` at 19:11:21.251); `ankusa_kafka` `3/3 · 140ms` (was 16 tools
+  in 14.5 s, 19:11:40.913 → 19:11:55.405); `examples` `10/10 · installed 1 tool ·
+  9 already installed in 7.7s` (was `19/19`); `sdk conformance` `13/13 · 9.2s`;
+  `integration`, `crash`, `tools` `3/3` in 197–283 ms; `lint` `2/2 · 136ms` and
+  **no** second line at all (was `installing 17 tools` at 17:59:56.301 and
+  `installed 16 tools · 1 failed in 11.3s` on ruby's 500, run 41689506568).
+  `bench` and `bench-tenant` are outside that diff's scope, so they ran on
+  throwaway probe PR #275 (closed unmerged, branch deleted): `perf gate` pass in
+  8m22s (job 126192642505) and `bench-tenant` pass in 4m13s (job 126192642664),
+  both `3/3 · installed 0 tools` with `MISE_AUTO_INSTALL=false` in the step env.
+  Forced-500 probe (branch `probe/ci-22-mise-retries`, closed unmerged, deleted;
+  run **41715076762**, mise 2026.10.12): a local server answers 500 to a one-file
+  `http:` tool and then serves it. With `MISE_HTTP_RETRIES=6` and a URL that
+  always answers 500 mise makes six retries — `attempt 1 … retrying in 155.3ms`,
+  `attempt 2 … 721.3ms`, `attempt 3 … 2.0s`, `attempt 4 … 14.2s`, `attempt 5 …
+  12.6s`, `attempt 6 … 13.3s` (20:41:05.639 → 20:41:35.318) — then fails at
+  20:41:48.660: `mise ERROR Failed to install http:probe@1.0.0: HTTP status
+  server error (500)`, **43.0 s and 7 requests**; with the default
+  (`MISE_HTTP_RETRIES` unset) the same URL fails after `attempt 3` in **4.2 s**
+  (4 requests). With the server answering 200 on the seventh request the same
+  install **succeeds**: `http:probe@1.0.0  38.6s`, `1/1 · installed 1 tool`, and
+  the tool runs (`probe-tool-ok`). The same probe with
+  `MISE_AUTO_INSTALL=false`: `mise run lint:workflows` green with no `installing`
+  line, and `mise run` on a task calling a declared but uninstalled tool fails at
+  the command — `[needs-probe] $ probe-tool --version` / `sh: 1: probe-tool: not
+  found` / `ERROR task failed`, exit 127, no download attempted.
+  `mise run lint:workflows` and `mise run lint:pins` pass locally.
+  `release*.yml`, `e2e.yml` and `soak.yml` keep their own mise config and are
+  out of this item's scope.
 
 - [ ] **CI-23 — Cost-balance the four shards: one shard carries 5.5× another's test time and is the run's critical path** · P2 · Deps: CI-17
   *Why:* `mix test --partitions K` assigns whole test *files* without knowing
