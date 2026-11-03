@@ -90,8 +90,12 @@ jobs:
                 rest="$rest${rest:+,}\"$name\""
               fi
             done
-            [ -n "$out" ] || out="-"
-            [ -n "$rest" ] || rest="-"
+            # An empty matrix is a workflow error, so "nothing to run" is the
+            # one-element `["-"]`; the `package` job's `if:` is what keeps it
+            # from expanding. Quoted, because `[-]` is not JSON and
+            # `fromJSON('[-]')` fails the run with no job to show for it.
+            [ -n "$out" ] || out='"-"'
+            [ -n "$rest" ] || rest='"-"'
             {
               echo "packages=[$out]"
               echo "packages_rest=[$rest]"
