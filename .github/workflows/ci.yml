@@ -622,7 +622,7 @@ jobs:
       # the test failure that caused it. The run is red either way.
       fail-fast: false
       matrix:
-        partition: [1, 2, 3, 4]
+        partition: [1, 2, 3]
     env:
       # Fork PRs get no secrets; skip the login there rather than fail it.
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
