@@ -194,9 +194,35 @@ docs/testing.md records them within 3 % of each other on the recording machine.
 So the legs are measuring different states of the runner/bench store, and the
 median of three such samples cannot support a 1.2× decision.
 
+### Current state (30 runs, 2026-11-03 11:00 … 16:20Z — after CI-14…CI-19)
+
+- **Wall clock 10.5 min median, 14.2 p90** over 26 non-cancelled runs (the
+  window straddles CI-17's merge), against 11.5 min in the 03:57 window and
+  30.0 min in the baseline.
+- **1 genuine red of 26 (3.8 %)**: `main` 41625156213, `ankusa (tests)`, the
+  `Ankusa.DrainTest` `/ready` flip — fixed by CI-19. Five other red runs are
+  this loop's own proofs (CI-9's two, CI-18's two, CI-15's deadline probe), each
+  exactly one failing job. Against 6 of 30 (20 %) an hour earlier and 12 of 30
+  (40 %) in the baseline.
+- `ankusa (tests)` 9.3 min median (n=25) through most of the window; **CI-17
+  landed at the end** and the last runs show four shards — 4.5 / 2.1 / 3.8 /
+  2.1 min plus `ankusa (coverage)` 41 s, **292 s from the first shard's start to
+  the merge's end** on run 41679004989, merged coverage 89.22 %.
+- **PR wall clock after CI-17: 5.2–6.4 min** (5.2, 5.3, 5.4, 6.2, 6.3, 6.4, 7.0
+  on the last seven runs) on a 33-job pipeline. The longest job is a shard
+  (4.2–4.5 min) or `ankusa_kafka` (5.3–6.6 min).
+- **`perf gate` is now the outlier: 12.0 / 12.2 / 13.8 min** on the three runs
+  where it measured. It runs only on a hot-path diff, so it no longer touches
+  the median — but it *is* the wall clock of any hot-path PR (CR-2 and CR-3 of
+  the feature plan), at 2.3× the rest of the pipeline. Job 125809478781's
+  12m9s: setup 46 s, base leg 5m35s (**4 discarded warm-ups = 84 s**, 12
+  measured runs ≈ 4m10s), branch leg 5m40s — 28 runs at ~21 s each. CI-20.
+- Jobs per run rose from ~29 to 33 with the shards and the merge job: the queue
+  note in the Backlog matters more, not less.
+
 ## Task list
 
-Status: 17/19 done · closed without meeting the bar: CI-9 · next: CI-13 · last updated: 2026-11-03
+Status: 17/20 done · closed without meeting the bar: CI-9 · next: CI-20, CI-13 · last updated: 2026-11-03
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -1458,6 +1484,51 @@ which it does when a measured red run outranks a slow pipeline.
   costs 0 docker jobs and 0 docker seconds instead of 3 jobs and ~135 s.
   `mise run lint:workflows` and `mise run lint:pins` green.
 
+### Phase J — The perf gate is now the critical path
+
+- [ ] **CI-20 — The perf gate's warm-up costs 84 s per leg, and the gate is now 2.3× the rest of the pipeline** · P2 · Deps: CI-14
+  *Why:* CI-17 took the test lane from 9.8 to ~4.9 min (four shards + merge, 292 s
+  on run 41679004989), so a PR whose diff touches a hot-path file is now wall
+  clocked by `perf gate` alone: **12.0 / 12.2 / 13.8 min** on the three runs
+  where it measured, while every other job finishes under 7. Job 125809478781's
+  12m9s decomposes as setup 46 s, **base leg 5m35s** and **branch leg 5m40s**,
+  each leg being 4 discarded warm-up runs (**84 s**) + 12 measured runs
+  (~4m10s) at ~21 s a run for 20 000 hooks. The warm-up is CI-14's addition and
+  it earned its place (it is what removes the first-round drift); its *size*
+  never had to be the measured size — 84 s per leg is 23 % of the job, and 2m48s
+  of the 12m9s is spent warming a code path, not measuring one.
+  *Change:* fix the cost of the warm-up, never the measurement's strictness —
+  `@gates`, `@matrix`, `BENCH_RUNS`, `BENCH_CONFIRM`'s default, the confirm
+  round and CI-14's settle/omit policy all stay exactly as they are.
+  1. Make the warm-up's size a constant of its own (`@warmup_n`, or a
+     `BENCH_WARMUP_N` knob defaulting to it) instead of the measured `@n`, and
+     use a small run count (the shape the item's measurement decides, e.g.
+     2 000 hooks at each cell's body size and concurrency).
+  2. Measure that it still does its job: three `BENCH_RUNS=3` gate runs on an
+     unchanged tree with the short warm-up, per-cell round medians, against the
+     same three runs with the full-size warm-up (CI-14's evidence is the
+     reference for the drift it removes). A cell whose round medians are wider
+     than the limit's headroom on the short warm-up means the short warm-up does
+     not warm that path: keep the full size for that cell and say so.
+  3. Print the warm-up's size in the run's log lines (`bench <cell> warm-up
+     (discarded, N hooks)`) so the next measurement can see it.
+  4. `docs/testing.md` "Perf gate": the warm-up is a fixed small run, and why
+     it is smaller than the measured one.
+  *Done when:* on a hot-path PR the `perf gate` job is **≥2 min faster** with
+  all four cells settled and the same verdicts (each cell's deltas inside the
+  limit, `PASS`), the round medians of the three-run table still agreeing inside
+  the limit's headroom, and `git diff` showing no change to `@gates`, `@matrix`
+  or the confirm/settle logic; or, if the short warm-up does not settle a cell,
+  the item closes with the three-run tables in *Evidence* and that cell's full
+  warm-up restored.
+  *Proof:* the two three-run tables (full vs short warm-up) with per-cell round
+  medians; the hot-path PR's `perf gate` duration next to 12m9s (job
+  125809478781); `mise run bench:gate` locally; `mise run lint:workflows`.
+  *Anchors:* `packages/ankusa/bench/gate.exs` (`@n`, `warmup/3`, `collect/5`,
+  `@spread_retries`, the header's warm-up paragraph),
+  `.github/workflows/ci.yml` (`bench` job), `docs/testing.md` "Perf gate".
+  *Evidence:* —
+
 ## Backlog (not yet an item)
 
 - **SQS FIFO batch order** — `Ankusa.Sink.SQSIntegrationTest` "sqs batch order:
@@ -1471,12 +1542,23 @@ which it does when a measured red run outranks a slow pipeline.
   measurements, not ordering guarantees); if the harness's own batching is what
   reorders, fix the wait.
 - **Runner concurrency during a burst** — ~25 jobs per run against the account's
-  concurrent-job limit: with eight runs in flight the queue lead went to 2–9.3
-  min (median 0.2, p90 1.5 over 26 runs), and one `main` push waited 9.3 min
-  before its first job started. Not an item yet: the wall clock is the suite
-  (CI-9/CI-17), and folding the nine single-minute SDK jobs into fewer would cut
-  slots but lengthen each lane. Revisit if CI-17 lands and queueing is then a
-  visible share of the median.
+  concurrent-job limit, now **33 jobs** after CI-17's four shards and the merge
+  job: with eight runs in flight the queue lead went to 2–9.3 min (median 0.2,
+  p90 1.5 over 26 runs), and one `main` push waited 9.3 min before its first job
+  started. Not an item yet: after CI-17 the wall clock is a shard (4.2–4.5 min)
+  or `perf gate`, both long enough that a few minutes of queue rarely shows;
+  re-measure once CI-20 lands and treat it as an item if the lead is a visible
+  share of a 5-minute pipeline. The candidates are folding the nine single-
+  minute SDK jobs into three, and dropping `bench-scope` into `changes`.
+- **`ankusa_kafka` is now the longest non-shard job** — 3.8 min median but
+  5.3–6.6 min on the long tail (runs 41681081948, 41683881288, 41679953968),
+  where it decides the PR's wall clock. CI-12 fixed the readiness wait; the tail
+  is five containers (three brokers, redpanda, toxiproxy) plus the fault tests.
+  An item if it stays above a shard after CI-20.
+- **`Ankusa.BlobStore.PoolTest`** — one local observation (`ankusa (tests)`,
+  2026-11-03, a pool-timing test): fails in a full run, passes in isolation and
+  passed in the CI lane on the same commit. Not enough samples to attribute;
+  collect ten full-lane runs before touching it.
 - **`ci-summary` as the measuring tool** — it now writes the per-job table to
   `$GITHUB_STEP_SUMMARY`; a second line with the *critical path* (first start →
   last end, and the job that ends last) would make the next measurement one
@@ -1506,7 +1588,7 @@ bisect.
 
 ## Verification of this plan
 
-- `grep -cE '^- \[[ x]\] \*\*CI-' CI_PIPELINE_PLAN.md` → 17 (the number of
+- `grep -cE '^- \[[ x]\] \*\*CI-' CI_PIPELINE_PLAN.md` → 20 (the number of
   items; fewer ticked as they land, and the count matches the `Status:` line's
   denominator).
 - Every *Anchors* path exists at the commit the item is executed on (re-read the
