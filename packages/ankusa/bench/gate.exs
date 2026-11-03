@@ -670,8 +670,10 @@ defmodule Bench.Gate do
   end
 
   # The closing line for a run with cells that were not judged, e.g.
-  # `1 cell inconclusive (512B-c32, over limit by 6.2%): not judged, see the
-  # step summary`. Deliberately not `PASS`: nothing was decided either way.
+  # `1 cell inconclusive (512B-c32): not judged, see the step summary`; a cell
+  # that is also over its limit carries that note, e.g.
+  # `512B-c32 (p99_ms over limit by 6.2%)`. Deliberately not `PASS`: nothing
+  # was decided either way.
   defp inconclusive_summary(inconclusive, rows) do
     cells =
       Enum.map_join(inconclusive, ", ", fn {cell, _spread, _samples} ->
