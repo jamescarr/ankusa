@@ -307,6 +307,31 @@ defmodule Ankusa.Sink.RabbitMQTest do
   defp connection(inst, exch, url \\ @amqp_url),
     do: Ankusa.whereis(inst, RabbitMQ.connection_key(url, exch))
 
+  # The registry drops a dead process's key in its partition process, after the
+  # monitor's `:DOWN` and after the AMQP connection's exit: reading the table
+  # the instant the AMQP process dies can still see the entry. Poll the same
+  # lookup until the registry has caught up, then assert once. A registration
+  # that outlives the deadline is a real leak, and this fails on it.
+  defp await_unregistered(inst, exch, deadline_ms \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + deadline_ms
+    do_await_unregistered(inst, exch, deadline)
+  end
+
+  defp do_await_unregistered(inst, exch, deadline) do
+    case connection(inst, exch) do
+      nil ->
+        :ok
+
+      pid ->
+        if System.monotonic_time(:millisecond) > deadline do
+          flunk("the registry still names #{inspect(pid)} after the connection exited")
+        else
+          Process.sleep(10)
+          do_await_unregistered(inst, exch, deadline)
+        end
+    end
+  end
+
   test "a publish whose caller already gave up is answered :expired and never sent", %{
     instance: inst,
     exchange: exch,
@@ -405,6 +430,7 @@ defmodule Ankusa.Sink.RabbitMQTest do
     sweep_as_idle(key)
 
     assert_receive {:DOWN, ^ref, :process, ^amqp, _reason}, 5_000
+    await_unregistered(inst, exch)
     assert connection(inst, exch) == nil
 
     assert :ok = deliver_when_connected(envelope(), ctx(inst), opts)
