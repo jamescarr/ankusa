@@ -18,6 +18,7 @@ defmodule Ankusa.Intake.KafkaTest do
   # same room, and it runs on this budget too.
   @moduletag timeout: 480_000
 
+  require Logger
   require Record
 
   alias Ankusa.Intake.Kafka

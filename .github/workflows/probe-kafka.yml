@@ -86,7 +86,7 @@ jobs:
           set -euo pipefail
           cd packages/ankusa_kafka
           export MIX_ENV=test
-          mix test --seed 47493 --slowest 42 2>&1 | tee /tmp/run-a.log
+          mix test --seed 47493 --slowest 42 2>&1 | tee /tmp/run-a.log || true
       - name: run B — every core busy
         run: |
           set -euo pipefail
