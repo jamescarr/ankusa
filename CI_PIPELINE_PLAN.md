@@ -455,7 +455,7 @@ priority, ID order.
 
 ### Phase D — Shorter critical path
 
-- [ ] **CI-6 — Split the `ankusa` job into a static-analysis lane and a test lane, each with its own cache key** · P2 · Deps: CI-1
+- [x] **CI-6 — Split the `ankusa` job into a static-analysis lane and a test lane, each with its own cache key** · P2 · Deps: CI-1
   *Why:* after CI-1 the `ankusa` job is still the whole critical path: compile +
   `credo --strict` + PLT + dialyzer + sobelow is 2:30–3:15 and
   `mix test --cover` is 6:24–8:14, run one after the other in one job. The two
@@ -483,7 +483,25 @@ priority, ID order.
   *Anchors:* `.mise/tasks/check/package`, `.github/workflows/ci.yml` (the
   `ankusa` matrix entry and its cache step), `.mise/lib/mix_cache.sh`,
   `docs/testing.md` (the "what each suite covers" table).
-  *Evidence:* —
+  *Evidence:* PR #224. Run 41550052881 (both lanes green on their first run):
+  `ankusa (static)` **1:19** — dialyzer `Total errors: 0`, docs and
+  `hex.build` included — and `ankusa (tests)` **9:38** (suite 8:47), against
+  the 10.4 min single `ankusa` job of run 41531241640. Wall clock (first job
+  start → last job end) **9:46**; the gate skips a diff with no hot-path file.
+  Both lanes warmed on that first run through their second restore prefix
+  (`Cache hit for restore-key: mix-v19-Linux-X64-ankusa-…`, the pre-split
+  full tree); on the merged head (run 41554012789) each restored its own key
+  instead (`mix-v19-…-ankusa-test-…`): `ankusa (static)` **1:17**,
+  `ankusa (tests)` **8:41** red on one pre-existing latency assertion
+  (`Ankusa.Edge.FleetTest`, 213 ms against a 200 ms budget) and **7:07** green
+  on `gh run rerun --failed`. The test lane is suite-bound — ~40 s of preamble
+  plus `mix test --cover` — so its floor tracks the suite, not the split.
+  Locally: `--lane static` 1:09; `--lane test` green (seed 126436); the bare
+  `mise run check:package ankusa` green (seed 982202, 21:08 on a loaded
+  laptop: both envs warmed, every step in the original order, same package
+  checksum as main's). Two earlier local runs failed only on the known
+  `Ankusa.Dispatch.IsolationTest` flakes. `mise run lint:workflows` and
+  `lint:pins` pass.
 
 ## Backlog (not yet an item)
 

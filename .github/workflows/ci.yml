@@ -24,10 +24,28 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       packages: ${{ steps.discover.outputs.packages }}
+      packages_rest: ${{ steps.discover.outputs.packages_rest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: discover
-        run: source .mise/lib/pkg.sh && echo "packages=$(pkg_json)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          source .mise/lib/pkg.sh
+          echo "packages=$(pkg_json)" >> "$GITHUB_OUTPUT"
+          # `ankusa` is not in the matrix: its analysis and its suite run side
+          # by side as `ankusa-static` and `ankusa-test` below, so the suite no
+          # longer queues behind dialyzer. Every other package keeps the
+          # one-job-per-package shape. `packages` stays for anything that wants
+          # the whole list.
+          rest="["
+          sep=""
+          for name in $(pkg_names); do
+            if [ "$name" != ankusa ]; then
+              rest="$rest$sep\"$name\""
+              sep=","
+            fi
+          done
+          echo "packages_rest=$rest]" >> "$GITHUB_OUTPUT"
 
   lint:
     name: lint
@@ -59,7 +77,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: ${{ fromJSON(needs.discover.outputs.packages) }}
+        # Every package but `ankusa`, which has the two lane jobs below.
+        package: ${{ fromJSON(needs.discover.outputs.packages_rest) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # A package job needs one toolchain, not the repo's whole set: the
@@ -268,9 +287,119 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  # `ankusa` — the package everything else depends on — was the whole critical
+  # path of a run: one job ran compile + credo + PLT + dialyzer + sobelow
+  # (2:30–3:15) and then `mix test --cover` (6:24–8:14) one after the other. The
+  # two halves share nothing but `deps/` and the compiled project, so they run
+  # as two jobs, each calling the same task a developer runs with `--lane`, and
+  # a static failure now reports in ~3 min instead of after the suite.
+  #
+  # One writer per key (CI-1's rule): `ankusa-static` saves
+  # `…-ankusa-static-…`, `ankusa-test` saves `…-ankusa-test-…`, and neither
+  # writes the pre-split `…-ankusa-<toolchain>-<lock>` entry. The first run of
+  # each lane therefore restores that full tree (`dev`+`test`+`prod`,
+  # everything the old job kept warm) through its second restore prefix: that
+  # is the warm start. `v19` is the version the pre-split entry was written
+  # under — the escape hatch (one writer per key, actions/cache never re-saves
+  # a key) is to bump it here and in the `package` job together.
+  ankusa-static:
+    name: ankusa (static)
+    needs: discover
+    runs-on: ubuntu-latest
+    env:
+      # Fork PRs get no secrets; skip the login there rather than fail it.
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `ankusa` is kind `hex`, so this is exactly what the `package` job's
+      # `toolchain` step resolves for that kind — `elixir erlang cmake` (cmake
+      # for the RocksDB NIF) — instead of restoring the 655 MB shared cache.
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.12
+          install_args: elixir erlang cmake
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-hex" # the default key skips .mise/conf.d/
+      - name: cache mix deps
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            packages/ankusa/deps
+            packages/ankusa/_build
+          key: mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-static-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          restore-keys: |
+            mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-static-${{ hashFiles('.mise.toml') }}-
+            mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-${{ hashFiles('.mise.toml') }}-
+      # Only the Mix projects compile rocksdb's NIF (see the `package` job).
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - run: mix local.hex --force && mix local.rebar --force
+      - name: Log in to Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # deps, `hex.audit`, format, `compile --warnings-as-errors`, credo, PLT
+      # restore/save, dialyzer, sobelow, `mix docs`, `mix hex.build` — the lane
+      # warms the `dev` env these run in.
+      - run: mise run check:package ankusa --lane static
+        env:
+          # `mix hex.audit`'s report (retired packages, advisories), kept below.
+          HEX_AUDIT_LOG: ${{ runner.temp }}/hex-audit-ankusa.txt
+      # Even when the audit failed the job: the report says which dependency.
+      - name: Upload the hex audit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hex-audit-ankusa
+          path: ${{ runner.temp }}/hex-audit-ankusa.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+  ankusa-test:
+    name: ankusa (tests)
+    needs: discover
+    runs-on: ubuntu-latest
+    env:
+      # Fork PRs get no secrets; skip the login there rather than fail it.
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.12
+          install_args: elixir erlang cmake
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-hex" # the default key skips .mise/conf.d/
+      # Same shape as the static lane, its own key: `deps/` plus `_build` with
+      # the `test` env compiled (the suite never reads `dev`).
+      - name: cache mix deps
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            packages/ankusa/deps
+            packages/ankusa/_build
+          key: mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-test-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          restore-keys: |
+            mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-test-${{ hashFiles('.mise.toml') }}-
+            mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-${{ hashFiles('.mise.toml') }}-
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - run: mix local.hex --force && mix local.rebar --force
+      - name: Log in to Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # `mix test --cover` (the coverage floor is the package's own) and the
+      # ExUnit seed line in the step summary; the lane warms `test` only. The
+      # audit and its `hex-audit-ankusa` artifact stay in the static lane —
+      # `hex.audit` runs there, and two jobs must not upload one artifact name.
+      - run: mise run check:package ankusa --lane test
+
   # Core's object-store adapters (and the S3 backup round trip) against the
   # floci emulators: `mix test --only integration` (the rest of core's suite
-  # runs in the `ankusa` package job).
+  # runs in the `ankusa-test` job).
   integration:
     name: core integration (floci)
     runs-on: ubuntu-latest
