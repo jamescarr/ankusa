@@ -195,10 +195,18 @@ jobs:
                 case "$path" in
                   packages/ankusa/*) integration=true ;;
                 esac
-                # The crash drills ack through the built image: any core or
-                # adapter code, the image, and the drills' own scripts. Kept
-                # deliberately wide — the drills are the ack-path gate.
+                # The crash drills ack through the built image: the ack path
+                # by name first (`queue/writer.ex`, `store.ex`,
+                # `edge/batcher.ex` and their `queue/`, `store/`, `edge/`
+                # siblings), then anything else under core's `lib`, the image
+                # and every adapter. Deliberately a superset: the drills are
+                # the ack-path gate, so only a diff that touched none of it
+                # skips them.
                 case "$path" in
+                  packages/ankusa/lib/ankusa/queue/writer.ex | packages/ankusa/lib/ankusa/store.ex | packages/ankusa/lib/ankusa/edge/batcher.ex)
+                    drills=true ;;
+                  packages/ankusa/lib/ankusa/queue/* | packages/ankusa/lib/ankusa/store/* | packages/ankusa/lib/ankusa/edge/*)
+                    drills=true ;;
                   packages/ankusa/lib/* | packages/ankusa/mix.exs | packages/ankusa/mix.lock)
                     drills=true ;;
                   packages/ankusa_server/* | packages/ankusa_*/lib/* | packages/ankusa_*/mix.exs)

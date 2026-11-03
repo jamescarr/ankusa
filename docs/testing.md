@@ -1189,7 +1189,8 @@ local run uses whatever your daemon already has.
   `acked=9344 recovered=5600 missing=3744` and exit status 1. It needs `docker run
   --privileged` with loop and device-mapper support in the Docker host's
   kernel and exits `2` where it has neither. CI runs it as the job
-  `crash-powerloss` on every PR and every push to `main` (GitHub's
+  `crash-powerloss` on every push to `main` and on every PR whose diff touches
+  core's or an adapter's `lib`, or `packages/ankusa_server/Dockerfile` (GitHub's
   `ubuntu-latest` allows it; on a runner that does not, the job reports a
   skip), and `release:preflight` reads that job's result line for the commit
   being tagged before a core tag, instead of running the drill. When the job

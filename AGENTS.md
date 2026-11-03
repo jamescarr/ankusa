@@ -153,7 +153,7 @@ every one of them:
 
 | Drill | Where CI runs it |
 | --- | --- |
-| `test:crash`, `scripts/drills/flakey.sh` | `ci.yml`'s two `crash drill` jobs: every PR, every push to `main` |
+| `test:crash`, `scripts/drills/flakey.sh` | `ci.yml`'s two `crash drill` jobs: every push to `main`, and every PR whose diff touches core's `lib`, an adapter's `lib`, or `packages/ankusa_server/Dockerfile` — which includes the ack path (`queue/writer.ex`, `store.ex`, `edge/batcher.ex`) |
 | `examples/fleet-e2e/run.sh` (`--replay-drill`, `--wal dual\|disk --kill-node`) | `e2e.yml`'s `fleet end to end (compose)`: nightly, every release tag, and PRs that touch `examples/fleet-e2e/**`, `tools/loadgen/**` or the server `Dockerfile` |
 | `mise run e2e` (kind: the Oban consumer, the Helm fleet) | `e2e.yml`'s `kind end to end`: nightly, every release tag |
 | `bench:soak` (3600 s) | `soak.yml`: nightly |
