@@ -196,7 +196,7 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 11/17 done · next: CI-14, CI-9, CI-16, CI-15, CI-17 · last updated: 2026-11-03
+Status: 12/17 done · next: CI-9, CI-16, CI-15, CI-17 · last updated: 2026-11-03
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -1025,7 +1025,7 @@ which it does when a measured red run outranks a slow pipeline.
 
 ### Phase H — The red runs no diff caused
 
-- [ ] **CI-14 — The perf gate's base leg fails the job when it cannot settle a cell** · P1 · Deps: CI-11
+- [x] **CI-14 — The perf gate's base leg fails the job when it cannot settle a cell** · P1 · Deps: CI-11
   *Why:* run 41586954095 (`main`, commit `77e22b6f`, CI-11's own merge, nothing
   changed since its green PR run) went red in `perf gate`:
 
@@ -1088,7 +1088,47 @@ which it does when a measured red run outranks a slow pipeline.
   `unsettled/3`/`wide/2`/`unstable/3`, `report/5`, the rebaseline `cond`),
   `.github/workflows/ci.yml` (`bench` job, "measure the base commit on this
   runner"), `docs/testing.md` "Perf gate".
-  *Evidence:* —
+  *Evidence:* PR #250. Diagnosis: three `BENCH_RUNS=3 BENCH_TRACE=1` gate runs
+  on an unchanged tree, p99 per run per round in the PR body (local bench data
+  on a 4 GiB RAM disk — macOS has no `/dev/shm` — and the laptop was under load
+  average 11–14 while other agents worked). That machine settles no cell in
+  either shape (8 of 12 cell-runs inconclusive before, 6 of 12 after) and its
+  first-round median was not systematically higher (0.78×–1.23× of the later
+  rounds): the monotone trend the CI run showed is a first-run cost the busy
+  machine buries, so the warm-up is the item's measured cheap discard (one run
+  per cell per leg, feeding neither the medians nor the spread), and the safety
+  comes from the policy below. Change: `warmup/3`; the `BENCH_REBASELINE=1`
+  branch writes the settled cells, leaves an unsettled one out, prints the
+  CI-11 `INCONCLUSIVE` line + `::warning::` + step summary and exits 0;
+  `evaluate/3` skips a cell absent from the baseline (never a pass) and the
+  branch leg reports it `inconclusive` once, naming the missing entry; every
+  other cell keeps its judgement. `@gates`, `@matrix`, `@spread_retries`,
+  `BENCH_CONFIRM` untouched. CI: PR #250's own `perf gate` is green twice on
+  the same runner — run 41604058589 / job 125809478781 (12m9s, all four cells
+  settled, deltas −5.8 %…+3.9 %) and rerun 41608411532 / job 125824087558
+  (15m28s) — and the two throwaway PRs (closed unmerged, branches deleted) are
+  the proofs. #251 (`BENCH_SELF_TEST_INCONCLUSIVE: 512B-c32`), run 41608424667
+  / job 125824024592: base leg prints `INCONCLUSIVE p99_ms 512B-c32: samples
+  span 3.10× …`, `rebaselined … without 512B-c32`, exits 0; branch leg prints
+  the same line plus `— and the baseline has no entry for it, so it cannot be
+  judged`, one `::warning::`, `1 cell inconclusive (512B-c32): not judged`, and
+  the job is green (16m8s) with the other cells `ok` (`512B ingest_per_s
+  21251.00 vs 21816.10`, `10240B p99_ms 54.50 vs 55.01`). #252 (the switch plus
+  `Process.sleep(20)` at the top of `Ingest.ingest/2`), run 41611183268 / job
+  125833239480: `perf gate` **fails** (21m4s) with `1 cell inconclusive
+  (512B-c32)` and `FAIL p99_ms 512B: 45.90 > 1.2×29.16`, `FAIL ingest_per_s
+  512B: 10615.85 < 0.8×23475.03`, `FAIL ingest_per_s 10240B`, `FAIL p99_ms
+  512B-ordered`; two reruns of that commit (attempt 2, job 125845714830;
+  attempt 3, job 125858306136) are the same verdict. The item's `sleep(1)`
+  cannot fail a judged cell here: measured at 41604135537 / job 125810067182 it
+  left `512B ingest_per_s 20575.28 vs 19647.27` (+4.7 %), and `sleep(5)` at
+  41608453549 / job 125824475220 left `19399.77 vs 22047.58` (−12.0 %), both
+  inside the 20 % the 0.8× limit allows — 1 ms is 8 % of a 256-worker cell's
+  ~12 ms service time, and CI-2's own `sleep(1)` proof failed only
+  `ingest_per_s 512B-c32`, the cell the switch unjudges; `sleep(20)` is the same
+  class of regression, sized to the runner. `mise run bench:gate` locally,
+  `mise run lint:pins`, `mise run lint:workflows`; `git diff` is
+  `packages/ankusa/bench/gate.exs`, `docs/testing.md` and this file.
 
 - [ ] **CI-15 — Finish the two flakes CI-8 left: the RabbitMQ idle reaper and the `ankusa_redis` deadline** · P2 · Deps: —
   *Why:* CI-8 fixed the tenant-fairness measurement (#248) and CI-12 the Kafka

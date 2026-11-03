@@ -1453,11 +1453,19 @@ with every run's sample, the table's verdict column says `inconclusive`, a
 `::warning::` annotation and a line in the job's step summary name the cell,
 its samples and the fact that it was not judged, and the job does not fail on
 it (a cell that is also over its limit keeps saying so: `inconclusive (over
-limit by X%)`). A failure the measurement can resolve still exits 1, and
-`BENCH_REBASELINE=1` still refuses to record a baseline from samples that
-wide. (The rounds' own max ÷ min is a noise detector, not the decision: a tail
-statistic over 20 000 samples jumps between runs by more than 20 % on a shared
-runner even when the cell's median is steady.)
+limit by X%)`). A failure the measurement can resolve still exits 1. (The
+rounds' own max ÷ min is a noise detector, not the decision: a tail statistic
+over 20 000 samples jumps between runs by more than 20 % on a shared runner
+even when the cell's median is steady.)
+
+Before its measured runs every cell gets one **discarded warm-up run** of its
+own. The first run of a cell pays costs that are not the code's — the `mix
+run` boot, module loading, allocator growth, a cold page cache and the CPU
+governor ramping — and they showed up as a trend across rounds: the failing
+base leg of run 41586954095 had `512B-c32` round medians of 6.12, 5.77 and
+4.78 ms with the first round always slowest, which no number of extra rounds
+settles. The warm-up run's sample feeds neither the medians nor the spread; it
+is measured once per cell per leg, on the runner that leg runs on.
 
 Numbers only compare on the machine that recorded them. Hosted CI runners of
 one class differ by a factor of two in speed from job to job (the same code
@@ -1470,8 +1478,18 @@ scripts), then gates the change against that. When the pull request changes
 `mix deps.get` materialises the base's own dependency set before the
 measurement (the branch's are restored afterwards), so a dependency change is
 also measured base-against-branch on one runner rather than against a baseline
-recorded on another one. It falls back to the checked-in `baseline.json` only
-when there is no base commit to measure. A release tag skips the gate: its
+recorded on another one. That base leg is a `BENCH_REBASELINE=1` run, so it
+writes the cells it could settle to the temp baseline and leaves a cell it
+could not settle out of it, printing the same `INCONCLUSIVE p99_ms <cell>: …`
+line, `::warning::` annotation and step-summary line as a comparison run and
+exiting 0: it never records a baseline from samples that wide, and it never
+fails the job over a measurement it cannot make (no diff is involved, and the
+branch leg still has to run). The branch leg then treats that cell as **not
+judged**, never as passed: it prints the `INCONCLUSIVE p99_ms <cell>: absent
+from the baseline …` line, shows `inconclusive` in the table and does not fail
+on it, while every cell the baseline does carry keeps its judgement — a cell
+over its limit still fails. It falls back to the checked-in `baseline.json`
+only when there is no base commit to measure. A release tag skips the gate: its
 commit was gated on its pull request and its push to `main`, and a new tag has
 no base commit, so the fallback would judge a hosted runner against a laptop.
 `baseline.json` is the reference for
