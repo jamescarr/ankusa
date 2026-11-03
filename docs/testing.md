@@ -76,6 +76,19 @@ mise run check:package ankusa         # no external infra needed
 mise run test:integration             # +22 tests against the floci emulators (see below)
 ```
 
+Every store the suite boots gets its data dir under one root:
+`/dev/shm` when it is writable and has at least 2 GiB free (CI's runner has
+7.8 GiB of tmpfs), the system temp dir anywhere else (macOS has no
+`/dev/shm`). A commit ends in an fsync, and the
+`property/migrate_property_test.exs` properties pay a synced batch per step of
+the store's format ladder on every generated case: on the runner's disk that is
+milliseconds per case, on tmpfs it is free. `ANKUSA_TEST_DATA_ROOT` overrides
+the root (a laptop's RAM disk), the same pattern as the bench's
+`BENCH_DATA_ROOT`; a root that is missing, unwritable or full falls back
+silently, so a local `mix test` never fails for it. `TEST_ARGS` appends flags
+to the lane for a one-off profile
+(`TEST_ARGS="--slowest 30" mise run check:package ankusa --lane test`).
+
 `test/ankusa/tracing_test.exs` (OPS-1) is the proof that a hook is one trace: it
 starts the OpenTelemetry SDK with the in-memory `:otel_exporter_pid` and asserts
 `one trace across stages` (ingest, verify, commit and dispatch spans share the

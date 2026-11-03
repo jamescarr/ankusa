@@ -8,6 +8,75 @@ defmodule Ankusa.TestHelpers do
   @doc "A unique instance atom for isolation."
   def unique_instance, do: :"t#{System.unique_integer([:positive])}"
 
+  # CI-2's finding for the bench, applied to the suite: a commit ends in an
+  # fsync, and the properties pay a store boot and a synced batch per generated
+  # case (the 0.3 import walks the format ladder, and a torn tail is 100
+  # cases). On the runner's disk an fsync is milliseconds; on its tmpfs it is
+  # free. `ANKUSA_TEST_DATA_ROOT` overrides (a laptop's RAM disk), and anywhere
+  # without one (macOS has no `/dev/shm`) the system temp dir is used, so a
+  # local `mix test` never fails for the root's sake.
+  @tmpfs_candidates ["/dev/shm"]
+  @tmpfs_min_free 2 * 1024 * 1024 * 1024
+
+  @doc """
+  The root every test store's data dir is created under.
+
+  Resolved once per VM: the probe runs a `df`, and every store boot asks.
+  """
+  def data_root do
+    case :persistent_term.get({__MODULE__, :data_root}, nil) do
+      nil ->
+        root = compute_data_root()
+        :persistent_term.put({__MODULE__, :data_root}, root)
+        root
+
+      root ->
+        root
+    end
+  end
+
+  defp compute_data_root do
+    case System.get_env("ANKUSA_TEST_DATA_ROOT") do
+      root when is_binary(root) and root != "" ->
+        File.mkdir_p!(root)
+        root
+
+      _ ->
+        Enum.find(@tmpfs_candidates, &tmpfs_usable?/1) || System.tmp_dir!()
+    end
+  end
+
+  # A candidate is used only when it is there, writable and has room for a
+  # run's stores; every failure falls through to the next, then to the system
+  # temp dir.
+  defp tmpfs_usable?(path) do
+    File.dir?(path) and writable?(path) and free_bytes(path) >= @tmpfs_min_free
+  end
+
+  defp writable?(path) do
+    probe = Path.join(path, ".ankusa_probe_#{System.unique_integer([:positive])}")
+
+    case File.write(probe, "") do
+      :ok ->
+        File.rm(probe)
+        true
+
+      _ ->
+        false
+    end
+  end
+
+  defp free_bytes(path) do
+    with {out, 0} <- System.cmd("df", ["-Pk", path], stderr_to_stdout: true),
+         line <- out |> String.split("\n", trim: true) |> List.last(),
+         available <- line |> String.split() |> Enum.at(3),
+         {kb, ""} <- Integer.parse(available) do
+      kb * 1024
+    else
+      _ -> 0
+    end
+  end
+
   @doc """
   A temp data dir no other test run can have used. `System.unique_integer/1`
   restarts at 1 in every VM, so a run that was SIGKILLed (the loss test does
@@ -16,7 +85,7 @@ defmodule Ankusa.TestHelpers do
   """
   def unique_data_dir(inst) do
     Path.join(
-      System.tmp_dir!(),
+      data_root(),
       "ankusa_#{inst}_#{System.unique_integer([:positive])}_#{System.os_time(:microsecond)}"
     )
   end
