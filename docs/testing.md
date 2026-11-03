@@ -61,8 +61,9 @@ mise loads `.mise/conf.d/*.toml` repo-wide, so every directory declares all 19
 tools, and its task runner installs every missing declared tool before a task
 runs (`task.run_auto_install`, on by default) — which undid each job's
 `install_args`: `ankusa_server` installed 16 tools inside `mise run check:package`,
-`examples` 19, and a `lint` run downloaded 17 it never uses and died on a 500
-from ruby's release URL. `ci.yml` therefore sets `MISE_AUTO_INSTALL=false` in
+`examples`, which named none, made its mise-action step install all 19, and a
+`lint` run downloaded 17 it never uses and died on a 500 from ruby's release
+URL. `ci.yml` therefore sets `MISE_AUTO_INSTALL=false` in
 its top-level `env:`, so a job installs exactly the `install_args` its
 mise-action step names and `mise run` installs nothing; a task that needs a tool
 its job did not install fails at that command, loudly, instead of starting a
