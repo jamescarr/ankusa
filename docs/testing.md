@@ -12,8 +12,9 @@ separately — with no flag it runs both, in the original order, and `mise run
 check` and every other caller pass no flag. CI uses it for `ankusa` alone: the
 `ankusa (static)` job runs `mise run check:package ankusa --lane static` (deps,
 `hex.audit`, format, `compile --warnings-as-errors`, credo, dialyzer, sobelow,
-docs, `hex.build`) and `ankusa (tests)` runs `--lane test` (`mix test --cover`
-and its seed line), side by side instead of the suite waiting behind dialyzer.
+docs, `hex.build`) and `ankusa (tests)` runs `--lane test` (`mix test --cover`,
+its seed line, and the failing tests' names on failure), side by side instead
+of the suite waiting behind dialyzer.
 The eight client SDKs are also checked against one shared, language-neutral
 vector suite — `mise run check:conformance`, below.
 
@@ -66,7 +67,14 @@ applications) between `mix compile --warnings-as-errors` and the tests:
 
 The test run prints its ExUnit seed; in CI `check:package` also appends it to the
 job's summary (`$GITHUB_STEP_SUMMARY`), so an order-dependent failure replays with
-`mix test --seed <n>`. A new adapter scaffolded by `mise run new:adapter` ships
+`mix test --seed <n>`. When the suite fails, the same page carries the failing
+tests' names, their `file:line` and the head of each failure body (up to 10
+failures, parsed from the log `tee` already captured — the suite is never
+re-run), because the names on stdout alone are what a clipped CI log view
+loses. One compact `Failed: N — <test> (<Module>) at file:line; …` line is
+printed at the end of the run too, so a locally-failing `mise run check` names
+its tests in the last line of the log. A green run appends the seed line and
+nothing else. A new adapter scaffolded by `mise run new:adapter` ships
 the same dependencies, PLT paths and coverage floor.
 
 ## `ankusa` core: `mix test`
