@@ -339,29 +339,33 @@ defmodule Bench.Gate do
 
   # The cells the gate cannot judge, and why: the measurement could not settle
   # the cell's p99 (`inconclusive`), or the base leg could not settle it, so
-  # the baseline it wrote has no entry for the cell (`unjudged`). Both are
-  # reported the same way and neither is ever a pass (header).
+  # the baseline it wrote has no entry for the cell (`unjudged`). One entry per
+  # cell, in matrix order — a cell with both problems is reported once, with
+  # its samples and the missing baseline entry — and neither is ever a pass
+  # (header).
   defp not_judged_entries(inconclusive, unjudged) do
-    measured =
-      for {cell, spread, samples} <- inconclusive do
-        %{
-          cell: cell,
-          detail:
-            "samples span #{ratio(spread)} across rounds (#{samples}) — wider than the " <>
-              "#{ratio(spread_limit())} the limit can resolve"
-        }
-      end
+    details =
+      Map.new(inconclusive, fn {cell, spread, samples} ->
+        {cell,
+         "samples span #{ratio(spread)} across rounds (#{samples}) — wider than the " <>
+           "#{ratio(spread_limit())} the limit can resolve"}
+      end)
 
-    measured ++
-      for cell <- unjudged do
-        %{
-          cell: cell,
-          detail:
-            "absent from the baseline (the base leg could not settle it on this runner), " <>
-              "so there is nothing to compare it with"
-        }
-      end
+    for {cell, _, _} <- @matrix,
+        details[cell] || cell in unjudged do
+      %{cell: cell, detail: not_judged_detail(details[cell], cell in unjudged)}
+    end
   end
+
+  defp not_judged_detail(detail, false), do: detail
+
+  defp not_judged_detail(nil, true),
+    do:
+      "absent from the baseline (the base leg could not settle it on this runner), " <>
+        "so there is nothing to compare it with"
+
+  defp not_judged_detail(detail, true),
+    do: detail <> " — and the baseline has no entry for it, so it cannot be judged"
 
   defp print_inconclusive(not_judged) do
     for %{cell: cell, detail: detail} <- not_judged do
