@@ -52,7 +52,26 @@ defmodule Ankusa.Sink.NATSTest do
     [host_port | _] = @servers
     [host, port] = String.split(host_port, ":")
 
-    %{host: to_charlist(host), port: String.to_integer(port)}
+    # `no_responders: true` lets `await_subscription/1` flush with a request
+    # to a subject nobody listens on; it changes nothing else this connection
+    # does (stream admin and subscriptions).
+    %{host: to_charlist(host), port: String.to_integer(port), no_responders: true}
+  end
+
+  # A subscription is written to the connection's socket before `Gnat.sub/3`
+  # returns, but the *server* has not necessarily read it yet — and the sink
+  # publishes on a second connection, which the server may process first. A
+  # message its stream stored while the subscriber was not live is never
+  # delivered. A request to a subject nobody listens on gets its 503 only when
+  # the server has read it, and one connection is processed in order, so the
+  # answer proves every SUB sent before it is registered.
+  defp await_subscription(admin) do
+    {:error, :no_responders} =
+      Gnat.request(admin, "ankusa.barrier.#{System.unique_integer([:positive])}", "",
+        receive_timeout: 5_000
+      )
+
+    :ok
   end
 
   defp envelope(overrides \\ %{}) do
@@ -97,6 +116,7 @@ defmodule Ankusa.Sink.NATSTest do
     admin: admin
   } do
     {:ok, _sid} = Gnat.sub(admin, self(), subject)
+    :ok = await_subscription(admin)
 
     env = envelope(%{dedupe_key: "evt_1"})
     assert :ok = deliver(env, Map.put(ctx(inst), :replay_id, "rid"), opts(subject))
