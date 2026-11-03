@@ -231,9 +231,11 @@ defmodule Ankusa.Edge.Ingest do
   @doc "Look the source up, refuse undeliverable header bytes, then `ingest/4`."
   @spec ingest(atom(), request()) :: result()
   def ingest(instance, %{source_id: source_id} = req) do
-    # PROBE (CI-14 evidence, never merged): a fixed delay in the request path;
-    # with 512B-c32 unjudged the gate must still fail on another cell.
-    Process.sleep(1)
+    # PROBE (CI-14 evidence, never merged): a fixed delay in the request path.
+    # With 512B-c32 unjudged the gate must still fail on another cell; sleep(1)
+    # adds 7% to a 256-worker cell's 13 ms service time, under the 20% the
+    # 0.8x limit allows, so this one is big enough to be a regression.
+    Process.sleep(5)
     route = %Ankusa.Route{source_id: source_id, tenant_id: Map.get(req, :tenant_id)}
 
     with {:ok, source, tenant_id} <- lookup(instance, route),
