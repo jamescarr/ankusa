@@ -1,3 +1,4 @@
+# Probe comment: the ack path (store.ex) selected by CI-5's drills rule.
 defmodule Ankusa.Store do
   @moduledoc """
   The node's local store: one RocksDB database per instance, under
