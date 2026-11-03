@@ -54,13 +54,22 @@
 #
 # The same noise decides what the limit *can* say: the limits are ratios of
 # 1.2x and 0.8x, so the cell's own measurements have to agree to better than
-# that. A cell whose three runs in one round span more than 1.2x is measured
-# one more round (its samples are added: the verdict is the median of all six);
-# if the two rounds — the p99 measurements the gate compares — still span more
-# than the limit's headroom, the run is INCONCLUSIVE: it prints the samples and
-# fails, and is neither a pass nor a regression. (A base leg the measurement
-# cannot decide is inconclusive too: a comparison against a baseline measured
-# that shakily means nothing.)
+# that. A cell whose runs in a round span more than 1.2x, or whose rounds — the
+# p99 medians the gate compares — do, is measured again: at most two more
+# rounds of `BENCH_RUNS` runs each (nine runs at most, never more). What is
+# still wider than the limit after that is INCONCLUSIVE: the measurement could
+# not decide, which is neither a pass nor a regression. Such a cell prints its
+# `INCONCLUSIVE p99_ms <cell>: samples span Nx across rounds (...)` line, gets
+# a `::warning::` annotation, appends its samples and the fact that it was not
+# judged to the GitHub step summary (`GITHUB_STEP_SUMMARY`, a no-op off CI),
+# shows `inconclusive` in the table's verdict column, and is left out of the
+# failures: the job does not fail on it. A cell whose failure the measurement
+# *can* resolve still fails, and a cell that is over its limit and also
+# unresolvable says how far over: `inconclusive (over limit by 6.2%)`.
+# `BENCH_REBASELINE=1` is the one exception: it still fails on one, because
+# that is a refusal to record a baseline from samples that wide (a baseline
+# measured that shakily makes every later comparison meaningless), not a
+# verdict about a change.
 #
 # Env knobs:
 #
@@ -77,6 +86,12 @@
 #   BENCH_TRACE=1           sample each run's data directory and print its peak
 #                           size (diagnostics; off, the gate does not touch the
 #                           store's directory during a run)
+#   BENCH_SELF_TEST_INCONCLUSIVE=<cell>
+#                           SELF-TEST ONLY, CI never sets it: multiplies that
+#                           cell's `p99_ms` per round and run so its spread
+#                           cannot settle, which exercises the inconclusive
+#                           path (a PR's evidence for the policy) without
+#                           waiting for a noisy runner
 #
 # Run it from `packages/ankusa` (the mise task does):
 #
@@ -98,6 +113,17 @@ defmodule Bench.Gate do
   # {metric, :min | :max, factor}: `:max` fails above factor x baseline, `:min`
   # below it.
   @gates [{"p99_ms", :max, 1.2}, {"ingest_per_s", :min, 0.8}]
+
+  # Extra rounds of `BENCH_RUNS` runs a cell that cannot settle is given
+  # (header). Bounded: two more rounds, then the cell is inconclusive.
+  @spread_retries 2
+
+  # Self-test only (header, "BENCH_SELF_TEST_INCONCLUSIVE"): that cell's
+  # `p99_ms` is multiplied by [round][run], so the first round is wider than
+  # the limit, the rounds' medians disagree, and the cell runs out of retries
+  # as inconclusive — deterministically, on any machine. CI never sets it.
+  @self_test_switch "BENCH_SELF_TEST_INCONCLUSIVE"
+  @self_test_p99_factors [[1.0, 2.0, 1.0], [3.0, 3.0, 3.0], [1.0, 1.0, 1.0]]
 
   @bench_dir Path.dirname(__ENV__.file)
   @last Path.join(@bench_dir, "last.json")
@@ -174,32 +200,61 @@ defmodule Bench.Gate do
     end
   end
 
-  # A leg's p99 can only support a 1.2x decision if the cell's own measurements
-  # agree to better than that. A round whose three runs are wider than the
-  # limit's headroom is measured once more (its samples are added: the verdict
-  # is the median of all six); if the rounds' medians still span more than the
-  # headroom, the cell is inconclusive (see the header). A cell that never
-  # needs a second round is decided on one round, like before.
-  defp settle_spread(matrix, runs, root, trace?, samples, cells) do
-    case wide(samples, cells) do
+  # A cell's p99 can only support a 1.2x decision if its measurements agree to
+  # better than that. A round whose runs are wider than the limit's headroom,
+  # or whose rounds (the p99 medians the gate compares) are, is measured
+  # again: at most `@spread_retries` more rounds of `runs` runs each, then the
+  # budget is gone and whatever is still that wide is inconclusive (header). A
+  # cell that settles in its first round is decided on that round, like before;
+  # a cell that never needed a retry never gets one.
+  defp settle_spread(matrix, runs, root, trace?, samples, cells),
+    do: settle(matrix, runs, root, trace?, samples, cells, 0)
+
+  defp settle(matrix, runs, root, trace?, samples, cells, extra_rounds) do
+    case unsettled(samples, cells, runs) do
       [] ->
         {samples, []}
 
-      wide ->
-        retry_cells = Enum.map(wide, &elem(&1, 0))
+      unsettled when extra_rounds == @spread_retries ->
+        # Out of rounds: the cells still wider than the limit's headroom at the
+        # level the gate compares cannot be decided on this runner.
+        {samples, unstable(samples, cells, runs)}
 
-        for {cell, spread, values} <- wide do
+      unsettled ->
+        for {cell, spread, _values} <- unsettled do
           IO.puts(
-            "==> p99_ms #{cell} spans #{ratio(spread)} over #{runs} runs " <>
-              "(#{join_samples(values)}): re-measuring it once"
+            "==> p99_ms #{cell} spans #{ratio(spread)} (#{spread_samples(samples, cell, runs)})" <>
+              ": re-measuring it (extra round #{extra_rounds + 1} of #{@spread_retries})"
           )
         end
 
+        retry_cells = Enum.map(unsettled, &elem(&1, 0))
         retry = Enum.filter(matrix, fn {cell, _, _} -> cell in retry_cells end)
-        retried = collect(retry, runs, root, trace?, %{})
+        retried = collect(retry, runs, root, trace?, %{}, extra_rounds + 1)
         samples = Map.merge(samples, retried, fn _cell, first, more -> first ++ more end)
-        {samples, unstable(samples, retry_cells, runs)}
+        settle(matrix, runs, root, trace?, samples, cells, extra_rounds + 1)
     end
+  end
+
+  # The cells that have to be measured again: a round's runs spread wider than
+  # the limit, or the rounds' medians do. The rounds' medians are the stronger
+  # statement, so a cell in both appears once, with the rounds' samples.
+  defp unsettled(samples, cells, runs) do
+    from_rounds = unstable(samples, cells, runs)
+    decided = Enum.map(from_rounds, &elem(&1, 0))
+
+    from_rounds ++
+      Enum.reject(wide(samples, cells), fn {cell, _, _} -> cell in decided end)
+  end
+
+  # What a re-measurement message shows: the round in hand, or the rounds'
+  # medians once there is more than one.
+  defp spread_samples(samples, cell, runs) do
+    values = Enum.map(samples[cell], & &1["p99_ms"])
+
+    if length(values) > runs,
+      do: "rounds #{rounds_joined(values, runs)}",
+      else: "#{runs} runs: #{join_samples(values)}"
   end
 
   # Cells whose own p99 samples span more than the p99 limit's factor.
@@ -258,7 +313,10 @@ defmodule Bench.Gate do
   defp empty_baseline(cells), do: Map.new(cells, fn cell -> {cell, %{}} end)
 
   # Round-robin over the cells so a noisy minute is spread over all of them.
-  defp collect(matrix, runs, root, trace?, samples) do
+  # `round` is the measurement round within the cell's budget (0 for the
+  # first, then 1..@spread_retries for the re-measurements); only the
+  # self-test switch reads it.
+  defp collect(matrix, runs, root, trace?, samples, round \\ 0) do
     for run <- 1..runs, {cell, bytes, concurrency} <- matrix, reduce: samples do
       acc ->
         IO.puts("==> bench #{cell} run #{run}/#{runs}")
@@ -274,7 +332,29 @@ defmodule Bench.Gate do
             run
           )
 
+        sample = self_test_p99(sample, cell, round, run)
         Map.update(acc, cell, [sample], &(&1 ++ [sample]))
+    end
+  end
+
+  # `BENCH_SELF_TEST_INCONCLUSIVE=<cell>` (header): a switch no CI job sets. It
+  # multiplies the cell's `p99_ms` by round and run, so the first round is
+  # wider than the limit, the second's median is three times the first's, and
+  # the gate has to take the inconclusive path on any machine.
+  defp self_test_p99(sample, cell, round, run) do
+    if System.get_env(@self_test_switch) == cell do
+      factor =
+        @self_test_p99_factors
+        |> Enum.at(min(round, length(@self_test_p99_factors) - 1))
+        |> Enum.at(run - 1) || 1.0
+
+      IO.puts(
+        "    SELF-TEST #{@self_test_switch}=#{cell}: p99_ms x#{factor} (round #{round + 1})"
+      )
+
+      Map.update!(sample, "p99_ms", &(&1 * factor))
+    else
+      sample
     end
   end
 
@@ -526,7 +606,8 @@ defmodule Bench.Gate do
     print_inconclusive(inconclusive)
 
     # A cell the measurement cannot decide is neither a pass nor a regression:
-    # it is reported as INCONCLUSIVE, not also as a FAIL (header).
+    # it is reported as INCONCLUSIVE, not as a FAIL, and it does not fail the
+    # run (header). A cell whose failure is resolvable still does.
     failures =
       Enum.filter(rows, &(&1.failed and &1.cell not in cells_inconclusive))
 
@@ -539,18 +620,85 @@ defmodule Bench.Gate do
       )
     end
 
+    if inconclusive != [] do
+      annotate_inconclusive(inconclusive)
+      step_summary(inconclusive, rows)
+      IO.puts(inconclusive_summary(inconclusive, rows))
+    end
+
     cond do
-      inconclusive != [] ->
-        IO.puts("INCONCLUSIVE")
-        System.halt(1)
-
-      failures == [] ->
-        IO.puts("PASS")
-
-      true ->
+      failures != [] ->
         IO.puts("FAIL")
         System.halt(1)
+
+      inconclusive != [] ->
+        # Not judged and not failed: the summary line above says so, and the
+        # exit code is 0 for it. Never `PASS`: the measurement did not pass.
+        :ok
+
+      true ->
+        IO.puts("PASS")
     end
+  end
+
+  # One warning annotation per cell the measurement could not decide, where the
+  # job's log and the pull request show it.
+  defp annotate_inconclusive(inconclusive) do
+    for {cell, _spread, _samples} <- inconclusive do
+      IO.puts("::warning::INCONCLUSIVE p99_ms #{cell} — not judged")
+    end
+  end
+
+  # The step summary line for each such cell: which cell, every sample, and
+  # that it was not judged. `GITHUB_STEP_SUMMARY` is unset off CI, where this
+  # does nothing.
+  defp step_summary(inconclusive, rows) do
+    case System.get_env("GITHUB_STEP_SUMMARY") do
+      path when is_binary(path) and path != "" ->
+        lines =
+          for {cell, spread, samples} <- inconclusive do
+            "- **INCONCLUSIVE** `p99_ms #{cell}`#{over_limit_note(cell, rows)}: **not judged** — " <>
+              "samples span #{ratio(spread)} across rounds (#{samples}), wider than the " <>
+              "#{ratio(spread_limit())} the limit can resolve.\n"
+          end
+
+        File.write!(path, lines, [:append])
+
+      _ ->
+        :ok
+    end
+  end
+
+  # The closing line for a run with cells that were not judged, e.g.
+  # `1 cell inconclusive (512B-c32): not judged, see the step summary`; a cell
+  # that is also over its limit carries that note, e.g.
+  # `512B-c32 (p99_ms over limit by 6.2%)`. Deliberately not `PASS`: nothing
+  # was decided either way.
+  defp inconclusive_summary(inconclusive, rows) do
+    cells =
+      Enum.map_join(inconclusive, ", ", fn {cell, _spread, _samples} ->
+        cell <> over_limit_note(cell, rows)
+      end)
+
+    count = length(inconclusive)
+    noun = if count == 1, do: "cell", else: "cells"
+
+    "#{count} #{noun} inconclusive (#{cells}): not judged, see the step summary"
+  end
+
+  # A cell that is over a limit and also unresolvable keeps saying how far over
+  # it is: the indecision is about the measurement, not about the regression.
+  defp over_limit_note(cell, rows) do
+    case Enum.find(rows, &(&1.cell == cell and &1.failed)) do
+      nil -> ""
+      row -> " (#{row.metric} over limit by #{percent_over(row)}%)"
+    end
+  end
+
+  defp percent_over(row) do
+    limit = row.factor * row.base
+    pct = abs(row.current - limit) / limit * 100
+    :erlang.float_to_binary(pct * 1.0, decimals: 1)
   end
 
   defp print_table(cells, medians, baseline, rows, inconclusive) do
@@ -571,7 +719,7 @@ defmodule Bench.Gate do
           r ->
             status =
               cond do
-                cell in inconclusive -> "?"
+                cell in inconclusive -> "inconclusive"
                 r.failed -> "FAIL"
                 true -> "ok"
               end
@@ -589,7 +737,7 @@ defmodule Bench.Gate do
   defp limit_label(%{kind: :min, factor: f, base: b}), do: ">= #{fmt(f * b)}"
 
   defp pad(cols) do
-    widths = [9, 18, 12, 12, 9, 12, 5]
+    widths = [9, 18, 12, 12, 9, 12, 12]
 
     cols
     |> Enum.zip(widths)

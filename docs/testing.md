@@ -1444,17 +1444,20 @@ for such a cell.
 
 The limits are ratios, so the measurements have to be tighter than the ratio
 for a verdict to mean anything. A cell whose own `p99_ms` over one round of
-three runs spans more than the limit's headroom (max ÷ min above 1.2×) is
-measured once more, and those samples are added to the cell's (the verdict is
-the median of all six). If the two rounds' medians — the p99 measurements the
-gate compares — still span more than 1.2×, the run is **inconclusive**: it
-prints `INCONCLUSIVE p99_ms <cell>: samples span N× across rounds (...)` with
-every run's sample, exits 1, and is neither a pass nor a regression. (The
-round's own max ÷ min is a noise detector, not the decision: a tail statistic
-over 20 000 samples jumps between runs by more than 20 % on a shared runner
-even when the cell's median is steady.) The check applies to the base leg too
-— a baseline measured that shakily makes every comparison against it
-meaningless.
+three runs spans more than the limit's headroom (max ÷ min above 1.2×), or
+whose rounds' medians do, is measured again: at most two more rounds of three
+runs each. What is still wider than 1.2× after that is **inconclusive** — the
+measurement could not decide, which is neither a pass nor a regression: the
+run prints `INCONCLUSIVE p99_ms <cell>: samples span N× across rounds (...)`
+with every run's sample, the table's verdict column says `inconclusive`, a
+`::warning::` annotation and a line in the job's step summary name the cell,
+its samples and the fact that it was not judged, and the job does not fail on
+it (a cell that is also over its limit keeps saying so: `inconclusive (over
+limit by X%)`). A failure the measurement can resolve still exits 1, and
+`BENCH_REBASELINE=1` still refuses to record a baseline from samples that
+wide. (The rounds' own max ÷ min is a noise detector, not the decision: a tail
+statistic over 20 000 samples jumps between runs by more than 20 % on a shared
+runner even when the cell's median is steady.)
 
 Numbers only compare on the machine that recorded them. Hosted CI runners of
 one class differ by a factor of two in speed from job to job (the same code
