@@ -250,8 +250,15 @@ median of three such samples cannot support a 1.2× decision.
   download surface that reddened `lint` in run 41689506568; CI-22.
 - **`ankusa_kafka` 237 s (job 126143230821)**: 44 s before compose (checkout +
   mise, 12 s of it the redundant toolchain), 21 s `docker compose up`, 35 s
-  deps/compile, **120 s suite**, 15 s teardown — so only ~20 s of it is
-  removable setup, and it stays in the Backlog (see there).
+  deps/compile, **120 s suite**, 15 s teardown. On the next green `main` run the
+  same job is **6.17 min** (126183566813, suite 239.6 s) and outlasts every
+  shard, so the suite's own 2× variance — not the setup — is the tail: CI-26.
+- **The critical path after CI-21 is `max(slowest shard, ankusa_kafka)`**: on
+  run 41712366064 (wall clock 6.67 min) shard 3/4 is 5.28, shard 1/4 4.32 and
+  `ankusa_kafka` **6.17**; on 41710035955 it is 4.82 / 4.68 / 3.83. So CI-23
+  (balance the shards, ~2 min) and CI-26 (the kafka suite's tail) are the two
+  remaining wall-clock levers for a normal PR; `ankusa (coverage)` grew from
+  40 s to ~58–60 s with the extra export it now merges.
 - **`perf gate` 9.5–11.7 min** on the five runs where it measured (CI-20's own
   merge run 41696475603: 9m28s) — still 2× the rest of the pipeline on any
   hot-path PR. Its two legs are independent measurements run in series on one
@@ -261,10 +268,12 @@ median of three such samples cannot support a 1.2× decision.
 
 Status: 20/26 done · closed without meeting the bar: CI-9 · next: CI-26 · last updated: 2026-11-03
 
-`main` is **green** at `5e9d5cc7` (#273's merge, run 41713817512): the whole
-graph. The two earlier reds: run 41689506568 (`902e3dcb`) failed `ankusa (tests,
-4/4)` (CI-21, fixed by #272) and `lint` (CI-22, fixed by #274 — the 17-tool
-`mise run` auto-install behind it is gone); run 41702699820 (`e53e3d32`) failed
+`main` is **green** at `0e11bebc` (CI-22's merge, run 41718109336): the whole
+graph, `perf gate` and `bench-tenant` included, and the jobs' mise lines are the
+short ones (27 mise-action installs for 27 steps, none inside `mise run`). The
+two earlier reds: run 41689506568 (`902e3dcb`) failed `ankusa (tests, 4/4)`
+(CI-21, fixed by #272) and `lint` (CI-22, fixed by #274 — the 17-tool `mise run`
+auto-install behind it is gone); run 41702699820 (`e53e3d32`) failed
 `ankusa_kafka` 40/42 (CI-26 — two `publish_batch` tests after a brod
 `{:reached_max_retries, :shutdown}`), which did **not** recur on the next
 `main` run, so CI-26 is a flake to attribute, not a standing red.
@@ -1925,12 +1934,23 @@ which it does when a measured red run outranks a slow pipeline.
 
 ### Phase L — `main`'s kafka red
 
-- [ ] **CI-26 — `ankusa_kafka`: after a broker-restart drill, the next `publish_batch` is `:unavailable` because the producer has `max_retries: 0`** · P1 · Deps: CI-12
-  *Why:* run 41702699820 (`main` `e53e3d32`, CI-20's bench/docs merge) `ankusa_kafka`
-  job 126150001619 failed **40/42**: `assert {:ok, %{position: 2}} =
-  Kafka.publish_batch(…)` at `kafka_test.exs:455` and `… position: 0` at `:492`,
-  both `right: {:error, :unavailable}`, each preceded by
-  `GenServer #PID<0.3227.0> terminating ** (stop) {:reached_max_retries,
+- [ ] **CI-26 — `ankusa_kafka`: a 2× suite-time tail, and `:unavailable` after the restart drills** · P1 · Deps: CI-12
+  *Why (the tail):* the job is now the pipeline's critical path on a green `main`
+  run: run 41712366064 (`7ba2866d`) finished in 6.67 min with `ankusa_kafka`
+  **6.17 min** (job 126183566813) — slower than the slowest shard (5.28) — and
+  its suite alone took **239.6 s** (`Result: 42 passed`) against **120.0 s** for
+  the same 42 tests on another runner (job 126143230821, 3.95 min). The rest of
+  that 6.17 min is setup: mise 20:25:43→20:26:18 (35 s, a chunk of it CI-22's
+  redundant 16-tool install), `docker compose up` 18 s, deps/compile 34 s. So
+  the variance is inside the suite — the broker stop/restart drills and their
+  bounded waits, which stretch when a loaded runner re-forms the cluster slowly.
+  The 2026-11-03 window's per-job medians agree: 3.93 min median over 27 runs
+  with a 5.88 max, and 6.17 on the latest green `main` run.
+  *Why (the flake):* run 41702699820 (`main` `e53e3d32`, CI-20's bench/docs
+  merge) `ankusa_kafka` job 126150001619 failed **40/42**: `assert {:ok,
+  %{position: 2}} = Kafka.publish_batch(…)` at `kafka_test.exs:455` and
+  `… position: 0` at `:492`, both `right: {:error, :unavailable}`, each preceded
+  by `GenServer #PID<0.3227.0> terminating ** (stop) {:reached_max_retries,
   :shutdown}` in `brod_producer_buffer.rebuffer_or_crash/3` with `Last message:
   {:DOWN, …, :shutdown}`. The test's own clients *had* connected
   (`:ankusa_intake_probe_… connected to localhost:29094`,
@@ -1942,38 +1962,47 @@ which it does when a measured red run outranks a slow pipeline.
   fixed exactly this shape at *startup* with a bounded commit probe, and this is
   the same state entered mid-suite after the outage drills
   (`compose(["restart" | all])`, `kafka_test.exs:340-400`), where nothing
-  re-probes. `main` is red on it, and it is the second `main` failure this
-  window after a diff (`bench/gate.exs` + docs) that cannot touch the adapter.
-  It did not recur on the next `main` run (`7ba2866d`, 41712366064 green), so it
-  is a flake to attribute rather than a standing red. It is also not a one-off:
-  CI-15's evidence already found the same class once ("`ankusa_kafka` (`replay
-  without a stamped partition … {:error, :unavailable}` after a brod producer
-  crash)", run 41630250047 attempt 7) and deliberately did not paper over it.
+  re-probes. It is a flake rather than a standing red (it did not recur on
+  `7ba2866d`), but not a one-off: CI-15's evidence found the same class once
+  ("`ankusa_kafka` (`replay without a stamped partition … {:error,
+  :unavailable}` after a brod producer crash)", run 41630250047 attempt 7) and
+  deliberately did not paper over it.
   *Change:* the CI-12 rule — make the *wait* right, never the assertion:
-  1. Attribute on CI first: ten reruns of the failing job on the same commit (or
-     a probe branch), recording for each whether the failure follows a restart
+  1. Attribute the tail first: run the suite on the CI runner twice, one of them
+     under load, with per-test timings (a probe branch with ExUnit's `--slowest`
+     or a `--trace`-free per-test log), and name the tests that carry the extra
+     120 s. If it is a drill's bounded wait reaching its limit, say which
+     signal took how long.
+  2. Attribute the flake: ten reruns of the failing job on the same commit (or a
+     probe branch), recording for each whether the failure follows a restart
      drill (`compose(["restart" | all])`), and the state at failure
      (`:brod.get_metadata` leader/ISR for the new topic, which broker the leader
      was on, the crashed producer's last batch). One sample is not a diagnosis.
-  2. If it follows a restart: after every restart/stop drill, re-establish the
-     produce path before the next test — a bounded (20 s) leader + ISR wait plus
-     CI-12's commit probe on a topic of its own — in the drill's teardown, or
-     lazily in `create_topic/1` when the helper sees a new restart generation.
+  3. If the flake follows a restart: after every restart/stop drill, re-establish
+     the produce path before the next test — a bounded (20 s) leader + ISR wait
+     plus CI-12's commit probe on a topic of its own — in the drill's teardown,
+     or lazily in `create_topic/1` when the helper sees a new restart generation.
      No retry inside a test body, and the probe keeps `max_retries: 0`.
-  3. If it does not follow a restart — a broker is genuinely unreachable long
-     enough under the suite's load — record the timings and hand it to the
-     maintainer as a product finding; do not widen the test.
+  4. If the tail is a drill's wait: make the drill react to the same signal
+     (controller elected, every replica in sync, a commit probe passed) instead
+     of a fixed budget, so the fast case and the loaded case converge. If a
+     broker genuinely needs the time under load, record the timings and hand it
+     to the maintainer as a product finding; do not widen a test.
   *Done when:* twenty consecutive `mise run check:package ankusa_kafka` runs (or
   ten CI reruns — say which) are green with no `reached_max_retries` in any log;
   the failure still reproduces when the re-probe is stubbed out and a broker is
-  restarted between tests; every assertion is unchanged.
-  *Proof:* the rerun list with the log excerpt, the stubbed negative check,
-  `docker compose up -d --wait`, `mise run check:package ankusa_kafka`, and a
-  green `main` run after the merge.
+  restarted between tests; the suite's duration on a loaded runner is within
+  20 % of its fast case (239.6 s → ≤ 145 s against the 120 s run), so the job
+  stops being the run's last non-fence job; every assertion is unchanged.
+  *Proof:* the rerun list with the log excerpt, the per-test timing tables (fast
+  and loaded), the stubbed negative check, `docker compose up -d --wait`,
+  `mise run check:package ankusa_kafka`, and a green `main` run after the merge
+  with the job's duration beside 6.17 min.
   *Anchors:* `packages/ankusa_kafka/test/ankusa/intake/kafka_test.exs:180-200,340-400,450-500`
   (the `max_retries: 0` comment, `compose/1`, the leader/ISR waits,
   `create_topic/1`), `packages/ankusa_kafka/lib/ankusa/intake/kafka.ex` (the
-  `:unavailable` mapping), `packages/ankusa_kafka/docker-compose.yml`.
+  `:unavailable` mapping), `packages/ankusa_kafka/docker-compose.yml`,
+  `.mise/tasks/check/package` (the `docker compose up -d --wait` step).
   *Evidence:* —
 
 ## Backlog (not yet an item)
@@ -2000,13 +2029,13 @@ which it does when a measured red run outranks a slow pipeline.
 - **`lint` failed on a mise download** — **promoted to CI-22**, which measured
   the cause: the job does not need ruby at all, and `mise run` was installing 17
   tools for it (`main` 41689506568, job 126104074391).
-- **`ankusa_kafka` is not the wall clock after CI-17** — job 126143230821
-  measures 237 s and decomposes as 44 s before compose (checkout, mise — 12 s of
-  it CI-22's redundant toolchain), 21 s `docker compose up` (five containers),
-  35 s deps/compile, **120 s suite**, 15 s teardown. So at most ~20 s of it is
-  removable setup, against 100 s from CI-23 and ~5 min from CI-24; it stays here
-  with the arithmetic, and becomes an item only if the suite itself (42 tests,
-  one of them the 2 s×N fault drills) grows again.
+- **`ankusa_kafka` setup, after CI-22** — job 126143230821 decomposes as 44 s
+  before compose (checkout + mise, ~12 s of it CI-22's redundant toolchain),
+  21 s `docker compose up` (five containers), 35 s deps/compile, 120–240 s
+  suite, 15 s teardown. With CI-22 removing the toolchain install, the setup is
+  ~85 s and the suite is the variable — **promoted to CI-26** together with the
+  `:unavailable` flake, because on the latest green `main` run the job (6.17 min)
+  outlasted every shard.
 - **`Ankusa.BlobStore.PoolTest`** — one local observation (`ankusa (tests)`,
   2026-11-03, a pool-timing test): fails in a full run, passes in isolation and
   passed in the CI lane on the same commit. Not enough samples to attribute;
