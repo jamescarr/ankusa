@@ -192,7 +192,9 @@ the wire said it. A `v: 2` message is a `v: 1` message plus additive fields, so
 a consumer reads it the same way; any other `v` is `unsupported_version`
 (permanent: dead-letter it). `message.instance` and `message.region` are the
 Ankusa instance that published the message and the region it is configured with
-(nil for none). A message from the instance's lifecycle sinks carries a
+(nil for none). `message.event_type` is the provider's event name as the
+source's `event_type` key read it, for example `invoice.paid` (nil for none). A
+message from the instance's lifecycle sinks carries a
 CloudEvents event as its body: `Ankusa.decode_lifecycle(body)` returns an
 `Ankusa::LifecycleEvent`.
 

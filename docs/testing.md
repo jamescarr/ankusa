@@ -754,6 +754,12 @@ the bucket/container bootstrap, runs `mix test --only integration` (the tagged t
 `packages/ankusa`, and tears the emulators down. CI runs it as the
 `core integration (floci)` job.
 
+CI keeps these images, and the four packages' own compose images, in the
+Actions cache (`scripts/ci/images.sh`): the job loads them and
+`docker compose up` pulls nothing, so a Docker Hub rate limit fails neither
+run. Nothing changes locally — `mise run test:integration` and
+`mise run check:package <pkg>` pull from whatever your daemon already has.
+
 Every floci emulator runs in `persistent` storage mode (the images default to
 in-memory) with its state on a named Docker volume, so it survives an emulator
 restart; the task's `down -v` removes those volumes, so each run starts empty.
@@ -1114,6 +1120,10 @@ mise run test:crash
 # acked=14940 recovered=14940 missing=0 enospc_503=1 resumed=true
 ```
 
+CI caches that base image between runs the same way as the compose images
+(`scripts/ci/images.sh`), so a drill job does not pull it from Docker Hub; a
+local run uses whatever your daemon already has.
+
 - **ENOSPC** (`mise run test:crash`, CI job `crash`): `/data` is a 192 MiB
   tmpfs. The harness ingests `RATE` (default 1000) hooks/s of `BODY_BYTES`
   (default 10 KiB) each; at +5 s a filler file takes every free byte. RocksDB
@@ -1356,12 +1366,39 @@ neither gated number; the 256-worker cells catch CPU cost per hook as lost
 `ingest_per_s`. At 32 workers latency is the service time, so the same delay
 shows up in `p99_ms`.
 
+Each run of a cell measures a store of its own: the gate makes a fresh
+directory per run, hands it to the bench as `TMPDIR`, and removes it
+afterwards, so no cell and no leg inherits another's store, its size or its
+page cache. By default that directory is on `/dev/shm` (or `BENCH_DATA_ROOT`):
+an ingest commit ends in an fsync (`Store.write(..., sync: true)`) and one
+group commit carries up to `batcher.group_commit_max_records` hooks, so on the
+runner's disk a single slow fsync *is* the `p99_ms` tail — the perf gate's
+failing leg on PR 213 spanned 22–202 ms inside one cell, and its base leg's
+`512B-ordered` came out 7× faster than its `512B`. A tmpfs is the "an fsync
+costs nothing" regime this section describes, and it is what makes the base
+and branch legs comparable. `BENCH_TRACE=1` prints each run's data directory
+and its peak size (diagnostics, off by default).
+
 A p99 over 20 000 samples is noisy on a shared machine, and noise only adds
 latency and takes throughput away. A cell that is over a limit after its
 three runs is therefore run three more times and judged on its best run of the
 six (lowest `p99_ms`, highest `ingest_per_s`): a real regression raises every
 run, noise rarely does. `last.json` and the table show those best-run numbers
 for such a cell.
+
+The limits are ratios, so the measurements have to be tighter than the ratio
+for a verdict to mean anything. A cell whose own `p99_ms` over one round of
+three runs spans more than the limit's headroom (max ÷ min above 1.2×) is
+measured once more, and those samples are added to the cell's (the verdict is
+the median of all six). If the two rounds' medians — the p99 measurements the
+gate compares — still span more than 1.2×, the run is **inconclusive**: it
+prints `INCONCLUSIVE p99_ms <cell>: samples span N× across rounds (...)` with
+every run's sample, exits 1, and is neither a pass nor a regression. (The
+round's own max ÷ min is a noise detector, not the decision: a tail statistic
+over 20 000 samples jumps between runs by more than 20 % on a shared runner
+even when the cell's median is steady.) The check applies to the base leg too
+— a baseline measured that shakily makes every comparison against it
+meaningless.
 
 Numbers only compare on the machine that recorded them. Hosted CI runners of
 one class differ by a factor of two in speed from job to job (the same code
@@ -1382,11 +1419,12 @@ no base commit, so the fallback would judge a hosted runner against a laptop.
 local runs on a comparable machine; a run on another runner class prints a
 `WARN`. The checked-in one was recorded (DUR-4.b.b.a, `runner:
 local-darwin-aarch64`) on an Apple-silicon laptop with the bench's data
-directory on a RAM disk (`TMPDIR=/Volumes/<ram disk>`: `hdiutil attach
--nomount ram://8388608`, then `diskutil erasevolume HFS+ <name> <device>`): an
-fsync that costs nothing is the regime of a CI runner, whereas on this laptop's
-disk (4.3 ms fsync) the `512B-c32` cell is fsync-bound and misses 0.8× the
-baseline however the code is.
+directory on a RAM disk (`BENCH_DATA_ROOT=/Volumes/<ram disk>`: `hdiutil attach
+-nomount ram://8388608`, then `diskutil erasevolume HFS+ <name> <device>`):
+an fsync that costs nothing is the regime the gate measures in on CI (where it
+picks `/dev/shm`), whereas on this laptop's disk (4.3 ms fsync) the
+`512B-c32` cell is fsync-bound and misses 0.8× the baseline however the code
+is. A macOS run has no `/dev/shm`, so `BENCH_DATA_ROOT` is how to give it one.
 
 `baseline.json` also holds an `f1_code` block: the F1 baseline's code
 (`b25506f6`, before DUR-4) measured with this harness, interleaved with
@@ -1402,8 +1440,9 @@ two runs of one tree there differ by 20 %. `STUB_INGEST=1` (above) is the
 check that the harness itself is not what a cell measures: at 10 KB it drives
 more than 100× the rate of the F1 code. Change the harness and the `f1_code`
 block has to be measured again, in the same PR.
-`BENCH_RUNS`, `BENCH_CONFIRM`, `BENCH_RUNNER`, `BENCH_BASELINE` and
-`BENCH_REBASELINE` are documented in the script's header.
+`BENCH_RUNS`, `BENCH_CONFIRM`, `BENCH_RUNNER`, `BENCH_BASELINE`,
+`BENCH_REBASELINE`, `BENCH_DATA_ROOT` and `BENCH_TRACE` are documented in the
+script's header.
 
 [`bench/tenant_fairness_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/tenant_fairness_bench.exs)
 is the fairness bench of TEN-3, run by hand: it prints a light tenant's p99
@@ -1471,12 +1510,14 @@ a pull request whose diff touches a hot-path file: anything under
 `packages/ankusa/lib/ankusa/{edge,queue,store,dispatch,verifier,routes}/`,
 `store.ex`, `queue.ex`, `dedupe.ex`, `envelope.ex`, `http.ex`,
 `route_resolver.ex`, `sink/message.ex`, `sink/http.ex`, or the gate's own files
-(`packages/ankusa/bench/`, `.mise/tasks/bench/`, `ci.yml`). The job always
+(`packages/ankusa/bench/`, `.mise/tasks/bench/`). A workflow file is not a hot
+path: it cannot change the measured program, and an invocation it gets wrong
+surfaces on the next push to `main` within minutes. The job always
 reports a status (it can be a required check); on a PR that touches none of
 those paths its steps are skipped. The run's `last.json` and the base
-commit's numbers are attached as the `bench-last` artifact. If the gate goes
-red on a change that touches no hot-path code, re-run the job once; a real
-regression fails again.
+commit's numbers are attached as the `bench-last` artifact. A run that cannot
+resolve the limits says so (`INCONCLUSIVE`, above) instead of passing or
+failing; re-running it re-measures.
 
 A hot-path PR states before/after numbers in its description. The checked-in
 baseline changes only in a pull request titled `perf: rebaseline <reason>`

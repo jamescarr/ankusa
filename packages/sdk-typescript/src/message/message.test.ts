@@ -57,6 +57,24 @@ describe("decodeMessage", () => {
       return true;
     });
   });
+
+  test("event_type is the provider's event name: a string, or null when null or absent", () => {
+    assert.equal(decodeMessage(INLINE).event_type, null);
+    assert.equal(decodeMessage(JSON.stringify({ ...JSON.parse(INLINE), event_type: null })).event_type, null);
+    assert.equal(
+      decodeMessage(JSON.stringify({ ...JSON.parse(INLINE), event_type: "invoice.paid" })).event_type,
+      "invoice.paid",
+    );
+    assert.throws(
+      () => decodeMessage(JSON.stringify({ ...JSON.parse(INLINE), event_type: 7 })),
+      (err: unknown) => {
+        assert.ok(err instanceof InvalidMessageError);
+        assert.equal(err.code, "invalid_field");
+        assert.equal(err.field, "event_type");
+        return true;
+      },
+    );
+  });
 });
 
 describe("idempotencyKey", () => {

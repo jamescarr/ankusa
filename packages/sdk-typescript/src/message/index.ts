@@ -51,6 +51,12 @@ export type Message = {
   instance: string | null;
   /** The region that instance is configured with; `null` when it has none or predates the field. */
   region: string | null;
+  /**
+   * The provider's event name (for example `invoice.paid`), as the source's
+   * `event_type` key read it; `null` when the source has none, the hook carries
+   * none, or the message predates the field.
+   */
+  event_type: string | null;
   /** The decoded inline body (non-enumerable); `null` for a claim message. */
   body: Uint8Array | null;
 };
@@ -173,6 +179,7 @@ export function decodeMessage(data: string | Uint8Array): Message {
     "tracestate",
     "instance",
     "region",
+    "event_type",
   ] as const) {
     const value = raw[key];
     if (!(value === undefined || value === null || typeof value === "string")) {
@@ -252,6 +259,7 @@ export function decodeMessage(data: string | Uint8Array): Message {
     tracestate: (raw.tracestate ?? null) as string | null,
     instance: (raw.instance ?? null) as string | null,
     region: (raw.region ?? null) as string | null,
+    event_type: (raw.event_type ?? null) as string | null,
   } as Message;
   // Non-enumerable, so a decoded message still serializes to exactly the wire
   // shape (and deep-equals the conformance vectors).

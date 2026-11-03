@@ -18,7 +18,7 @@ name: ankusa_kafka
 #   docker compose down -v
 
 x-kafka: &kafka
-  image: apache/kafka:3.9.1
+  image: apache/kafka:3.9.1@sha256:4ceccc577f03f51f6af8dbfda55194d0d892f4fa7913ffbded567ce3895622ed
   healthcheck:
     test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
     interval: 3s
@@ -45,7 +45,7 @@ x-kafka-env: &kafka-env
 
 services:
   redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:v26.2.5
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.5@sha256:badca2d958f81da675c3055a9ecb6ebb590325582bcf16936148ffd65e96e920
     command:
       - redpanda
       - start
@@ -98,7 +98,7 @@ services:
   # (DEL-7) points the sink at :19093 instead of at the broker, and adds latency,
   # drops and cut connections through the API on :8476. No other suite uses it.
   toxiproxy:
-    image: ghcr.io/shopify/toxiproxy:2.12.0
+    image: ghcr.io/shopify/toxiproxy:2.12.0@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e
     ports:
       - "8476:8474"    # toxiproxy API
       - "19093:19093"  # proxy to redpanda:9093 (its `proxied` listener advertises the proxy)
