@@ -1,4 +1,5 @@
 defmodule Ankusa.Edge.Router do
+  # Probe comment: makes this a core hot-path diff for CI-5.
   @moduledoc """
   The Bandit edge. Minimal work on the hot path, in the order that keeps
   an unauthenticated caller from costing anything: resolve the catch URL
