@@ -220,9 +220,40 @@ median of three such samples cannot support a 1.2× decision.
 - Jobs per run rose from ~29 to 33 with the shards and the merge job: the queue
   note in the Backlog matters more, not less.
 
+### Current state (8 runs, 2026-11-03 17:45 … 19:25Z — after CI-17…CI-20)
+
+- **`main` is red at 19:25Z**: run 41689506568 (`902e3dcb`) failed two jobs —
+  `ankusa (tests, 4/4)` (CI-21's tenant-fairness p99) and `lint` (a `mise install`
+  500, CI-22). Run 41702699820 (`e53e3d32`, CI-20's merge) was still in progress
+  at this measurement. AGENTS.md blocks a tag on a red `main` until diagnosed.
+- **Wall clock after CI-17: 5.35 min** on a green `main` run (41688133998) and
+  6.15 min on the red one; the two `main` runs are the only non-gate runs in the
+  window. The CI-20 probe PRs read 11.9 / 16.7 / 12.7 / 21.4 / 12.0 min because
+  they touch `packages/ankusa/bench/`, so `perf gate` measured on all five.
+- **Per-shard, run 41696475603** (`ankusa (tests, k/4)`): test time 199.3 /
+  43.3 / 237.1 / 69.1 s, job time 269 / 92 / **314** / 142 s — ~73 s of per-job
+  overhead and a 5.5× spread in test time. On the last non-gate `main` run
+  (41688133998, wall clock 5.35 min) the four shard jobs are 4.38 / 1.72 / 3.85
+  / 2.22 min and **the slowest job in the run is a shard at 82 % of the wall
+  clock** while another idles for 2.7 min. The assignment is not cost-aware;
+  CI-23.
+- **`mise by @jdx – installing 16 tools`** appears *after* the mise-action step
+  in every package job — the per-kind `install_args` is undone by mise's
+  task-run auto-install: `ankusa_server` 11.3 s (job 126143230677), `ankusa_kafka`
+  14.5 s (126143230821), `examples` 19 tools (126143230846). That is the
+  download surface that reddened `lint` in run 41689506568; CI-22.
+- **`ankusa_kafka` 237 s (job 126143230821)**: 44 s before compose (checkout +
+  mise, 12 s of it the redundant toolchain), 21 s `docker compose up`, 35 s
+  deps/compile, **120 s suite**, 15 s teardown — so only ~20 s of it is
+  removable setup, and it stays in the Backlog (see there).
+- **`perf gate` 9.5–11.7 min** on the five runs where it measured (CI-20's own
+  merge run 41696475603: 9m28s) — still 2× the rest of the pipeline on any
+  hot-path PR. Its two legs are independent measurements run in series on one
+  runner; CI-24.
+
 ## Task list
 
-Status: 18/21 done · closed without meeting the bar: CI-9 · next: CI-21, CI-13 · last updated: 2026-11-03
+Status: 18/25 done · closed without meeting the bar: CI-9 · next: CI-21, CI-22 · main: **red** (run 41689506568, `902e3dcb` — CI-21's p99 and CI-22's mise 500; 41702699820 on `e53e3d32` in progress at 19:25Z) · last updated: 2026-11-03
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -1571,6 +1602,187 @@ which it does when a measured red run outranks a slow pipeline.
   *Anchors:* `packages/ankusa/test/ankusa/dispatch/isolation_test.exs` (the drill and its heartbeat), `.github/workflows/ci.yml` (`ankusa-test` matrix), `packages/ankusa/test/test_helper.exs`.
   *Evidence:* —
 
+### Phase K — The toolchain, the shards and the gate's legs
+
+- [ ] **CI-22 — Every `mise run` installs the whole 19-tool monorepo toolchain, and one 500 from a tool download reddens the run** · P1 · Deps: —
+  *Why:* mise loads `.mise/conf.d/*.toml` repo-wide, so the config declares 19
+  tools in every directory, and its task runner auto-installs every missing
+  declared tool before a task runs (`auto_install` / `task.run_auto_install`,
+  default on). The package job's careful per-kind `install_args` (`elixir erlang
+  cmake` for a Mix package, `go` for `sdk-go`, …) is therefore undone the moment
+  `mise run check:package` starts. Measured on run 41700744695 (`07ea08fd`):
+  `ankusa_server` job 126143230677 — the action reports `3/3 · installed 0 tools
+  · 3 already installed in 194ms`, then at 19:11:09 `mise by @jdx – installing
+  16 tools` completes 19:11:21 `installed 16 tools in 11.3s`; `ankusa_kafka`
+  job 126143230821 — 16 tools in 14.5 s (18:44:07 → 18:44:19 of a 237 s job);
+  `examples` job 126143230846 — 19 tools. Six jobs pass no `install_args` at all
+  (`integration`, `conformance`, `examples`, `bench`, `bench-tenant`, `crash`:
+  `ci.yml:768,828,874,1033,1101,1134`) and the action installs the whole set
+  there by design. That download surface is also the flake: run 41689506568
+  (`main` `902e3dcb`) `lint` job 126104074391 exited 1 in 30 s because
+  `mise run lint:workflows` auto-installed 17 tools and `ruby@4.0.9` answered
+  500 three times in 4 s (`github.com/jdx/ruby/releases/download/4.0.9-1/ruby-4.0.9.x86_64_linux.tar.gz`
+  at 17:59:57.095, :57.235, :57.886, then `mise ERROR Failed to install
+  core:ruby@4.0: HTTP status server error (500)`), while the job's own comment
+  says it needs no Elixir and no SDK toolchain ("actionlint and promtool alone
+  are a few MB"). mise's retry backoff is documented as roughly 200 ms, 1 s,
+  4 s, 15 s with `MISE_HTTP_RETRIES` retries (default 3), so the whole budget
+  fits in a 4 s window — shorter than a GitHub Releases 500 burst
+  (https://mise.jdx.dev/configuration/settings.html, `http_retries`).
+  *Change:*
+  1. `MISE_AUTO_INSTALL: "false"` in `.github/workflows/ci.yml`'s top-level
+     `env:` (every job inherits it), so `mise run` never installs anything the
+     job's `install_args` did not. CI only: local `mise run check` keeps its
+     on-demand installs.
+  2. Complete every job's `install_args`: the six jobs above get exactly what
+     their tasks use (`integration`, `bench`, `bench-tenant`, `crash`:
+     `elixir erlang cmake`; `conformance`: the tools `mise run check:conformance`
+     actually invokes — measure it, do not copy the whole list; `examples`:
+     `node kubectl helm kubeconform kind elixir erlang cmake`). A missing tool
+     must fail at the command that needs it, not start a 19-tool download.
+  3. `MISE_HTTP_RETRIES: "6"` beside it, so the downloads that remain (a
+     package job's three tools) ride out a 5xx burst (~50 s of backoff) instead
+     of reddening a run.
+  4. `docs/testing.md`: one paragraph (CI runs with auto-install off and a
+     longer retry budget; a task that needs a tool the workflow does not install
+     fails loudly). `AGENTS.md`'s Commands row only if it claims `mise run`
+     brings the toolchain.
+  *Done when:* no CI job log contains a second `mise by @jdx – installing N
+  tools` after its mise-action step (and `lint` contains none at all); the six
+  previously-argument-less jobs log exactly their declared tools; a probe branch
+  whose tool URL answers 500 shows 6 retry attempts with the documented backoff
+  and then the failure, and the same probe with the server answering on the
+  last attempt succeeds; every job's task is green.
+  *Proof:* the before/after mise lines with timestamps for the three jobs above
+  and for `lint`; the probe run ids; `mise run lint:workflows`,
+  `mise run lint:pins`; a full green `main` run after the merge.
+  *Anchors:* `.github/workflows/ci.yml` (top-level `env:`, `lint` job's
+  mise-action step, the package job's `the package's toolchain` step, the six
+  `uses: jdx/mise-action` steps without `install_args`), `.mise.toml`
+  (`[tools]`), `.mise/conf.d/*.toml`, `docs/testing.md`, `AGENTS.md` (Commands).
+  *Evidence:* —
+
+- [ ] **CI-23 — Cost-balance the four shards: one shard carries 5.5× another's test time and is the run's critical path** · P2 · Deps: CI-17
+  *Why:* `mix test --partitions K` assigns whole test *files* without knowing
+  what they cost, so on run 41696475603 (`06875752`) the four shards finished
+  their tests in **199.3 / 43.3 / 237.1 / 69.1 s** and their jobs in 269 / 92 /
+  **314** / 142 s — a 5.5× spread in test time. On the last non-gate `main` run
+  (41688133998) the shard jobs are 4.38 / 1.72 / 3.85 / 2.22 min and the slowest
+  job of the whole run is a shard at **82 % of the 5.35 min wall clock**, while
+  shard 2/4 finishes with 2.7 min to spare. Evenly divided the test time is
+  137 s, so a shard's job would be ~210 s: **~100 s off every core-touching PR**
+  (5.35 → ~3.7 min) with the same tests, the same 85 % floor and the same
+  merged coverage. The imbalance is structural, not noise: a 137 s file
+  (`test/ankusa/property/migrate_property_test.exs`, CI-9's measurement) lands
+  whole in one shard, and CI-17 already found that a fifth shard buys nothing
+  while the assignment stays hash-based.
+  *Change:*
+  1. Measure per file on the runner first (a probe branch with a per-file timing
+     pass, or one `--slowest 200` run grouped by file) and put the table in the
+     PR: the assignment must be made from measured cost, not from file size.
+  2. Replace `MIX_TEST_PARTITION`/`--partitions` in `.mise/tasks/check/package`'s
+     `--partition` form with an explicit assignment: a committed map
+     (`packages/ankusa/test/.shard-map`, or a list in the task) from shard to
+     test files, run as `mix test --cover --export-coverage <n> <files…>` —
+     Mix's own export name, which `mix test.coverage` already merges.
+  3. Add the **completeness guard**: the lane enumerates `test/**/*_test.exs`
+     and fails naming any file that is in no shard or in two. A file silently
+     missing from the map must be a red run, never a shorter suite.
+  4. Balance against the measured file times; where one property file is the
+     only reason a shard is long, split that file into two (same cases, same
+     `max_runs`, same assertions) rather than lowering anything. If a single
+     file alone exceeds the target, say so and accept that floor.
+  5. `ankusa-coverage` stays as it is (four exports, the 85 % floor enforced
+     once); update its comments and `docs/testing.md` + the AGENTS.md
+     `check:package` row: how the map is maintained, and that the guard names a
+     new file that is missing from it.
+  *Done when:* on a run whose predecessor had 314 s for shard 3/4, the four
+  shard jobs are within 15 % of each other and the slowest is ≤ 240 s; the
+  shards' `Result:` counts sum to the single-process total (2 081 today, and
+  the merge job proves coverage within 0.5 points of the single-process
+  89.2 %); a probe branch that drops one file from the map fails the guard with
+  that file's name; the 85 % floor still runs only in `ankusa (coverage)`.
+  *Proof:* the before/after per-shard tables with run ids, the per-file timing
+  table, the dropped-file guard probe (closed unmerged), `mise run
+  check:package ankusa --partition 3/4` locally, `mise run lint:workflows`.
+  *Anchors:* `.mise/tasks/check/package` (`--partition` block, the test lane's
+  `mix test --cover`), `.github/workflows/ci.yml` (`ankusa-test` matrix,
+  `PARTITIONS`, `ankusa-coverage`), `packages/ankusa/test/**/*_test.exs`,
+  `packages/ankusa/mix.exs` (`test_coverage`), `docs/testing.md`, `AGENTS.md`
+  (Commands).
+  *Evidence:* —
+
+- [ ] **CI-24 — Run the perf gate's two legs on two runners and judge in a third, so a hot-path PR stops paying them in series** · P2 · Deps: CI-20
+  *Why:* after CI-17 and CI-20 a hot-path PR is wall-clocked by `perf gate`
+  alone: 9m28s on run 41696475603, 11.7 min median over the five runs where it
+  measured (max 16.2), against 5.35 min for the rest of the pipeline. The job is
+  two independent measurements in series — setup 46 s, base leg (4 discarded
+  warm-ups at 2 000 hooks, then 12 measured runs × 4 cells), branch leg (the
+  same) — and the second waits for the first only because the base leg writes
+  `$RUNNER_TEMP/base-baseline.json` for the branch leg to read. Both legs must
+  stay on one runner class and neither may share a runner (they would contend
+  and corrupt each other's samples), so the fix is two parallel jobs plus a
+  verdict job, not two steps in one job.
+  *Change:* `@gates` (1.2× p99, 0.8× throughput), the four cells,
+  `BENCH_RUNS`, `BENCH_CONFIRM`, CI-20's warm-up size and CI-14's
+  settle/omit policy are untouched.
+  1. `perf gate (base)`: the existing base-leg step (checkout the base commit's
+     sources and deps, `BENCH_REBASELINE=1 mise run bench:gate`), uploading
+     `base-baseline.json` **and** its raw samples as artifacts.
+  2. `perf gate (branch)`: its own runner, `mise run bench:gate` against the
+     base baseline when the artifact is available (else the checked-in
+     `baseline.json`, as today), uploading `last.json` and its samples. The
+     confirm round lives here: measure the cells that decide, and when a cell
+     is within the limit's headroom of failing, collect its confirm samples in
+     the same job (the branch job knows its own numbers; the base is only
+     needed for the verdict).
+  3. `perf gate (verdict)`: downloads both, applies the same `evaluate/3`
+     decisions (no new thresholds, no new pass), writes the step summary and
+     fails on a resolvable regression or a missing artifact by name.
+  4. `bench-scope` gates both legs; `ci-summary` lists the three jobs; the
+     `bench-last` artifact keeps its name so docs and probes still find it.
+  *Done when:* on a hot-path PR the wall clock from `perf gate (base)` start to
+  `perf gate (verdict)` end is ≤ 60 % of the 9m28s–11m39s reference on the same
+  runner class, with the same verdicts on the same commit; a deliberately
+  regressed tree (`Process.sleep(20)` in `Ankusa.Edge.Ingest.ingest/2`, CI-14's
+  proof) still fails, naming its cell; a missing baseline artifact fails the
+  verdict job by name; a `main` push with no base commit still falls back to the
+  checked-in baseline.
+  *Proof:* the before/after job tables with run ids, the deliberate-regression
+  run, the missing-artifact probe (closed unmerged), `mise run bench:gate`
+  locally, `mise run lint:workflows`, `mise run lint:pins`.
+  *Anchors:* `.github/workflows/ci.yml` (`bench` job's two legs, `bench-scope`,
+  `bench-tenant`, `ci-summary`), `packages/ankusa/bench/gate.exs` (`evaluate/3`,
+  `report/5`, `settle_spread/6`, `warmup/4`, `@gates`, `BENCH_CONFIRM`),
+  `.mise/tasks/bench/gate`, `docs/testing.md` "Perf gate".
+  *Evidence:* —
+
+- [ ] **CI-25 — `ci-summary` prints the run, not its critical path: add the wall clock, the last job and the queue lead** · P2 · Deps: —
+  *Why:* every measurement this loop makes starts with `gh run list` plus one
+  `gh run view --json jobs` per run (30 calls) to answer three questions: how
+  long the run took, which job ended last, and how long the queue held it.
+  `ci-summary` already fetches the same jobs API and prints the table; the
+  arithmetic is three lines. The lead is not decoration: with 33 jobs per run
+  and eight runs in flight it reached 2–9.3 min (median 0.2, p90 1.5 in the
+  2026-11-03 window), which on a 5.35 min pipeline is a visible share, and the
+  shard imbalance above is only visible if the last job is named.
+  *Change:* in `ci-summary`'s existing step, compute from the same `gh api
+  …/jobs` response — first `started_at` to last `completed_at` as the wall
+  clock, the job with the latest `completed_at` as the last to finish (a
+  skipped leg never wins), and `created_at` of the run (`gh api
+  repos/$REPO/actions/runs/$RUN_ID`, the same token) to the first `started_at`
+  as the queue lead. Print one line above the table, e.g. `wall clock 5.4 min
+  (queued 0.1 min; last to finish: ankusa (tests, 3/4) 5.2 min)`. Keep the
+  table, the `changes` reason line and the failure block unchanged.
+  *Done when:* a run with a skipped matrix leg and a run with every job show the
+  right wall clock, lead and last-job name against a hand-computed `gh run view
+  --json jobs`, and the job's exit condition is unchanged.
+  *Proof:* the two summary pages quoted in the PR beside the hand-computed
+  numbers; `mise run lint:workflows`.
+  *Anchors:* `.github/workflows/ci.yml` (`ci-summary` job), `docs/testing.md`
+  (the summary page, if documented there).
+  *Evidence:* —
+
 ## Backlog (not yet an item)
 
 - **SQS FIFO batch order** — `Ankusa.Sink.SQSIntegrationTest` "sqs batch order:
@@ -1587,29 +1799,26 @@ which it does when a measured red run outranks a slow pipeline.
   concurrent-job limit, now **33 jobs** after CI-17's four shards and the merge
   job: with eight runs in flight the queue lead went to 2–9.3 min (median 0.2,
   p90 1.5 over 26 runs), and one `main` push waited 9.3 min before its first job
-  started. Not an item yet: after CI-17 the wall clock is a shard (4.2–4.5 min)
-  or `perf gate`, both long enough that a few minutes of queue rarely shows;
-  re-measure once CI-20 lands and treat it as an item if the lead is a visible
-  share of a 5-minute pipeline. The candidates are folding the nine single-
-  minute SDK jobs into three, and dropping `bench-scope` into `changes`.
-- **`lint` failed on a mise download** — `main` 41689506568 (job 126104074391):
-  `mise ✗ ruby@4.0.9 … HTTP status server error (500) for
-  https://github.com/jdx/ruby/releases/download/4.0.9-1/…` after mise's own 3
-  retries. External and rare; if it recurs, pin/cache the ruby tool or drop
-  ruby from the jobs that do not lint Ruby. Not an item until it repeats.
-- **`ankusa_kafka` is now the longest non-shard job** — 3.8 min median but
-  5.3–6.6 min on the long tail (runs 41681081948, 41683881288, 41679953968),
-  where it decides the PR's wall clock. CI-12 fixed the readiness wait; the tail
-  is five containers (three brokers, redpanda, toxiproxy) plus the fault tests.
-  An item if it stays above a shard after CI-20.
+  started. Not an item yet, and CI-25 now prints the lead on every run's
+  summary so the next measurement is free. Candidates if it becomes one: folding
+  the nine single-minute SDK jobs into three, and dropping `bench-scope` into
+  `changes`. Note that CI-22 and CI-23 both shrink job *time*, which is the
+  other half of the same problem.
+- **`lint` failed on a mise download** — **promoted to CI-22**, which measured
+  the cause: the job does not need ruby at all, and `mise run` was installing 17
+  tools for it (`main` 41689506568, job 126104074391).
+- **`ankusa_kafka` is not the wall clock after CI-17** — job 126143230821
+  measures 237 s and decomposes as 44 s before compose (checkout, mise — 12 s of
+  it CI-22's redundant toolchain), 21 s `docker compose up` (five containers),
+  35 s deps/compile, **120 s suite**, 15 s teardown. So at most ~20 s of it is
+  removable setup, against 100 s from CI-23 and ~5 min from CI-24; it stays here
+  with the arithmetic, and becomes an item only if the suite itself (42 tests,
+  one of them the 2 s×N fault drills) grows again.
 - **`Ankusa.BlobStore.PoolTest`** — one local observation (`ankusa (tests)`,
   2026-11-03, a pool-timing test): fails in a full run, passes in isolation and
   passed in the CI lane on the same commit. Not enough samples to attribute;
   collect ten full-lane runs before touching it.
-- **`ci-summary` as the measuring tool** — it now writes the per-job table to
-  `$GITHUB_STEP_SUMMARY`; a second line with the *critical path* (first start →
-  last end, and the job that ends last) would make the next measurement one
-  page read instead of 30 API calls.
+- **`ci-summary` as the measuring tool** — **promoted to CI-25**.
 - **`mix docs --warnings-as-errors`** — closed, not a pipeline defect: the one
   failure in the 2026-11-03 window (run 41575322460, `ankusa (static)`) is
   `warning: documentation references module "Ankusa.Application" but it is
@@ -1635,7 +1844,7 @@ bisect.
 
 ## Verification of this plan
 
-- `grep -cE '^- \[[ x]\] \*\*CI-' CI_PIPELINE_PLAN.md` → 21 (the number of
+- `grep -cE '^- \[[ x]\] \*\*CI-' CI_PIPELINE_PLAN.md` → 25 (the number of
   items; fewer ticked as they land, and the count matches the `Status:` line's
   denominator).
 - Every *Anchors* path exists at the commit the item is executed on (re-read the
