@@ -1786,15 +1786,14 @@ which it does when a measured red run outranks a slow pipeline.
   Forced-500 probe (branch `probe/ci-22-mise-retries`, closed unmerged, deleted;
   run **41715076762**, mise 2026.10.12): a local server answers 500 to a one-file
   `http:` tool and then serves it. With `MISE_HTTP_RETRIES=6` and a URL that
-  always answers 500 mise makes six retries — `attempt 1 … retrying in 155.3ms`,
-  `attempt 2 … 721.3ms`, `attempt 3 … 2.0s`, `attempt 4 … 14.2s`, `attempt 5 …
-  12.6s`, `attempt 6 … 13.3s` (20:41:05.639 → 20:41:35.318) — then fails at
-  20:41:48.660: `mise ERROR Failed to install http:probe@1.0.0: HTTP status
-  server error (500)`, **43.0 s and 7 requests**; with the default
-  (`MISE_HTTP_RETRIES` unset) the same URL fails after `attempt 3` in **4.2 s**
-  (4 requests). With the server answering 200 on the seventh request the same
-  install **succeeds**: `http:probe@1.0.0  38.6s`, `1/1 · installed 1 tool`, and
-  the tool runs (`probe-tool-ok`). The same probe with
+  always answers 500 mise makes six retries — `attempt 1 … retrying in 173.1ms`,
+  `attempt 2 … 804.0ms`, `attempt 3 … 2.6s`, `attempt 4 … 14.6s`, `attempt 5 …
+  14.1s`, `attempt 6 … 9.4s` (20:42:56.425 → 20:43:28.660) — then fails at
+  20:43:38.067 with `1/1 · installed 0 tools · 1 failed in 41.7s`, **41.7 s and
+  7 requests**; with the default (`MISE_HTTP_RETRIES` unset) the same URL fails
+  after `attempt 3` in **3.5 s** (4 requests). With the server answering 200 on
+  the seventh request the same install **succeeds**: `http:probe@1.0.0  37.0s`,
+  `1/1 · installed 1 tool`, and the tool runs (`probe-tool-ok`). The same probe with
   `MISE_AUTO_INSTALL=false`: `mise run lint:workflows` green with no `installing`
   line, and `mise run` on a task calling a declared but uninstalled tool fails at
   the command — `[needs-probe] $ probe-tool --version` / `sh: 1: probe-tool: not
