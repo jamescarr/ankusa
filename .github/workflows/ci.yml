@@ -595,14 +595,39 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  # CI-17: the suite is four shards on four runners plus a merge job, because
+  # one `mix test --cover` was 7-10 min of the run and the last job to finish.
+  # `--partitions` assigns whole test *files* round-robin over the sorted file
+  # list, so a heavy file decides the balance of whichever shard it lands in and
+  # cannot be split. Measured per-shard job times: K=3 290/127/322 s
+  # (run 41677632064), K=4 188/93/250/120 s (41679004989; 292 s from the first
+  # shard to the merge's end) and 128/299/315/113 s on a run where every job
+  # was ~30 % slower (41683881288), K=5 92/251/114/215/131 s (41685085654;
+  # 297 s). A fifth runner bought no wall clock, so K stays at 4. A shard does
+  # not enforce the coverage floor — `mix test --partitions K --cover`
+  # exports `cover/<n>.coverdata` instead of computing a report, because a
+  # report over 1/K of the code would fail the floor for the very reason the
+  # suite is split. The `ankusa-coverage` job below is the one place it runs.
+  #
+  # The matrix and each job's `PARTITIONS` env are the two places K appears (a
+  # job name cannot read `env`); keep them in step. The lane task takes `n/K`
+  # itself, so a shard cannot disagree with the export name it uploads.
   ankusa-test:
-    name: ankusa (tests)
+    name: ankusa (tests, ${{ matrix.partition }}/4)
     needs: changes
     if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      # One red shard must not cancel the others: a cancelled shard uploads no
+      # export, and the merge job would then report a missing shard instead of
+      # the test failure that caused it. The run is red either way.
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
     env:
       # Fork PRs get no secrets; skip the login there rather than fail it.
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+      PARTITIONS: 4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
@@ -611,7 +636,9 @@ jobs:
           install_args: elixir erlang cmake
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-hex" # the default key skips .mise/conf.d/
       # Same shape as the static lane, its own key: `deps/` plus `_build` with
-      # the `test` env compiled (the suite never reads `dev`).
+      # the `test` env compiled (the suite never reads `dev`). All four shards
+      # restore (and, on a cold key, race to save) the one entry — the same
+      # single-writer rule as before, now within one matrix job.
       - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -631,11 +658,100 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      # `mix test --cover` (the coverage floor is the package's own) and the
-      # ExUnit seed line in the step summary; the lane warms `test` only. The
-      # audit and its `hex-audit-ankusa` artifact stay in the static lane —
+      # One shard of `mix test --cover`, exporting its coverage and its own
+      # ExUnit seed line to this job's summary; the lane fails the shard if it
+      # ran no tests (`Result:` absent or zero) or left no export. The audit
+      # and its `hex-audit-ankusa` artifact stay in the static lane —
       # `hex.audit` runs there, and two jobs must not upload one artifact name.
-      - run: mise run check:package ankusa --lane test
+      - run: mise run check:package ankusa --partition ${{ matrix.partition }}/${{ env.PARTITIONS }}
+      # Always: a red shard still has a complete export (Mix exports after the
+      # suite, not only on success), and the merge job names a *missing*
+      # shard, which is the failure that says the pipeline broke, not the test.
+      - name: upload the shard's coverage export
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ankusa-coverage-${{ matrix.partition }}
+          path: packages/ankusa/cover/${{ matrix.partition }}.coverdata
+          if-no-files-found: error
+          retention-days: 7
+
+  # CI-17: merge the shards' exports and enforce the package's own floor — the
+  # same `test_coverage: [summary: [threshold: 85]]` `mix test --cover` applies
+  # in one process, through `mix test.coverage` (which calls the same
+  # `generate_cover_results/1`; it exits non-zero with "Coverage test failed,
+  # threshold not met" when the merged total is under the floor). No env or
+  # `mix.exs` switch is needed: the export path used by a shard skips the
+  # summary entirely, and this job imports every export before the summary is
+  # computed.
+  #
+  # `always() && !cancelled()`: this job must run after a red shard to say which
+  # shard is missing, and must not run when the matrix was skipped by `changes`.
+  ankusa-coverage:
+    name: ankusa (coverage)
+    needs: [changes, ankusa-test]
+    if: always() && !cancelled() && needs.changes.outputs.core == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # Keep in step with the `ankusa-test` matrix above; a shard missing from
+      # cover/ fails this job before Mix runs.
+      PARTITIONS: 4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.12
+          install_args: elixir erlang cmake
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-hex" # the default key skips .mise/conf.d/
+      # The same entry the shards restored and saved: the compiled `test` tree
+      # `mix test.coverage` needs to cover-compile and attribute lines to.
+      - name: cache mix deps
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            packages/ankusa/deps
+            packages/ankusa/_build
+          key: mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-test-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          restore-keys: |
+            mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-test-${{ hashFiles('.mise.toml') }}-
+            mix-v19-${{ runner.os }}-${{ runner.arch }}-ankusa-${{ hashFiles('.mise.toml') }}-
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - run: mix local.hex --force && mix local.rebar --force
+      # Each shard uploads `cover/<n>.coverdata`; `merge-multiple` puts them
+      # back side by side in the package's `cover/`, which is what
+      # `mix test.coverage` reads (`cover/*.coverdata`, gitignored).
+      - name: download the shards' coverage
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ankusa-coverage-*
+          path: packages/ankusa/cover
+          merge-multiple: true
+      # The explicit guard: a missing or empty shard must fail here, with the
+      # shard named, rather than merge into a report that looks complete. (If
+      # *no* artifact arrives, the download step above already failed the job.)
+      - name: merge the shards and enforce the 85 % floor
+        working-directory: packages/ankusa
+        env:
+          MIX_ENV: test
+        run: |
+          set -euo pipefail
+          for n in $(seq 1 "$PARTITIONS"); do
+            if [ ! -s "cover/$n.coverdata" ]; then
+              echo "::error::shard $n uploaded no cover/$n.coverdata — a missing shard is a failure, not a partial pass"
+              exit 1
+            fi
+          done
+          found=0
+          for f in cover/*.coverdata; do
+            if [ -e "$f" ]; then found=$((found + 1)); fi
+          done
+          if [ "$found" -ne "$PARTITIONS" ]; then
+            echo "::error::expected $PARTITIONS coverage exports, found $found — a shard ran twice or a partition is wrong"
+            exit 1
+          fi
+          mix deps.get --check-locked
+          mix test.coverage
 
   # Core's object-store adapters (and the S3 backup round trip) against the
   # floci emulators: `mix test --only integration` (the rest of core's suite
@@ -1167,6 +1283,7 @@ jobs:
       - package
       - ankusa-static
       - ankusa-test
+      - ankusa-coverage
       - integration
       - conformance
       - examples

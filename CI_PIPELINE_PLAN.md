@@ -196,7 +196,7 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 16/19 done · closed without meeting the bar: CI-9 · next: CI-17, CI-13 · last updated: 2026-11-03
+Status: 17/19 done · closed without meeting the bar: CI-9 · next: CI-13 · last updated: 2026-11-03
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -993,7 +993,7 @@ which it does when a measured red run outranks a slow pipeline.
   (partition into three shards and merge the coverage) is what takes it to
   ~3.2 min.
 
-- [ ] **CI-17 — Partition the core suite across jobs and merge the coverage, so the pipeline stops being one 9.8 min job** · P2 · Deps: CI-9
+- [x] **CI-17 — Partition the core suite across jobs and merge the coverage, so the pipeline stops being one 9.8 min job** · P2 · Deps: CI-9
   *Why:* `ankusa (tests)` is 9.8 min median of an 11.5 min PR wall clock and
   the last job to finish in 10 of 26 runs (2026-11-03 window); ~40 s of it is
   preamble and ~9 min is one `mix test --cover` in one ExUnit process on a
@@ -1039,7 +1039,31 @@ which it does when a measured red run outranks a slow pipeline.
   *Anchors:* `.mise/tasks/check/package` (`--lane`, the `test` env warm),
   `packages/ankusa/mix.exs` (`test_coverage`), `.github/workflows/ci.yml`
   (`ankusa-test` job, `ci-summary`), `docs/testing.md`.
-  *Evidence:* —
+  *Evidence:* 2026-11-03 · PR #265 · four shards + a merge. Per-shard job times
+  on run 41679004989 (`3b5f721f`): `ankusa (tests, 1/4)` **188 s** (142.4 s
+  test, 506 passed), `2/4` **93 s** (46.8 s, 519), `3/4` **250 s** (200.7 s,
+  601), `4/4` **120 s** (71.2 s, 455), `ankusa (coverage)` **40 s**, merged
+  **89.22 %** — **292 s** from the first shard's start to the merge's end,
+  **49.7 %** of the plan's 9.8 min lane (bar ≤ 60 %) and 67.7 % of the same
+  commit's own 431 s single-process job (run 41673183340: 385.6 s of tests,
+  `Result: 2081 passed (51 properties, 2030 tests), 41 excluded`, 89.20 %). The
+  shards sum to exactly those counts (506+519+601+455 = 2 081, 51 properties,
+  2 030 tests, 41 excluded) and the merged table is 0.02 points off. A second
+  K=4 run on a noisier host ran every job ~30 % slower (`ankusa_kafka` 232 →
+  321 s) and put the same shape at 355 s (60.4 %); a measured K=5 run
+  (41685085654: 92/251/114/215/131 s, 297 s, 50.5 %) bought no wall clock, so
+  K stays 4 — a heavy property file is whole in one shard either way and the
+  ~55 s of per-shard setup is the floor. The floor runs only in
+  `ankusa (coverage)` via `mix test.coverage` (exit 3, `Coverage: … /
+  Threshold: 85.00 %`; a single shard's export merges to 66.97 % locally), and
+  probe PR #266 (closed unmerged, branch deleted) proved both guards on CI:
+  threshold 99.9 → merge job exit 3 (`Coverage: 89.25 % / Threshold: 99.90 %`),
+  shard 4 dropped from the matrix → merge job exit 1 (`shard 4 uploaded no
+  cover/4.coverdata`). Local `mise run check:package ankusa --partition 1/3`
+  ran shard 1 (`Result: 765 passed (20 properties, 745 tests)`) and exported
+  `cover/1.coverdata`; the single-process `--lane test` path is unchanged.
+  `mise run lint:pins`, `mise run lint:workflows` and `mix docs
+  --warnings-as-errors` clean.
 
 - [x] **CI-18 — A failed test lane names its tests where the report survives** · P1 · Deps: —
   *Why:* on 2026-11-03 a failed `mise run check:package ankusa --lane test` exited 1 with "1 failed test" and **the failing test's name was lost**: the lane reports failures only on stdout, and stdout is what a CI log view or an agent's tool output clips. `mix test --failed` is the local recovery and CI cannot use it (a fresh VM every run). The lane already writes the ExUnit seed to `$GITHUB_STEP_SUMMARY` (`.mise/tasks/check/package`, `record_seed`, from the `$testlog` that `tee` already captures), so the names belong on the same page. The cost is real: 6 of 30 `ci.yml` runs were red in the 2026-11-03 window and two of those sites were attributed only by pulling job logs through the API, while a third (the run that motivated this item) was never named at all.
