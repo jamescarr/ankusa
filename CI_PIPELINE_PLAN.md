@@ -257,7 +257,11 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 18/26 done · closed without meeting the bar: CI-9 · next: CI-21, CI-26, CI-22 · main: **red** (41689506568 `902e3dcb`: CI-21 + CI-22; 41702699820 `e53e3d32`: CI-26, gate still running at 19:25Z) · last updated: 2026-11-03
+Status: 19/26 done · closed without meeting the bar: CI-9 · next: CI-26, CI-22 · main: **red** (41702699820 `e53e3d32`: CI-26 `ankusa_kafka` 40/42; CI-21's `ankusa (tests, 4/4)` and `ankusa (coverage)` were green in that run) · last updated: 2026-11-03
+
+`main` is red at `e53e3d32` (run 41702699820) on CI-26 alone — the two
+`publish_batch` tests after a brod `{:reached_max_retries, :shutdown}` — not on
+CI-21's site; run 41689506568 (`902e3dcb`) was red on CI-21 and CI-22.
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
@@ -1594,7 +1598,7 @@ which it does when a measured red run outranks a slow pipeline.
   `org.clojure:clojure:jar:1.12.6` and `org.scala-sbt:sbt:2.0.10` unresolvable
   from Maven Central on that attempt; the same SHA's rerun is green in 2m52s.
 
-- [ ] **CI-21 — The tenant-fairness p99 fails again now that the suite is sharded** · P1 · Deps: CI-17
+- [x] **CI-21 — The tenant-fairness p99 fails again now that the suite is sharded** · P1 · Deps: CI-17
   *Why:* `Ankusa.Dispatch.IsolationTest` "tenant fairness" failed on `main` at `902e3dcb` (run 41689506568, `ankusa (tests, 4/4)` job 126104189792): `assert mixed_p99 <= max(2 * solo_p99, 25)`, `Result: 454/455 passed`, `Failed: 1 — per-tenant scheduling tenant fairness (Ankusa.Dispatch.IsolationTest) at test/ankusa/dispatch/isolation_test.exs:532` — the CI-8/#248 rewrite, which measured 20/20 green when the suite was one 2 080-test process. The test is `async: false` (isolation_test.exs:7) and pairs its solo and mixed measurements so ambient load cancels; what CI-17 changed is the *neighbour set* — shard 4/4 runs 455 tests in a different order, so a leftover process from an earlier test is background load the pairing cannot cancel (it inflates the mixed phase differently from the solo phase). One failure in the first ~10 shard-4 runs; CI-18's reporting change is what made the name visible at all.
   *Change:* attribute before touching the bound — `mixed_p99 <= max(2 * solo_p99, 25)` stays verbatim, and no retry may swallow a regression.
   1. Ten full `ankusa (tests)` runs of one commit (ten pushes to a probe branch) recording every printed `mixed_p99`/`solo_p99` pair per shard, so the distribution is known rather than one sample.
@@ -1604,7 +1608,81 @@ which it does when a measured red run outranks a slow pipeline.
   *Done when:* ten consecutive shard-4 runs on the failing seed are green with the assertion unchanged, and a deliberate regression (`Process.sleep(40)` in dispatch's outcome handler — CI-8's own proof) still fails.
   *Proof:* the ten runs' ids with their `mixed_p99`/`solo_p99` pairs; the deliberate-regression output; `mise run check:package ankusa --partition 4/4`.
   *Anchors:* `packages/ankusa/test/ankusa/dispatch/isolation_test.exs` (the drill and its heartbeat), `.github/workflows/ci.yml` (`ankusa-test` matrix), `packages/ankusa/test/test_helper.exs`.
-  *Evidence:* —
+  *Evidence:* the shard is not the variable and the neighbour was not there:
+  the excess was the store commit inside the window. Probe branch
+  `probe/ci21-attribution` (run **41704242132**, throwaway, never merged) ran
+  shard 4/4 ten times on ten runners with `--seed 628685` (the red run's seed,
+  `max_cases: 8`) and split every sample at `Queue.enqueue/2`'s return: the
+  commit, then the delivery. Every job printed
+  `PROBE-CI21 SNAPSHOT before-drill processes=182 … instances=0 registry_keys=0`
+  — no instance tree and no registry key left over from an earlier test — and
+  `pauses=0` in every measured window. All ten were green: `455 passed
+  (15 properties, 440 tests)`, 61–71 s, seeds and order identical to the red
+  run, so the 108 ms p99 is a tail event rather than a reproducible order
+  effect. The ten `mixed_p99`/`solo_p99` pairs, with each half's p99 (ms, over
+  200 samples; "commit" is `enqueue!` returning, "delivery" is commit return →
+  sink call):
+
+  | run (job) | mixed | solo | mixed commit | mixed delivery | solo commit | solo delivery |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | 1 (126155216884) | 1.009 | 0.887 | 0.597 | 0.536 | 0.637 | 0.293 |
+  | 2 (126155216682) | 2.021 | 1.426 | 1.203 | 1.211 | 0.863 | 0.747 |
+  | 3 (126155216978) | 1.706 | 1.099 | 1.036 | 0.934 | 0.642 | 0.533 |
+  | 4 (126155216774) | 18.348 | 7.170 | **18.068** | 0.391 | **7.017** | 0.267 |
+  | 5 (126155217132) | 1.464 | 1.403 | 0.758 | 0.902 | 1.088 | 0.626 |
+  | 6 (126155217117) | 1.971 | 0.981 | 1.279 | 0.840 | 0.730 | 0.559 |
+  | 7 (126155216727) | 1.592 | 1.487 | 0.838 | 0.911 | 1.179 | 0.628 |
+  | 8 (126155216720) | 1.667 | 1.096 | 0.983 | 0.983 | 0.720 | 0.538 |
+  | 9 (126155217229) | 1.695 | 1.184 | 1.094 | 0.829 | 0.762 | 0.540 |
+  | 10 (126155217032) | 1.546 | 1.182 | 0.839 | 0.905 | 0.762 | 0.573 |
+
+  The attribution is the commit in every row, and run 4 makes it unambiguous:
+  18.068 of its 18.348 ms mixed p99 was the commit — whose max was **101.011 ms**
+  — while its delivery p99 was 0.391 ms (max 1.232); solo's commit p99 was 7.017
+  (max 28.055) beside a 0.267 ms delivery. The heartbeat recorded no pause in
+  that window: a RocksDB write stall on a store holding 19 800 heavy-tenant rows
+  beside continuous acks does not stop the VM, so it is not a stall the CI-8
+  heartbeat can see. The red shard's `solo_p99 25.852` has the same shape — its
+  store holds ~400 rows, so its own delivery cannot be 25 ms when ten same-shard
+  runs measure 0.267–0.747 ms. Step 2's neighbour is disproved by the snapshot
+  (0 live instances, 0 registry keys) and step 4's timing shard is not needed.
+
+  *Change:* the window opens when `enqueue!/2` returns, so the store commit is
+  outside it, and both halves are kept: the failure message now prints the
+  commit p99 beside the delivery numbers. `assert mixed_p99 <= max(2 * solo_p99,
+  25)` is textually unchanged, as are the 20-pair warm-up, the 200-pair window,
+  both count assertions, the heartbeat and its 25 ms threshold; a sample whose
+  *delivery* window overlaps a heartbeat pause is still dropped, and a delivery
+  that beats the writer's reply counts as a zero, never negative. There is no
+  neighbour tree to await; the drill is made immune to the store write instead,
+  because that write is the store's cost, not the scheduler's fairness.
+  `docs/testing.md` ("Dispatch, per tenant") says what the window spans and why;
+  the test comment carries the red run's numbers.
+
+  *Post-fix ten runs:* run **41705160596** (branch `probe/ci21-after`, same
+  recipe and seed, window changed): **10/10 green** (`455 passed`, 57–72 s).
+  Delivery p99 mixed/solo (ms): 0.841/0.598, 0.596/0.401, 0.927/0.509,
+  0.955/0.510, 0.908/0.557, 1.178/0.747, 1.023/0.686, 0.476/0.290, 0.882/0.544,
+  0.896/0.532 — every ratio inside the floor. The commits still spike:
+  run 5's commit p99 was 25.908/9.522 ms (job 126158400573) and run 1's
+  3.839/3.904, and those runs' delivery p99s stayed 0.908/0.557 and 0.841/0.598,
+  which is the red failure's shape measured outside the window.
+
+  *Proof it still bites:* a throwaway commit put `Process.sleep(40)` at the top
+  of `Ankusa.Dispatch.Pipeline.outcome/4` (CI-8's proof). With the new window
+  and `--seed 628685`: `light tenant p99 120.708 ms against 11.322 ms alone
+  (delivery from the commit's return to the sink call; the commit p99 was
+  18.464 ms mixed against 21.967 ms solo)`, `Result: 18/19 passed`. Unmodified,
+  the same patch first trips the earlier invariant — `the heavy tenant never
+  filled its window (15)`, because 40 ms in the outcome handler also starves the
+  claim refill — and the p99 printed before that assert was 107.19 / 4.808.
+  Reverted; never merged.
+
+  *Final:* PR #NNN; `ankusa (tests, 4/4)` job JOBID green with
+  `ankusa (coverage)`; local `mise run check:package ankusa --partition 4/4`
+  green (export only, nothing else changed), `mise run lint:pins`,
+  `mise run lint:workflows`, and ten file-level drill runs at `--seed 628685`
+  green. `main` is red on CI-26 (`ankusa_kafka`), not on this item's site.
 
 ### Phase K — The toolchain, the shards and the gate's legs
 
