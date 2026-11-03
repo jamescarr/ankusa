@@ -28,10 +28,11 @@ concurrency:
 # 19; on 41689506568 a `lint` run downloaded 17 tools it never uses and died on
 # a 500 from ruby's release URL.
 #
-# `http_retries=6` rides out exactly that burst: mise's backoff is ~0.1 s, 0.8 s,
-# 2.5 s, 9.5 s, 11 s, 10 s (~33 s, measured) instead of the default three
-# attempts inside 4.6 s. The downloads that remain — a package job's three
-# tools — are the whole remaining 5xx surface.
+# `http_retries=6` rides out exactly that burst: mise's backoff is ~0.2 s, 0.7 s,
+# 2 s, 14 s, 13 s, 13 s — 43 s from the first attempt to the final failure,
+# measured on a probe with a URL that always answers 500 — instead of the
+# default three attempts inside 4.2 s. The downloads that remain — a package
+# job's three tools — are the whole remaining 5xx surface.
 env:
   MISE_AUTO_INSTALL: "false"
   MISE_HTTP_RETRIES: "6"

@@ -68,11 +68,11 @@ mise-action step names and `mise run` installs nothing; a task that needs a tool
 its job did not install fails at that command, loudly, instead of starting a
 19-tool download. Locally nothing changes — `mise run check` still installs what
 it needs. Beside it, `MISE_HTTP_RETRIES=6` widens the retry budget for the
-downloads that remain (a package job's three tools): six attempts with mise's
-backoff (≈0.1 s, 0.8 s, 2.5 s, 9.5 s, 11 s, 10 s, ~33 s in total) instead of the
-default three inside 4.6 s. A new job names the tools its task calls in
-`install_args`; a tool added to `.mise/conf.d/` reaches only the jobs that list
-it.
+downloads that remain (a package job's three tools): six retries with mise's
+backoff (≈0.2 s, 0.7 s, 2 s, 14 s, 13 s, 13 s — 43 s from the first attempt to
+the final failure) instead of the default three inside 4.2 s. A new job names
+the tools its task calls in `install_args`; a tool added to `.mise/conf.d/`
+reaches only the jobs that list it.
 
 ## Static analysis and coverage gates
 
