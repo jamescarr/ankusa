@@ -1,5 +1,7 @@
 name: CI
 
+# Probe (CI-16): a ci.yml-only diff must not trigger docker.yml. Closed unmerged.
+
 # Every job runs the same `mise run` task you run locally, with the toolchain
 # pinned in .mise.toml and .mise/conf.d/*.toml. The package matrix is
 # discovered from packages/*, so a new package (`mise run new:adapter`) needs no
