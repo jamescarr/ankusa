@@ -6,9 +6,16 @@ different infrastructure dependency (none, RabbitMQ, Redpanda, NATS, Redis).
 `mise run check:package <pkg>` runs one package's full CI check (format,
 warnings-as-errors, credo, dialyzer, sobelow, tests with a coverage floor,
 docs), starting and stopping that package's own `docker-compose.yml` around the
-suite; `mise run check` runs all of them. The
-eight client SDKs are also checked against one shared, language-neutral vector
-suite — `mise run check:conformance`, below.
+suite; `mise run check` runs all of them. `check:package` also takes
+`--lane static` / `--lane test`, which run the two halves of a Mix package
+separately — with no flag it runs both, in the original order, and `mise run
+check` and every other caller pass no flag. CI uses it for `ankusa` alone: the
+`ankusa (static)` job runs `mise run check:package ankusa --lane static` (deps,
+`hex.audit`, format, `compile --warnings-as-errors`, credo, dialyzer, sobelow,
+docs, `hex.build`) and `ankusa (tests)` runs `--lane test` (`mix test --cover`
+and its seed line), side by side instead of the suite waiting behind dialyzer.
+The eight client SDKs are also checked against one shared, language-neutral
+vector suite — `mise run check:conformance`, below.
 
 ## Static analysis and coverage gates
 
