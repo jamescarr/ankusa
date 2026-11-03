@@ -78,14 +78,71 @@ installation, so phase splits come from the log timestamps.
 - **Runner-minutes per pipeline: 53** (perf gate skipped, 14 of 30 runs) to
   **63** (gate run). The `ankusa` job alone is 30.0 (48–57 %).
 
-*Current state* (measured on `main`, run 41549538574, after CI-1/CI-2/CI-3/CI-4):
+*State after CI-1…CI-4* (measured on `main`, run 41549538574):
 **47.9 runner-minutes, 10.6 min wall clock** — `perf gate` 10.6 min, `ankusa`
 10.1 min, `ankusa_kafka` 3.1 min, every other job under 1.6 min. Against the
 baseline above that is −65 % wall clock (30.0 → 10.6) and −24 % runner-minutes
-(63 → 47.9 with the gate, 53 → 40 without). The two long jobs now hold 20.7 of
-the 47.9, and 24 jobs still start on every diff however small — which is why
-CI-5 and CI-7 are next. Re-measure after each lands; do not quote these as
-current after a change to the job graph.
+(63 → 47.9 with the gate, 53 → 40 without). The two long jobs then held 20.7 of
+the 47.9, and 24 jobs still started on every diff however small — which is why
+CI-5 and CI-7 followed.
+
+### Current state (30 runs, 2026-11-03 03:57 … 06:29Z — after CI-5…CI-8, CI-10…CI-12)
+
+| job | med | p90 | max | | job | med | p90 | max |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **`ankusa (tests)`** | **9.8** | **10.1** | **10.4** | | `sdk-java` | 1.3 | 1.4 | 1.5 |
+| `ankusa_kafka` | 3.4 | 5.2 | 5.7 | | `ankusa (static)` | 1.3 | 1.4 | 1.5 |
+| `bench-tenant` (5 runs) | 3.1 | 4.0 | 4.1 | | `crash drill (ENOSPC)` | 1.3 | 1.4 | 1.4 |
+| `sdk conformance` | 2.5 | 2.7 | 2.9 | | `sdk-python` | 1.2 | 1.2 | 1.5 |
+| `examples` | 1.7 | 1.8 | 1.9 | | `ankusa_server` | 1.1 | 1.2 | 1.4 |
+| `ankusa_nats` | 1.6 | 1.7 | 1.9 | | `sdk-clojure` | 1.1 | 1.2 | 1.6 |
+| `core integration` | 1.5 | 1.7 | 1.8 | | `crash drill (power-loss)` | 1.0 | 1.1 | 1.1 |
+| `ankusa_redis` | 1.4 | 1.6 | 1.7 | | `async_api_spex` | 1.0 | 1.2 | 1.3 |
+| `ankusa_rabbitmq` | 1.4 | 1.5 | 1.7 | | `sdk-go`/`sdk-elixir` | 0.9 | 1.0 | 1.3 |
+| `perf gate` (4 measured) | 10.0* | 16.1 | 16.1 | | `sdk-rust`/`sdk-ruby`/`sdk-php` | 0.8 | 1.0 | 1.3 |
+| `lint` | 0.5 | 0.6 | 1.1 | | `tools` | 0.7 | 0.8 | 1.6 |
+| `changes`/`bench-scope`/`ci-summary` | 0.1 | 0.1 | 0.1 | | `sdk-typescript` | 0.6 | 0.6 | 0.9 |
+
+\* the gate **measured** in only 4 of the 22 non-cancelled runs it appears in
+(9.0, 10.0, 10.1, 16.1 min); the other 18 are the scope decision
+(`no hot-path file touched: perf gate and bench-tenant skipped`) finishing in
+0.1 min. Its numbers are therefore thin, and its failure rate is 1 of 4, not
+1 of 22 — see CI-14.
+
+- **Wall clock: 11.5 min median, 14.9 p90, 20.5 max** (10.5 median over the 4
+  runs where the gate did not measure). Against the 30.0 min baseline that is
+  −62 %.
+- **Runner-minutes: 38.9 median** (6.3 min for a PR that only ran an SDK job,
+  55.6 for a full run whose gate failed), down from 47.9/63.
+- **The critical path is one job.** The last job to finish is `ankusa (tests)`
+  in 10 of 26 non-cancelled runs (the fence job `ci-summary`, 0.1 min, in the
+  rest); on a typical PR the wall clock is `ankusa (tests)` 9.7 min + 0.2 min
+  of lead (p90 lead 1.5 min — GitHub queueing, up to 9.3 min in a burst of
+  eight simultaneous runs: ~25 jobs per run against the account's runner
+  concurrency). Everything else is done by minute 6. **The suite is the
+  pipeline** — CI-9, CI-17.
+- **Failure rate: 6 of 30 runs red (20 %), 4 cancelled by `concurrency:`**
+  (CI-4 doing its job), one distinct cause each:
+  - **1 — `perf gate` failed its own base leg**: `INCONCLUSIVE p99_ms
+    512B-c32 … span 1.28×` then `[bench:gate] ERROR task failed` on `main`
+    commit `77e22b6f` (run 41586954095, CI-11's merge, nothing had changed
+    since its green PR run). The rebaseline refuses a shaky sample by design
+    and halts, which kills the branch leg too. CI-14.
+  - **1 — `ankusa (tests)` 2079/2080**: the tenant-fairness p99. Fixed by
+    CI-8 (#248).
+  - **1 — `ankusa_rabbitmq` 38/39**: `assert connection(inst, exch) == nil` in
+    the idle-reaper test. Open — CI-15.
+  - **1 — `ankusa_kafka` 40/42**: the broker-leader `MatchError`s. Fixed by
+    CI-12 (#246).
+  - **1 — `core integration` 40/41**: `Ankusa.Sink.SQSIntegrationTest` "sqs
+    batch order" on a FIFO group — `left: ["m02","m01","m03", …]`, i.e. the
+    first two messages of one group swapped. Backlog (needs attribution).
+  - **1 — `ankusa (static)`**: `mix docs --warnings-as-errors` —
+    `documentation references module "Ankusa.Application" but it is hidden`.
+    That run is the `docs/elixir` PR's own doc edit, not a pipeline defect;
+    removed from the backlog.
+
+### The baseline window's failures (30 runs, 2026-10-26 … 10-31)
 
 - **Failure rate: 12 of 30 runs red (40 %)**, 21 failed jobs, by cause:
   - **11 — Docker Hub pull rate limit**
@@ -139,12 +196,13 @@ median of three such samples cannot support a 1.2× decision.
 
 ## Task list
 
-Status: 10/13 done · last updated: 2026-11-03
+Status: 11/17 done · next: CI-14, CI-9, CI-16, CI-15, CI-17 · last updated: 2026-11-03
 
 Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (with the measured
 numbers), *Change*, *Done when*, *Proof*, *Anchors*, *Evidence* (filled by the
 executor in the same PR that ticks the box). **P1** is executed first; within a
-priority, ID order.
+priority, ID order — unless the Status line's `next:` names a different one,
+which it does when a measured red run outranks a slow pipeline.
 
 ### Phase A — Stop paying twice
 
@@ -758,7 +816,7 @@ priority, ID order.
   `docker compose up -d --wait` passes. PR run 41583971484: `ankusa_kafka` job
   125745049774 success, 203 s, five containers Healthy.
 
-- [ ] **CI-8 — Three flaky tests, not one assertion: make their *measurements* deterministic without touching what they assert** · P2 · Deps: —
+- [x] **CI-8 — Three flaky tests, not one assertion: make their *measurements* deterministic without touching what they assert** · P2 · Deps: —
   *Why:* in the 30-run sample plus today's runs, four red runs were a **single
   failing test**, and three distinct tests account for them:
   - `Ankusa.Dispatch.IsolationTest` "per-tenant scheduling tenant fairness"
@@ -807,11 +865,35 @@ priority, ID order.
   `packages/ankusa_rabbitmq/test/ankusa/sink/rabbitmq_test.exs`,
   `packages/ankusa/lib/ankusa/sink/reaper.ex` (the telemetry to poll),
   `.mise/tasks/check/package` (`docker compose up -d --wait`).
-  *Evidence:* —
+  *Evidence:* two PRs, because the causes were unrelated. **#248** (squash
+  `1177dc6e`) did the fairness measurement: a 20-pair warm-up window dropped
+  from the p99, two steady-state gates instead of a wall clock (the heavy
+  tenant's window full, its slow sink every slot busy, two waves finished), 200
+  samples with the count asserted (`assert length(lags) == @measured`), the solo
+  baseline measured hook-for-hook beside the mixed one, and a 1 ms heartbeat
+  that drops samples overlapping a ≥ 25 ms host stall. The assertion
+  (`mixed_p99 <= max(2 * solo_p99, 25)`) and the 99× ratio are unchanged. Ten
+  consecutive runs: before, `mixed_p99` p50 9.2 / p90 18.3 / max 52.8 ms, 1 of
+  10 failed; after, mixed/solo 1.02–1.52 on all 10, and 1.09–1.29 under 12 CPU
+  burners. Proven still biting: `Process.sleep(40)` in dispatch's outcome
+  handler fails with `light tenant p99 179.354 ms`; 20/20 green locally,
+  `2080 passed`, coverage 89.28 %. The same PR fixed a second flake it surfaced
+  — "circuit breaker opens after breaker_failures…" (3 runs in 52, `left: 1`):
+  the test had asserted which *rows* took the three attempts, which the breaker
+  does not promise; it now asserts three attempts, on one to three rows, the
+  rest parked with a re-open time. **#246** (CI-12, squash `fc3b3b4e`) did the
+  Kafka one in the fixture (leader/ISR wait plus a bounded commit probe, ten
+  consecutive green package runs, the CI shape reproduced with the wait
+  stubbed). CI on `1177dc6e`: `ankusa (tests)` 9:18 green, `ankusa (static)`
+  green, the run green (41583819554). **Not done, carried to CI-15:** the
+  RabbitMQ idle-reaper test's `sleep`-and-assert-reaped pattern and the
+  `ankusa_redis` deadline — the file `packages/ankusa_rabbitmq/test/ankusa/sink/rabbitmq_test.exs`
+  is untouched, and it failed again in this window (run 41575405567,
+  `38/39 passed`, `assert connection(inst, exch) == nil`).
 
 ### Phase F — The last wall-clock lever: the suite itself
 
-- [ ] **CI-9 — Profile the core suite and cut the test lane's wall-clock time** · P2 · Deps: CI-6
+- [ ] **CI-9 — Profile the core suite and cut the test lane's wall-clock time** · P1 · Deps: CI-6
   *Why:* after CI-6 the `ankusa (tests)` lane **is** the pipeline: 9:47 of a 9:54
   wall clock (run 41565219821), ≈40 s of it preamble and the rest `mix test
   --cover`. A profile of the suite (`MIX_ENV=test mix test --slowest 30` in
@@ -865,6 +947,54 @@ priority, ID order.
   `.mise/tasks/check/package` (the `--lane test` step).
   *Evidence:* —
 
+- [ ] **CI-17 — Partition the core suite across jobs and merge the coverage, so the pipeline stops being one 9.8 min job** · P2 · Deps: CI-9
+  *Why:* `ankusa (tests)` is 9.8 min median of an 11.5 min PR wall clock and
+  the last job to finish in 10 of 26 runs (2026-11-03 window); ~40 s of it is
+  preamble and ~9 min is one `mix test --cover` in one ExUnit process on a
+  4-vCPU runner. ExUnit already splits the suite, and since Elixir 1.18 the
+  coverage objection this plan has carried is gone:
+  `MIX_TEST_PARTITION=k mix test --partitions K --cover` exports each shard's
+  coverage and `mix test.coverage` merges the parts into one report under the
+  package's own `:test_coverage` floor — Elixir's docs call this exact case
+  out ("Example: aggregating partitioned runs",
+  https://hexdocs.pm/mix/1.18.4/Mix.Tasks.Test.Coverage.html). So K shards plus
+  a merge step keep the 85 % floor and the same test count, with no new
+  dependency (the `ex_coveralls` route the backlog named is not needed). Three
+  shards on three runners should land near 3.3 min plus ~0.5 min of merge —
+  ~6 min off the wall clock, the largest lever left once CI-9 has taken the
+  per-case cost out.
+  *Change:*
+  1. Measure before building: on a throwaway branch run the suite as
+     `MIX_TEST_PARTITION=k mix test --partitions 3 --cover` for k = 1, 2, 3 on
+     the CI runner, then `mix test.coverage`; record the per-shard durations,
+     their sum, and the merged coverage against the single-process 89.28 %
+     (2080 tests, 41 excluded).
+  2. `.mise/tasks/check/package`: a partition form of `--lane test` (e.g.
+     `--partition 1/3`, passed to `mix test --partitions 3` with
+     `MIX_TEST_PARTITION=1`) that keeps the coverage-floor step *out* of the
+     shard and fails if the shard's `Result:` line is missing or zero tests ran
+     (an empty shard is a workflow bug, not a pass).
+  3. `.github/workflows/ci.yml`: `ankusa-test` becomes a matrix of K shards,
+     each uploading its exported coverage; a new `ankusa-coverage` job
+     (`needs: ankusa-test`, `if: always() && !cancelled()`) downloads them,
+     runs `mix test.coverage`, and enforces the **same** 85 % floor — failing
+     on a shortfall and on a missing shard artifact. `ci-summary` gains it.
+     Keep one ExUnit seed line per shard in the step summary.
+  4. `docs/testing.md` (the local check) and the `AGENTS.md` Commands row: how
+     to run one shard locally.
+  *Done when:* the merged report matches the single-process run — the shards'
+    test counts sum to 2080, the merged coverage is within 0.5 points of
+    89.28 %, the floor is still 85 % — and the shard jobs plus the merge take
+    ≤ 60 % of the old lane's 9.8 min on the same runner class; a shard whose
+    artifact is missing fails the merge job (proved with a throwaway commit).
+  *Proof:* the two coverage tables and the before/after durations; the
+    throwaway PR's failed merge job; `mise run check:package ankusa
+    --partition 1/3` locally; `mise run lint:workflows`.
+  *Anchors:* `.mise/tasks/check/package` (`--lane`, the `test` env warm),
+  `packages/ankusa/mix.exs` (`test_coverage`), `.github/workflows/ci.yml`
+  (`ankusa-test` job, `ci-summary`), `docs/testing.md`.
+  *Evidence:* —
+
 - [ ] **CI-13 — Evaluate an arm64 runner for the Mix jobs, measured, not guessed** · P3 · Deps: CI-5
   *Why:* the repository is public, so standard runners are free either way, and
   GitHub offers `ubuntu-24.04-arm` at the same price for public repos. The
@@ -893,46 +1023,202 @@ priority, ID order.
   (the image jobs stay where they are), `docs/testing.md` (runner class).
   *Evidence:* —
 
+### Phase H — The red runs no diff caused
+
+- [ ] **CI-14 — The perf gate's base leg fails the job when it cannot settle a cell** · P1 · Deps: CI-11
+  *Why:* run 41586954095 (`main`, commit `77e22b6f`, CI-11's own merge, nothing
+  changed since its green PR run) went red in `perf gate`:
+
+  ```
+  INCONCLUSIVE p99_ms 512B-c32: samples span 1.28× across rounds
+    (6.12, 4.76, 6.21 | 5.47, 5.77, 6.10 | 4.78, 5.51, 4.71)
+    — wider than the 1.20× the limit can resolve
+  INCONCLUSIVE
+  [bench:gate] ERROR task failed
+  ```
+
+  That is the **base** leg: the "measure the base commit on this runner" step
+  runs `BENCH_REBASELINE=1`, and `gate.exs`'s rebaseline branch treats an
+  unsettled cell as a hard refusal (`System.halt(1)`, header: "it still fails on
+  one, because that is a refusal to record a baseline from samples that wide").
+  The refusal is sound; failing the pipeline is not — no diff was involved, the
+  job died *before* the branch leg ran (`bench` is one job with the two legs in
+  sequence), and 10.6 min of red bought nothing. The samples also say *why* it
+  could not settle: round medians 6.12 → 5.77 → 4.78 ms, a monotone warm-up
+  trend (first round slowest), so the spread is systematic, not tail noise.
+  Frequency: the gate measured in only **4 runs** in the 2026-11-03 window (the
+  other 18 were scope no-ops — `no hot-path file touched`), and **1 of those 4
+  failed this way**: 25 % of the measurements, on 1 of the 8 gated numbers. It
+  will hit every hot-path PR — CR-2 and CR-3 of the feature plan change
+  `edge/ingest.ex`, `queue.ex` and `sink/http.ex` — and every `main` push that
+  touches them.
+  *Change:* fix the measurement, never the limits: `@gates` stays
+  `p99_ms ≤ 1.2×`, `ingest_per_s ≥ 0.8×`, the four cells stay, `BENCH_CONFIRM`
+  stays 1.
+  1. Diagnose the trend first: three `BENCH_RUNS=3 BENCH_TRACE=1 mise run
+     bench:gate` runs on an unchanged tree, recording each cell's p99 per run
+     per round. Put the table in the PR.
+  2. If it is warm-up, add one **discarded** warm-up run per cell per leg —
+     `collect/5` gains a round whose samples feed neither the medians nor the
+     spread — and re-measure: the cell's round medians must then agree inside
+     the limit's headroom on a runner where today's shape does not.
+  3. Whatever remains unstable: the base leg must not *fail* on it. Write the
+     settled cells to the temp baseline, omit the unsettled cell, print the same
+     `INCONCLUSIVE p99_ms <cell>: …` line + `::warning::` + step summary, and
+     exit 0; `evaluate/3` must treat a cell absent from the baseline as **not
+     judged** (never as passed), and the branch leg then reports that cell
+     `inconclusive` — the policy CI-11 already applies on the branch side.
+     Every cell the measurement *can* decide keeps its judgement, and a cell
+     over its limit still fails.
+  4. `docs/testing.md` "Perf gate": the warm-up run, and that a cell the base
+     leg cannot settle is reported and not judged (never a pass, never a red
+     run).
+  *Done when:* with the harness's own `BENCH_SELF_TEST_INCONCLUSIVE=512B-c32`
+  (built for this), both legs are green, the job prints the INCONCLUSIVE line
+  for that cell, and the step summary says not judged; with that switch **and**
+  a real `Process.sleep(1)` at the top of `Ankusa.Edge.Ingest.ingest/2`, the
+  same run still **FAILS** on another cell (the gate bites while one cell is
+  unjudged — the proof CI-2 used); two reruns of the failing `main` commit
+  produce the same verdict; `git diff` touches only `packages/ankusa/bench/gate.exs`
+  and `docs/testing.md`.
+  *Proof:* the self-test runs' ids with their `INCONCLUSIVE` and `FAIL` lines;
+  the three `BENCH_TRACE=1` tables; `mise run bench:gate` locally;
+  `mise run lint:workflows`.
+  *Anchors:* `packages/ankusa/bench/gate.exs` (header, `settle_spread/6`,
+  `unsettled/3`/`wide/2`/`unstable/3`, `report/5`, the rebaseline `cond`),
+  `.github/workflows/ci.yml` (`bench` job, "measure the base commit on this
+  runner"), `docs/testing.md` "Perf gate".
+  *Evidence:* —
+
+- [ ] **CI-15 — Finish the two flakes CI-8 left: the RabbitMQ idle reaper and the `ankusa_redis` deadline** · P2 · Deps: —
+  *Why:* CI-8 fixed the tenant-fairness measurement (#248) and CI-12 the Kafka
+  readiness wait (#246); two of the four sites it named are untouched and both
+  still cost a full rerun (~11 min) plus a wrong attribution:
+  - `Ankusa.Sink.RabbitMQTest` "an idle connection is closed at the broker, and
+    the next delivery opens a new one"
+    (`packages/ankusa_rabbitmq/test/ankusa/sink/rabbitmq_test.exs:387`) failed
+    run 41575405567 / job 125717852245 with `Assertion with == failed … code:
+    assert connection(inst, exch) == nil`, `Result: 38/39 passed`. The test
+    sweeps the reaper deterministically (`sweep_as_idle/1` + `:sys.get_state/1`
+    as a barrier) and then waits for the AMQP process's `:DOWN`; it asserts the
+    *registry* is empty the instant the process dies, which is a different
+    event — the registry processes its own exit message after the monitor
+    fires.
+  - `ankusa_redis`: `flunk("condition was still false after the deadline")` in
+    four files (`source_store/redis_test.exs:85`, `routes/store/redis_test.exs:85`,
+    `routes/store/redis_scale_test.exs:94`, `rate_limiter/store/redis_test.exs:116`)
+    behind `eventually(fun, deadline_ms \\ 2_000)` polling every 20 ms — a 2 s
+    budget for cross-node propagation through a Redis in Docker on a loaded
+    runner. Measured once in the 2026-10-31 window (`82/83`); `main` has not
+    hit it since, so the deadline needs a distribution before it is changed.
+  *Change:* the CI-8 rule — change what the test *waits on*, never what it
+  asserts.
+  - RabbitMQ: after `assert_receive {:DOWN, …}`, read the registry through its
+    owning process (a call/`:sys.get_state` on the connection registry is a
+    serialisation barrier that guarantees the exit message was handled) or poll
+    it with a bounded deadline; do **not** relax `assert connection(inst, exch)
+    == nil` and do not add a retry that swallows a stale-connection bug.
+  - `ankusa_redis`: run the four files ten times on the CI runner with the
+    elapsed time of every `eventually` logged, and set the deadline from the
+    measured p99.9 (state the old and new value and the distribution in the
+    PR); if the condition is ever *never* true, that is a product bug — stop
+    and say so.
+  *Done when:* twenty consecutive CI runs of the two package jobs (or ten
+  pushes to the PR) with zero failures of either test, and each test still fails
+  when its subject is deliberately broken (a throwaway commit that disables the
+  reaper / shortens Redis's propagation, output in the PR, never merged).
+  *Proof:* the run list; the two deliberate-breakage outputs;
+  `mise run check:package ankusa_rabbitmq`; `mise run check:package ankusa_redis`.
+  *Anchors:* `packages/ankusa_rabbitmq/test/ankusa/sink/rabbitmq_test.exs:380-420`,
+  `packages/ankusa_redis/test/ankusa/source_store/redis_test.exs:74-91`,
+  `packages/ankusa_redis/test/ankusa/routes/store/redis_test.exs:80-90`,
+  `packages/ankusa_redis/test/ankusa/routes/store/redis_scale_test.exs:88-98`,
+  `packages/ankusa_redis/test/ankusa/rate_limiter/store/redis_test.exs:110-120`,
+  `.mise/tasks/check/package` (`docker compose up -d --wait`).
+  *Evidence:* —
+
+### Phase I — Stop rebuilding the image for this loop's own diffs
+
+- [ ] **CI-16 — `docker.yml` must not build the image for a `ci.yml`-only diff** · P1 · Deps: —
+  *Why:* `.github/workflows/docker.yml` lists `.github/workflows/ci.yml` in both
+  its `push` and its `pull_request` `paths`, so **every** CI change this loop
+  makes rebuilds and smoke-tests both architectures: 13 of the last 30
+  `docker.yml` runs are `ci:`-titled PRs, each 3 non-skipped jobs
+  (`Resolve version and tags` 0.1 min, `Build and smoke (linux/amd64)` 0.9,
+  `Build and smoke (linux/arm64)` 0.9) and **2.0 min median / 3.1 p90** of wall
+  clock on a workflow an agent is already blocked on — measured on the 30
+  `docker.yml` runs of 2026-11-03. The diff cannot change the image: the
+  workflow's only use of `ci.yml` is the `ci` job, which is
+  `if: github.ref_type == 'tag'`, and path filters are not evaluated for tag
+  pushes (the file says so in its own comment) — so a release still runs the
+  full suite before an image ships.
+  *Change:* drop `- ".github/workflows/ci.yml"` from both `paths` lists in
+  `.github/workflows/docker.yml` (the `push` one under `branches: [main]` and
+  the `pull_request` one). Keep `packages/ankusa*/**`,
+  `packages/async_api_spex/**`, `.dockerignore` and
+  `.github/workflows/docker.yml` itself. Add a one-line comment beside the
+  remaining paths saying why `ci.yml` is not one of them (the `ci` job reads it
+  at tag time only).
+  *Done when:* a `ci.yml`-only PR shows no `docker.yml` job in its checks, while
+  a `packages/ankusa/lib/...` change (or the next real core PR) still does; the
+  tag path is unchanged in the file (`if: github.ref_type == 'tag'` on `ci`,
+  path filters not evaluated for tags).
+  *Proof:* the two PRs' check lists (a throwaway `ci.yml`-comment PR and a
+  throwaway `packages/ankusa/lib` comment PR, both closed unmerged);
+  `mise run lint:workflows`.
+  *Anchors:* `.github/workflows/docker.yml` (`on.push.paths`,
+  `on.pull_request.paths`, the `ci` job's `if`).
+  *Evidence:* —
+
 ## Backlog (not yet an item)
 
-- **Flaky tests that block merges** (each hit costs a full rerun; the `ankusa`
-  job is one of the two longest, so a rerun is ~10 min):
-  - `Ankusa.Dispatch.IsolationTest` "per-tenant scheduling tenant fairness"
-    (`test/ankusa/dispatch/isolation_test.exs:437`): `assert mixed_p99 <=
-    max(2 * solo_p99, 25)` failed with `light tenant p99 62.843 ms against
-    1.159 ms alone` on run 41532198386; the same job has failed `1958/1959` and
-    `1960/1961` on other days. It is a latency assertion inside a loaded
-    runner. Fix the *measurement* (a longer probe window, a warm-up, a
-    steady-state sample) — never the bound.
-  - `Ankusa.Intake.KafkaTest` "earliest, assign_partition and ready?"
-    (`ankusa_kafka` 39/40 twice, `:econnrefused` to 127.0.0.1): a broker
-    readiness race in the package's compose fixture; fix the wait, not the test.
-  - `ankusa_redis` 82/83 (once) — the failing test still needs naming.
-- **`mix docs --warnings-as-errors` in `ankusa_redis`** — 2 of 21 failures; the
-  log says a warning in the generated docs, which is a signal bug worth its own
-  diagnosis.
-- **ExUnit partitioning** — only worth it with *merged* coverage: `mix test
-  --cover --partitions K` writes K `cover/` trees, so every shard fails the
-  85 % floor, and shards-plus-one-full-coverage-job leaves the long job on the
-  critical path. Doing it properly means ex_coveralls-style merging (a new dev
-  dependency in `packages/ankusa`) or a merged `.coverdata` step — evaluate only
-  if CI-9's profile shows the suite is still the critical path afterwards.
-- **Pipeline report** — a `ci-summary` job writing per-job durations to
-  `$GITHUB_STEP_SUMMARY` so the next measurement needs no API poking.
-- **`discover` hop** — 0.1 min but serial ahead of every package job; fold it
-  into `changes` when CI-5 lands.
-- **Branch protection** — `main` has none (`gh api
-  repos/jamescarr/ankusa/branches/main/protection` → 404; `/rulesets` → `[]`).
-  Nothing forces a merge to wait for CI, and no check is required. This is an
-  observation for the maintainer, not an item: adding protection changes the
-  merge semantics every agent here relies on, so it needs a decision, not a
-  patch from this loop.
-- **Runner class** — larger/arm64 runners are a cost decision, not a speed one
-  for the critical path until `ankusa` is a single verified number.
+- **SQS FIFO batch order** — `Ankusa.Sink.SQSIntegrationTest` "sqs batch order:
+  one FIFO group arrives in the order its messages were admitted" failed once in
+  the 2026-11-03 window (run 41575205472, `40/41 passed`): `left: ["m02", "m01",
+  "m03", …]` against `["m01", "m02", …]` — the first two of one group swapped
+  and every later pair in order. One sample decides nothing. Attribution first:
+  run the test 20× on the CI runner (or in a loop with `floci`) and record the
+  distribution; if the batcher can emit two flushes for one lane out of order
+  that is a *product* finding and leaves this loop's scope (this loop fixes
+  measurements, not ordering guarantees); if the harness's own batching is what
+  reorders, fix the wait.
+- **Runner concurrency during a burst** — ~25 jobs per run against the account's
+  concurrent-job limit: with eight runs in flight the queue lead went to 2–9.3
+  min (median 0.2, p90 1.5 over 26 runs), and one `main` push waited 9.3 min
+  before its first job started. Not an item yet: the wall clock is the suite
+  (CI-9/CI-17), and folding the nine single-minute SDK jobs into fewer would cut
+  slots but lengthen each lane. Revisit if CI-17 lands and queueing is then a
+  visible share of the median.
+- **`ci-summary` as the measuring tool** — it now writes the per-job table to
+  `$GITHUB_STEP_SUMMARY`; a second line with the *critical path* (first start →
+  last end, and the job that ends last) would make the next measurement one
+  page read instead of 30 API calls.
+- **`mix docs --warnings-as-errors`** — closed, not a pipeline defect: the one
+  failure in the 2026-11-03 window (run 41575322460, `ankusa (static)`) is
+  `warning: documentation references module "Ankusa.Application" but it is
+  hidden`, from the `docs/elixir` PR's own doc edit. If it recurs on `main`,
+  reopen it with the offending doc line.
+
+## Note for the maintainer (no action from this loop)
+
+`main` has **no branch protection** — `gh api
+repos/jamescarr/ankusa/branches/main/protection` returns 404 and
+`/rulesets` returns `[]` (re-checked 2026-11-03). Nothing forces a merge to wait
+for CI and no check is required, so a red `main` is only visible in the run
+list, and every agent here merges on its own judgement of the green checks.
+Adding protection would change the merge semantics this loop and the feature
+loop rely on (a required-check list, a merge queue, or "branches must be up to
+date"), so it is a decision for you, not a patch from this loop. The related
+measurement: in the 2026-11-03 window **2 of 7 `main` pushes were red** (the
+perf gate's own refusal on `77e22b6f`, run 41586954095, and the Kafka readiness
+flake before #246 landed), and nothing in the repository makes a red `main`
+visible beyond the run list — a required check on the two lane jobs would have
+shown both on the PR that caused them, where the cost is a rerun instead of a
+bisect.
 
 ## Verification of this plan
 
-- `grep -cE '^- \[[ x]\] \*\*CI-' CI_PIPELINE_PLAN.md` → 13 (the number of
+- `grep -cE '^- \[[ x]\] \*\*CI-' CI_PIPELINE_PLAN.md` → 17 (the number of
   items; fewer ticked as they land, and the count matches the `Status:` line's
   denominator).
 - Every *Anchors* path exists at the commit the item is executed on (re-read the
