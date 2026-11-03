@@ -1850,3 +1850,5 @@ documented run of the same harness did lose 12 of 1581 acked hooks in chaos
 reproduced the mechanism deterministically rather than by luck.
 
 Probe: this line exists only to make CI-5's docs-only diff.
+
+Probe 2: a second line, to rerun the docs-only diff after the matrix fix.
