@@ -195,7 +195,11 @@ defmodule Ankusa.Ordering do
     end)
   end
 
-  defp stored_policy(config, %Source{store_headers: override, verifier: verifier}) do
+  @doc false
+  # The instance's stored-header policy as it applies to `source`, credential
+  # headers included; `Ankusa.Sink.Template.check/2` reads it too.
+  @spec stored_policy(Ankusa.Config.t(), Source.t()) :: StoredHeaders.policy()
+  def stored_policy(config, %Source{store_headers: override, verifier: verifier}) do
     policy = StoredHeaders.resolve(override, config.store_headers)
 
     case verifier do

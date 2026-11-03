@@ -881,6 +881,89 @@ defmodule Ankusa.Sink.HttpTest do
       assert Enum.all?(sent, &(&1["x-plan"] == "gold"))
     end
 
+    defp template!(string), do: Ankusa.Sink.Template.compile!("test", string)
+
+    test "template: a url and header values are rendered from the envelope on every attempt",
+         %{capture: capture} do
+      opts =
+        computed(
+          url: template!("https://203.0.113.10/t/{{ tenant }}/{{ event_type ?? none }}"),
+          headers: [
+            {"x-event", template!("{{ event_type ?? none }}")},
+            {"x-source", template!("{{ source }}")},
+            {"x-static", "1"}
+          ]
+        )
+
+      assert :ok =
+               Sink.Http.deliver(
+                 envelope(%{tenant_id: "acme", event_type: "invoice.paid"}),
+                 %{attempt: 1},
+                 opts
+               )
+
+      assert :ok = Sink.Http.deliver(envelope(%{tenant_id: "globex"}), %{attempt: 1}, opts)
+
+      assert paths(capture) == ["/t/acme/invoice.paid", "/t/globex/none"]
+
+      sent =
+        capture
+        |> Agent.get(& &1)
+        |> Map.new(fn {_m, path, headers, _b} -> {path, Map.new(headers)} end)
+
+      assert %{"x-event" => "invoice.paid", "x-source" => "stripe", "x-static" => "1"} =
+               sent["/t/acme/invoice.paid"]
+
+      assert %{"x-event" => "none", "x-static" => "1"} = sent["/t/globex/none"]
+    end
+
+    test "template: a variable with no value and no fallback is permanent and sends nothing",
+         %{capture: capture} do
+      missing_url = computed(url: template!("https://203.0.113.10/{{ event_type }}"))
+
+      assert {:error, {:permanent, {:template_missing, "event_type"}}} =
+               Sink.Http.deliver(envelope(), %{attempt: 1}, missing_url)
+
+      missing_header =
+        computed(
+          url: "https://203.0.113.10/h",
+          headers: [{"x-event", template!("{{ header.x-absent }}")}]
+        )
+
+      assert {:error, {:permanent, {:template_missing, "header.x-absent"}}} =
+               Sink.Http.deliver(envelope(), %{attempt: 1}, missing_header)
+
+      assert Agent.get(capture, & &1) == []
+    end
+
+    test "template: the rendered url is egress-checked like any other" do
+      opts = computed(url: template!("https://{{ header.x-host }}/"))
+      env = envelope(%{headers: [{"x-host", "10.1.2.3"}]})
+
+      assert {:error, {:permanent, {:egress_denied, {:address, _host, _address}}}} =
+               Sink.Http.deliver(env, %{attempt: 1}, opts)
+    end
+
+    test "template: validate_opts!/1 accepts one, and describe/2 reports the url as computed" do
+      opts = [
+        url: template!("https://203.0.113.10/t/{{ tenant }}"),
+        headers: [{"x-event", template!("{{ event_type }}")}],
+        allow_unsigned: true
+      ]
+
+      assert :ok = Sink.Http.validate_opts!(opts)
+
+      assert %Ankusa.Sink.Description{protocol: "http", host: nil, computed: [:url, :headers]} =
+               Sink.Http.describe(%{source_id: "s", tenant_id: nil}, opts)
+
+      # headers that hold no template are static
+      assert %Ankusa.Sink.Description{computed: [:url]} =
+               Sink.Http.describe(
+                 %{source_id: "s", tenant_id: nil},
+                 Keyword.put(opts, :headers, [{"x", "1"}])
+               )
+    end
+
     test "computed secret per tenant signs with that tenant's secret", %{capture: capture} do
       secret_for = fn
         %{tenant_id: "acme"} -> @acme_secret

@@ -9,6 +9,18 @@ own ([`docs/releasing.md`](../../docs/releasing.md)).
 
 ### Added
 
+- **`{{ var }}` templates on sink addresses (CR-3).** Any sink of a source (YAML
+  or the admin API) may template its per-hook address keys: `kafka` `topic` /
+  `key`, `rabbitmq` `routing_key`, `nats` `subject`, `redis` `channel`, `sqs`
+  `message_group_id`, `google_pubsub` `ordering_key`, and `http` `url` and
+  `headers` values: `topic: "events.{{ event_type ?? other }}"`. No new key.
+  A `{{` on any other key, or a malformed template, is refused naming
+  `sources.<id>.sinks[i].<key>`; an `http` `url` takes templates after its host
+  only (`url: templates are allowed after the host, not in it`);
+  `lifecycle.sinks` take none. `/v1/config` and the source routes show the
+  string as written. A hook with a variable that has no value and no fallback
+  is dead-lettered as `permanent` (`{:template_missing, var}`).
+
 - **`sources.<id>.event_type` (CR-1).** Where the provider's event name is read
   from: a preset (`github`, `shopify`, `stripe`, `standard_webhooks`, `svix`,
   `slack`) or exactly one of `header` / `json` (a dot path). The admin API's

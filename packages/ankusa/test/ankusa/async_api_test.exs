@@ -292,6 +292,46 @@ defmodule Ankusa.AsyncApiTest do
     assert [%{"address" => "fixed.topic"}] = fixed
   end
 
+  defmodule TemplatedSink do
+    @moduledoc false
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(_env, _ctx, _opts), do: :ok
+
+    # What `Sink.Kafka` does: the address is the topic when one string serves
+    # every hook.
+    @impl true
+    def describe(_subject, opts) do
+      %Ankusa.Sink.Description{
+        protocol: "kafka",
+        host: "broker:9092",
+        address: Ankusa.Sink.Messaging.static(Keyword.fetch!(opts, :address)),
+        ankusa_headers: true
+      }
+    end
+  end
+
+  test "template: a {{ var }} address is a dynamic channel, a static one keeps its address" do
+    templated = Ankusa.Sink.Template.compile!("test", "events.{{ event_type ?? other }}")
+
+    map =
+      document_map(
+        source_store:
+          static(%{
+            "a" => [sinks: [{TemplatedSink, address: templated}]],
+            "fixed" => [sinks: [{TemplatedSink, address: "fixed.topic"}]]
+          })
+      )
+
+    {dynamic, fixed} =
+      map["channels"] |> Map.values() |> Enum.split_with(&(not Map.has_key?(&1, "address")))
+
+    assert [%{"title" => "Dynamic address (a)", "description" => description}] = dynamic
+    assert description =~ "computed per hook (by a configured function or a template)"
+    assert [%{"address" => "fixed.topic"}] = fixed
+  end
+
   test "the tenant is fixed in a message only when the route resolver takes it from the source" do
     sources = %{"a" => [tenant_id: "acme", sinks: [{DescribedSink, address: "t"}]]}
 

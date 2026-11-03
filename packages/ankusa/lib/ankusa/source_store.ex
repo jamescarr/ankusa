@@ -430,6 +430,7 @@ defmodule Ankusa.SourceStore.Static do
 
     Ankusa.Queue.validate_config!(updated)
     Ankusa.Ordering.validate_config!(updated)
+    Ankusa.Sink.Template.validate_config!(updated)
     Ankusa.Verifier.validate_config!(updated)
     Ankusa.Verifier.validate_shared!(updated)
     Ankusa.HttpClient.Egress.validate_config!(updated)

@@ -21,9 +21,11 @@ defmodule Ankusa.Sink.Messaging do
       end
 
   An option that may differ per hook — a routing key, a subject, a record key
-  — is a `t:per_hook/1`: one string for every hook, or a function of the
-  `Ankusa.Envelope`. `resolve/2` is its value for one hook and `static/1` the
-  value a `describe/2` can name (`nil` when a function computes it).
+  — is a `t:per_hook/1`: one string for every hook, a function of the
+  `Ankusa.Envelope`, or a `{{ var }}` template the YAML loader and the admin
+  API can state (`Ankusa.Sink.Template`, compiled when the source is built).
+  `resolve/2` is its value for one hook and `static/1` the value a
+  `describe/2` can name (`nil` when a function or a template computes it).
   `endpoints/1` reads a broker list in every shape an adapter accepts: a list
   of `"host:port"` strings or `{host, port}` tuples, or one comma-separated
   string from a YAML loader.
@@ -90,18 +92,32 @@ defmodule Ankusa.Sink.Messaging do
          do: mod.publish(payload, env, ctx, opts)
   end
 
-  @typedoc "A sink option that is one value for every hook, or a function of the hook."
-  @type per_hook(value) :: value | (Envelope.t() -> value)
+  @typedoc """
+  A sink option that is one value for every hook, a function of the hook, or a
+  compiled `Ankusa.Sink.Template`.
+  """
+  @type per_hook(value) :: value | (Envelope.t() -> value) | Ankusa.Sink.Template.t()
 
-  @doc "A `t:per_hook/1` option's value for `env`; `nil` stays `nil`."
+  @doc """
+  A `t:per_hook/1` option's value for `env`; `nil` stays `nil`. A template whose
+  variable has no value and no fallback raises `Ankusa.Sink.Template.MissingError`,
+  which `Ankusa.Sink.safe_deliver/4` turns into a permanent failure.
+  """
   @spec resolve(per_hook(String.t()) | nil, Envelope.t()) :: String.t() | nil
   def resolve(nil, _env), do: nil
   def resolve(value, _env) when is_binary(value), do: value
   def resolve(fun, %Envelope{} = env) when is_function(fun, 1), do: fun.(env)
 
+  def resolve({:template, _parts} = template, %Envelope{} = env) do
+    case Ankusa.Sink.Template.render(template, env) do
+      {:ok, value} -> value
+      {:error, {:template_missing, var}} -> raise Ankusa.Sink.Template.MissingError, var: var
+    end
+  end
+
   @doc """
   The one value a `t:per_hook/1` option has for every hook, or `nil` when a
-  function computes it, so a description cannot name it.
+  function or a template computes it, so a description cannot name it.
   """
   @spec static(per_hook(String.t()) | nil) :: String.t() | nil
   def static(value) when is_binary(value), do: value

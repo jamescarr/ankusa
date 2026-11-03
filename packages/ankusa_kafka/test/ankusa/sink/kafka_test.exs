@@ -150,6 +150,66 @@ defmodule Ankusa.Sink.KafkaTest do
     refute Map.has_key?(Map.new(second.headers), "ankusa_ordering_key")
   end
 
+  test "templated topic: rendered per hook from the envelope, one topic per event type", %{
+    instance: inst,
+    topic: topic
+  } do
+    paid = topic <> ".invoice.paid"
+    other = topic <> ".other"
+
+    :ok =
+      :brod.create_topics(
+        @hosts,
+        for(
+          name <- [paid, other],
+          do: %{
+            name: name,
+            num_partitions: 1,
+            replication_factor: 1,
+            assignments: [],
+            configs: []
+          }
+        ),
+        %{timeout: 5_000}
+      )
+
+    on_exit(fn -> :brod.delete_topics(@hosts, [paid, other], 5_000) end)
+
+    templated = opts(Ankusa.Sink.Template.compile!("test", topic <> ".{{ event_type ?? other }}"))
+
+    assert :ok = Kafka.deliver(envelope(%{event_type: "invoice.paid"}), ctx(inst), templated)
+    assert :ok = Kafka.deliver(envelope(), ctx(inst), templated)
+
+    assert [paid_record] = fetch_all(paid)
+    assert JSON.decode!(paid_record.value)["event_type"] == "invoice.paid"
+    assert [other_record] = fetch_all(other)
+    assert JSON.decode!(other_record.value)["event_type"] == nil
+
+    # a template with no fallback and no value is a permanent failure, nothing produced
+    strict = opts(Ankusa.Sink.Template.compile!("test", topic <> ".{{ event_type }}"))
+
+    assert {:error, {:permanent, {:template_missing, "event_type"}}} =
+             Ankusa.Sink.safe_deliver(Kafka, envelope(), ctx(inst), strict)
+
+    assert length(fetch_all(paid)) == 1
+    assert length(fetch_all(other)) == 1
+  end
+
+  test "templated topic: describe/2 advertises no topic, and a templated key is described as computed" do
+    template = Ankusa.Sink.Template.compile!("test", "events.{{ event_type }}")
+    subject = %{source_id: "src", tenant_id: nil}
+
+    assert %{address: nil, channel_bindings: %{"kafka" => binding}, message_bindings: message} =
+             Kafka.describe(subject, opts(template, key: template))
+
+    refute Map.has_key?(binding, "topic")
+    assert %{"kafka" => %{"key" => %{"description" => description}}} = message
+    assert description =~ "template"
+
+    assert %{address: "static", channel_bindings: %{"kafka" => %{"topic" => "static"}}} =
+             Kafka.describe(subject, opts("static"))
+  end
+
   test "an unknown topic is an error and is not auto-created", %{instance: inst} do
     topic = "ankusa.missing.#{System.unique_integer([:positive])}"
 

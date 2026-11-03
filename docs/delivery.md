@@ -284,7 +284,7 @@ See [`claim-check.md`](claim-check.md).
 | Adapter | Deps | What it does |
 | --- | --- | --- |
 | `Sink.Log` | none | Default. Logs the delivery; nothing leaves the process. |
-| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-idempotency-key`/`x-ankusa-verification`/`x-ankusa-tenant` (when set) headers, and a Standard Webhooks signature: `secret` is required unless `allow_unsigned: true`. The URL, headers and secret may be computed per tenant ([below](#sinkhttp-per-tenant-destinations)). Status mapping below. |
+| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-idempotency-key`/`x-ankusa-verification`/`x-ankusa-tenant` (when set) headers, and a Standard Webhooks signature: `secret` is required unless `allow_unsigned: true`. The URL, headers and secret may be computed per tenant ([below](#sinkhttp-per-tenant-destinations)), and the URL and header values may be `{{ var }}` templates ([below](#templated-addresses)). Status mapping below. |
 | `Sink.RabbitMQ` | `:amqp`, separate `ankusa_rabbitmq` package | Publishes to an exchange. Detailed below. |
 | `Sink.Kafka` | `:brod` (native `crc32cer` NIF), separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
 | `Sink.NATS` | `:gnat`, separate `ankusa_nats` package | Publishes to a JetStream subject, acknowledged by the stream. Detailed below. |
@@ -367,9 +367,100 @@ no secret is never sent unsigned. A function returns `{:error, reason}` to fail
 the attempt (`{:error, {:permanent, reason}}` to dead-letter a tenant with no
 endpoint); a raise is a transient failure; a value of the wrong shape is
 `{:permanent, {:computed, key, :invalid}}`, which never echoes the value. YAML
-and the admin API build static sinks only. `Ankusa.Sink.describe/3` reports
+and the admin API state a per-hook value as a [template](#templated-addresses)
+instead of a function. `Ankusa.Sink.describe/3` reports
 the options that are `computed`; the sink stays out of the AsyncAPI document,
 which describes the envelope and not the raw body this sink sends.
+
+### Templated addresses
+
+A function cannot be written in YAML or sent to the admin API. A `{{ var }}`
+template can, so a shared source routes each hook to an address that depends
+on it: one Kafka topic per event type, one NATS subject per tenant, one HTTP
+path per tenant. The strings are compiled when the source is built
+(`Ankusa.Sink.Template`) and rendered on every delivery attempt from the stored
+hook, so a replay renders the same way.
+
+```yaml
+sources:
+  billing:
+    verify: { type: none }
+    event_type: { json: type }        # the variable below
+    sinks:
+      - type: kafka
+        brokers: [redpanda:9092]
+        topic: "events.{{ event_type ?? other }}"
+      - type: http
+        url: "https://hooks.example.com/t/{{ tenant }}"
+        headers: { x-event: "{{ event_type }}" }
+        secret: whsec_…
+```
+
+**Syntax.** `{{ var }}` and `{{ var ?? fallback }}`, whitespace inside the
+braces optional. The variables:
+
+| `var` | Value |
+| --- | --- |
+| `tenant` | the hook's tenant (`default` without one) |
+| `source` | the source id |
+| `id` | the hook id |
+| `event_type` | the source's [`event_type`](configuration.md#sources), as extracted at ingest |
+| `header.<name>` | the first value of that request header (case-insensitive), from the stored header list |
+
+A `fallback` is a literal of `A-Z a-z 0-9 . _ : / -`. A variable with no value,
+an empty one, or one with a control character in it, takes the fallback. A
+string that contains `{{` must parse entirely: an unknown variable, an unclosed
+`{{`, an empty `{{ }}`, a fallback with other characters or an empty `header.`
+name is a config error that names the key (`sources.billing.sinks[0].topic: …`).
+`}}` outside a template is literal, and a literal `{{` cannot be written on a
+templatable key. A value is rendered as it is, never encoded or sanitised: a
+name the broker refuses is the broker's error.
+
+**Which keys.** Only these take a template; a `{{` in any other option of the
+sink is a config error (`templates are not supported on <key>`), because those
+are a connection's or a batcher's identity (credentials such as `password` and
+`token` are never read for templates):
+
+| Sink | Templatable | Not templatable |
+| --- | --- | --- |
+| `kafka` | `topic`, `key` | `brokers` |
+| `rabbitmq` | `routing_key` | `exchange`, `url` |
+| `nats` | `subject` | `servers` |
+| `redis` | `channel` | `url` |
+| `sqs` | `message_group_id` | `queue_url` |
+| `google_pubsub` | `ordering_key` (an unordered sink's own key) | `project`, `topic` |
+| `http` | `url`, every value of `headers` | `secret`, header names |
+
+`lifecycle.sinks` take no templates: a lifecycle event has no source's hook to
+read a variable from.
+
+**A missing value is a permanent dead letter.** A variable with no value and
+no fallback fails that delivery as `{:permanent, {:template_missing, var}}`
+(`error_class: permanent`, reason `{:template_missing, "event_type"}` in `GET
+/v1/dlq`): retrying cannot fix a hook that lacks the field. Fix the source
+(add a fallback), then replay the DLQ and the hooks deliver. A `header.<name>`
+variable on a header the source's `store_headers` policy drops or hashes is
+refused when the source is written (and at boot), because a replay renders
+from the stored hook.
+
+**The host stays literal.** An `http` `url` may hold templates in its path and
+query only: the literal text before the first `{{` must be an absolute
+`http(s)://host/` (with the `/`). `https://{{ tenant }}.example.com` is refused
+(`url: templates are allowed after the host, not in it`), because the host is
+what the egress policy and the connection pools key on. The rendered URL is
+still checked against the egress policy on every attempt. Elixir code that
+builds a source directly may template anything, and a URL that fans out to N
+hosts opens up to N pools, bounded by `egress.pools.max_pools` and
+`max_pools_per_tenant` ([connection pools](#sinkhttp-connection-pools)).
+
+**The AsyncAPI document** shows a templated address as a dynamic one: a
+channel with no `address`, since no one string serves every hook
+([`asyncapi.md`](asyncapi.md)). Kafka's `topic` is the sole topic option that
+was never per hook before; the sink still never creates a topic, so every topic
+a template can render must already exist. Tests: `sink/template_test.exs`,
+`sink/http_test.exs` (`templated destinations`), `dispatch_test.exs`
+(`template_missing`), the adapters' `templated …` cases and
+`ankusa_server/config_test.exs` (`templated url: host rule`).
 
 ### `Sink.Http`: connection pools
 
@@ -735,7 +826,9 @@ on a different partition than a Java producer would choose.
 free; a topic's partition count is a capacity and ordering contract that can
 only grow, remapping keys when it does. An unknown topic is an error that
 flows into `Ankusa.RetryPolicy`, never a silently auto-created
-single-partition topic.
+single-partition topic. `topic` may be per hook, a function of the envelope or
+a [`{{ var }}` template](#templated-addresses) (`events.{{ event_type ?? other }}`);
+every topic it can render must already exist.
 
 **`deliver/3` returns `:ok` only once every in-sync replica has the record**
 (`required_acks: -1`, then a synchronous wait bounded by

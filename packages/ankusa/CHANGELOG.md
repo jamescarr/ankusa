@@ -13,6 +13,25 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **`{{ var }}` templates on per-hook sink addresses (CR-3).**
+  `Ankusa.Sink.Template` compiles `{{ var }}` / `{{ var ?? fallback }}` strings
+  (`tenant`, `source`, `id`, `event_type`, `header.<name>`) when
+  `Ankusa.Source.new/2` builds a source, so a YAML or API-managed source can
+  name an address per hook, which only an Elixir function could before. The
+  keys that take one: `Sink.Kafka` `topic` and `key`, `Sink.RabbitMQ`
+  `routing_key`, `Sink.NATS` `subject`, `Sink.Redis` `channel`, `Sink.SQS`
+  `message_group_id`, `Sink.GooglePubSub` `ordering_key`, and `Sink.Http` `url`
+  and every value of `headers`; a `{{` on any other option of those sinks is an
+  `ArgumentError` naming the key. `Messaging.resolve/2` renders a template and
+  `Messaging.static/1` reports none, so the AsyncAPI document shows a dynamic
+  address. A variable with no value and no fallback raises
+  `Ankusa.Sink.Template.MissingError`, which `Sink.safe_deliver/4` turns into
+  `{:permanent, {:template_missing, var}}`: dead-lettered at once, replayable
+  after the fix. `Ankusa.Sink.Template.check/2` (called beside `Ordering.check/2`
+  when a source is written, and at boot) refuses a `header.<name>` variable on a
+  header the source's `store_headers` policy drops or hashes. A value that is
+  empty or holds a control character counts as no value.
+
 - **`event_type:` per source (CR-1).** `Ankusa.EventType` reads the provider's
   event name at ingest, from a request header or a JSON path (presets `github`,
   `shopify`, `stripe`, `standard_webhooks`, `svix`, `slack`; a value must be a
