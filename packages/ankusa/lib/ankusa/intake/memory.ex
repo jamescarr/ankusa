@@ -48,6 +48,9 @@ defmodule Ankusa.Intake.Memory do
     timeout = Keyword.get(opts, :timeout, 2_000)
     node = Keyword.get(opts, :node)
 
+    # CI-7 probe (throwaway, never merged): 30 ms on every dual commit.
+    if instance |> to_string() |> String.contains?("intake_bench_dual"), do: Process.sleep(30)
+
     try do
       GenServer.call(server(instance), {:publish, node, records}, timeout)
     catch
