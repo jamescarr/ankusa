@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Perf regression gate: core_bench matrix vs packages/ankusa/bench/baseline.json (p99 > 1.2x or ingest/s < 0.8x fails), plus the self-asserting tenant benches"
+#MISE description="Perf regression gate: core_bench matrix vs packages/ankusa/bench/baseline.json (p99 > 1.2x or ingest/s < 0.8x fails), plus the self-asserting tenant benches unless BENCH_SKIP_TENANTS=1"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT/packages/ankusa"
@@ -12,22 +12,13 @@ export MIX_ENV=test
 mix deps.get --check-locked
 mix compile
 
-# The tenant benches assert their own flatness (ADR 0001): the gauge tick and
-# the dispatch scan must cost the same at 10^3 and 10^6 queued rows and at 10 and
-# 10^5 tenants. They have no baseline entry. A rebaseline run measures the base
-# commit's sources, which have neither the tenant layout nor these benches'
-# APIs, so it skips them.
-if [ "${BENCH_REBASELINE:-}" != 1 ] && [ "${BENCH_REBASELINE:-}" != true ]; then
-  for bench in gauges_bench dispatch_tick_bench intake_bench; do
-    echo "==> bench/$bench.exs"
-    MIX_ENV=test mix run "bench/$bench.exs"
-  done
-  # The route table asserts its own budgets (TEN-9: boot/reload time, miss p99
-  # with the cache out of the picture, create/list flat in the table size,
-  # bytes per route). The gate runs it at 10^5 routes; `mix run
-  # bench/routes_bench.exs` defaults to the 10^6 the task is judged at.
-  echo "==> bench/routes_bench.exs (ROUTES_BENCH_N=${ROUTES_BENCH_N:-100000})"
-  ROUTES_BENCH_N="${ROUTES_BENCH_N:-100000}" MIX_ENV=test mix run bench/routes_bench.exs
+# The tenant benches moved to `bench:tenants` in CI-7: they assert their own
+# flatness and budgets rather than a baseline, so they never belonged on the
+# base/branch measurement's critical path, and CI now runs them in the
+# `bench-tenant` job beside this one. Locally this task still means everything;
+# BENCH_SKIP_TENANTS=1 is the CI job's switch, not a default.
+if [ "${BENCH_SKIP_TENANTS:-}" != 1 ] && [ "${BENCH_SKIP_TENANTS:-}" != true ]; then
+  mise run bench:tenants
 fi
 unset MIX_ENV
 

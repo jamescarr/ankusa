@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+#MISE description="The self-asserting tenant benches (gauges, dispatch tick, intake, routes): no baseline, each asserts its own budgets; skipped by BENCH_REBASELINE"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT/packages/ankusa"
+
+# These four assert their own flatness (ADR 0001) and their own budgets (TEN-9)
+# and have no baseline entry, so the gate cannot judge them base-against-branch.
+# `bench:gate` ran them before `elixir bench/gate.exs` until CI-7, which was
+# 2:33 of the gate's 10.6 min — all of it off the critical path of the
+# base/branch measurement. They are this task, and in CI the `bench-tenant` job
+# beside the gate. `mise run bench:gate` still runs them here, so it locally
+# means everything; the job sets BENCH_SKIP_TENANTS=1 to keep it to the matrix.
+export MIX_ENV=test
+
+# The benches run under MIX_ENV=test (set by the script), so fetch and compile
+# that environment first: compile time must not land in the first measured run.
+mix deps.get --check-locked
+mix compile
+
+# A rebaseline run measures the base commit's sources, which have neither the
+# tenant layout nor these benches' APIs, so it skips them (the gate's rule,
+# kept here because the gate delegates to this task).
+if [ "${BENCH_REBASELINE:-}" = 1 ] || [ "${BENCH_REBASELINE:-}" = true ]; then
+  echo "BENCH_REBASELINE: the base commit has neither the tenant layout nor these benches; skipped"
+  exit 0
+fi
+
+for bench in gauges_bench dispatch_tick_bench intake_bench; do
+  echo "==> bench/$bench.exs"
+  MIX_ENV=test mix run "bench/$bench.exs"
+done
+# The route table asserts its own budgets (TEN-9: boot/reload time, miss p99
+# with the cache out of the picture, create/list flat in the table size,
+# bytes per route). The gate runs it at 10^5 routes; `mix run
+# bench/routes_bench.exs` defaults to the 10^6 the task is judged at.
+echo "==> bench/routes_bench.exs (ROUTES_BENCH_N=${ROUTES_BENCH_N:-100000})"
+ROUTES_BENCH_N="${ROUTES_BENCH_N:-100000}" MIX_ENV=test mix run bench/routes_bench.exs
