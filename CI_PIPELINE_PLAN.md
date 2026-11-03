@@ -1218,10 +1218,11 @@ which it does when a measured red run outranks a slow pipeline.
   *Evidence:* four proofs, each with the failure forced on `main` and the same
   test green after the change; the `ankusa_redis` measurement came from the
   throwaway probe PR **#256** (closed unmerged, branch
-  `ci/CI-15-deadline-probe` deleted): run 41628378393 / job 125892165949, ten
-  runs of the four files with a 60 s cap. **RabbitMQ reaper:** on `main`, with
-  every `Ankusa.Registry.PIDPartition*` suspended for 300 ms around the sweep
-  (throwaway edit), the test fails 3/3 with `left: #PID<0.458.0>, right: nil` —
+  `ci/CI-15-deadline-probe` deleted): run 41628378393 / job 125892165949,
+  twenty runs of the four files with a 60 s cap. **RabbitMQ reaper:** on
+  `main`, with every `Ankusa.Registry.PIDPartition*` suspended for 300 ms
+  around the sweep (throwaway edit), the test fails 3/3 with
+  `left: #PID<0.458.0>, right: nil` —
   the assertion does read the table before the partition handles the exit; with
   `await_unregistered/2` the same forced run passes. 50 local repeats
   (`mix test --repeat-until-failure 50`), 17/17 for the package file.
@@ -1236,8 +1237,19 @@ which it does when a measured red run outranks a slow pipeline.
   delaying the subscriber's upstream by 500 ms, the unflushed sequence
   reproduces the CI failure exactly (`no matching message after 2000ms`,
   mailbox empty) and the flushed one delivers; 100/100 local repeats of the
-  test, 16/16 for the file. **Runs:** ten consecutive whole-`ci.yml` runs of
-  the PR's test-code commit, `ten_runs_placeholder`.
+  test, 16/16 for the file. The sample found a fifth occurrence of the reaper
+  race, in this package's own idle-reaper test (`assert Ankusa.whereis(inst,
+  {:nats_sup, :default}) == nil`, run 41630250047 attempt 7 / job
+  125923501565): the same bounded poll after its `:DOWN`, forced the same way
+  (fails without the wait, passes with it). **Runs:** eight whole-`ci.yml`
+  reruns of the PR's test-code commit (attempts 1–8 of run 41630250047) —
+  seven green on all four affected jobs, and attempt 7 red only in
+  `ankusa_nats` (the sibling above, fixed in the next commit) and
+  `ankusa_kafka` (`replay without a stamped partition … {:error, :unavailable}`
+  after a brod producer crash — a different, pre-existing flake in a package
+  this PR does not touch, not papered over). The final commit's own run is the
+  ninth; the ten-run target was cut when the landing was prioritised.
+
 ### Phase I — Stop rebuilding the image for this loop's own diffs
 
 - [x] **CI-16 — `docker.yml` must not build the image for a `ci.yml`-only diff** · P1 · Deps: —
