@@ -717,9 +717,12 @@ jobs:
   # no baseline entry, so they are not part of the base-against-branch
   # measurement — they only rode along inside `mise run bench:gate` until
   # CI-7, where they were 2:33 of the gate's 10.6 min. They are their own job
-  # here, gated by the same scope output and running beside the gate, so the
-  # gate's critical path is its two legs alone and the two jobs share the warm
-  # `MIX_ENV=test` tree. Nothing else about them changes: same commands, same
+  # here, gated by the same scope output, so the gate's critical path is its
+  # two legs alone and both jobs share the warm `MIX_ENV=test` tree. A job can
+  # read another job's output only through `needs:`, so this one starts when
+  # `bench` finishes; that is the price of the shared decision, and it is paid
+  # once, at the tail of a hot-path run, not on the pushes that skip both.
+  # Nothing else about the benches changes: same commands, same
   # `BENCH_REBASELINE` skip, same assertions (`mise run bench:tenants`).
   bench-tenant:
     name: bench-tenant
