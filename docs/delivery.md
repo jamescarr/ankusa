@@ -344,6 +344,52 @@ does not leave its connection open for the life of the node. The next
 delivery opens a new one; a delivery caught by the close fails that attempt
 and is retried.
 
+### Routing by content
+
+Three keys, each described in its own section below, decide where a hook goes
+from what the hook says. They compose, and they are read in a fixed order:
+
+```yaml
+sources:
+  billing:
+    verify: { type: none }
+    event_type: { json: type }                    # 1. name the hook
+    sinks:
+      - type: kafka
+        brokers: [redpanda:9092]
+        topic: "events.{{ event_type ?? other }}" # 3. address it, at delivery
+      - type: http
+        url: http://receiver:3000/invoices
+        filter: { event_type: [invoice.paid] }    # 2. choose the sinks, at ingest
+        secret: ${SINK_WHSEC}
+```
+
+1. **The event type** (`event_type:`, [`configuration.md`](configuration.md#sources))
+   is read once at ingest, from a header or a path in the body's one capped JSON
+   decode, and stored on the hook. A hook that carries none stores `null`
+   (`ankusa_ingest_event_type_missing_total`).
+2. **The filters** ([Filters](#filters)) are judged at ingest, once, on that
+   event type and the rest of the hook. A sink whose filter does not select the
+   hook gets no delivery row; a hook no sink selects is answered `201` with
+   `"filtered": true` and is not stored.
+3. **The templates** ([Templated addresses](#templated-addresses)) are rendered
+   on every delivery attempt, from the stored hook, for the sinks that do have a
+   row. A replay renders the same way, and the topic or URL follows the hook.
+
+What each one does when it cannot do its job:
+
+| Situation | Result |
+| --- | --- |
+| The source reads no event type from a hook | `event_type` is `null`. A filter on it does not match `eq`/`in`; a template with a `?? fallback` renders the fallback. |
+| No sink's filter selects the hook | `201 {"status":"accepted","id":…,"filtered":true}`. Nothing is claimed, stored or replayable, and an identical retry is `filtered` again. |
+| A `json.*` filter condition on a body over `dedupe.max_json_bytes`, or not JSON | The filter selects its sink (a filter never loses a hook), and `ankusa_dispatch_filter_unevaluable_total` counts it. |
+| A template variable has no value and no fallback | That delivery dead-letters at once as `permanent`, reason `{:template_missing, var}`. Add a fallback to the source, then replay the DLQ. |
+
+[`examples/event-routing/`](https://github.com/jamescarr/ankusa/tree/main/examples/event-routing/)
+runs this source end to end: `invoice.paid` goes to `events.invoice.paid` and to
+an HTTP receiver, any other hook goes to `events.other` only, and a source whose
+only sink is the filtered one answers `filtered: true`.
+
 ### `Sink.Http`: per-tenant destinations
 
 On a shared source (one `stripe` source behind `/webhooks/:tenant/stripe`) the

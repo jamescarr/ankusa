@@ -1,6 +1,6 @@
 # Examples
 
-Eight runnable demonstrations of the same receiver with a different last hop.
+Nine runnable demonstrations of the same receiver with a different last hop.
 Each one ends in a worker you could replace with your own service; read the
 [quickstart](quickstart/) first, then pick the transport you actually run.
 
@@ -25,6 +25,7 @@ flowchart LR
 | [http-consumer](http-consumer/) | HTTP | Python (FastAPI, uv) | docker | `docker compose up --build -d --wait` |
 | [rabbitmq-consumer](rabbitmq-consumer/) | RabbitMQ | TypeScript | docker | `docker compose up --build` |
 | [kafka-sqs-consumer](kafka-sqs-consumer/) | Kafka → SQS FIFO | TypeScript | docker | `docker compose up --build -d --wait` |
+| [event-routing](event-routing/) | Kafka topic named by event type, and a filtered HTTP sink | TypeScript | docker | `docker compose up --build -d --wait && ./run.sh` |
 | [nats-consumer](nats-consumer/) | NATS JetStream | Rust | docker | `docker compose up --build -d --wait` |
 | [oban-consumer](oban-consumer/) | HTTP → Oban | Elixir | docker, kind, kubectl | `./run.sh` |
 | [fleet-e2e](fleet-e2e/) | RabbitMQ, two nodes behind nginx (or, from the Helm chart, on kind) | TypeScript (Postgres) | docker (kind, kubectl, helm for `./kind.sh`) | `./run.sh` |
@@ -34,7 +35,9 @@ flowchart LR
 `rabbitmq-consumer`, `kafka-sqs-consumer`, and `oban-consumer` build their
 ingest app from this repo's Elixir source, so you can see the library in use.
 `fleet-e2e` builds the server image from this checkout; `jetstream-k8s` does
-too unless you set `ANKUSA_IMAGE` to a published tag.
+too unless you set `ANKUSA_IMAGE` to a published tag. `event-routing` builds the
+server image from this checkout too, because it uses keys newer than the last
+release; `ANKUSA_IMAGE` replaces that build with a published tag that has them.
 
 ## quickstart
 
@@ -113,6 +116,26 @@ flowchart LR
 ```
 
 [`kafka-sqs-consumer/`](kafka-sqs-consumer/)
+
+## event-routing
+
+One source routed by what each hook says it is, with no code: the source reads
+an event type from the JSON body (`event_type: {json: type}`), a Kafka sink names
+its topic by it (`topic: "events.{{ event_type ?? other }}"`), and an HTTP sink
+gets only `invoice.paid` (`filter: {event_type: [invoice.paid]}`). A TypeScript
+worker consumes both topics, and a TypeScript receiver verifies the HTTP
+deliveries' signatures. `run.sh` posts three hooks and asserts where each
+landed, including a `201 …"filtered":true` for a hook that no sink selects.
+
+```mermaid
+flowchart LR
+    P[Provider] -->|POST /webhooks/billing| A[Ankusa]
+    A -->|every hook, topic by event type| K[(events.invoice.paid / events.other)]
+    A -->|only invoice.paid| R[receiver]
+    K --> W[worker]
+```
+
+[`event-routing/`](event-routing/)
 
 ## nats-consumer
 
