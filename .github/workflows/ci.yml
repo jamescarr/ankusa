@@ -805,29 +805,24 @@ jobs:
       - run: mix local.hex --force && mix local.rebar --force
       - run: mise run check:tools
 
-  # The perf regression gate (ground rule 10 of ANKUSA_HARDENING_PLAN.md,
-  # docs/testing.md "Perf gate"): on a push to main and on a PR only when the
-  # diff touches a hot-path file. The job itself always runs — it is the job
-  # that computes the decision, and a skipped job cannot publish an output —
-  # while the steps that cost minutes are skipped on a diff that touches no
-  # hot-path file. `bench-tenant` (below) is one of those steps split out, and
-  # reads this job's `run` output, so both jobs run on the same judgement.
-  # Hosted runners of one class differ by a factor of two in speed from job to
-  # job, so the gate compares against the base commit measured on this very
-  # runner (see the "measure the base commit" step); the checked-in
-  # packages/ankusa/bench/baseline.json (recorded on a laptop with the bench's
-  # data directory on a RAM disk, see docs/testing.md "Perf gate") is the
-  # fallback when there is no base commit to measure.
-  bench:
-    name: perf gate
+  # The one scope decision the two bench jobs obey (CI-7, CI-10). A pull
+  # request is judged by its diff from the API; a push to `main` by
+  # `github.event.before..sha`, which is the PR diff that was already gated
+  # plus whatever else landed in the range — so a main push that touches no
+  # hot-path file runs neither job, and its commit keeps the verdict its PR
+  # run gave it. Every failure in here resolves to `run=true`: a filter that
+  # breaks must run the gate, never skip it. It is a job of its own because a
+  # job reads another job's output only through `needs:`, and keeping the step
+  # inside `bench` made `bench-tenant` wait for the whole gate (CI-10: the
+  # merge push's wall clock went to 14:24 from 10:04). A checkout, a `gh api`
+  # or `git diff`, and a `grep`: seconds, and both jobs start together after it.
+  bench-scope:
+    name: bench-scope
     runs-on: ubuntu-latest
     outputs:
-      # The scope decision, for `bench-tenant`. Nothing else reads it.
+      # The scope decision, for `perf gate` and `bench-tenant`.
       run: ${{ steps.scope.outputs.run }}
     env:
-      # `bench:gate` runs the tenant benches locally too; here `bench-tenant`
-      # runs them in parallel, so the matrix task must not run them again.
-      BENCH_SKIP_TENANTS: 1
       # Ground rule 10's hot-path files, plus the gate's own files. `ci.yml` is
       # not one of them: a workflow file cannot change the measured program, and
       # an invocation it gets wrong shows up on the next push to `main` within
@@ -840,13 +835,6 @@ jobs:
         )$|^packages/ankusa/bench/|^\.mise/tasks/bench/
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The one scope decision both bench jobs obey. A pull request is judged by
-      # its diff from the API; a push to `main` by `github.event.before..sha`,
-      # which is the PR diff that was already gated plus whatever else landed
-      # in the range — so a main push that touches no hot-path file skips both
-      # jobs, and its commit keeps the verdict its PR run gave it (CI-7). Every
-      # failure in here resolves to `run=true`: a filter that breaks must run
-      # the gate, never skip it.
       - id: scope
         name: does the diff touch the hot path?
         env:
@@ -903,13 +891,34 @@ jobs:
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "no hot-path file touched: perf gate and bench-tenant skipped"
           fi
-      - if: steps.scope.outputs.run == 'true'
-        uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+
+  # The perf regression gate (ground rule 10 of ANKUSA_HARDENING_PLAN.md,
+  # docs/testing.md "Perf gate"): on a push to main and on a PR only when the
+  # diff touches a hot-path file, which `bench-scope` decides. It runs beside
+  # `bench-tenant` (both `needs: bench-scope`), so neither job's duration is on
+  # the other's critical path, and a diff that touches nothing skips both.
+  # Hosted runners of one class differ by a factor of two in speed from job to
+  # job, so the gate compares against the base commit measured on this very
+  # runner (see the "measure the base commit" step); the checked-in
+  # packages/ankusa/bench/baseline.json (recorded on a laptop with the bench's
+  # data directory on a RAM disk, see docs/testing.md "Perf gate") is the
+  # fallback when there is no base commit to measure.
+  bench:
+    name: perf gate
+    needs: bench-scope
+    if: needs.bench-scope.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # `bench:gate` runs the tenant benches locally too; here `bench-tenant`
+      # runs them in parallel, so the matrix task must not run them again.
+      BENCH_SKIP_TENANTS: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
-      - if: steps.scope.outputs.run == 'true'
-        name: cache mix deps
+      - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -918,13 +927,10 @@ jobs:
           key: mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
           restore-keys: |
             mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml') }}-
-      - if: steps.scope.outputs.run == 'true'
-        name: rocksdb system deps
+      - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
-      - if: steps.scope.outputs.run == 'true'
-        run: mix local.hex --force && mix local.rebar --force
-      - if: steps.scope.outputs.run == 'true'
-        name: measure the base commit on this runner
+      - run: mix local.hex --force && mix local.rebar --force
+      - name: measure the base commit on this runner
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
@@ -949,9 +955,8 @@ jobs:
           # shellcheck disable=SC2086
           rm -rf $src && git checkout HEAD -- $src $deps
           echo "BENCH_BASELINE=$RUNNER_TEMP/base-baseline.json" >> "$GITHUB_ENV"
-      - if: steps.scope.outputs.run == 'true'
-        run: mise run bench:gate
-      - if: always() && steps.scope.outputs.run == 'true'
+      - run: mise run bench:gate
+      - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bench-last
@@ -965,17 +970,15 @@ jobs:
   # no baseline entry, so they are not part of the base-against-branch
   # measurement — they only rode along inside `mise run bench:gate` until
   # CI-7, where they were 2:33 of the gate's 10.6 min. They are their own job
-  # here, gated by the same scope output, so the gate's critical path is its
-  # two legs alone and both jobs share the warm `MIX_ENV=test` tree. A job can
-  # read another job's output only through `needs:`, so this one starts when
-  # `bench` finishes; that is the price of the shared decision, and it is paid
-  # once, at the tail of a hot-path run, not on the pushes that skip both.
-  # Nothing else about the benches changes: same commands, same
-  # `BENCH_REBASELINE` skip, same assertions (`mise run bench:tenants`).
+  # here, obeying the same `bench-scope` decision as the gate and starting with
+  # it (CI-10: `needs: bench` made this job wait for the whole gate, 14:24 of
+  # wall clock instead of 10:04), so the two benches overlap and share the warm
+  # `MIX_ENV=test` tree. Nothing else about the benches changes: same commands,
+  # same `BENCH_REBASELINE` skip, same assertions (`mise run bench:tenants`).
   bench-tenant:
     name: bench-tenant
-    needs: bench
-    if: needs.bench.outputs.run == 'true'
+    needs: bench-scope
+    if: needs.bench-scope.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1168,6 +1171,7 @@ jobs:
       - conformance
       - examples
       - tools
+      - bench-scope
       - bench
       - bench-tenant
       - crash
