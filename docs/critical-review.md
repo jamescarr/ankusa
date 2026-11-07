@@ -53,22 +53,7 @@ Architecturally, the ceiling is one `GenServer` per node that owns every byte: a
 
 ## Where it breaks
 
-```mermaid
-flowchart LR
-    P[Provider] -->|POST| R["Edge.Router<br/>E3 E4"]
-    R --> I["Ingest<br/>E1 E2 E5 E8"]
-    I -->|verify failed| Q[("Quarantine<br/>E1 E2 S3")]
-    I --> B["Batcher<br/>E6 W4 W9"]
-    B --> W[("WAL GenServer<br/>W1 W2 W3 W4 W5 W6")]
-    W --> C["Compactor<br/>S1 S2 S3 S7"]
-    C --> BS[("Blob store<br/>S4 S5 S6")]
-    W --> D["Dispatch.Pipeline<br/>D1 D2 D3 D4 D6 D7"]
-    D --> DLQ[("DLQ<br/>D5 S3")]
-    D --> SK["Sinks<br/>B1-B10"]
-    SK --> CO["Consumers<br/>K1 K2 K3"]
-    CO -->|GET /v1/claims| G["Claim gateway<br/>C1 C2"]
-    G --> BS
-```
+![The reviewed pipeline with each component's finding IDs: router E3 E4, ingest E1 E2 E5 E8, quarantine E1 E2 S3, batcher E6 W4 W9, WAL W1–W6, compactor S1 S2 S3 S7, blob store S4–S6, dispatch D1–D7, DLQ D5 S3, sinks B1–B10, consumers K1–K3, claim gateway C1 C2.](diagrams/critical-review-map.png)
 
 ## Root causes
 

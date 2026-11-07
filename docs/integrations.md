@@ -22,6 +22,8 @@ the shipped sinks (`Sink.Log`, `Sink.Http`, `Sink.RabbitMQ`, `Sink.Kafka`,
 `Sink.NATS`, `Sink.Redis`, `Sink.SQS`, `Sink.GooglePubSub`) are all
 framework-neutral.
 
+![After the fsync and 201, Ankusa hands each hook over either by Sink.Http to your /deliveries route, which records the idempotency key and enqueues an Oban job or Celery task in one transaction, or by a broker sink publishing Sink.Message v1 to a worker that uses an Ankusa SDK.](diagrams/integrations.png)
+
 ## HTTP handoff (any language)
 
 The most common shape, and the one every worked example on this page uses:
@@ -74,6 +76,8 @@ sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", secret: Syst
   `x-ankusa-dedupe-key`. With a signing `secret` (below) the sink's own
   `webhook-id`, `webhook-timestamp` and `webhook-signature` replace any
   forwarded headers of those names.
+
+![Each attempt resolves the tenant's URL, headers and secret, adds x-ankusa-* headers and a Standard Webhooks signature, passes the egress policy, posts through a pooled connection and classifies the status: 2xx delivered, 408/425/429/5xx retried, listed 4xx dead-lettered.](diagrams/sink-http.png)
 
 ### Signed deliveries
 
@@ -346,6 +350,8 @@ changes between Ankusa's dispatch pipeline and the enqueue: a function call
 instead of a socket. Oban's `unique:` only dedupes against jobs still in the
 table, so with a pruner either keep the key in your own table as the HTTP
 example does or set the unique period past the prune age.
+
+![Your application supervises an Ankusa.Instance; its listener accepts a webhook, the batcher commits it to RocksDB before 201, and dispatch calls your own Ankusa.Sink module, which inserts a unique Oban job that the worker runs against Postgres.](diagrams/elixir-embedded.png)
 
 ## Celery
 

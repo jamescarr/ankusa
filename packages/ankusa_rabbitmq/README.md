@@ -34,6 +34,8 @@ config :ankusa,
   }
 ```
 
+![Dispatch encodes the hook as Sink.Message v1 (large bodies as a claim reference), publishes it mandatory and persistent to the ankusa.events topic exchange and counts it delivered only on the broker's confirm that a bound queue took it; unroutable or unconfirmed publishes retry, then dead-letter.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/sink-rabbitmq.png)
+
 Sinks belong to a source. `Ankusa.Config.new/1` takes the same `sources` for a
 non-default instance.
 

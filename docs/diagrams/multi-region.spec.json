@@ -1,0 +1,31 @@
+{
+  "title": "Multi-region — independent regional fleets, tenants pinned at the edge",
+  "legend": true,
+  "groups": [
+    {"id": "eu", "label": "eu-west-1", "kind": "deployment"},
+    {"id": "us", "label": "us-east-1", "kind": "deployment"}
+  ],
+  "nodes": [
+    {"id": "provider", "kind": "external-system", "label": "Stripe / GitHub / …", "sub": "retries a 5xx"},
+    {"id": "glb", "kind": "service", "label": "Global load balancer", "sub": "GeoDNS · anycast L7 · mesh gateway"},
+    {"id": "eu-fleet", "kind": "service", "label": "eu-west-1 fleet", "sub": "one chart release", "badges": ["gateway"], "group": "eu"},
+    {"id": "eu-log", "kind": "pubsub-channel", "label": "ankusa.intake.eu-west-1", "sub": "no DLQ: unconfirmed → 503", "tags": ["RF 3", "in-region only"], "group": "eu"},
+    {"id": "eu-bucket", "kind": "message-store", "label": "eu-west-1 bucket", "sub": "segments · claims · primary backup", "group": "eu"},
+    {"id": "us-fleet", "kind": "service", "label": "us-east-1 fleet", "sub": "one chart release", "badges": ["gateway"], "group": "us"},
+    {"id": "us-log", "kind": "pubsub-channel", "label": "ankusa.intake.us-east-1", "sub": "no DLQ: unconfirmed → 503", "tags": ["RF 3", "in-region only"], "group": "us"},
+    {"id": "us-bucket", "kind": "message-store", "label": "us-east-1 bucket", "sub": "segments · claims · primary backup", "group": "us"},
+    {"id": "dr", "kind": "message-store", "label": "Secondary bucket (other region)", "sub": "backup.secondary · the only state that leaves"},
+    {"id": "region-note", "kind": "note", "label": "Nothing spans regions: the same event in two regions is two hooks, and fleet-scoped dedupe and rate limits are per region.", "attach": "glb"}
+  ],
+  "edges": [
+    {"from": "provider", "to": "glb", "kind": "rpc", "message": "POST /webhooks/<tenant>/<source>", "seq": 1},
+    {"from": "glb", "to": "eu-fleet", "kind": "rpc", "message": "tenant pinned to eu-west-1", "label": "503 while the region is down", "seq": 2},
+    {"from": "glb", "to": "us-fleet", "kind": "rpc", "message": "tenant pinned to us-east-1", "seq": 2},
+    {"from": "eu-fleet", "to": "eu-log", "type": "event", "message": "intake record", "label": "201 = fsync + confirm", "seq": 3},
+    {"from": "us-fleet", "to": "us-log", "type": "event", "message": "intake record", "label": "201 = fsync + confirm", "seq": 3},
+    {"from": "eu-fleet", "to": "eu-bucket", "kind": "data", "label": "segments + claims"},
+    {"from": "us-fleet", "to": "us-bucket", "kind": "data", "label": "segments + claims"},
+    {"from": "eu-fleet", "to": "dr", "kind": "data", "label": "backup every 60 s"},
+    {"from": "us-fleet", "to": "dr", "kind": "data", "label": "backup every 60 s"}
+  ]
+}

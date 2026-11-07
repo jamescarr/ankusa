@@ -1,0 +1,36 @@
+{
+  "title": "What an Ankusa SDK does in your consumer — decode, redeem, verify",
+  "legend": true,
+  "lanes": ["Queue delivery", "HTTP delivery", "Control APIs"],
+  "groups": [
+    {"id": "broker", "label": "Your broker", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "q", "kind": "p2p-channel", "label": "Your queue / topic", "sub": "poison messages → your DLQ", "tags": ["at-least-once", "key=tenant/source"], "group": "broker", "lane": "Queue delivery"},
+    {"id": "decode", "kind": "message-translator", "label": "decode_message", "sub": "version · size · sha256 · tenant checks", "lane": "Queue delivery"},
+    {"id": "poison", "kind": "invalid-message-channel", "label": "Poison messages", "sub": "InvalidMessageError · retryable=false", "tags": ["your terminal queue"], "lane": "Queue delivery", "col": 1},
+    {"id": "route", "kind": "content-based-router", "label": "Inline body or claim?", "sub": "both or neither → invalid", "lane": "Queue delivery"},
+    {"id": "claim", "kind": "claim-check", "label": "ClaimCheckClient.redeem", "sub": "parse ref · GET · verify sha256", "lane": "Queue delivery"},
+    {"id": "gateway", "kind": "service", "label": "Claim gateway :4001", "sub": "returns bytes, never checks sha256", "badges": ["gateway"], "lane": "Queue delivery"},
+    {"id": "handler", "kind": "service", "label": "Your handler", "sub": "dedupes on the idempotency key", "badges": ["idempotent"], "lane": "Queue delivery"},
+    {"id": "http", "kind": "channel-adapter", "label": "Sink.Http", "sub": "Standard Webhooks signature", "lane": "HTTP delivery"},
+    {"id": "receive", "kind": "service", "label": "receive_delivery", "sub": "signature, then headers · 401 on failure", "badges": ["gateway"], "lane": "HTTP delivery"},
+    {"id": "operator", "kind": "actor", "label": "Operator / CI", "lane": "Control APIs"},
+    {"id": "clients", "kind": "service", "label": "AdminClient · RoutesClient · SourcesClient", "lane": "Control APIs"},
+    {"id": "apis", "kind": "control-bus", "label": "Admin, routes and sources APIs", "sub": ":4002 admin + sources · :4003 routes", "tags": ["/v1/dlq", "/v1/replays", "/admin/routes"], "lane": "Control APIs"},
+    {"id": "trust-note", "kind": "note", "label": "Trust a hook only when verification.status is ok and not flagged (is_trusted). Names vary by language (decodeMessage, decode_message, Message.decode/1); the conformance suite pins the behaviour.", "attach": "handler"}
+  ],
+  "edges": [
+    {"from": "q", "to": "decode", "type": "event", "message": "Sink.Message v1", "label": "v1 or v2", "seq": 1},
+    {"from": "decode", "to": "poison", "kind": "dlq", "label": "invalid_json · size_mismatch · integrity", "route": "above"},
+    {"from": "decode", "to": "route", "type": "event", "message": "Message", "seq": 2},
+    {"from": "route", "to": "handler", "type": "event", "message": "body", "label": "inline, ≤ 64 KiB", "seq": 3},
+    {"from": "route", "to": "claim", "type": "event", "message": "claim + sha256", "seq": 3},
+    {"from": "claim", "to": "gateway", "kind": "rpc", "message": "GET /v1/claims/{tenant}/{id}", "label": "v2 ref adds exp + sig", "seq": 4},
+    {"from": "claim", "to": "handler", "type": "event", "message": "verified bytes", "label": "or ClaimIntegrityError", "seq": 5},
+    {"from": "http", "to": "receive", "type": "event", "message": "POST", "label": "raw body + webhook-signature"},
+    {"from": "receive", "to": "handler", "type": "event", "message": "Hook", "label": "x-ankusa-id + idempotency key"},
+    {"from": "operator", "to": "clients", "kind": "control", "label": "from code, not curl"},
+    {"from": "clients", "to": "apis", "kind": "control", "message": "DLQ · replays · routes · sources"}
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "title": "Quarantine — holding unverified hooks until the secret is fixed",
+  "legend": true,
+  "nodes": [
+    {"id": "provider", "kind": "external-system", "label": "Provider", "sub": "signed request · secret rotated", "col": 0, "row": 1},
+    {"id": "ingest", "kind": "service", "label": "Edge.Ingest (verify)", "sub": "on_verify_failure decides", "col": 1, "row": 1},
+    {"id": "rejected", "kind": "invalid-message-channel", "label": "Rejected", "sub": "reject (default): 401", "tags": ["not stored"], "col": 2, "row": 0},
+    {"id": "pen", "kind": "message-store", "label": "Quarantine pen", "sub": "202 after fsync · 1 GiB cap · 14 days", "col": 2, "row": 2},
+    {"id": "store", "kind": "message-store", "label": "Store", "sub": "hook + delivery rows", "col": 2, "row": 4},
+    {"id": "dispatch", "kind": "service", "label": "Dispatch", "sub": "normal delivery path", "badges": ["retry"], "col": 3, "row": 4},
+    {"id": "replayer", "kind": "service", "label": "Dispatch.Replayer", "sub": "kind: quarantine · re-verifies", "badges": ["durable"], "col": 3, "row": 3},
+    {"id": "admin", "kind": "control-bus", "label": "Admin API :4002", "sub": "needs the edge role", "tags": ["/v1/quarantine", "/v1/replays"], "col": 1, "row": 3},
+    {"id": "operator", "kind": "actor", "label": "Operator", "sub": "fixes the secret first", "col": 0, "row": 4},
+    {"id": "pen-note", "kind": "note", "label": "One bucket per source (burst 100, 20/s) → 429 quarantine_rate_limited; past the 1 GiB cap → 503 quarantine_full. The pen never evicts an acked hook.", "attach": "pen"}
+  ],
+  "edges": [
+    {"from": "provider", "to": "ingest", "kind": "rpc", "message": "POST /webhooks/<source>", "label": "newest secret first", "seq": 1},
+    {"from": "ingest", "to": "rejected", "kind": "dlq", "label": "reject → 401"},
+    {"from": "ingest", "to": "pen", "kind": "dlq", "label": "quarantine → 202", "seq": 2},
+    {"from": "ingest", "to": "store", "kind": "data", "label": "accept_flag → stored, flagged"},
+    {"from": "operator", "to": "admin", "kind": "control", "message": "GET /v1/quarantine · POST /v1/replays", "label": "list, then release", "seq": 3},
+    {"from": "admin", "to": "replayer", "kind": "control", "label": "start release job", "seq": 4},
+    {"from": "admin", "to": "pen", "kind": "data", "message": "DELETE /v1/quarantine", "label": "purge"},
+    {"from": "replayer", "to": "pen", "kind": "data", "label": "re-verify with the current verifier", "seq": 5},
+    {"from": "replayer", "to": "store", "kind": "data", "label": "commit with original id + replay_id", "seq": 6},
+    {"from": "store", "to": "dispatch", "kind": "data", "label": "due rows", "seq": 7}
+  ]
+}

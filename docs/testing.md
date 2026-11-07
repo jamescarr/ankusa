@@ -1771,6 +1771,8 @@ loadgen -> nginx (round robin) -> ankusa-a / ankusa-b -> RabbitMQ -> consumer ->
                                    +-- MinIO bucket <- claim-check gateway <------+ (fat hooks)
 ```
 
+![loadgen posts through nginx to two all-role nodes that share Redis definitions and one MinIO bucket under separate prefixes and publish to RabbitMQ; the consumer binds its own queue, redeems large bodies at the claim-check node and upserts processed_webhooks, which loadgen.verify reads.](diagrams/example-fleet-e2e.png)
+
 Both nodes read their route definitions and sources from Redis (a path nobody
 defined is a `404` on either), write segments under their own
 `storage.key_prefix` of one bucket, and check fat bodies in to it. The
@@ -1874,6 +1876,8 @@ through three phases against it:
    `BURST_SECONDS`; the drain time it reports is how long the pipeline needed
    after ingest stopped, so it is the dispatch throughput ceiling referenced in
    [`deployment.md`](deployment.md#dispatch-throughput).
+
+![loadgen posts to a three-pod Ankusa StatefulSet whose pods each fsync to their own PVC, then deliver over HTTP to two consumer replicas that record the hook and enqueue an Oban job in one Postgres transaction; loadgen.verify checks every acked id was processed.](diagrams/example-oban-consumer.png)
 
 `mix loadgen.verify` polls `processed_webhooks` (the consumer's ground truth,
 written by the idempotent `WebhookWorker.perform/1` upsert) until every acked

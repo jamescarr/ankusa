@@ -34,6 +34,8 @@ config :ankusa,
   }
 ```
 
+![Dispatch encodes the hook, hands value, key and headers to one brod client and produces with acks=all to a topic it never creates; the delivery counts only once every in-sync replica has the record, and permanent produce errors dead-letter at once.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/sink-kafka.png)
+
 Sinks belong to a source. `Ankusa.Config.new/1` takes the same `sources` for a
 non-default instance.
 
@@ -50,6 +52,8 @@ no fallback is dead-lettered as permanent (`{:template_missing, var}`).
 `Ankusa.Intake.Kafka` is the adapter of the dual-commit intake log
 ([ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)): a hook is acked only after it is fsynced on the node
 **and** confirmed in a replicated topic, so a lost host loses nothing.
+
+![Under wal.type: dual the writer runs a synced local write and an acks=all Kafka publish in parallel and the provider gets 201 only when both confirm; an open breaker refuses with 503 intake_unavailable, the reconciler completes half-persisted hooks, and recovery replays the log.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/dual-intake.png)
 
 ```elixir
 config =

@@ -1,0 +1,37 @@
+{
+  "title": "Dual commit — wal.type: dual, fsync and intake-log confirm before 201",
+  "legend": true,
+  "groups": [
+    {"id": "kafka", "label": "Kafka (intake log)", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "provider", "kind": "external-system", "label": "Provider", "sub": "retries the 503", "col": 0, "row": 1},
+    {"id": "backup", "kind": "message-store", "label": "Backup", "sub": "manifest records the intake offset", "col": 0, "row": 3},
+    {"id": "operator", "kind": "actor", "label": "Operator", "sub": "recover a stopped store", "col": 0, "row": 4},
+    {"id": "edge", "kind": "service", "label": "Edge", "sub": "201 · 503 intake_unavailable", "col": 1, "row": 1},
+    {"id": "recovery", "kind": "service", "label": "Intake.Recovery", "sub": "boot: replay from offset + 1", "col": 1, "row": 3},
+    {"id": "writer", "kind": "service", "label": "Queue.Writer", "sub": "one seq · both halves in parallel", "col": 2, "row": 1},
+    {"id": "store", "kind": "message-store", "label": "Local store", "sub": "hook + rows + intake offset", "col": 2, "row": 3},
+    {"id": "gate", "kind": "service", "label": "Intake.Gate", "sub": "3 failures open · 1 probe per s", "badges": ["circuit-breaker"], "col": 3, "row": 0},
+    {"id": "pending", "kind": "datastore", "label": "Pending set", "sub": "unconfirmed records (ETS)", "col": 3, "row": 2},
+    {"id": "reconciler", "kind": "service", "label": "Intake.Reconciler", "sub": "completes the missing half", "badges": ["retry"], "col": 3, "row": 4},
+    {"id": "intake", "kind": "channel-adapter", "label": "Intake.Kafka", "sub": "one attempt per call", "col": 4, "row": 1},
+    {"id": "log", "kind": "pubsub-channel", "label": "ankusa.intake.<fleet>", "sub": "no DLQ: the reconciler never drops", "tags": ["key=node_id", "acks=all", "min.insync.replicas=2"], "group": "kafka", "col": 5, "row": 1}
+  ],
+  "edges": [
+    {"from": "provider", "to": "edge", "kind": "rpc", "message": "POST /webhooks/<source>", "label": "201 only when both halves confirm", "seq": 1},
+    {"from": "edge", "to": "writer", "type": "event", "message": "hook", "label": "caller blocks", "seq": 2},
+    {"from": "writer", "to": "gate", "kind": "control", "label": "admit before either half", "route": "above"},
+    {"from": "writer", "to": "store", "kind": "data", "label": "local half: write + fsync", "seq": 3},
+    {"from": "writer", "to": "intake", "kind": "rpc", "message": "publish_batch", "label": "log half, in parallel", "seq": 3},
+    {"from": "intake", "to": "log", "type": "event", "message": "intake record", "label": "acks=all", "seq": 4},
+    {"from": "writer", "to": "pending", "kind": "data", "label": "until both confirm"},
+    {"from": "reconciler", "to": "pending", "kind": "data", "label": "promote when both are done"},
+    {"from": "reconciler", "to": "intake", "kind": "rpc", "message": "publish again", "label": "log half missing"},
+    {"from": "reconciler", "to": "store", "kind": "data", "label": "local half missing"},
+    {"from": "backup", "to": "recovery", "kind": "data", "label": "restore latest first"},
+    {"from": "recovery", "to": "log", "kind": "rpc", "message": "replay", "label": "from intake offset + 1", "route": "below"},
+    {"from": "recovery", "to": "store", "kind": "data", "label": "apply by seq + hook id"},
+    {"from": "operator", "to": "recovery", "kind": "control", "message": "mix ankusa.recover", "label": "--dry-run · --allow-gap", "route": "below"}
+  ]
+}

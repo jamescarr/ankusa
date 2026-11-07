@@ -1,0 +1,29 @@
+{
+  "title": "Sink.SQS — batched SendMessageBatch to standard or FIFO",
+  "legend": true,
+  "groups": [
+    {"id": "aws", "label": "Amazon SQS", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "dispatch", "kind": "service", "label": "Dispatch attempt", "sub": "retry policy → DLQ", "badges": ["retry", "circuit-breaker"], "col": 0, "row": 1},
+    {"id": "claim", "kind": "claim-check", "label": "Claim check", "sub": "body > inline_max_bytes (64 KiB)", "col": 1, "row": 0},
+    {"id": "encode", "kind": "envelope-wrapper", "label": "Sink.Message v1", "sub": "body + message attributes", "col": 1, "row": 1},
+    {"id": "batcher", "kind": "service", "label": "Sink.Batcher", "sub": "10 entries · 256 KiB · 20 ms linger", "badges": ["bulkhead"], "col": 2, "row": 1},
+    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead delivery rows", "sub": "QueueDoesNotExist · AccessDenied · too large", "tags": ["node-local"], "col": 2, "row": 3},
+    {"id": "creds", "kind": "service", "label": "AWS credentials", "sub": "opts → env → IRSA → IMDSv2", "col": 3, "row": 0},
+    {"id": "signer", "kind": "channel-adapter", "label": "SigV4 request", "sub": "SendMessageBatch", "col": 4, "row": 1},
+    {"id": "queue", "kind": "p2p-channel", "label": "hooks.fifo", "sub": "never created by the sink", "tags": ["FIFO group=tenant/source", "dedup id = hook id"], "group": "aws", "col": 5, "row": 1},
+    {"id": "consumer", "kind": "service", "label": "Worker / Lambda", "sub": "deletes after handling", "badges": ["idempotent", "polling"], "col": 6, "row": 1},
+    {"id": "fifo-note", "kind": "note", "label": "FIFO: MessageGroupId = tenant/source (the lane key when ordered), MessageDeduplicationId = hook id or id:replay:<id>. A standard queue gets neither unless message_group_id is set.", "attach": "signer"}
+  ],
+  "edges": [
+    {"from": "dispatch", "to": "encode", "type": "event", "message": "hook", "seq": 1},
+    {"from": "encode", "to": "claim", "kind": "data", "label": "too large", "seq": 2},
+    {"from": "encode", "to": "batcher", "type": "event", "message": "batch entry", "seq": 3},
+    {"from": "creds", "to": "signer", "kind": "data", "label": "signing credentials"},
+    {"from": "batcher", "to": "signer", "type": "event", "message": "≤ 10 entries", "label": "one request per queue", "seq": 4},
+    {"from": "signer", "to": "queue", "kind": "rpc", "message": "POST SendMessageBatch", "label": "ok per entry on MD5 match", "seq": 5},
+    {"from": "queue", "to": "consumer", "type": "event", "message": "Sink.Message v1", "label": "FIFO within a group", "seq": 6},
+    {"from": "batcher", "to": "dlq", "kind": "dlq", "label": "permanent entry failure"}
+  ]
+}

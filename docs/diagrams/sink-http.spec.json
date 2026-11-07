@@ -1,0 +1,28 @@
+{
+  "title": "Sink.Http — a signed delivery to your receiver",
+  "legend": true,
+  "nodes": [
+    {"id": "dispatch", "kind": "service", "label": "Dispatch attempt", "sub": "24 h horizon · 30 s attempt", "badges": ["retry", "circuit-breaker"]},
+    {"id": "resolve", "kind": "dynamic-router", "label": "Destination", "sub": "url · headers · secret per tenant"},
+    {"id": "headers", "kind": "envelope-wrapper", "label": "x-ankusa-* headers", "sub": "id · idempotency-key · body-sha256 · …"},
+    {"id": "sign", "kind": "envelope-wrapper", "label": "Standard Webhooks signature", "sub": "webhook-id · -timestamp · -signature"},
+    {"id": "egress", "kind": "message-filter", "label": "Egress policy", "sub": "private and loopback addresses denied"},
+    {"id": "pools", "kind": "service", "label": "Connection pools", "sub": "one per address + TLS · 32 connections", "badges": ["bulkhead"]},
+    {"id": "recv", "kind": "external-system", "label": "Your receiver", "sub": "2xx only after a durable enqueue"},
+    {"id": "classify", "kind": "content-based-router", "label": "Status classifier", "sub": "2xx ok · retry · permanent"},
+    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead delivery rows", "sub": "fix, then POST /v1/replays", "tags": ["node-local"]},
+    {"id": "tpl-note", "kind": "note", "label": "{{ tenant }} may template the URL path and query only; the host stays literal so pools key on it. A missing template variable is permanent.", "attach": "resolve"}
+  ],
+  "edges": [
+    {"from": "dispatch", "to": "resolve", "type": "command", "message": "deliver/3", "seq": 1},
+    {"from": "resolve", "to": "headers", "type": "event", "message": "raw body", "label": "url · headers · secret resolved", "seq": 2},
+    {"from": "headers", "to": "sign", "type": "event", "message": "id.timestamp.body", "label": "HMAC-SHA256 per secret", "seq": 3},
+    {"from": "sign", "to": "egress", "type": "event", "message": "POST <url>", "label": "checked before any byte is sent", "seq": 4},
+    {"from": "egress", "to": "pools", "type": "event", "message": "pinned address", "seq": 5},
+    {"from": "pools", "to": "recv", "kind": "rpc", "message": "POST /t/{{ tenant }}", "label": "TLS name verified", "seq": 6},
+    {"from": "recv", "to": "classify", "type": "reply", "message": "status", "label": "≤ 64 KiB of the body read", "seq": 7},
+    {"from": "classify", "to": "dlq", "kind": "dlq", "label": "400 401 403 404 410 413 422 451", "seq": 8},
+    {"from": "classify", "to": "dispatch", "type": "reply", "message": "retry", "label": "408 · 425 · 429 · 5xx · timeout", "seq": 9},
+    {"from": "egress", "to": "dlq", "kind": "dlq", "label": "egress_denied"}
+  ]
+}

@@ -13,6 +13,8 @@ core's in-memory route store and `SourceStore.Persistent`), that share one rate
 limit or dedupe window across nodes (`fleet.store`), or that deliver hooks to a
 Redis pub/sub channel.
 
+![Route and source writes land in Redis hashes with a version counter and a pub/sub nudge that makes every node reload its local mirror; each hook costs one EVALSHA for fleet-wide limits and dedupe, with a local fallback, and Sink.Redis publishes delivered hooks to a channel only live subscribers receive.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/redis-adapters.png)
+
 ## Installation
 
 ```elixir

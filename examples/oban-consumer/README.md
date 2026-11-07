@@ -5,14 +5,7 @@ production job-queue fleet, Oban, backed by Postgres, over plain HTTP,
 with zero loss under normal load, under chaos (pods killed mid-flight), and
 under a closed-loop burst.
 
-```mermaid
-flowchart LR
-    P[Provider / loadgen] -->|POST /webhooks/demo| A[ankusa\n3 pods, all-role\nStatefulSet]
-    A -->|store fsync, then ack| P
-    A -->|"Ankusa.Sink.Http\nPOST /deliveries"| C[consumer\n2 replicas: Plug + Oban]
-    C --> OJ[Oban jobs]
-    OJ --> DB[(processed_webhooks\ndb: consumer)]
-```
+![loadgen posts to a three-pod Ankusa StatefulSet whose pods each fsync to their own PVC, then deliver over HTTP to two consumer replicas that record the hook and enqueue an Oban job in one Postgres transaction; loadgen.verify checks every acked id was processed.](../../docs/diagrams/example-oban-consumer.png)
 
 **What each piece proves:**
 

@@ -1,0 +1,23 @@
+{
+  "title": "Ordering lanes — per-key order, one head at a time",
+  "legend": true,
+  "lanes": ["Ingest", "Store", "Dispatch", "Destination"],
+  "nodes": [
+    {"id": "ingest", "kind": "service", "label": "Edge.Ingest", "sub": "ordering_key resolved at ingest", "lane": "Ingest"},
+    {"id": "lane", "kind": "p2p-channel", "label": "Lane {tenant, source, sink, key}", "sub": "only the head is due", "tags": ["FIFO per key", "seq order"], "lane": "Store"},
+    {"id": "dead-head", "kind": "dead-letter-channel", "label": "Dead head", "sub": "releases the lane", "tags": ["node-local"], "shadow": "lane"},
+    {"id": "pipeline", "kind": "service", "label": "Dispatch.Pipeline", "sub": "promotes the next member after :ok", "lane": "Dispatch"},
+    {"id": "sink", "kind": "channel-adapter", "label": "Sink (ordered: true)", "sub": "one delivery at a time per lane", "lane": "Dispatch"},
+    {"id": "kafka", "kind": "pubsub-channel", "label": "Kafka topic", "sub": "Sink.Kafka", "tags": ["record key = lane key"], "lane": "Destination"},
+    {"id": "sqs", "kind": "p2p-channel", "label": "queue.fifo", "sub": "Sink.SQS needs .fifo", "tags": ["MessageGroupId = lane key"], "lane": "Destination"},
+    {"id": "lane-note", "kind": "note", "label": "Opt in per sink: ordered: true + ordering_key (header, JSON path or MFA); needs wal disk or dual. A retrying head blocks only its lane, up to the 24 h horizon. Order is per node.", "attach": "pipeline"}
+  ],
+  "edges": [
+    {"from": "ingest", "to": "lane", "type": "event", "message": "hook", "label": "joins the lane for its key", "seq": 1},
+    {"from": "lane", "to": "pipeline", "type": "event", "message": "head due", "label": "members hold no slot", "seq": 2},
+    {"from": "pipeline", "to": "sink", "type": "command", "message": "deliver/3", "label": "after the previous :ok", "seq": 3},
+    {"from": "sink", "to": "kafka", "type": "event", "message": "Sink.Message v1", "label": "key = lane key", "seq": 4},
+    {"from": "sink", "to": "sqs", "type": "event", "message": "Sink.Message v1", "label": "group = lane key", "seq": 4},
+    {"from": "pipeline", "to": "lane", "message": "promote next", "label": "in seq order"}
+  ]
+}

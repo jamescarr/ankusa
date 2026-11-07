@@ -86,20 +86,7 @@ and [`delivery.md`](delivery.md#direct-mode).
 
 ## The pipeline
 
-```mermaid
-flowchart LR
-    P[Provider] -->|POST catch URL| E[Edge: Bandit + Router]
-    E --> RR[RouteResolver]
-    RR --> IG[Ingest: verify]
-    IG --> B[Group-commit Batcher]
-    B -->|one synced batch per commit| S[(Store\nhooks + delivery rows)]
-    S -->|ack| P
-    S -->|due rows| D[Dispatch Scheduler]
-    S -->|archive obligations| C[Compactor]
-    C --> BS[(Blob store\nsegments + index)]
-    D --> SK[Sinks]
-    D -->|give up| DLQ[(Dead rows)]
-```
+![Numbered request path: the router refuses oversize, unknown or rate-limited requests before the body, the resolver maps the URL to a source and tenant, the verifier applies on_verify_failure, dedupe drops provider retries, and the group commit fsyncs before 201.](diagrams/request-path.png)
 
 Ingest and dispatch are **fully decoupled**. A commit writes the hook and one
 delivery row per sink in one store batch; dispatch is a scheduler over the
@@ -118,14 +105,7 @@ which share nothing but the provider's traffic.
 `wal.type: none` skips the queue entirely — one request, one publish, still one
 honest ack:
 
-```mermaid
-flowchart LR
-    P[Provider] -->|POST catch URL| E[Edge: Bandit + Router]
-    E --> IG[Ingest: verify]
-    IG -->|in the request| SK[Sinks, concurrently]
-    SK -->|every sink confirmed| A[201 accepted]
-    SK -->|any failure or timeout| R[503 + Retry-After]
-```
+![Direct mode: after verification the request process publishes to every selected sink at once under one 8 s deadline and answers 201 only when each confirms, otherwise 503 with Retry-After; nothing is committed, archived or dead-lettered.](diagrams/direct-mode.png)
 
 No batcher, no queue, no compactor, no dispatch pipeline, no DLQ. The request
 process publishes to each of the source's sinks and answers only once all have
@@ -293,6 +273,8 @@ and the node-day's `_manifest.json`, and catalogues the segment in the store
 ([`storage.md`](storage.md#ankusacodec-and-segment-format)). It is a recovery
 buffer for replay, not a system of record.
 
+![The compactor reads archive obligations from the store, writes a dated segment, its index and the node-day manifest to the blob store, records a catalogue row and clears the obligations so the hook can be deleted; an hourly sweep enforces retention and replay by id reads one frame back.](diagrams/compaction-archive.png)
+
 `archive.retention_days` is the whole retention policy, and it is off by
 default. When set, the compactor deletes a segment object, its index and its
 catalogue row through the blob store once the newest hook in it is that old;
@@ -397,7 +379,9 @@ from the message, since their calls carry a hook's or a source's sinks. The
 replayer keeps only the codec module, so its state holds no configuration.
 Supervisors cannot: their child specs carry the config, so
 `:sys.get_status/1` on a supervisor, or a supervisor report when SASL reports
-are turned on (`handle_sasl_reports`, off by default), still prints it.
+reports are turned on (`handle_sasl_reports`, off by default), still prints it.
+
+![One rest_for_one supervisor starts a Registry watcher, then the core that acks hooks (source store, store, edge), then each optional domain in its own isolated subtree, so a broken sink or a taken port stops only that domain while hooks wait in the store.](diagrams/instances.png)
 
 ## Deployment topologies
 
@@ -415,17 +399,7 @@ different adapter tuples. Operational how-tos live in
 One process, every role. Nothing else to run: no broker, no database, no object
 store.
 
-```mermaid
-flowchart LR
-    P[Provider] --> E[Edge]
-    subgraph Node["one BEAM node"]
-        E --> S[("Store\nlocal disk")]
-        Disp[Dispatch] --> S
-        Comp[Compactor] --> S
-        Comp --> BS[("BlobStore.LocalFS\nlocal disk")]
-    end
-    Disp --> SK[Sinks]
-```
+![Provider posts to the edge; the batcher group-commits the hook to the local store and the provider gets 201 only after the fsync. Dispatch delivers due rows to sinks, dead-lettering give-ups; the compactor archives to the blob store.](diagrams/overview.png)
 
 `mix run --no-halt` / `iex -S mix`, or the single-container
 [`examples/quickstart/`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/). Durable to
@@ -474,21 +448,7 @@ so the claim store (the bucket, or a dedicated `claim_check.store`, or a list
 of them with failover, `claim_check.stores`) is shared by every node and one
 gateway serves them all.
 
-```mermaid
-flowchart LR
-    P[Provider] --> E1[Ingest node 1]
-    P --> E2[Ingest node N]
-    E1 & E2 --> S[("Store\nper node")]
-    E1 & E2 -->|small: inline body| X(("ankusa.events\nexchange"))
-    E1 & E2 -.fat: write packed claims.-> Obj[("Object store")]
-    E1 & E2 -->|"fat: message carries a claim ref"| X
-    X --> QA[queue A\nowned by consumer A]
-    X --> QB[queue B\nowned by consumer B]
-    QA --> CA[Worker A\nno store credentials]
-    QB --> CB[Worker B\nno store credentials]
-    CA & CB -->|GET /v1/claims/...| CC["claim-check\n:claim_check role\nread-only, authenticated"]
-    CC --> Obj
-```
+![Ingest nodes commit each hook locally, pack bodies over 64 KiB into the object store and publish one Sink.Message to the ankusa.events exchange; every consumer owns its queue and binding, and workers without storage credentials redeem claim references at the read-only gateway.](diagrams/topology-queue-fanout.png)
 
 A consumer that shouldn't hold object-store credentials (any worker, in any
 language, or a third party) redeems the reference with `GET /v1/claims/...`
@@ -512,14 +472,7 @@ and acks on their confirm. Nothing written here is acked customer data, so a
 replica can be killed, rescheduled, or added mid-storm with nothing to drain
 and nothing to repoint.
 
-```mermaid
-flowchart LR
-    P[Provider] --> LB[Load balancer]
-    LB --> E1[edge replica 1\nno volume]
-    LB --> E2[edge replica N\nno volume]
-    E1 & E2 -->|publish in the request\nack on confirm| Q[Kafka / NATS / RabbitMQ]
-    Q --> W[Your workers]
-```
+![A load balancer spreads requests over identical edge replicas with no volumes; each verifies, publishes to the source's sinks inside the request and answers 201 only when every sink confirms, so a 503 with Retry-After is the whole retry and consumers dedupe on the idempotency key.](diagrams/topology-stateless-fleet.png)
 
 The trade is the retry: with no queue there is no retry policy, no dead-letter
 queue, and no replay — a `503` with `Retry-After` is the whole retry mechanism,

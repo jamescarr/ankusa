@@ -84,6 +84,8 @@ works before you have any provider credentials. Done? `docker rm -f ankusa`.
 
 ## Deliver to your worker
 
+![Dispatch gives every selected sink its own delivery row and sends Sink.Message v1 (for HTTP, the raw signed body) to a Kafka topic, RabbitMQ exchange, JetStream subject, SQS queue, Pub/Sub topic, Redis channel or HTTP receiver, counting it delivered only when the destination confirms.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/sinks.png)
+
 Give a source a `kafka`, `rabbitmq`, or `nats` sink and every hook becomes a
 message on the broker your workers already consume from. Ankusa publishes; the
 consumer owns its topic, queue, or stream. A broker outage is retried, and a
@@ -154,17 +156,7 @@ request, one concurrent publish, and the provider's retry is the only retry.
 (The store still opens for the quarantine pen, API-managed sources and
 rate-limit overrides.)
 
-```mermaid
-flowchart LR
-    P[Provider] -->|POST catch URL| E[Edge]
-    E --> B[Group-commit Batcher]
-    B -->|one fsync| W[(Store)]
-    W -->|ack| P
-    W --> C[Compactor]
-    W --> D[Dispatch]
-    C --> S[(Object store)]
-    D --> SK[Sinks]
-```
+![Provider posts to the edge; the batcher group-commits the hook to the local store and the provider gets 201 only after the fsync. Dispatch delivers due rows to sinks, dead-lettering give-ups; the compactor archives to the blob store.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/overview.png)
 
 ## Operating it
 
@@ -215,19 +207,7 @@ Under `wal.type: dual`, the intake log also survives a lost host: restore that
 node's backup under its stable `intake.node_id` and run `recover` to replay
 whatever the backup does not hold.
 
-```mermaid
-flowchart LR
-    P[Stripe, GitHub, ...] --> LB[Load balancer]
-    LB --> E1[Ankusa node 1]
-    LB --> E2[Ankusa node 2]
-    LB --> E3[Ankusa node N]
-    E1 --> ST1[("own store\n+ volume")]
-    E2 --> ST2[("own store\n+ volume")]
-    E3 --> ST3[("own store\n+ volume")]
-    ST1 & ST2 & ST3 --> Q[Kafka / NATS / RabbitMQ / SQS / HTTP]
-    ST1 & ST2 & ST3 --> S[(S3 / GCS)]
-    Q --> W[Your workers]
-```
+![A load balancer lands each hook on one of N all-role nodes; each node fsyncs to its own store and volume, publishes to the shared broker after the commit, archives under its own prefix in one bucket, optionally shares routes, sources and fleet limits through Redis, and workers redeem claims at one gateway.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/fleet.png)
 
 Your workers can be written in anything. A TypeScript, Python, Ruby, or Go
 consumer reads from the queue and fetches large payloads over the claim-check

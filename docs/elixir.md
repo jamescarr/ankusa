@@ -5,6 +5,8 @@ dispatch, sinks — as a library in your own supervision tree. If you would
 rather run Ankusa as a container, or you don't write Elixir, start at the
 [README](../README.md).
 
+![Your application supervises an Ankusa.Instance; its listener accepts a webhook, the batcher commits it to RocksDB before 201, and dispatch calls your own Ankusa.Sink module, which inserts a unique Oban job that the worker runs against Postgres.](diagrams/elixir-embedded.png)
+
 ## Install
 
 ```elixir
@@ -194,6 +196,8 @@ ANKUSA_ROLES=claim_check mix run --no-halt             # claim-check gateway, an
 Ankusa.Application reads `ANKUSA_ROLES` (comma-separated) and `PORT` on top of
 whatever `config.exs` sets, see
 [`configuration.md#runtime-environment-overrides`](configuration.md#runtime-environment-overrides).
+
+![edge, dispatch and storage run in one BEAM node around one RocksDB store — edge commits, dispatch delivers and retries, storage archives segments — while claim_check is the only role that can run on another node, reading the shared claim bucket.](diagrams/roles.png)
 
 ## The queue from code
 

@@ -14,6 +14,8 @@ wrong again for a product minting unguessable tokens on demand. Hardcoding
 any one scheme into the router would force every other use case to fork the
 router.
 
+![A per-customer catch URL is resolved into a route with a tenant, bound to its source, charged to that tenant's quota and stored under it; dispatch delivers with the tenant in context to that tenant's own destination, and erasing a tenant deletes its rows and claims behind a tombstone.](diagrams/multi-tenancy.png)
+
 ## `Ankusa.Route` and `Ankusa.RouteResolver`
 
 `Ankusa.Route` is the resolved identity of a request:

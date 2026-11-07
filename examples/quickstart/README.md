@@ -12,17 +12,7 @@ worker polls the queue with `boto3` and decodes each message with the `ankusa`
 Python SDK ([`packages/sdk-python`](../../packages/sdk-python)). No object
 store, and the worker holds no storage credentials.
 
-```mermaid
-flowchart LR
-    P[Provider / curl] -->|POST /webhooks/demo :4000| A[ankusa]
-    A -->|written to disk, then 201| P
-    A -->|produce ankusa.events, acks=all| T[(Redpanda topic)]
-    T -->|consumer group| B[bridge]
-    B -->|SendMessage, group = key| Q[(SQS FIFO, floci)]
-    Q -->|long poll| W[worker.py]
-    W -.->|large body: redeem claim :4001| A
-    O[You] -->|/health /metrics /v1/dlq :4002| A
-```
+![curl posts to ankusa on 4000, which fsyncs the hook, answers 201 and produces it to ankusa.events; a Redpanda Connect bridge moves records into the ankusa-worker.fifo queue, and worker.py long-polls it, redeems bodies over 8 KiB at the claim check on 4001 and dead-letters permanent failures.](../../docs/diagrams/example-quickstart.png)
 
 ## What's here
 

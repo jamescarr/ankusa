@@ -1,0 +1,25 @@
+{
+  "title": "Sink.Kafka — keyed produce, acks=all",
+  "legend": true,
+  "groups": [
+    {"id": "kafka", "label": "Kafka / Redpanda", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "dispatch", "kind": "service", "label": "Dispatch attempt", "sub": "retry policy → DLQ", "badges": ["retry", "circuit-breaker"]},
+    {"id": "encode", "kind": "envelope-wrapper", "label": "Sink.Message v1", "sub": "same bytes as RabbitMQ and NATS"},
+    {"id": "claim", "kind": "claim-check", "label": "Claim check", "sub": "body would not fit max_record_bytes"},
+    {"id": "client", "kind": "channel-adapter", "label": "brod client", "sub": "one per instance · reconnects itself"},
+    {"id": "topic", "kind": "pubsub-channel", "label": "ankusa.events", "sub": "never auto-created", "tags": ["key=tenant/source", "acks=all"], "group": "kafka"},
+    {"id": "consumer", "kind": "service", "label": "Consumer group", "sub": "dedupes on idempotency_key", "badges": ["idempotent", "competing:3"]},
+    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead delivery rows", "sub": "permanent produce errors", "tags": ["node-local"]},
+    {"id": "key-note", "kind": "note", "label": "The record key picks the partition (the lane key when ordered: true). brod's producer is not idempotent: a timed-out produce may still land, so consumers dedupe.", "attach": "client"}
+  ],
+  "edges": [
+    {"from": "dispatch", "to": "encode", "type": "event", "message": "hook", "seq": 1},
+    {"from": "encode", "to": "claim", "kind": "data", "label": "too large → claim ref", "seq": 2},
+    {"from": "encode", "to": "client", "type": "event", "message": "value + key + headers", "seq": 3},
+    {"from": "client", "to": "topic", "type": "event", "message": "produce", "label": "ok once every in-sync replica has it", "seq": 4},
+    {"from": "topic", "to": "consumer", "type": "event", "message": "Sink.Message v1", "label": "at-least-once", "seq": 5},
+    {"from": "client", "to": "dlq", "kind": "dlq", "label": "message_too_large · invalid_record"}
+  ]
+}

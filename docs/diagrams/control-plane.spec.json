@@ -1,0 +1,36 @@
+{
+  "title": "Control plane — admin API, reload, metrics and traces",
+  "legend": true,
+  "nodes": [
+    {"id": "ops", "kind": "actor", "label": "Operator / CI", "sub": "token · JWT · client cert", "col": 0, "row": 3},
+    {"id": "admin", "kind": "control-bus", "label": "Admin API :4002", "sub": "scope per route · loopback by default", "tags": ["/health /ready", "/v1/dlq /v1/replays", "/v1/config/reload /v1/log-level"]},
+    {"id": "routes-api", "kind": "service", "label": "Routes API :4003", "sub": "edge role only", "badges": ["gateway"], "col": 1, "row": 1},
+    {"id": "metrics", "kind": "service", "label": "Metrics listener :4004", "sub": "/metrics /health /ready only"},
+    {"id": "health", "kind": "service", "label": "Health checks", "sub": "store · intake · sinks · disk · backlog · backup"},
+    {"id": "store", "kind": "datastore", "label": "Node store", "sub": "DLQ · quarantine · overrides"},
+    {"id": "audit", "kind": "message-store", "label": "Audit trail", "sub": "GET /v1/audit · one row per change"},
+    {"id": "replay", "kind": "service", "label": "Replay jobs", "sub": "dlq · archive · quarantine · lifecycle"},
+    {"id": "reload", "kind": "service", "label": "Config reload", "sub": "SIGHUP or POST /v1/config/reload"},
+    {"id": "running", "kind": "datastore", "label": "Running config", "sub": "reloadable keys applied atomically"},
+    {"id": "telemetry", "kind": "wire-tap", "label": "Ankusa.Telemetry", "sub": "spans · counters · gauges"},
+    {"id": "prometheus", "kind": "external-system", "label": "Prometheus", "sub": "scrapes every node"},
+    {"id": "otel", "kind": "external-system", "label": "OTel collector", "sub": "OTLP · tracing.enabled"},
+    {"id": "auth-note", "kind": "note", "label": "401 without a credential, 403 naming the missing scope; a change is refused with 503 audit_backlog rather than going unaudited.", "attach": "admin"}
+  ],
+  "edges": [
+    {"from": "ops", "to": "admin", "kind": "control", "message": "GET /v1/dlq · POST /v1/replays", "label": "scoped, tenant-filtered", "seq": 1},
+    {"from": "ops", "to": "reload", "kind": "control", "message": "kill -HUP 1", "label": "node-local"},
+    {"from": "ops", "to": "routes-api", "kind": "control", "message": "POST /admin/routes"},
+    {"from": "admin", "to": "health", "kind": "rpc", "message": "GET /ready", "label": "503 + Retry-After"},
+    {"from": "admin", "to": "store", "kind": "data", "label": "DLQ · quarantine pages", "route": "below"},
+    {"from": "admin", "to": "audit", "kind": "data", "label": "one row per change"},
+    {"from": "admin", "to": "replay", "kind": "control", "message": "POST /v1/replays"},
+    {"from": "admin", "to": "reload", "kind": "control", "message": "POST /v1/config/reload", "label": "config:write"},
+    {"from": "reload", "to": "running", "kind": "data", "label": "else 409 not_reloadable"},
+    {"from": "replay", "to": "store", "kind": "data", "label": "revive rows at a rate"},
+    {"from": "telemetry", "to": "metrics", "kind": "tap", "label": "Prometheus reporter"},
+    {"from": "prometheus", "to": "metrics", "kind": "rpc", "message": "GET /metrics"},
+    {"from": "metrics", "to": "health", "kind": "data", "label": "same checks"},
+    {"from": "telemetry", "to": "otel", "kind": "tap", "label": "ankusa.ingest spans"}
+  ]
+}

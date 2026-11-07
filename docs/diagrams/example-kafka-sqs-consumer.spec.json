@@ -1,0 +1,31 @@
+{
+  "title": "Kafka to SQS FIFO — ingest, bridge, worker, both dead-letter paths",
+  "legend": true,
+  "groups": [
+    {"id": "redpanda", "label": "Redpanda", "kind": "broker"},
+    {"id": "floci", "label": "floci (SQS)", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "provider", "kind": "external-system", "label": "Provider / curl", "col": 0, "row": 1},
+    {"id": "ingest", "kind": "service", "label": "Ankusa ingest", "sub": "edge + dispatch + storage", "badges": ["retry"], "col": 1, "row": 1},
+    {"id": "bucket", "kind": "message-store", "label": "S3 bucket (floci)", "sub": "segments · claim packs", "col": 2, "row": 0},
+    {"id": "topic", "kind": "pubsub-channel", "label": "ankusa.events", "sub": "no topic DLQ: retries → /v1/dlq", "tags": ["6 partitions", "key=tenant/source", "acks=all"], "group": "redpanda", "col": 2, "row": 1},
+    {"id": "bridge", "kind": "messaging-bridge", "label": "Redpanda Connect", "sub": "group ankusa-sqs-bridge · offset after send", "group": "redpanda", "col": 3, "row": 1},
+    {"id": "sqs", "kind": "p2p-channel", "label": "ankusa-worker.fifo", "sub": "redrive after 5 receives", "tags": ["group = Kafka key", "dedup = ankusa_id", "visibility 30 s"], "group": "floci", "col": 4, "row": 1},
+    {"id": "dlq", "kind": "dead-letter-channel", "label": "ankusa-worker-dlq.fifo", "sub": "maxReceiveCount 5 · or sent by the worker", "tags": ["FIFO"], "shadow": "sqs", "group": "floci"},
+    {"id": "worker", "kind": "service", "label": "TypeScript worker", "sub": "batch 10 · 20 s long poll", "badges": ["idempotent", "polling"], "col": 5, "row": 1},
+    {"id": "gateway", "kind": "service", "label": "Claim check :4001", "badges": ["gateway"], "col": 5, "row": 2},
+    {"id": "failure-note", "kind": "note", "label": "Permanent failures (bad JSON, wrong version, claim without sha256) are sent to the DLQ, then deleted; transient ones double the visibility timeout and block their group.", "attach": "gateway"}
+  ],
+  "edges": [
+    {"from": "provider", "to": "ingest", "kind": "rpc", "message": "POST /webhooks/demo", "label": "201 after fsync", "seq": 1},
+    {"from": "ingest", "to": "bucket", "kind": "data", "label": "segments + claims over 8 KiB"},
+    {"from": "ingest", "to": "topic", "type": "event", "message": "Sink.Message v1", "label": "acks=all", "seq": 2},
+    {"from": "topic", "to": "bridge", "type": "event", "message": "record", "label": "consumer group", "seq": 3},
+    {"from": "bridge", "to": "sqs", "type": "event", "message": "SendMessageBatch", "label": "group = key · dedup = id", "seq": 4},
+    {"from": "sqs", "to": "worker", "type": "event", "message": "Sink.Message v1", "label": "receive 10 · wait 20 s", "seq": 5},
+    {"from": "worker", "to": "gateway", "kind": "rpc", "message": "GET /v1/claims/…", "label": "claim ref", "seq": 6},
+    {"from": "gateway", "to": "bucket", "kind": "data", "label": "read pack", "route": "ortho"},
+    {"from": "worker", "to": "dlq", "kind": "dlq", "label": "permanent: send, then delete"}
+  ]
+}

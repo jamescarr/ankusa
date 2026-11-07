@@ -1,0 +1,22 @@
+{
+  "title": "Direct mode — wal.type: none, 201 only when every sink confirms",
+  "legend": true,
+  "nodes": [
+    {"id": "provider", "kind": "external-system", "label": "Provider", "sub": "retries on 5xx or timeout"},
+    {"id": "router", "kind": "service", "label": "Edge.Router", "sub": "same refusals before the body"},
+    {"id": "ingest", "kind": "service", "label": "Edge.Ingest", "sub": "verify · tenant quota · envelope"},
+    {"id": "publish", "kind": "recipient-list", "label": "Edge.Publish", "sub": "every selected sink · one 8 s deadline"},
+    {"id": "kafka", "kind": "pubsub-channel", "label": "Kafka topic", "sub": "no DLQ: a failed publish is the 503", "tags": ["acks=all", "key=tenant/source"]},
+    {"id": "http", "kind": "external-system", "label": "Your HTTP endpoint", "sub": "2xx = delivered"},
+    {"id": "store", "kind": "datastore", "label": "Local store", "sub": "quarantine pen · sources · limits only"},
+    {"id": "direct-note", "kind": "note", "label": "Nothing is committed: no batcher, dispatch, DLQ or archive. At least one sink must be durable or the source is refused. Confirmed sinks keep their copy, so a retry after 503 delivers again.", "attach": "publish"}
+  ],
+  "edges": [
+    {"from": "provider", "to": "router", "kind": "rpc", "message": "POST /webhooks/<source>", "label": "201 when all confirm · else 503", "seq": 1},
+    {"from": "router", "to": "ingest", "kind": "rpc", "message": "ingest", "label": "verify before publishing", "seq": 2},
+    {"from": "ingest", "to": "publish", "type": "event", "message": "verified hook", "label": "in the request process", "seq": 3},
+    {"from": "ingest", "to": "store", "kind": "data", "label": "quarantine writes only"},
+    {"from": "publish", "to": "kafka", "type": "event", "message": "Sink.Message v1", "label": "acks=all", "seq": 4},
+    {"from": "publish", "to": "http", "type": "event", "message": "POST", "label": "2xx", "seq": 4}
+  ]
+}

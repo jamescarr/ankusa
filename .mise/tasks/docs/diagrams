@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#MISE description="Rebuild docs/diagrams/<id>.png from <id>.spec.json with the excalidraw-architecture skill (needs node >= 22, Chrome and network)"
+#USAGE arg "[ids]" var=#true help="diagram ids (default: every docs/diagrams/*.spec.json)"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+gen="${EIP_EXCALIDRAW:-$HOME/.omp/agent/skills/excalidraw-architecture/scripts/eip_excalidraw.py}"
+[ -f "$gen" ] || fail "no generator at $gen: install the excalidraw-architecture skill or set EIP_EXCALIDRAW to its scripts/eip_excalidraw.py"
+
+ids=()
+eval "ids=(${usage_ids:-})"
+if [ ${#ids[@]} -eq 0 ]; then
+  for s in docs/diagrams/*.spec.json; do ids+=("$(basename "$s" .spec.json)"); done
+fi
+
+# The .excalidraw scene is scratch: the PNG embeds it (drop the PNG on
+# excalidraw.com to edit) and the spec is the source of truth.
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+failed=()
+for id in "${ids[@]}"; do
+  spec="docs/diagrams/$id.spec.json"
+  [ -f "$spec" ] || fail "no $spec"
+  echo "==> $id"
+  # One retry: the esm.sh import behind --png occasionally fails to fetch.
+  python3 "$gen" build "$spec" -o "$scratch/$id.excalidraw" --no-svg --png "docs/diagrams/$id.png" --strict ||
+    python3 "$gen" build "$spec" -o "$scratch/$id.excalidraw" --no-svg --png "docs/diagrams/$id.png" --strict ||
+    failed+=("$id")
+done
+[ ${#failed[@]} -eq 0 ] || fail "layout warnings or export errors in: ${failed[*]}"

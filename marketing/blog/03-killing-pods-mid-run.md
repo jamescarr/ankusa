@@ -15,13 +15,7 @@ This post is what that test does, what it reported, and the loss it caught in an
 
 The harness is `examples/oban-consumer/run.sh`, described in [docs/testing.md](https://github.com/jamescarr/ankusa/blob/main/docs/testing.md). It stands up a `kind` cluster with a 3-pod `ankusa` StatefulSet and a 2-replica `consumer` running Oban. Each Ankusa pod is a self-contained all-role node with its own store on a persistent volume. The nodes share nothing, which is how I describe fleets in [the launch post]({{BLOG_URL}}/ankusa-launch). Then `tools/loadgen` drives three phases against it.
 
-```mermaid
-flowchart LR
-    L[load generator] --> N[ankusa ×3, all-role, own store on PVC]
-    N -->|POST /deliveries| C[consumer]
-    C --> OJ[Oban]
-    OJ --> DB[(processed_webhooks)]
-```
+![loadgen posts to a three-pod Ankusa StatefulSet whose pods each fsync to their own PVC, then deliver over HTTP to two consumer replicas that record the hook and enqueue an Oban job in one Postgres transaction; loadgen.verify checks every acked id was processed.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/example-oban-consumer.png)
 
 The phases:
 

@@ -1,0 +1,25 @@
+{
+  "title": "RabbitMQ consumer — exchange, worker-owned queue, claim-check gateway",
+  "legend": true,
+  "groups": [
+    {"id": "rmq", "label": "RabbitMQ", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "provider", "kind": "external-system", "label": "Provider / curl", "col": 0, "row": 1},
+    {"id": "ingest", "kind": "service", "label": "Ankusa ingest", "sub": "edge + dispatch + storage", "badges": ["retry"], "col": 1, "row": 1},
+    {"id": "exchange", "kind": "content-based-router", "label": "ankusa.events", "sub": "topic exchange · the sink only publishes", "group": "rmq", "col": 2, "row": 1},
+    {"id": "queue", "kind": "p2p-channel", "label": "ankusa-example-worker", "sub": "no DLX: a permanent failure is dropped", "tags": ["durable", "bind ankusa.#", "prefetch 10"], "group": "rmq", "col": 3, "row": 1},
+    {"id": "bucket", "kind": "message-store", "label": "S3 bucket (floci)", "sub": "segments · claims/ packs", "col": 3, "row": 0},
+    {"id": "worker", "kind": "service", "label": "TypeScript worker", "sub": "no dedupe: the handler only prints", "col": 4, "row": 1},
+    {"id": "gateway", "kind": "service", "label": "Claim check :4001", "sub": "ANKUSA_ROLES=claim_check", "badges": ["gateway"], "col": 4, "row": 2}
+  ],
+  "edges": [
+    {"from": "provider", "to": "ingest", "kind": "rpc", "message": "POST /webhooks/demo", "label": "201 after fsync", "seq": 1},
+    {"from": "ingest", "to": "bucket", "kind": "data", "label": "segments + claims over 8 KiB"},
+    {"from": "ingest", "to": "exchange", "type": "event", "message": "Sink.Message v1", "seq": 2},
+    {"from": "exchange", "to": "queue", "type": "event", "message": "Sink.Message v1", "label": "ankusa.#", "seq": 3},
+    {"from": "queue", "to": "worker", "type": "event", "message": "Sink.Message v1", "label": "prefetch 10", "seq": 4},
+    {"from": "worker", "to": "gateway", "kind": "rpc", "message": "GET /v1/claims/…", "label": "claim ref", "seq": 5},
+    {"from": "gateway", "to": "bucket", "kind": "data", "label": "read pack"}
+  ]
+}

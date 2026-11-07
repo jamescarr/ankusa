@@ -6,13 +6,7 @@ no object store. The worker depends on the `ankusa` Python SDK
 ([`packages/sdk-python`](../../packages/sdk-python)) for header parsing,
 managed with [`uv`](https://docs.astral.sh/uv/).
 
-```mermaid
-flowchart LR
-    P[Provider / curl] -->|POST /webhooks/demo :4000| A[ankusa]
-    A -->|written to disk, then 201| P
-    A -->|POST /hooks + x-ankusa-id| W[worker.py]
-    O[You] -->|/health /metrics /v1/dlq :4002| A
-```
+![curl posts to ankusa on 4000, which fsyncs the hook and answers 201; the HTTP sink posts the raw body with x-ankusa-* headers to worker.py's /hooks, retries six times, then dead-letters the hook, which you replay through the admin API on 4002.](../../docs/diagrams/example-http-consumer.png)
 
 ## What's here
 

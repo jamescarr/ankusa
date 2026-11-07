@@ -1,0 +1,37 @@
+{
+  "title": "Ingest fleet — N independent all-role nodes behind one load balancer",
+  "legend": true,
+  "groups": [
+    {"id": "brokers", "label": "Your broker", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "provider", "kind": "external-system", "label": "Stripe / GitHub / …", "col": 0, "row": 0},
+    {"id": "lb", "kind": "service", "label": "Load balancer", "sub": "no affinity · a hook stays on its node", "col": 1, "row": 0},
+    {"id": "store-a", "kind": "message-store", "label": "Store + volume A", "sub": "hooks · deliveries · DLQ", "col": 1, "row": 1},
+    {"id": "store-n", "kind": "message-store", "label": "Store + volume N", "sub": "replayed by its own admin API", "col": 1, "row": 3},
+    {"id": "node-a", "kind": "service", "label": "ankusa node A", "sub": "edge + dispatch + storage", "badges": ["retry"], "col": 2, "row": 0},
+    {"id": "node-n", "kind": "service", "label": "ankusa node N", "sub": "edge + dispatch + storage", "badges": ["retry"], "col": 2, "row": 2},
+    {"id": "broker", "kind": "pubsub-channel", "label": "Kafka / NATS / RabbitMQ / SQS", "sub": "no broker DLQ: failures stay on the node", "tags": ["key=tenant/source", "at-least-once"], "group": "brokers", "col": 3, "row": 0},
+    {"id": "redis", "kind": "datastore", "label": "Redis (optional)", "sub": "routes · sources · fleet limits + dedupe", "col": 3, "row": 1},
+    {"id": "bucket", "kind": "message-store", "label": "S3 / GCS bucket", "sub": "segments per node prefix · claims shared", "col": 3, "row": 3},
+    {"id": "workers", "kind": "service", "label": "Your workers", "sub": "any language", "badges": ["idempotent", "competing"], "col": 4, "row": 0},
+    {"id": "gateway", "kind": "service", "label": "Claim gateway :4001", "sub": "one for the whole fleet", "badges": ["gateway"], "col": 5, "row": 3},
+    {"id": "fleet-note", "kind": "note", "label": "DLQ and replay are per node. A provider retry is a new hook with a new id unless the source sets dedupe (fleet-wide with dedupe.scope: fleet).", "attach": "gateway"}
+  ],
+  "edges": [
+    {"from": "provider", "to": "lb", "kind": "rpc", "message": "POST /webhooks/<tenant>/<source>", "label": "provider retries a 5xx", "seq": 1},
+    {"from": "lb", "to": "node-a", "kind": "rpc", "message": "POST", "label": "201 after fsync · 503 refused", "seq": 2},
+    {"from": "lb", "to": "node-n", "kind": "rpc", "message": "POST", "label": "201 after fsync · 503 refused", "seq": 2},
+    {"from": "node-a", "to": "store-a", "kind": "data", "label": "group commit", "seq": 3},
+    {"from": "node-n", "to": "store-n", "kind": "data", "label": "group commit", "seq": 3},
+    {"from": "node-a", "to": "redis", "kind": "data", "label": "shared definitions"},
+    {"from": "node-n", "to": "redis", "kind": "data", "label": "shared definitions"},
+    {"from": "node-a", "to": "broker", "type": "event", "message": "Sink.Message v1", "label": "after commit", "seq": 4},
+    {"from": "node-n", "to": "broker", "type": "event", "message": "Sink.Message v1", "label": "after commit", "seq": 4},
+    {"from": "node-a", "to": "bucket", "kind": "data", "label": "segments under A/"},
+    {"from": "node-n", "to": "bucket", "kind": "data", "label": "segments under N/"},
+    {"from": "broker", "to": "workers", "type": "event", "message": "Sink.Message v1", "label": "at-least-once", "seq": 5},
+    {"from": "workers", "to": "gateway", "kind": "rpc", "message": "GET /v1/claims/{tenant}/{id}", "label": "no bucket credentials", "seq": 6},
+    {"from": "gateway", "to": "bucket", "kind": "data", "label": "read claim pack", "route": "ortho"}
+  ]
+}

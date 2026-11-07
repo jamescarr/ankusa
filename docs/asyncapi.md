@@ -110,6 +110,8 @@ route-management API, or `Ankusa.SourceStore.put/5`, `delete/3` and
 | `io.ankusa.tenant.deleted` | a tenant was erased ([`multi-tenancy.md`](multi-tenancy.md#erasing-a-tenant)), after the `deleted` event of each of its sources and routes; `data` is `{"tenant": <id>}`, no entity | the tenant id |
 | `io.ankusa.instance.restored` | the store was restored from a backup, before any new change | the instance name |
 
+![A source, route or tenant change commits with an audit row flagged for publication; the lifecycle publisher reads those rows in order, wraps each as a CloudEvents 1.0 event inside Sink.Message v1 and delivers it at least once to every lifecycle sink; replay re-emits a window and the AsyncAPI document describes the channel.](diagrams/lifecycle-events.png)
+
 The body is a [CloudEvents 1.0](https://cloudevents.io) structured-mode event:
 `specversion`, `id`, `source` (`urn:ankusa:instance:<instance>`), `type`,
 `subject`, `time` (when the change committed), `datacontenttype`, and `data`:

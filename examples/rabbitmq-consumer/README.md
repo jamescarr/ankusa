@@ -5,18 +5,7 @@ it's something you run, front real webhooks with, and consume from a queue,
 with a Claim Check gateway (`docs/claim-check.md`) fronting the object store
 for consumers that shouldn't hold storage credentials.
 
-```mermaid
-flowchart LR
-    P[Provider / curl] -->|POST /webhooks/demo| I[Ankusa ingest\nedge+dispatch+storage]
-    I -->|store fsync, then ack| P
-    I -->|"small body (base64)"| X((ankusa.events\nexchange))
-    I -.fat body: Direct check-in.-> S[(S3 / floci)]
-    I -->|"fat body → message carries a claim ref"| X
-    X -->|ankusa.# binding, owned by consumer| Q[worker's queue]
-    Q --> W[TypeScript worker\nno S3 credentials]
-    W -->|GET /v1/claims/...| CC[claim-check\n:claim_check role]
-    CC --> S
-```
+![The ingest node fsyncs each hook, answers 201 and publishes it to the ankusa.events topic exchange; the TypeScript worker declares and binds its own queue and redeems bodies over 8 KiB at the claim-check gateway on 4001 without holding storage credentials.](../../docs/diagrams/example-rabbitmq-consumer.png)
 
 **What each piece is doing:**
 

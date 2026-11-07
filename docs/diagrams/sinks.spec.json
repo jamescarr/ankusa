@@ -1,0 +1,32 @@
+{
+  "title": "Sink catalogue — one delivery row per sink, eight destinations",
+  "legend": true,
+  "nodes": [
+    {"id": "dispatch", "kind": "service", "label": "Dispatch", "sub": "at-least-once · breaker per sink", "badges": ["retry", "circuit-breaker"]},
+    {"id": "fanout", "kind": "recipient-list", "label": "Every selected sink", "sub": "one delivery row each"},
+    {"id": "http", "kind": "external-system", "label": "HTTP receiver", "sub": "Sink.Http (core) · 2xx = delivered"},
+    {"id": "kafka", "kind": "pubsub-channel", "label": "Kafka topic", "sub": "Sink.Kafka (ankusa_kafka)", "tags": ["key=tenant/source", "acks=all"]},
+    {"id": "exchange", "kind": "message-broker", "label": "RabbitMQ exchange", "sub": "Sink.RabbitMQ (ankusa_rabbitmq)"},
+    {"id": "rabbit-queue", "kind": "p2p-channel", "label": "Bound queue", "sub": "consumer-owned", "tags": ["routing_key ankusa.<source>", "publisher confirm"]},
+    {"id": "nats", "kind": "pubsub-channel", "label": "JetStream subject", "sub": "Sink.NATS (ankusa_nats)", "tags": ["stream ack", "Nats-Msg-Id = id"]},
+    {"id": "sqs", "kind": "p2p-channel", "label": "SQS queue", "sub": "Sink.SQS (core)", "tags": ["FIFO group=tenant/source", "200 + MD5 match"]},
+    {"id": "pubsub", "kind": "pubsub-channel", "label": "Pub/Sub topic", "sub": "Sink.GooglePubSub (core)", "tags": ["orderingKey optional", "one id per message"]},
+    {"id": "redis", "kind": "pubsub-channel", "label": "Redis channel", "sub": "Sink.Redis (ankusa_redis) · not durable", "tags": ["0 subscribers = error"]},
+    {"id": "log", "kind": "service", "label": "Log", "sub": "Sink.Log (core) · nothing leaves"},
+    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead delivery rows", "sub": "any sink's give-up", "tags": ["node-local", "replayable"]},
+    {"id": "contract-note", "kind": "note", "label": "A sink returns :ok only once the destination confirms. {:permanent, _} dead-letters now; everything else follows the retry policy. Bodies over 64 KiB travel as a claim reference.", "attach": "dispatch"}
+  ],
+  "edges": [
+    {"from": "dispatch", "to": "fanout", "type": "command", "message": "deliver", "label": "selected sinks only", "seq": 1},
+    {"from": "fanout", "to": "http", "type": "event", "message": "POST raw body", "label": "signed · x-ankusa-*", "seq": 2},
+    {"from": "fanout", "to": "kafka", "type": "event", "message": "Sink.Message v1", "seq": 2},
+    {"from": "fanout", "to": "exchange", "type": "event", "message": "Sink.Message v1", "label": "mandatory · persistent", "seq": 2},
+    {"from": "exchange", "to": "rabbit-queue", "type": "event", "message": "Sink.Message v1", "label": "confirm when a queue took it", "seq": 3},
+    {"from": "fanout", "to": "nats", "type": "event", "message": "Sink.Message v1", "seq": 2},
+    {"from": "fanout", "to": "sqs", "type": "event", "message": "Sink.Message v1", "label": "SendMessageBatch ≤ 10", "seq": 2},
+    {"from": "fanout", "to": "pubsub", "type": "event", "message": "Sink.Message v1", "label": "topics.publish ≤ 1000", "seq": 2},
+    {"from": "fanout", "to": "redis", "type": "event", "message": "Sink.Message v1", "label": "PUBLISH", "seq": 2},
+    {"from": "fanout", "to": "log", "message": "hook", "label": "logged only", "seq": 2},
+    {"from": "dispatch", "to": "dlq", "kind": "dlq", "label": "give up · permanent"}
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "title": "Oban consumer on kind — three Ankusa pods to Postgres, chaos-tested",
+  "legend": true,
+  "groups": [
+    {"id": "kind", "label": "kind cluster ankusa-e2e", "kind": "deployment"}
+  ],
+  "nodes": [
+    {"id": "loadgen", "kind": "actor", "label": "tools/loadgen", "sub": "steady · chaos · burst", "col": 0, "row": 1},
+    {"id": "ankusa", "kind": "service", "label": "ankusa StatefulSet ×3", "sub": "all roles · RocksDB on a 1 Gi PVC each", "badges": ["retry"], "group": "kind", "col": 1, "row": 0},
+    {"id": "consumer", "kind": "service", "label": "consumer ×2 :4200", "sub": "POST /deliveries · row + job in one tx", "badges": ["idempotent", "gateway"], "group": "kind", "col": 2, "row": 0},
+    {"id": "oban", "kind": "p2p-channel", "label": "Oban queue :webhooks", "sub": "no DLQ: exhausted jobs are discarded", "tags": ["Postgres-backed", "max_attempts 10"], "group": "kind", "col": 3, "row": 0},
+    {"id": "postgres", "kind": "datastore", "label": "Postgres", "sub": "processed_webhooks + oban_jobs", "group": "kind", "col": 4, "row": 0},
+    {"id": "worker", "kind": "service", "label": "WebhookWorker", "sub": "stamps processed_at", "badges": ["idempotent", "activator"], "group": "kind", "col": 3, "row": 1},
+    {"id": "chaos-note", "kind": "note", "label": "The chaos phase deletes ankusa-0, ankusa-1 and a consumer pod mid-load; loadgen.verify then checks every acked id reached processed_webhooks.", "attach": "loadgen"}
+  ],
+  "edges": [
+    {"from": "loadgen", "to": "ankusa", "kind": "rpc", "message": "POST /webhooks/demo", "label": "201 only when committed · 503 shed", "seq": 1},
+    {"from": "ankusa", "to": "consumer", "type": "event", "message": "POST /deliveries", "label": "Sink.Http · 5 s timeout", "seq": 2},
+    {"from": "consumer", "to": "postgres", "kind": "data", "label": "INSERT … ON CONFLICT", "seq": 3, "route": "below"},
+    {"from": "consumer", "to": "oban", "type": "command", "message": "Oban.insert", "label": "same transaction", "seq": 3},
+    {"from": "oban", "to": "worker", "type": "command", "message": "perform/1", "seq": 4, "route": "below"},
+    {"from": "worker", "to": "postgres", "kind": "data", "label": "UPDATE processed_at", "seq": 5},
+    {"from": "loadgen", "to": "postgres", "kind": "data", "label": "mix loadgen.verify", "route": "above"}
+  ]
+}

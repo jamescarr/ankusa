@@ -67,6 +67,8 @@ Why parallel and not "publish, then local" (the plan's first sketch) or "local, 
 
 The ack path stays a single synced batch plus one broker round trip. `Queue.enqueue/3`'s signature is unchanged; only its per-item result set grows.
 
+![Under wal.type: dual the writer runs a synced local write and an acks=all Kafka publish in parallel and the provider gets 201 only when both confirm; an open breaker refuses with 503 intake_unavailable, the reconciler completes half-persisted hooks, and recovery replays the log.](../diagrams/dual-intake.png)
+
 ### 3. Half-persisted hooks: the rule
 
 Both halves end in `503` for the provider. The half that persisted still exists. **The rule: once the writer has issued either half for a record, that record is carried to completion; nothing is undone.** A hook that is in either place is *committed*; a record that is in neither is the only thing a `503` may leave behind.

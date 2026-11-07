@@ -1,0 +1,29 @@
+{
+  "title": "Dead letters and replay — reviving dead rows at a capped rate",
+  "legend": true,
+  "nodes": [
+    {"id": "operator", "kind": "actor", "label": "Operator"},
+    {"id": "fleet", "kind": "service", "label": "docker-entrypoint replay", "sub": "one job id on every node"},
+    {"id": "admin", "kind": "control-bus", "label": "Admin API :4002", "sub": "per node", "tags": ["/v1/dlq", "/v1/replays"]},
+    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead delivery rows", "sub": "newest first · cursor paging", "tags": ["retention 30 d", "max_rows 10M"]},
+    {"id": "replayer", "kind": "service", "label": "Dispatch.Replayer", "sub": "rate 1000/s · pauses while lag > 2 s", "badges": ["durable"]},
+    {"id": "jobs", "kind": "datastore", "label": "Replay job + cursor", "sub": "cursor commits with each page"},
+    {"id": "dispatch", "kind": "service", "label": "Dispatch", "sub": "normal retries and horizon", "badges": ["retry"]},
+    {"id": "sink", "kind": "channel-adapter", "label": "Sink", "sub": "same idempotency key"},
+    {"id": "consumer", "kind": "service", "label": "Your consumer", "sub": "dedupes on the idempotency key", "badges": ["idempotent"]},
+    {"id": "replay-note", "kind": "note", "label": "A replayed delivery keeps its id and idempotency key and carries replay_id (x-ankusa-replay-id). A job revives only rows dead before it was created and pauses itself if they keep dying.", "attach": "replayer"}
+  ],
+  "edges": [
+    {"from": "operator", "to": "admin", "kind": "control", "message": "POST /v1/replays {kind: dlq}", "label": "tenant · sink · error_class filters", "seq": 1, "route": "below"},
+    {"from": "operator", "to": "fleet", "kind": "control", "message": "replay --nodes …", "label": "--filter · --rate", "seq": 1},
+    {"from": "fleet", "to": "admin", "kind": "control", "message": "one POST per node", "label": "same job id · polls to done", "seq": 2},
+    {"from": "admin", "to": "dlq", "kind": "data", "message": "GET /v1/dlq", "label": "limit ≤ 1000", "route": "below"},
+    {"from": "admin", "to": "replayer", "kind": "control", "label": "create · pause · rate", "seq": 3},
+    {"from": "replayer", "to": "dlq", "kind": "data", "label": "revive a page", "seq": 4},
+    {"from": "replayer", "to": "jobs", "kind": "data", "label": "cursor + counters"},
+    {"from": "dlq", "to": "dispatch", "type": "command", "message": "revived row", "label": "rows dead before the job", "seq": 5},
+    {"from": "dispatch", "to": "sink", "type": "command", "message": "deliver/3", "seq": 6},
+    {"from": "sink", "to": "consumer", "type": "event", "message": "Sink.Message v1", "label": "same idempotency key + replay_id", "seq": 7},
+    {"from": "dispatch", "to": "dlq", "kind": "dlq", "label": "gives up again"}
+  ]
+}

@@ -11,21 +11,7 @@ Phoenix LiveView control panel, running in the same cluster, fires synthetic
 webhooks at either fleet, draws the flow live, tails what the consumers
 processed, and breaks things on request, once or on a timer.
 
-```mermaid
-flowchart LR
-    S[control panel\nload generator] -->|POST /webhooks/demo| G[Istio ingress gateway\nEnvoy]
-    S -->|POST /webhooks/durable| G
-    G --> A[ankusa ×2-6\ndirect mode, HPA on CPU]
-    G --> D[ankusa-durable ×3\nwal: disk, a PVC each]
-    A -->|publish, 201 on ack| N[(NATS JetStream\n3 nodes, stream ANKUSA R3)]
-    D -->|201 on disk commit,\nthen dispatch with retries| N
-    N --> C[consumer ×1-8\nTypeScript, KEDA on lag]
-    A -.->|body over 64 KiB| F[(floci\nS3 emulator)]
-    D -.->|body over 64 KiB| F
-    C -.->|claim ref| CC[claim-check gateway]
-    CC -.-> F
-    C -->|request demo.consumed| P[control panel\nflow + tail + ledger]
-```
+![The control panel posts through the Istio gateway to a direct fleet (wal: none, scaled by HPA, 201 on JetStream's ack) or a durable fleet (wal: disk, 201 after the commit); both publish into the replicated ANKUSA stream, and a KEDA-scaled consumer acks, dead-letters to ANKUSA_DLQ and redeems claims.](../../docs/diagrams/example-jetstream-k8s.png)
 
 **What each piece proves:**
 

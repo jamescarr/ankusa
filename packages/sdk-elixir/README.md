@@ -18,13 +18,7 @@ delivery, plus clients for the operator APIs.
 The SDK never depends on `ankusa` core and never defines the bare `Ankusa`
 module, so an app may load both.
 
-```text
-HTTP sink     Ankusa --> Ankusa.SDK.Receiver ---------------------+
-                                                                  |
-Queue sinks   Ankusa --> your consumer --> Message.decode/1       +--> MyApp.Hooks.handle_hook/2
-                                           Message.to_hook/2 -----+
-                                           (redeems a claim through Ankusa.SDK.ClaimCheck)
-```
+![On the queue path the SDK decodes Sink.Message v1, sends malformed messages to a poison channel, and passes the inline body or the claim-redeemed, sha256-checked bytes to your idempotent handler; on the HTTP path it verifies the signature first; admin, routes and sources clients drive the control APIs.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/sdk-consumer.png)
 
 ## Install
 

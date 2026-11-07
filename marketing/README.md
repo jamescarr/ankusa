@@ -70,7 +70,7 @@ sidebar before posting. If a sub has no project flair, post as plain text.
 ## Publishing notes
 
 - **Template syntax.** Post 01 and the Try-it footer contain `{{.State.Health.Status}}` (verbatim from `README.md`). Jekyll/Liquid, Hugo and Nunjucks treat `{{ … }}` as template syntax: wrap those code blocks in `{% raw %}…{% endraw %}` (Liquid/Nunjucks) or the equivalent escape for your generator, or the page fails to render.
-- **Mermaid.** Posts 01, 03 and 04 use `mermaid` fences copied from the repo docs; your blog needs a Mermaid plugin or a pre-render step.
+- **Diagrams.** Posts embed PNG diagrams by absolute raw.githubusercontent.com URL (sources in `docs/diagrams/`); no Mermaid plugin is needed.
 - **Frontmatter.** Keys are `title date slug description tags draft`; flip `draft` to `false` when you publish.
 - **Forbidden terms.** `claims.md` §Forbidden lists the claims no piece may make. The register spells them out, so any grep for those terms matches `claims.md` itself; run the grep on every other file under `marketing/`.
 

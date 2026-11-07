@@ -4,18 +4,7 @@ Nine runnable demonstrations of the same receiver with a different last hop.
 Each one ends in a worker you could replace with your own service; read the
 [quickstart](quickstart/) first, then pick the transport you actually run.
 
-```mermaid
-flowchart LR
-    P[Provider] -->|POST /webhooks/:source| A[Ankusa]
-    A -->|HTTP| H[Your HTTP worker]
-    A -->|publish| R[(RabbitMQ)]
-    A -->|produce| K[(Kafka)]
-    A -->|publish| N[(NATS JetStream)]
-    R --> QW[Queue worker]
-    K --> SW[SQS / stream worker]
-    N --> RW[Rust worker]
-    QW & SW & RW -.->|large payloads| CC[Claim-check gateway]
-```
+![One provider posts to an Ankusa node that stores each hook before 201 and delivers it four ways: HTTP POST to a worker, a RabbitMQ exchange to a worker-owned queue, Kafka bridged into an SQS FIFO queue, and a NATS JetStream stream; queue workers redeem large bodies at the claim-check gateway.](../docs/diagrams/examples-overview.png)
 
 ## Pick one
 
@@ -48,16 +37,7 @@ and a Python worker polls the queue with `boto3`, using the `ankusa` Python SDK
 redeem a large body from the node's claim-check gateway. No object store. Keep
 it as the shape to copy when your workers consume from a queue.
 
-```mermaid
-flowchart LR
-    C[curl] -->|POST /webhooks/demo| A[ankusa :4000]
-    A -->|produce| T[(Redpanda: ankusa.events)]
-    T --> B[bridge]
-    B -->|group = key| Q[(SQS FIFO: floci)]
-    Q -->|long poll| W[worker.py]
-    W -.->|large body| CC[claim-check :4001]
-    Y[You] -->|/health /metrics /v1/dlq| AD[admin :4002]
-```
+![curl posts to ankusa on 4000, which fsyncs the hook, answers 201 and produces it to ankusa.events; a Redpanda Connect bridge moves records into the ankusa-worker.fifo queue, and worker.py long-polls it, redeems bodies over 8 KiB at the claim check on 4001 and dead-letters permanent failures.](../docs/diagrams/example-quickstart.png)
 
 [`quickstart/`](quickstart/)
 
@@ -69,12 +49,7 @@ using the `ankusa` Python SDK ([`packages/sdk-python`](../packages/sdk-python))
 to parse the delivery's headers. No broker, no object store. Keep it as the
 shape to copy when you write your own receiving service.
 
-```mermaid
-flowchart LR
-    C[curl] -->|POST /webhooks/demo| A[ankusa :4000]
-    A -->|POST /hooks| W[worker.py]
-    Y[You] -->|/health /metrics /v1/dlq| AD[admin :4002]
-```
+![curl posts to ankusa on 4000, which fsyncs the hook and answers 201; the HTTP sink posts the raw body with x-ankusa-* headers to worker.py's /hooks, retries six times, then dead-letters the hook, which you replay through the admin API on 4002.](../docs/diagrams/example-http-consumer.png)
 
 [`http-consumer/`](http-consumer/)
 
@@ -86,15 +61,7 @@ touches a queue. A body over the sink's `inline_max_bytes` is checked in to S3
 and the message carries a claim ref URN, which the worker redeems through the
 claim-check gateway.
 
-```mermaid
-flowchart LR
-    P[Provider] -->|POST /webhooks/demo| I[Ankusa ingest]
-    I -->|publish| X((exchange ankusa.events))
-    X -->|ankusa.# binding| Q[worker's queue]
-    Q --> W[TypeScript worker]
-    W -.->|claim ref| CC[claim-check :4001]
-    CC -.-> S[(S3 / floci)]
-```
+![The ingest node fsyncs each hook, answers 201 and publishes it to the ankusa.events topic exchange; the TypeScript worker declares and binds its own queue and redeems bodies over 8 KiB at the claim-check gateway on 4001 without holding storage credentials.](../docs/diagrams/example-rabbitmq-consumer.png)
 
 [`rabbitmq-consumer/`](rabbitmq-consumer/)
 
@@ -106,14 +73,7 @@ queue with `message_group_id` set from the Kafka key (`tenant/source`), so one
 source's records land in one group. Its README documents three failure drills:
 bridge down, worker down, poison claim.
 
-```mermaid
-flowchart LR
-    P[Provider] --> I[Ankusa ingest]
-    I --> K[(Kafka topic)]
-    K --> B[Bridge]
-    B --> Q[(SQS FIFO)]
-    Q --> W[Worker]
-```
+![Ingest fsyncs each hook and produces it keyed tenant/source to ankusa.events; Redpanda Connect copies records into ankusa-worker.fifo with the Kafka key as group and ankusa_id as dedup id, and the worker long-polls, redeems claims and dead-letters permanent failures, while redrive catches the rest after 5 receives.](../docs/diagrams/example-kafka-sqs-consumer.png)
 
 [`kafka-sqs-consumer/`](kafka-sqs-consumer/)
 
@@ -127,13 +87,7 @@ worker consumes both topics, and a TypeScript receiver verifies the HTTP
 deliveries' signatures. `run.sh` posts three hooks and asserts where each
 landed, including a `201 …"filtered":true` for a hook that no sink selects.
 
-```mermaid
-flowchart LR
-    P[Provider] -->|POST /webhooks/billing| A[Ankusa]
-    A -->|every hook, topic by event type| K[(events.invoice.paid / events.other)]
-    A -->|only invoice.paid| R[receiver]
-    K --> W[worker]
-```
+![A hook to /webhooks/billing has its event_type read once; the Kafka sink renders its topic from a template (events.invoice.paid, else events.other) and the HTTP sink's filter passes only invoice.paid to the receiver, while an unselected hook gets 201 filtered:true.](../docs/diagrams/example-event-routing.png)
 
 [`event-routing/`](event-routing/)
 
@@ -147,13 +101,7 @@ dedupes on the hook id, `nak`s a failure a retry can fix (the gateway
 unreachable), and `term`s one it cannot (bad JSON, a sha256 mismatch). No object
 store: the claim-check gateway runs on the same node as everything else.
 
-```mermaid
-flowchart LR
-    P[Provider] --> A[Ankusa :4000]
-    A --> N[(JetStream ANKUSA)]
-    N --> W[Rust worker]
-    W -.->|claim ref| CC[claim-check :4001]
-```
+![curl posts to ankusa on 4000, which fsyncs the hook, publishes it to subject ankusa.demo and waits for JetStream's ack; the Rust worker owns the ANKUSA stream and its durable consumer, dedupes on id, redeems large bodies on 4001, and naks or terms failures.](../docs/diagrams/example-nats-consumer.png)
 
 [`nats-consumer/`](nats-consumer/)
 
@@ -165,13 +113,7 @@ HTTP, with Oban doing the actual work. `tools/loadgen` drives three load
 phases — steady, chaos with pods killed mid-run, and a closed-loop burst — and
 verifies every acknowledged hook is delivered and processed.
 
-```mermaid
-flowchart LR
-    L[load generator] --> N[ankusa ×3, all-role, own store on PVC]
-    N -->|POST /deliveries| C[consumer]
-    C --> OJ[Oban]
-    OJ --> DB[(processed_webhooks)]
-```
+![loadgen posts to a three-pod Ankusa StatefulSet whose pods each fsync to their own PVC, then deliver over HTTP to two consumer replicas that record the hook and enqueue an Oban job in one Postgres transaction; loadgen.verify checks every acked id was processed.](../docs/diagrams/example-oban-consumer.png)
 
 [`oban-consumer/`](oban-consumer/)
 
@@ -187,18 +129,7 @@ consumer killed) and burst phases, then verifies that every acknowledged hook
 was processed. `--wal dual --kill-node` runs the same drill under the intake log
 and restores a replacement node from backup.
 
-```mermaid
-flowchart LR
-    L[load generator] --> LB[nginx]
-    LB --> A[ankusa-a, own store]
-    LB --> B[ankusa-b, own store]
-    A & B -->|publish| X((RabbitMQ))
-    X --> C[consumer]
-    C --> DB[(processed_webhooks)]
-    A & B -.->|fat body| S[(MinIO)]
-    C -.->|claim ref| CC[claim-check]
-    CC -.-> S
-```
+![loadgen posts through nginx to two all-role nodes that share Redis definitions and one MinIO bucket under separate prefixes and publish to RabbitMQ; the consumer binds its own queue, redeems large bodies at the claim-check node and upserts processed_webhooks, which loadgen.verify reads.](../docs/diagrams/example-fleet-e2e.png)
 
 [`fleet-e2e/`](fleet-e2e/)
 
@@ -217,18 +148,6 @@ claim-check path through an S3 emulator. Prometheus scrapes every ankusa pod,
 and a provisioned Grafana dashboard shows ingest, store, dispatch, claim-check
 and lifecycle metrics at `/grafana/`.
 
-```mermaid
-flowchart LR
-    S[control panel\nload generator] --> G[Istio gateway]
-    G --> A[ankusa ×2-6\ndirect mode, HPA]
-    G --> D[ankusa-durable ×3\nwal: disk, PVC each]
-    A --> N[(JetStream\n3 nodes, R3)]
-    D --> N
-    N --> C[consumer ×1-8\nKEDA]
-    A -.-> F[(floci S3)]
-    D -.-> F
-    C -.->|claim ref| CC[claim-check gateway]
-    CC -.-> F
-```
+![The control panel posts through the Istio gateway to a direct fleet (wal: none, scaled by HPA, 201 on JetStream's ack) or a durable fleet (wal: disk, 201 after the commit); both publish into the replicated ANKUSA stream, and a KEDA-scaled consumer acks, dead-letters to ANKUSA_DLQ and redeems claims.](../docs/diagrams/example-jetstream-k8s.png)
 
 [`jetstream-k8s/`](jetstream-k8s/)

@@ -1,0 +1,29 @@
+{
+  "title": "Dispatch — due rows, tenant fairness, retries, dead letters",
+  "legend": true,
+  "nodes": [
+    {"id": "store", "kind": "message-store", "label": "Store", "sub": "hooks + one delivery row per sink"},
+    {"id": "pipeline", "kind": "service", "label": "Dispatch.Pipeline", "sub": "claims due rows · woken by commits"},
+    {"id": "sources", "kind": "datastore", "label": "SourceStore", "sub": "sink opts read at claim time"},
+    {"id": "attempts", "kind": "service", "label": "Delivery attempts", "sub": "≤ 32 concurrent · 8 per sink key", "badges": ["bulkhead"]},
+    {"id": "sink", "kind": "channel-adapter", "label": "Sink", "sub": "deliver/3 · 30 s attempt timeout"},
+    {"id": "breaker", "kind": "service", "label": "Breaker per sink key", "sub": "5 failures · 30 s → 5 min", "badges": ["circuit-breaker"]},
+    {"id": "retry", "kind": "service", "label": "RetryPolicy.Exponential", "sub": "100 ms → 5 min · 24 h horizon", "badges": ["retry"]},
+    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead delivery rows", "sub": "same store · GET /v1/dlq", "tags": ["error_class: permanent | throttled | transient"]},
+    {"id": "fair-note", "kind": "note", "label": "Each page of 128 rows is split per tenant (deficit round-robin) and slots rotate over sink keys, so one tenant or one dead sink cannot starve the rest.", "attach": "pipeline"}
+  ],
+  "edges": [
+    {"from": "store", "to": "pipeline", "kind": "data", "label": "due rows · page of 128"},
+    {"from": "pipeline", "to": "sources", "kind": "data", "label": "current sink opts"},
+    {"from": "pipeline", "to": "attempts", "type": "command", "message": "attempt", "label": "one row per sink key", "seq": 1},
+    {"from": "attempts", "to": "sink", "type": "command", "message": "deliver/3", "seq": 2},
+    {"from": "sink", "to": "attempts", "type": "reply", "message": ":ok | {:error, reason}", "seq": 3},
+    {"from": "attempts", "to": "store", "kind": "data", "label": ":ok → row deleted", "seq": 4},
+    {"from": "attempts", "to": "breaker", "message": "outcome", "label": "permanent errors not counted"},
+    {"from": "breaker", "to": "store", "kind": "data", "label": "park rows, attempts unchanged", "route": "above"},
+    {"from": "attempts", "to": "retry", "message": "failure class", "label": "transient · retry_after"},
+    {"from": "retry", "to": "store", "kind": "data", "label": "row due at now + backoff"},
+    {"from": "retry", "to": "dlq", "kind": "dlq", "label": "give up or past 24 h"},
+    {"from": "attempts", "to": "dlq", "kind": "dlq", "label": "{:permanent, _} → at once", "route": "below"}
+  ]
+}

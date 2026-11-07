@@ -25,6 +25,8 @@ Constraints from the code on main (`11b5cb1`), all checked:
 
 ## Decision
 
+![With ordered: true a sink puts each hook into a lane per ordering key; only the lane head is a due row, delivered one at a time with the next promoted after :ok, a dead head releases the lane, and Kafka keys or SQS FIFO groups carry the lane key.](../diagrams/ordering-lanes.png)
+
 ### 1. Configuration
 
 Two options on a source's sink entry, read by core, not by the sink module:

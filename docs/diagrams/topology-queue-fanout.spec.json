@@ -1,0 +1,37 @@
+{
+  "title": "Queue fan-out — one consumer-owned queue per independent worker",
+  "legend": true,
+  "groups": [
+    {"id": "broker", "label": "RabbitMQ", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "provider", "kind": "external-system", "label": "Provider", "col": 0, "row": 1},
+    {"id": "ingest-n", "kind": "service", "label": "ingest node N", "sub": "all roles · own store", "badges": ["retry"], "col": 0, "row": 2},
+    {"id": "ingest-1", "kind": "service", "label": "ingest node 1", "sub": "all roles · own store", "badges": ["retry"], "col": 1, "row": 2},
+    {"id": "packer", "kind": "claim-check", "label": "Claim check", "sub": "bodies over 64 KiB", "col": 2, "row": 1},
+    {"id": "exchange", "kind": "content-based-router", "label": "ankusa.events", "sub": "Ankusa declares no queue or DLX", "group": "broker", "col": 3, "row": 0},
+    {"id": "queue-a", "kind": "p2p-channel", "label": "queue A", "sub": "consumer A's · its DLQ is A's", "tags": ["consumer-declared", "at-least-once"], "group": "broker", "col": 4, "row": 0},
+    {"id": "queue-b", "kind": "p2p-channel", "label": "queue B", "sub": "consumer B's · its DLQ is B's", "tags": ["consumer-declared", "at-least-once"], "group": "broker", "col": 4, "row": 1},
+    {"id": "worker-a", "kind": "service", "label": "Worker A", "sub": "no store credentials", "badges": ["idempotent", "competing"], "col": 5, "row": 0},
+    {"id": "worker-b", "kind": "service", "label": "Worker B", "sub": "no store credentials", "badges": ["idempotent", "competing"], "col": 5, "row": 1},
+    {"id": "objects", "kind": "message-store", "label": "Object store", "sub": "claim packs", "col": 3, "row": 3},
+    {"id": "gateway", "kind": "service", "label": "Claim gateway :4001", "sub": "role claim_check · read-only", "badges": ["gateway"], "col": 4, "row": 3},
+    {"id": "fanout-note", "kind": "note", "label": "Adding a consumer is a change on its side only: it declares its queue and binding (on Kafka, its consumer group).", "attach": "gateway"}
+  ],
+  "edges": [
+    {"from": "provider", "to": "ingest-1", "kind": "rpc", "message": "POST /webhooks/<source>", "label": "201 after fsync", "seq": 1},
+    {"from": "provider", "to": "ingest-n", "kind": "rpc", "message": "POST /webhooks/<source>", "label": "201 after fsync", "seq": 1},
+    {"from": "ingest-1", "to": "packer", "kind": "data", "label": "large bodies", "seq": 2},
+    {"from": "ingest-n", "to": "packer", "kind": "data", "label": "large bodies", "seq": 2},
+    {"from": "packer", "to": "objects", "kind": "data", "label": "PUT pack"},
+    {"from": "ingest-1", "to": "exchange", "type": "event", "message": "Sink.Message v1", "label": "body or claim + sha256", "seq": 3},
+    {"from": "ingest-n", "to": "exchange", "type": "event", "message": "Sink.Message v1", "seq": 3},
+    {"from": "exchange", "to": "queue-a", "type": "event", "message": "Sink.Message v1", "label": "binding A", "seq": 4},
+    {"from": "exchange", "to": "queue-b", "type": "event", "message": "Sink.Message v1", "label": "binding B", "seq": 4},
+    {"from": "queue-a", "to": "worker-a", "type": "event", "message": "Sink.Message v1", "seq": 5},
+    {"from": "queue-b", "to": "worker-b", "type": "event", "message": "Sink.Message v1", "seq": 5},
+    {"from": "worker-a", "to": "gateway", "kind": "rpc", "message": "GET /v1/claims/…", "seq": 6},
+    {"from": "worker-b", "to": "gateway", "kind": "rpc", "message": "GET /v1/claims/…", "seq": 6},
+    {"from": "gateway", "to": "objects", "kind": "data", "label": "read pack"}
+  ]
+}

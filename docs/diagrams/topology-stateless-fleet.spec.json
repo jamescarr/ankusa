@@ -1,0 +1,26 @@
+{
+  "title": "Stateless ingest fleet — wal.type: none, ack on the sinks' confirm",
+  "legend": true,
+  "groups": [
+    {"id": "broker", "label": "Your broker", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "provider", "kind": "external-system", "label": "Provider", "sub": "retries a 5xx"},
+    {"id": "lb", "kind": "service", "label": "Load balancer", "sub": "any replica · nothing to drain"},
+    {"id": "edge-1", "kind": "service", "label": "edge replica 1", "sub": "wal.type: none · no volume", "badges": ["gateway"]},
+    {"id": "edge-n", "kind": "service", "label": "edge replica N", "sub": "added or killed mid-storm", "badges": ["gateway"]},
+    {"id": "broker", "kind": "pubsub-channel", "label": "Kafka / NATS / RabbitMQ", "sub": "no DLQ or replay: the 503 is the retry", "tags": ["key=tenant/source", "at-least-once"], "group": "broker"},
+    {"id": "workers", "kind": "service", "label": "Your workers", "sub": "dedupe on the idempotency key", "badges": ["idempotent", "competing"]},
+    {"id": "local", "kind": "datastore", "label": "emptyDir data dir", "sub": "quarantine · API sources · overrides"},
+    {"id": "durable-note", "kind": "note", "label": "Every source needs a durable sink: boot refuses one without, and the admin API answers 400 invalid_source.", "attach": "edge-1"}
+  ],
+  "edges": [
+    {"from": "provider", "to": "lb", "kind": "rpc", "message": "POST /webhooks/<source>", "seq": 1},
+    {"from": "lb", "to": "edge-1", "kind": "rpc", "message": "POST", "label": "201 only when every sink confirms", "seq": 2},
+    {"from": "lb", "to": "edge-n", "kind": "rpc", "message": "POST", "label": "else 503 + Retry-After", "seq": 2},
+    {"from": "edge-1", "to": "broker", "type": "event", "message": "Sink.Message v1", "label": "published in the request", "seq": 3},
+    {"from": "edge-n", "to": "broker", "type": "event", "message": "Sink.Message v1", "seq": 3},
+    {"from": "broker", "to": "workers", "type": "event", "message": "Sink.Message v1", "label": "at-least-once", "seq": 4},
+    {"from": "edge-1", "to": "local", "kind": "data", "label": "lost with the pod"}
+  ]
+}

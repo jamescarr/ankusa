@@ -1,0 +1,32 @@
+{
+  "title": "Node roles — what runs where",
+  "legend": true,
+  "groups": [
+    {"id": "node", "label": "One BEAM node, one store", "kind": "context"},
+    {"id": "gw", "label": "claim_check: any node", "kind": "context"}
+  ],
+  "nodes": [
+    {"id": "provider", "kind": "external-system", "label": "Provider", "col": 0, "row": 0},
+    {"id": "edge", "kind": "service", "label": "edge", "sub": ":4000 ingress · routes · batchers", "badges": ["gateway"], "group": "node", "col": 1, "row": 0},
+    {"id": "store", "kind": "message-store", "label": "RocksDB store", "sub": "one per node · exclusive lock", "group": "node", "col": 1, "row": 1},
+    {"id": "dispatch", "kind": "service", "label": "dispatch", "sub": "singleton · 32 concurrent attempts", "badges": ["retry"], "group": "node", "col": 2, "row": 1},
+    {"id": "storage", "kind": "service", "label": "storage", "sub": "singleton compactor", "group": "node", "col": 2, "row": 2},
+    {"id": "worker", "kind": "service", "label": "Your worker", "badges": ["idempotent"], "col": 3, "row": 1},
+    {"id": "archive", "kind": "message-store", "label": "S3 / GCS", "sub": "archive segments", "col": 4, "row": 2},
+    {"id": "claim", "kind": "service", "label": "claim_check", "sub": ":4001 · read-only · no store", "badges": ["gateway"], "group": "gw", "col": 5, "row": 3},
+    {"id": "claims", "kind": "message-store", "label": "Claim bucket", "sub": "shared by every node", "group": "gw", "col": 5, "row": 4},
+    {"id": "split-note", "kind": "note", "label": "edge, dispatch and storage share one store, so they run in one BEAM node; splitting them across hosts is not supported. Default roles: edge, dispatch, storage.", "attach": "archive"},
+    {"id": "none-note", "kind": "note", "label": "wal.type: none drops dispatch and storage: edge alone is a complete node.", "attach": "worker"}
+  ],
+  "edges": [
+    {"from": "provider", "to": "edge", "kind": "rpc", "message": "POST /webhooks/<source>", "label": "201 after fsync", "seq": 1},
+    {"from": "edge", "to": "store", "kind": "data", "label": "one synced batch", "seq": 2},
+    {"from": "store", "to": "dispatch", "kind": "data", "label": "due rows", "seq": 3},
+    {"from": "dispatch", "to": "worker", "type": "event", "message": "Sink.Message v1", "label": "at-least-once", "seq": 4},
+    {"from": "store", "to": "storage", "kind": "data", "label": "archive obligations"},
+    {"from": "storage", "to": "archive", "kind": "data", "label": "segments"},
+    {"from": "dispatch", "to": "claims", "kind": "data", "label": "pack large bodies"},
+    {"from": "worker", "to": "claim", "kind": "rpc", "message": "GET /v1/claims/…", "label": "claims:read"},
+    {"from": "claim", "to": "claims", "kind": "data", "label": "read pack"}
+  ]
+}
