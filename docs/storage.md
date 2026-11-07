@@ -396,6 +396,8 @@ the quarantine pen, API-managed sources and rate-limit overrides. See
 [`delivery.md#direct-mode`](delivery.md#direct-mode) and
 [`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml).
 
+![Direct mode: after verification the request process publishes to every selected sink at once under one 8 s deadline and answers 201 only when each confirms, otherwise 503 with Retry-After; nothing is committed, archived or dead-lettered.](diagrams/direct-mode.png)
+
 ### The default, single-node
 
 The default `wal: :disk` runs the store on local disk, with no external
@@ -415,6 +417,8 @@ config :ankusa, wal: :disk   # the default
 `backup.enabled` (off by default) turns on `Ankusa.Store.Backup`, which closes
 the gap above to `backup.interval_ms` (60 s): what a lost host takes with it
 is the hooks acked since the last backup.
+
+![Every 60 s the store writes a checkpoint and the uploader copies its files, a signed manifest and finally LATEST to a primary then a secondary bucket; verify reads both back, a clean stop takes a final backup, and a node that boots without a database restores LATEST and reconciles the archive.](diagrams/backup-restore.png)
 
 - **Backup.** Every interval the store writes a RocksDB checkpoint (memtables
   flushed, files hard-linked under `<data_dir>/<instance>/store.checkpoint`,
@@ -552,6 +556,8 @@ a replicated log (a Kafka topic, `Ankusa.Intake.Kafka` from `ankusa_kafka`), and
 the `201` waits for both. What that adds to the store is four **meta rows** in
 the `default` family, nothing else, so the store format is unchanged and a
 release that does not know them ignores them:
+
+![Under wal.type: dual the writer runs a synced local write and an acks=all Kafka publish in parallel and the provider gets 201 only when both confirm; an open breaker refuses with 503 intake_unavailable, the reconciler completes half-persisted hooks, and recovery replays the log.](diagrams/dual-intake.png)
 
 | Row | Holds |
 | --- | --- |
@@ -699,6 +705,8 @@ Under `wal: :none` none of this applies: there is no queue, no segment story
 and no data volume — replicas are freely interchangeable, and the broker (or
 whatever answers the sink) is the only shared state. See
 [`architecture.md#4-stateless-ingest-fleet-wal-none`](architecture.md#4-stateless-ingest-fleet-wal-none).
+
+![A load balancer lands each hook on one of N all-role nodes; each node fsyncs to its own store and volume, publishes to the shared broker after the commit, archives under its own prefix in one bucket, optionally shares routes, sources and fleet limits through Redis, and workers redeem claims at one gateway.](diagrams/fleet.png)
 
 ## `Ankusa.BlobStore`
 
@@ -980,6 +988,8 @@ Golden vectors of both formats are in `test/ankusa/codec_test.exs`
 
 A hook committed while the `:storage` role runs carries an *archive
 obligation*. Each tick (default every `storage.interval_ms`, 1s) clears some:
+
+![The compactor reads archive obligations from the store, writes a dated segment, its index and the node-day manifest to the blob store, records a catalogue row and clears the obligations so the hook can be deleted; an hourly sweep enforces retention and replay by id reads one frame back.](diagrams/compaction-archive.png)
 
 1. Read archive obligations past the compactor's own position, in `seq` order,
    taking them until their stored sizes reach `storage.roll_bytes` (default

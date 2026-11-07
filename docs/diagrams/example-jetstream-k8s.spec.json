@@ -1,0 +1,33 @@
+{
+  "title": "JetStream on kind — an autoscaling direct fleet and a durable fleet",
+  "legend": true,
+  "groups": [
+    {"id": "nats", "label": "NATS JetStream (3 nodes)", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "panel", "kind": "service", "label": "Control panel", "sub": "sender · flow · tail · chaos", "col": 0, "row": 0},
+    {"id": "gateway", "kind": "content-based-router", "label": "Istio ingress gateway", "sub": "routes by path · retries 0", "col": 1, "row": 0},
+    {"id": "direct", "kind": "service", "label": "ankusa ×2–6", "sub": "wal: none · HPA on CPU 50 %", "badges": ["gateway"], "col": 2, "row": 0},
+    {"id": "durable", "kind": "service", "label": "ankusa-durable ×3", "sub": "wal: disk · 1 Gi PVC each", "badges": ["retry", "circuit-breaker"], "col": 2, "row": 2},
+    {"id": "stream", "kind": "pubsub-channel", "label": "ANKUSA stream", "sub": "workqueue · discard new · 640 MiB", "tags": ["R3", "ankusa.demo + ankusa.durable"], "group": "nats", "col": 3, "row": 0},
+    {"id": "dlq", "kind": "dead-letter-channel", "label": "ANKUSA_DLQ", "sub": "subject dlq.ankusa · 24 h", "tags": ["R3"], "group": "nats", "col": 4, "row": 0},
+    {"id": "consumer", "kind": "service", "label": "consumer ×1–8", "sub": "KEDA on lag 50 · ack wait 30 s", "badges": ["idempotent", "competing:8"], "col": 5, "row": 0},
+    {"id": "claim", "kind": "service", "label": "Claim check :4001", "badges": ["gateway"], "col": 6, "row": 2},
+    {"id": "floci", "kind": "message-store", "label": "floci S3", "sub": "claims expire after 5 min", "col": 5, "row": 3},
+    {"id": "owner-note", "kind": "note", "label": "The consumer creates ANKUSA and ANKUSA_DLQ on boot; Ankusa never creates a stream.", "attach": "consumer"}
+  ],
+  "edges": [
+    {"from": "panel", "to": "gateway", "kind": "rpc", "message": "POST /webhooks/demo | durable", "label": "same event id on retry", "seq": 1},
+    {"from": "gateway", "to": "direct", "kind": "rpc", "message": "/webhooks/demo", "seq": 2},
+    {"from": "gateway", "to": "durable", "kind": "rpc", "message": "/webhooks/durable", "seq": 2},
+    {"from": "direct", "to": "stream", "type": "event", "message": "Sink.Message v1", "label": "201 on the publish ack", "seq": 3},
+    {"from": "durable", "to": "stream", "type": "event", "message": "Sink.Message v1", "label": "after the disk commit", "seq": 3},
+    {"from": "stream", "to": "consumer", "type": "event", "message": "Sink.Message v1", "label": "durable consumer", "seq": 4, "route": "above"},
+    {"from": "consumer", "to": "dlq", "kind": "dlq", "label": "permanent: publish, then term"},
+    {"from": "consumer", "to": "claim", "kind": "rpc", "message": "GET /v1/claims/…"},
+    {"from": "claim", "to": "floci", "kind": "data", "label": "read pack"},
+    {"from": "direct", "to": "floci", "kind": "data", "label": "bodies > 64 KiB"},
+    {"from": "durable", "to": "floci", "kind": "data", "label": "bodies > 64 KiB"},
+    {"from": "consumer", "to": "panel", "kind": "rpc", "message": "request demo.consumed", "label": "before the ack", "route": "above"}
+  ]
+}

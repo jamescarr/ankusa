@@ -110,6 +110,8 @@ is the [key reference](#ankusa-config) below.
 [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/reference.yml)
 for every key with its comment and the alternatives.
 
+![The hook's path from provider to sinks and blob store, each stage annotated with the YAML sections that configure it, plus the admin API on 4002 where reloadable keys change at runtime.](diagrams/configuration-map.png)
+
 ### Tracing
 
 `tracing` (image only; not a key of `%Ankusa.Config{}`) turns on OpenTelemetry
@@ -376,6 +378,8 @@ and `public_key`.
 
 ### Sinks
 
+![Dispatch gives every selected sink its own delivery row and sends Sink.Message v1 (for HTTP, the raw signed body) to a Kafka topic, RabbitMQ exchange, JetStream subject, SQS queue, Pub/Sub topic, Redis channel or HTTP receiver, counting it delivered only when the destination confirms.](diagrams/sinks.png)
+
 | `type` | Keys |
 | --- | --- |
 | `log` | none |
@@ -457,6 +461,8 @@ settings. See
 [`delivery.md`](delivery.md#sinkhttp-per-tenant-destinations).
 
 ### Sink filters
+
+![Ingest reads the event type once and each sink's filter decides whether it gets a delivery row; at delivery the Kafka topic is rendered from a template (events.invoice.paid, else events.other) and the filtered HTTP sink posts only invoice.paid hooks.](diagrams/content-routing.png)
 
 Every sink also takes `filter`, read by core like `ordered`: a data predicate over
 the hook that decides whether the sink gets a delivery row. A sink without a
@@ -1212,6 +1218,8 @@ With `admin.enabled: true` it also serves `GET /asyncapi.json`, the AsyncAPI
 document of the channels this node publishes to ([AsyncAPI and lifecycle
 events](asyncapi.md)).
 
+![Operators drive one HTTP control bus on 4002 (health, DLQ, replays, config reload, log level), route definitions on 4003 and a metrics-only listener on 4004; SIGHUP also reloads the config, and telemetry is tapped to Prometheus and to an OpenTelemetry collector.](diagrams/control-plane.png)
+
 #### Control-plane authentication
 
 The admin API, the route-management API and the claim-check gateway each carry
@@ -1316,6 +1324,8 @@ the IP rules **and** its method and normalized path match an enabled route.
 Anything else is answered `404` (`403` for an IP denial, unless
 `ip_denied_status: 404`) and never reaches the queue — no record, no dispatch,
 no delivery.
+
+![An operator writes a route on port 4003; it is version-checked into the ETS store or Redis, a Redis write publishes a version nudge so every node reloads its snapshot, and the guard decides each incoming POST against that snapshot through a decision cache, denying unmatched paths.](diagrams/route-management.png)
 
 Path patterns, no regex:
 

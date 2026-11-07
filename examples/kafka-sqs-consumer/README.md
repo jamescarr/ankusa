@@ -8,24 +8,9 @@ redeeming fat payloads through the Claim Check gateway
 ([`docs/claim-check.md`](../../docs/claim-check.md)) with no object-store
 credentials of its own.
 
-```mermaid
-flowchart LR
-    P[Provider] --> I[Ankusa ingest]
-    I --> K[(Kafka topic)]
-    K --> B[Bridge]
-    B --> Q[(SQS FIFO)]
-    Q --> W[Worker]
-```
+![Ingest fsyncs each hook and produces it keyed tenant/source to ankusa.events; Redpanda Connect copies records into ankusa-worker.fifo with the Kafka key as group and ankusa_id as dedup id, and the worker long-polls, redeems claims and dead-letters permanent failures, while redrive catches the rest after 5 receives.](../../docs/diagrams/example-kafka-sqs-consumer.png)
 
 ### Ingest
-
-```mermaid
-flowchart LR
-    P[Provider / curl] -->|POST /webhooks/demo| I[Ankusa ingest]
-    I -->|store fsync, then 201| P
-    I -->|"produce, acks=all\nkey tenant/source"| K[("topic ankusa.events")]
-    I -.->|"body > 8 KiB: check in"| S[(S3 / floci)]
-```
 
 - `ingest/`: a real `Ankusa.Instance` (`ANKUSA_ROLES=edge,dispatch,storage`,
   the default) configured entirely from environment variables.
@@ -42,13 +27,6 @@ flowchart LR
 
 ### Bridge
 
-```mermaid
-flowchart LR
-    K[("topic ankusa.events")] -->|consumer group ankusa-sqs-bridge| B[Redpanda Connect]
-    B -->|"SendMessageBatch\nGroupId = key, DedupId = id"| Q[("ankusa-worker.fifo")]
-    Q -.->|maxReceiveCount 5| D[("ankusa-worker-dlq.fifo")]
-```
-
 - `bridge/`: Redpanda Connect: `redpanda` input → metadata whitelist →
   `aws_sqs` output. It owns the consumer group (`ankusa-sqs-bridge`) and the
   queue URL; ingest knows neither exists. A Kafka topic has no bindings:
@@ -56,16 +34,6 @@ flowchart LR
   is a process and not a config line.
 
 ### Worker
-
-```mermaid
-flowchart LR
-    Q[("ankusa-worker.fifo")] --> W[TypeScript worker]
-    W -->|inline body| H[handleHook]
-    W -->|"claim ref: GET /v1/claims/..."| CC[claim-check :4001]
-    CC -.-> S[(S3 / floci)]
-    CC -->|"bytes; worker checks sha256"| H
-    W -->|permanent failure| D[("ankusa-worker-dlq.fifo")]
-```
 
 - `worker/`: a minimal TypeScript consumer with **no S3 credentials at
   all**: SQS only, redeeming claim refs over HTTP through a client generated

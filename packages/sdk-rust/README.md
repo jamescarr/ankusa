@@ -10,6 +10,8 @@ plain `#[tokio::main]` has them). The crate's own HTTP client is `reqwest`,
 behind a `Transport` hook you can replace with anything that speaks
 `http::Request<Bytes>`/`http::Response<Bytes>`.
 
+![On the queue path the SDK decodes Sink.Message v1, sends malformed messages to a poison channel, and passes the inline body or the claim-redeemed, sha256-checked bytes to your idempotent handler; on the HTTP path it verifies the signature first; admin, routes and sources clients drive the control APIs.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/sdk-consumer.png)
+
 ## Install
 
 ```sh

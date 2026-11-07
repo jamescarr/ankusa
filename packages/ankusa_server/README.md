@@ -44,6 +44,8 @@ curl localhost:4002/health    # {"status":"ok","instance":"default","roles":[...
 curl localhost:4002/metrics   # Prometheus text format
 ```
 
+![Provider posts to the edge; the batcher group-commits the hook to the local store and the provider gets 201 only after the fsync. Dispatch delivers due rows to sinks, dead-lettering give-ups; the compactor archives to the blob store.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/overview.png)
+
 ## Configure it
 
 Mount a YAML file at `/etc/ankusa/ankusa.yml` (or point `ANKUSA_CONFIG` at it):
@@ -68,6 +70,8 @@ sources:
     sinks:
       - {type: http, url: "${SINK_URL}", method: post, timeout_ms: 5000, secret: "${SINK_WHSEC}"}
 ```
+
+![The hook's path from provider to sinks and blob store, each stage annotated with the YAML sections that configure it, plus the admin API on 4002 where reloadable keys change at runtime.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/configuration-map.png)
 
 Secrets never go in the file: reference them as `${VAR}` and pass the values as
 environment variables. A `${VAR}` with no value and no default stops the
@@ -143,6 +147,8 @@ definitions while you believed the fleet shared them.
 directly when the config does not name static keys.
 
 ## Deliver to your worker
+
+![Dispatch gives every selected sink its own delivery row and sends Sink.Message v1 (for HTTP, the raw signed body) to a Kafka topic, RabbitMQ exchange, JetStream subject, SQS queue, Pub/Sub topic, Redis channel or HTTP receiver, counting it delivered only when the destination confirms.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/sinks.png)
 
 An HTTP sink forwards every hook to your own service, raw body and all. The URL
 must be `https://`, and may not resolve to a loopback, private or link-local
@@ -228,7 +234,11 @@ for the WAL, `409 wal_disabled`) when you ask the wrong node, and
 too: an edge node exports ingest series, a worker exports dispatch and
 compaction series. Scrape every node.
 
+![Operators drive one HTTP control bus on 4002 (health, DLQ, replays, config reload, log level), route definitions on 4003 and a metrics-only listener on 4004; SIGHUP also reloads the config, and telemetry is tapped to Prometheus and to an OpenTelemetry collector.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/control-plane.png)
+
 #### Replay a whole fleet
+
+![An operator, or the fleet replay command with one job id per node, starts a durable replay job; the replayer revives dead rows page by page at a capped rate, dispatch redelivers them with their original idempotency key plus a replay id, and repeat failures return to the DLQ.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/dlq-replay.png)
 
 Replay jobs are per node. `replay` is the command that starts one on every node
 and follows them, so an incident that left dead letters on a hundred nodes is one

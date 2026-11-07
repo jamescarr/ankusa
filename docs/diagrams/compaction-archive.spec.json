@@ -1,0 +1,33 @@
+{
+  "title": "Archive compaction — hooks to dated segments, retention, replay by id",
+  "legend": true,
+  "groups": [
+    {"id": "bucket", "label": "Blob store bucket (archive/v1/)", "kind": "deployment"}
+  ],
+  "nodes": [
+    {"id": "store", "kind": "message-store", "label": "Store", "sub": "archive obligations"},
+    {"id": "compactor", "kind": "service", "label": "Compactor", "sub": "tick 1 s · roll 16 MiB or 30 s", "badges": ["polling"], "col": 0, "row": 1},
+    {"id": "blob", "kind": "channel-adapter", "label": "BlobStore", "sub": "LocalFS · S3 · GCS · Azure · OCI"},
+    {"id": "segment", "kind": "message-store", "label": "Segment (.seg)", "sub": "frames + sha256 trailer", "group": "bucket"},
+    {"id": "idx", "kind": "datastore", "label": "Index (.idx)", "sub": "id → offset, length, seq", "group": "bucket"},
+    {"id": "manifest", "kind": "datastore", "label": "_manifest.json", "sub": "per node and day", "group": "bucket"},
+    {"id": "catalogue", "kind": "datastore", "label": "Archive catalogue", "sub": "key · node · day · sha256"},
+    {"id": "retention", "kind": "channel-purger", "label": "Retention sweep", "sub": "hourly · archive.retention_days"},
+    {"id": "replay", "kind": "service", "label": "Replay by id", "sub": "Storage.fetch/2"},
+    {"id": "layout-note", "kind": "note", "label": "Key: archive/v1/dt=<day>/<node>/seg-<first>-<last>.seg with .idx beside it. A failed PUT ends the tick and retries the same keys; nothing crashes.", "attach": "compactor"}
+  ],
+  "edges": [
+    {"from": "store", "to": "compactor", "kind": "data", "label": "obligations in seq order", "seq": 1},
+    {"from": "compactor", "to": "blob", "kind": "data", "label": "PUT segment, index, manifest", "seq": 2},
+    {"from": "blob", "to": "segment", "kind": "data", "label": "PUT .seg", "seq": 3},
+    {"from": "blob", "to": "idx", "kind": "data", "label": "PUT .idx", "seq": 3},
+    {"from": "blob", "to": "manifest", "kind": "data", "label": "rewrite", "seq": 3},
+    {"from": "compactor", "to": "catalogue", "kind": "data", "label": "one row per segment", "seq": 4},
+    {"from": "compactor", "to": "store", "kind": "data", "label": "clear obligations", "seq": 5, "route": "above"},
+    {"from": "retention", "to": "catalogue", "kind": "control", "label": "rows past the cutoff"},
+    {"from": "retention", "to": "blob", "kind": "control", "label": "DELETE .seg + .idx"},
+    {"from": "catalogue", "to": "replay", "kind": "data", "label": "which segment holds the id", "route": "below"},
+    {"from": "idx", "to": "replay", "kind": "data", "label": "offset + length", "route": "ortho"},
+    {"from": "blob", "to": "replay", "kind": "data", "label": "range GET one frame", "route": "above"}
+  ]
+}

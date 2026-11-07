@@ -76,6 +76,8 @@ end
 
 An unresolvable URL returns `:error`, which the router turns into a `404`. That is the same response an unknown `source_id` gets, so a probe cannot tell "malformed URL" from "URL shape is fine but nothing is registered there". Note the comment in the middle: the token lookup is yours. The resolver is where you decide what a valid URL looks like, and I did not want to guess at your endpoint table.
 
+![A per-customer catch URL is resolved into a route with a tenant, bound to its source, charged to that tenant's quota and stored under it; dispatch delivers with the tenant in context to that tenant's own destination, and erasing a tenant deletes its rows and claims behind a tombstone.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/multi-tenancy.png)
+
 ### What `tenant_id` does once it is set
 
 `tenant_id` is the storage and retention scope, and it travels with every delivery. It is a field of `Ankusa.Envelope`, so it sits inside every stored hook. It is also in every sink's `ctx` map as `ctx.tenant_id`, so a sink can route, tag, or partition by it. A custom RabbitMQ `:routing_key` function can include it, for example.
@@ -144,6 +146,8 @@ The management API runs on port 4003, its own listener and never the ingest port
 | `GET` | `/health` | `{status, routes}` |
 
 This port is unauthenticated by design, and it listens on 127.0.0.1 by default (`routes.admin.ip`). Ankusa does not know what auth scheme your deployment wants, and I did not want to pick one for you. Front it with your proxy or a network policy before anything else can reach it.
+
+![An operator writes a route on port 4003; it is version-checked into the ETS store or Redis, a Redis write publishes a version nudge so every node reloads its snapshot, and the guard decides each incoming POST against that snapshot through a decision cache, denying unmatched paths.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/route-management.png)
 
 ## Telling the rest of your system
 

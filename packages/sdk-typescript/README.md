@@ -9,6 +9,8 @@ client, the route-management client (`routes.admin.port`), the operator
 and a decoder for the queue message those deliveries carry (with the
 idempotency-key helper that goes with it).
 
+![On the queue path the SDK decodes Sink.Message v1, sends malformed messages to a poison channel, and passes the inline body or the claim-redeemed, sha256-checked bytes to your idempotent handler; on the HTTP path it verifies the signature first; admin, routes and sources clients drive the control APIs.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/sdk-consumer.png)
+
 ## Claim-check client
 
 Redeem a claim-check ref, verify the bytes it returns against the sha256 the

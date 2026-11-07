@@ -1,0 +1,43 @@
+{
+  "title": "The examples — one Ankusa node, four delivery transports",
+  "legend": true,
+  "lanes": ["Provider", "Ankusa", "HTTP", "RabbitMQ", "Kafka → SQS", "NATS JetStream", "Claim check"],
+  "groups": [
+    {"id": "rmq", "label": "RabbitMQ", "kind": "broker"},
+    {"id": "kafka", "label": "Redpanda", "kind": "broker"},
+    {"id": "sqs", "label": "SQS FIFO (floci)", "kind": "broker"},
+    {"id": "nats", "label": "NATS JetStream", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "provider", "kind": "external-system", "label": "Provider", "sub": "POST /webhooks/:source", "lane": "Provider"},
+    {"id": "ankusa", "kind": "service", "label": "Ankusa", "sub": "edge + dispatch + storage · fsync before 201", "lane": "Ankusa"},
+    {"id": "http-worker", "kind": "service", "label": "HTTP worker", "sub": "POST /hooks · 5 s timeout", "badges": ["idempotent"], "lane": "HTTP"},
+    {"id": "exchange", "kind": "content-based-router", "label": "ankusa.events exchange", "sub": "topic exchange", "group": "rmq", "lane": "RabbitMQ"},
+    {"id": "rqueue", "kind": "p2p-channel", "label": "Worker's queue", "sub": "no DLX: a reject drops it", "tags": ["bind ankusa.#", "prefetch 10"], "group": "rmq", "lane": "RabbitMQ"},
+    {"id": "rworker", "kind": "service", "label": "TypeScript worker", "sub": "no dedupe: prints the hook", "lane": "RabbitMQ"},
+    {"id": "topic", "kind": "pubsub-channel", "label": "ankusa.events", "sub": "no topic DLQ: retries → /v1/dlq", "tags": ["key=tenant/source", "acks=all"], "group": "kafka", "lane": "Kafka → SQS"},
+    {"id": "bridge", "kind": "messaging-bridge", "label": "Redpanda Connect", "sub": "group ankusa-sqs-bridge", "group": "kafka", "lane": "Kafka → SQS"},
+    {"id": "sqs", "kind": "p2p-channel", "label": "ankusa-worker.fifo", "sub": "redrive after 5 receives", "tags": ["group = Kafka key", "dedup = ankusa_id"], "group": "sqs", "lane": "Kafka → SQS"},
+    {"id": "sqs-dlq", "kind": "dead-letter-channel", "label": "ankusa-worker-dlq.fifo", "tags": ["maxReceiveCount 5"], "shadow": "sqs", "group": "sqs"},
+    {"id": "sqs-worker", "kind": "service", "label": "SQS worker", "sub": "batch 10 · 20 s long poll", "badges": ["idempotent", "polling"], "lane": "Kafka → SQS"},
+    {"id": "stream", "kind": "pubsub-channel", "label": "ANKUSA stream", "sub": "no DLQ: term on permanent", "tags": ["ankusa.>", "explicit ack"], "group": "nats", "lane": "NATS JetStream"},
+    {"id": "nats-worker", "kind": "service", "label": "Rust worker", "sub": "dedupe on id · nak 5 s or term", "badges": ["idempotent", "durable"], "lane": "NATS JetStream"},
+    {"id": "gateway", "kind": "service", "label": "Claim gateway :4001", "sub": "GET /v1/claims/:tenant/:id", "badges": ["gateway"], "lane": "Claim check"}
+  ],
+  "edges": [
+    {"from": "provider", "to": "ankusa", "kind": "rpc", "message": "POST /webhooks/:source", "label": "201 after fsync", "seq": 1},
+    {"from": "ankusa", "to": "http-worker", "type": "event", "message": "POST /hooks", "label": "x-ankusa-* headers", "seq": 2},
+    {"from": "ankusa", "to": "exchange", "type": "event", "message": "Sink.Message v1", "seq": 2},
+    {"from": "exchange", "to": "rqueue", "type": "event", "message": "Sink.Message v1", "label": "ankusa.#"},
+    {"from": "rqueue", "to": "rworker", "type": "event", "message": "Sink.Message v1"},
+    {"from": "ankusa", "to": "topic", "type": "event", "message": "Sink.Message v1", "label": "acks=all", "seq": 2},
+    {"from": "topic", "to": "bridge", "type": "event", "message": "record"},
+    {"from": "bridge", "to": "sqs", "type": "event", "message": "SendMessageBatch", "label": "GroupId = key · DedupId = id"},
+    {"from": "sqs", "to": "sqs-worker", "type": "event", "message": "Sink.Message v1", "label": "long poll"},
+    {"from": "ankusa", "to": "stream", "type": "event", "message": "Sink.Message v1", "label": "publish ack", "seq": 2},
+    {"from": "stream", "to": "nats-worker", "type": "event", "message": "Sink.Message v1", "label": "durable pull consumer"},
+    {"from": "rworker", "to": "gateway", "kind": "rpc", "message": "GET /v1/claims/…", "label": "large bodies"},
+    {"from": "sqs-worker", "to": "gateway", "kind": "rpc", "message": "GET /v1/claims/…"},
+    {"from": "nats-worker", "to": "gateway", "kind": "rpc", "message": "GET /v1/claims/…"}
+  ]
+}

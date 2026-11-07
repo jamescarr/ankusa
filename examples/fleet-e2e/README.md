@@ -6,20 +6,7 @@ on every release tag: a load balancer in front of two Ankusa nodes, a shared
 bucket and claim-check gateway, a consumer, and a check that every hook the
 fleet acknowledged was processed, with a node killed in the middle.
 
-```mermaid
-flowchart LR
-    L[tools/loadgen] --> LB[nginx, round robin :18080]
-    LB --> A["ankusa-a :14001<br/>own store, prefix node-a/"]
-    LB --> B["ankusa-b :14002<br/>own store, prefix node-b/"]
-    A & B <-.->|routes, sources| R[(Redis)]
-    A & B -->|publish| X((RabbitMQ<br/>ankusa.events))
-    A & B -.->|"fat body (claims/...)"| S[(MinIO bucket)]
-    X --> C[consumer]
-    C -->|"GET /v1/claims/..."| CC[claim-check node]
-    CC -.-> S
-    C -->|upsert| DB[(Postgres<br/>processed_webhooks)]
-    L -.->|loadgen.verify| DB
-```
+![loadgen posts through nginx to two all-role nodes that share Redis definitions and one MinIO bucket under separate prefixes and publish to RabbitMQ; the consumer binds its own queue, redeems large bodies at the claim-check node and upserts processed_webhooks, which loadgen.verify reads.](../../docs/diagrams/example-fleet-e2e.png)
 
 ## What each piece is doing
 

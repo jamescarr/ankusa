@@ -1,0 +1,34 @@
+{
+  "title": "Route management — definitions to per-node enforcement",
+  "legend": true,
+  "groups": [
+    {"id": "redis", "label": "Redis (shared route store)", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "ops", "kind": "actor", "label": "Operator / CI", "sub": "routes:write"},
+    {"id": "api", "kind": "service", "label": "Routes API :4003", "sub": "own listener, never the ingest port", "badges": ["gateway"]},
+    {"id": "routes", "kind": "service", "label": "Ankusa.Routes", "sub": "validate · conflict check · audit"},
+    {"id": "ets", "kind": "datastore", "label": "ETS store (default)", "sub": "node memory · seeded on boot", "col": 1, "row": 0},
+    {"id": "rstore", "kind": "datastore", "label": "Redis store", "sub": "routes hash · ip_rules · version", "group": "redis"},
+    {"id": "nudge", "kind": "pubsub-channel", "label": "<ns> nudge", "sub": "no DLQ: a 30 s tick catches a miss", "tags": ["payload = version", "fleet-wide"], "group": "redis"},
+    {"id": "snap", "kind": "datastore", "label": "Route snapshot (per node)", "sub": "new epoch per reload"},
+    {"id": "cache", "kind": "datastore", "label": "Decision cache", "sub": "keyed by epoch, method, path"},
+    {"id": "guard", "kind": "message-filter", "label": "RouteGuard", "sub": "deny by default · 404 · 403 ip_denied"},
+    {"id": "router", "kind": "service", "label": "Edge.Router", "sub": "guard runs first"},
+    {"id": "provider", "kind": "external-system", "label": "Provider"},
+    {"id": "rl-note", "kind": "note", "label": "Rate limits are per client IP, node, source and tenant, never per route.", "attach": "guard"}
+  ],
+  "edges": [
+    {"from": "ops", "to": "api", "kind": "control", "message": "POST /admin/routes", "seq": 1},
+    {"from": "api", "to": "routes", "kind": "rpc", "message": "create · replace · patch · delete", "label": "dry run: /admin/routes/test", "seq": 2},
+    {"from": "routes", "to": "ets", "kind": "data", "label": "version-checked write", "seq": 3},
+    {"from": "routes", "to": "rstore", "kind": "data", "label": "one Lua script", "seq": 3},
+    {"from": "rstore", "to": "nudge", "type": "event", "message": "PUBLISH version", "seq": 4},
+    {"from": "nudge", "to": "snap", "type": "event", "message": "reload", "label": "only if the version differs", "seq": 5},
+    {"from": "ets", "to": "snap", "kind": "data", "label": "next request sees it", "route": "above"},
+    {"from": "provider", "to": "router", "kind": "rpc", "message": "POST <any path>", "seq": 6},
+    {"from": "router", "to": "guard", "kind": "rpc", "message": "decide", "label": "method · path · client IP", "seq": 7},
+    {"from": "guard", "to": "cache", "kind": "data", "label": "IP rules never cached", "seq": 8},
+    {"from": "cache", "to": "snap", "kind": "data", "label": "miss → prefix scan", "seq": 9, "route": "below"}
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "title": "NATS consumer — JetStream stream and a durable Rust worker",
+  "legend": true,
+  "groups": [
+    {"id": "nats", "label": "NATS JetStream", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "curl", "kind": "actor", "label": "Provider / curl"},
+    {"id": "ankusa", "kind": "service", "label": "ankusa :4000", "sub": "edge · dispatch · storage · claim_check", "badges": ["retry"]},
+    {"id": "stream", "kind": "pubsub-channel", "label": "ANKUSA stream", "sub": "no DLQ: term is final · created by the worker", "tags": ["subjects ankusa.>", "explicit ack"], "group": "nats"},
+    {"id": "worker", "kind": "service", "label": "Rust worker", "sub": "dedupe on id · nak 5 s or term", "badges": ["idempotent", "durable"]},
+    {"id": "claim", "kind": "service", "label": "Claim check :4001", "sub": "same node", "badges": ["gateway"]},
+    {"id": "admin", "kind": "control-bus", "label": "Admin :4002", "tags": ["/health /metrics", "/v1/dlq"]},
+    {"id": "you", "kind": "actor", "label": "You"},
+    {"id": "stream-note", "kind": "note", "label": "Until the worker creates ANKUSA, publishes fail: 6 attempts over about 8–15 s, then the hook is in /v1/dlq.", "attach": "ankusa"}
+  ],
+  "edges": [
+    {"from": "curl", "to": "ankusa", "kind": "rpc", "message": "POST /webhooks/demo", "label": "201 after fsync", "seq": 1},
+    {"from": "ankusa", "to": "stream", "type": "event", "message": "Sink.Message v1", "label": "subject ankusa.demo · awaits the ack", "seq": 2},
+    {"from": "stream", "to": "worker", "type": "event", "message": "Sink.Message v1", "label": "durable pull consumer", "seq": 3},
+    {"from": "worker", "to": "claim", "kind": "rpc", "message": "GET /v1/claims/…", "label": "body > 8 KiB"},
+    {"from": "you", "to": "admin", "kind": "control", "message": "GET /v1/dlq"}
+  ]
+}

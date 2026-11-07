@@ -1,0 +1,29 @@
+{
+  "title": "Sink.RabbitMQ — exchange publish with publisher confirms",
+  "legend": true,
+  "groups": [
+    {"id": "rabbit", "label": "RabbitMQ", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "dispatch", "kind": "service", "label": "Dispatch attempt", "sub": "retry policy → DLQ", "badges": ["retry", "circuit-breaker"]},
+    {"id": "encode", "kind": "envelope-wrapper", "label": "Sink.Message v1", "sub": "JSON · body inline as base64"},
+    {"id": "claim", "kind": "claim-check", "label": "Claim check", "sub": "body > inline_max_bytes (64 KiB)"},
+    {"id": "conn", "kind": "channel-adapter", "label": "AMQP connection", "sub": "confirm channel per (url, exchange)"},
+    {"id": "exchange", "kind": "content-based-router", "label": "Exchange ankusa.events", "sub": "type topic · declared durable", "group": "rabbit"},
+    {"id": "queue", "kind": "p2p-channel", "label": "Consumer's queue", "sub": "declared and bound by the consumer", "tags": ["routing_key ankusa.<source>", "persistent"], "group": "rabbit"},
+    {"id": "consumer", "kind": "service", "label": "Your consumer", "sub": "acks after its handler commits", "badges": ["idempotent", "competing:2"]},
+    {"id": "gateway", "kind": "service", "label": "Claim gateway :4001", "sub": "GET /v1/claims/{tenant}/{id}", "badges": ["gateway"]},
+    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead delivery rows", "sub": "unroutable · nacked · confirm timeout", "tags": ["node-local"]},
+    {"id": "owner-note", "kind": "note", "label": "The sink declares the exchange, never a queue: until a queue is bound every publish is unroutable, retried, then dead-lettered. DLX and retry queues are the consumer's.", "attach": "encode"}
+  ],
+  "edges": [
+    {"from": "dispatch", "to": "encode", "type": "event", "message": "hook", "seq": 1},
+    {"from": "encode", "to": "claim", "kind": "data", "label": "over inline_max_bytes → claim ref", "seq": 2},
+    {"from": "encode", "to": "conn", "type": "event", "message": "Sink.Message v1", "label": "message_id = hook id", "seq": 3},
+    {"from": "conn", "to": "exchange", "type": "event", "message": "basic.publish", "label": "mandatory · persistent", "seq": 4},
+    {"from": "exchange", "to": "queue", "type": "event", "message": "Sink.Message v1", "label": "topic binding", "seq": 5},
+    {"from": "queue", "to": "consumer", "type": "event", "message": "Sink.Message v1", "label": "at-least-once", "seq": 6},
+    {"from": "consumer", "to": "gateway", "kind": "rpc", "message": "GET /v1/claims/…", "label": "claim ref only · checks sha256", "seq": 7},
+    {"from": "conn", "to": "dlq", "kind": "dlq", "label": "after the retry policy gives up"}
+  ]
+}

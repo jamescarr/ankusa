@@ -52,6 +52,8 @@ Rules 2 and 3 are what make it honest. When I add a feature to `features.json` w
 
 Message decoding is where this pays off most. The decode rules run in a fixed order and the first failure wins, so the same malformed message produces the same error code in all eight languages. Bad JSON, wrong version, a field of the wrong type, both `body_base64` and `claim` present, a length that does not match `size`, a sha256 that does not match the body, a claim whose tenant disagrees with the message's `tenant_id`: the decode rules in the README cover each, and a poison message dead-letters the same way whichever language your worker is written in.
 
+![On the queue path the SDK decodes Sink.Message v1, sends malformed messages to a poison channel, and passes the inline body or the claim-redeemed, sha256-checked bytes to your idempotent handler; on the HTTP path it verifies the signature first; admin, routes and sources clients drive the control APIs.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/sdk-consumer.png)
+
 ## The same five lines in eight languages
 
 Each snippet below is copied from that SDK's README. They redeem a claim and branch on whether the error is retryable. The one-bit answer is the point: your worker needs to decide between requeue and dead-letter, and nothing else about the failure.

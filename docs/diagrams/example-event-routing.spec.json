@@ -1,0 +1,31 @@
+{
+  "title": "Event routing — templated Kafka topics and a filtered HTTP sink",
+  "legend": true,
+  "groups": [
+    {"id": "redpanda", "label": "Redpanda", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "provider", "kind": "external-system", "label": "Provider / curl", "sub": "POST /webhooks/billing"},
+    {"id": "ankusa", "kind": "service", "label": "ankusa :4000", "sub": "event_type read from the JSON body", "badges": ["retry"]},
+    {"id": "template", "kind": "content-based-router", "label": "Topic template", "sub": "events.{{ event_type ?? other }}"},
+    {"id": "paid", "kind": "pubsub-channel", "label": "events.invoice.paid", "sub": "no topic DLQ: retries → /v1/dlq", "tags": ["1 partition"], "group": "redpanda"},
+    {"id": "other", "kind": "pubsub-channel", "label": "events.other", "sub": "the fallback", "tags": ["1 partition"], "group": "redpanda"},
+    {"id": "filter", "kind": "message-filter", "label": "Sink filter", "sub": "event_type ∈ [invoice.paid]"},
+    {"id": "receiver", "kind": "service", "label": "receiver :3000", "sub": "verifies the signature · no dedupe"},
+    {"id": "worker", "kind": "service", "label": "TypeScript worker", "sub": "group event-routing-worker · no dedupe"},
+    {"id": "admin", "kind": "control-bus", "label": "Admin :4002", "tags": ["/asyncapi.json", "/metrics"]},
+    {"id": "you", "kind": "actor", "label": "You"},
+    {"id": "filtered-note", "kind": "note", "label": "A hook no sink selects is answered 201 {\"filtered\": true} and stored nowhere.", "attach": "filter"}
+  ],
+  "edges": [
+    {"from": "provider", "to": "ankusa", "kind": "rpc", "message": "POST /webhooks/billing", "label": "201 · filtered:true if unselected", "seq": 1},
+    {"from": "ankusa", "to": "template", "type": "event", "message": "Sink.Message v1", "seq": 2},
+    {"from": "template", "to": "paid", "type": "event", "message": "Sink.Message v1", "label": "type = invoice.paid", "seq": 3},
+    {"from": "template", "to": "other", "type": "event", "message": "Sink.Message v1", "label": "no type", "seq": 3},
+    {"from": "ankusa", "to": "filter", "type": "event", "message": "hook", "seq": 2},
+    {"from": "filter", "to": "receiver", "type": "event", "message": "POST /invoices", "label": "invoice.paid only · signed", "seq": 4},
+    {"from": "paid", "to": "worker", "type": "event", "message": "Sink.Message v1", "seq": 5},
+    {"from": "other", "to": "worker", "type": "event", "message": "Sink.Message v1", "seq": 5},
+    {"from": "you", "to": "admin", "kind": "control", "message": "GET /asyncapi.json"}
+  ]
+}

@@ -65,6 +65,9 @@ defmodule Ankusa.MixProject do
       source_ref: "ankusa-v#{@version}",
       source_url_pattern:
         "#{@source_url}/blob/ankusa-v#{@version}/packages/ankusa/%{path}#L%{line}",
+      # docs/*.md link PNGs as diagrams/<id>.png: copy the diagram directory
+      # into the doc output so HexDocs serves them.
+      assets: %{"../../docs/diagrams" => "diagrams"},
       extras: [
         "../../docs/elixir.md",
         "../../README.md",

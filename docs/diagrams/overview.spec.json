@@ -1,0 +1,26 @@
+{
+  "title": "Default pipeline — wal.type: disk, one node",
+  "legend": true,
+  "nodes": [
+    {"id": "provider", "kind": "external-system", "label": "Any provider", "sub": "Stripe · GitHub · Shopify"},
+    {"id": "edge", "kind": "service", "label": "Edge", "sub": "router · verify · route · rate limit"},
+    {"id": "batcher", "kind": "service", "label": "Group-commit batcher", "sub": "one fsync per group"},
+    {"id": "store", "kind": "message-store", "label": "Store (RocksDB)", "sub": "hooks · delivery rows · obligations"},
+    {"id": "dispatch", "kind": "service", "label": "Dispatch", "sub": "due rows · retries", "badges": ["retry"]},
+    {"id": "sinks", "kind": "external-system", "label": "Sinks", "sub": "HTTP, RabbitMQ, Kafka, NATS, SQS, Pub/Sub, Redis"},
+    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead rows (DLQ)", "sub": "GET /v1/dlq · POST /v1/replays", "tags": ["node-local", "retention 30 d"]},
+    {"id": "compactor", "kind": "service", "label": "Compactor", "sub": "obligations → segments"},
+    {"id": "blob", "kind": "message-store", "label": "Blob store", "sub": "LocalFS by default · S3 · GCS · Azure · OCI"},
+    {"id": "node-note", "kind": "note", "label": "One BEAM node runs every role. Durable to a crash or power loss on this host, not to losing the host.", "attach": "store"}
+  ],
+  "edges": [
+    {"from": "provider", "to": "edge", "kind": "rpc", "message": "POST /webhooks/<source>", "label": "201 after fsync · 503 + Retry-After", "seq": 1},
+    {"from": "edge", "to": "batcher", "type": "event", "message": "hook", "label": "caller blocks on its commit", "seq": 2},
+    {"from": "batcher", "to": "store", "kind": "data", "label": "one batch", "seq": 3},
+    {"from": "store", "to": "dispatch", "kind": "data", "label": "due delivery rows"},
+    {"from": "dispatch", "to": "sinks", "type": "event", "message": "hook", "label": "at-least-once"},
+    {"from": "dispatch", "to": "dlq", "kind": "dlq", "label": "give up after retries"},
+    {"from": "store", "to": "compactor", "kind": "data", "label": "archive obligations"},
+    {"from": "compactor", "to": "blob", "kind": "data", "label": "segment + index"}
+  ]
+}

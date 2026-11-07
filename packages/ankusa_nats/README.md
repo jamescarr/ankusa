@@ -40,6 +40,8 @@ config :ankusa,
   }
 ```
 
+![Dispatch encodes the hook and publishes it to a subject covered by the operator's JetStream stream, counting it delivered only when JetStream acks with a stream and sequence; the hook id as Nats-Msg-Id collapses retried publishes, and a missing stream retries, then dead-letters.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/sink-nats.png)
+
 Sinks belong to a source. `Ankusa.Config.new/1` takes the same `sources` for a
 non-default instance.
 

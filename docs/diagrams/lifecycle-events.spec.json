@@ -1,0 +1,31 @@
+{
+  "title": "Lifecycle events — every source and route change as a CloudEvent",
+  "legend": true,
+  "groups": [
+    {"id": "kafka", "label": "Kafka (example sink)", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "ops", "kind": "actor", "label": "Operator / admin caller", "sub": "sources:write · routes:write", "col": 0, "row": 0},
+    {"id": "admin", "kind": "service", "label": "Admin + routes APIs", "badges": ["gateway"]},
+    {"id": "changes", "kind": "service", "label": "SourceStore · Routes · tenant erase", "sub": "every write is audited"},
+    {"id": "outbox", "kind": "outbox", "label": "Audit row (outbox)", "sub": "publish: true · same synced batch"},
+    {"id": "publisher", "kind": "service", "label": "Lifecycle.Publisher", "sub": "cursor · seq order · batch 200", "badges": ["polling"]},
+    {"id": "envelope", "kind": "envelope-wrapper", "label": "Sink.Message.encode/3", "sub": "CloudEvents 1.0 in body_base64"},
+    {"id": "topic", "kind": "pubsub-channel", "label": "ankusa.lifecycle", "sub": "no DLQ: dropped after retries · replay re-emits", "tags": ["ordered by audit seq", "at-least-once"], "group": "kafka"},
+    {"id": "consumer", "kind": "service", "label": "Your consumer", "sub": "dedupes on event id · revision guard", "badges": ["idempotent", "event-driven"]},
+    {"id": "replay", "kind": "service", "label": "Replay job (kind: lifecycle)", "sub": "since · until · tenant"},
+    {"id": "asyncapi", "kind": "schema-registry", "label": "AsyncAPI document", "sub": "GET /asyncapi.json · LifecycleEventV1"}
+  ],
+  "edges": [
+    {"from": "ops", "to": "admin", "kind": "control", "message": "POST /v1/tenants/<t>/sources", "label": "or a route change", "seq": 1},
+    {"from": "admin", "to": "changes", "kind": "rpc", "message": "put · delete · erase", "seq": 2},
+    {"from": "changes", "to": "outbox", "kind": "data", "label": "audit row + entity, one batch", "seq": 3},
+    {"from": "outbox", "to": "publisher", "kind": "data", "label": "flagged rows in seq order", "seq": 4},
+    {"from": "publisher", "to": "envelope", "type": "event", "message": "io.ankusa.source.created", "label": "same id however often sent", "seq": 5},
+    {"from": "envelope", "to": "topic", "type": "event", "message": "Sink.Message v1", "seq": 6},
+    {"from": "topic", "to": "consumer", "type": "event", "message": "LifecycleEventV1", "seq": 7},
+    {"from": "ops", "to": "replay", "kind": "control", "message": "POST /v1/replays {kind: lifecycle}"},
+    {"from": "replay", "to": "publisher", "kind": "control", "label": "re-emit a window", "route": "below"},
+    {"from": "asyncapi", "to": "topic", "kind": "data", "label": "channel + schema", "route": "below"}
+  ]
+}

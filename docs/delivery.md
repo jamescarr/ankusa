@@ -2,6 +2,8 @@
 
 ## The dispatch pipeline
 
+![Dispatch claims due delivery rows fairly across tenants, runs bounded attempts per sink key, deletes a row on :ok, parks rows behind an open breaker, reschedules transient failures with exponential backoff inside a 24 h horizon, and dead-letters the rest.](diagrams/dispatch.png)
+
 `Ankusa.Dispatch.Pipeline` is a `GenServer`, one per instance, that is a
 scheduler over **delivery rows** (`Ankusa.Queue`), not a poller. A commit
 sends it `:wake`, so a new hook is claimed at once; otherwise it sleeps until
@@ -182,6 +184,8 @@ every sink of the source **concurrently**, all under one overall deadline
 timeout), and answers `201` only once every sink has confirmed. No polling, no
 concurrency window — and **the rest of this section does not apply**:
 
+![Direct mode: after verification the request process publishes to every selected sink at once under one 8 s deadline and answers 201 only when each confirms, otherwise 503 with Retry-After; nothing is committed, archived or dead-lettered.](diagrams/direct-mode.png)
+
 - no retry policy: any sink failure, crash or timeout makes the answer a `503`
   with `Retry-After`, and the provider's retry *is* the retry; sinks that
   already confirmed keep their copy;
@@ -220,6 +224,8 @@ there is no replay job to release pen entries, only `GET` and `DELETE
 /v1/quarantine`. See [Quarantine](#quarantine).
 
 ## `Ankusa.Sink`
+
+![Dispatch gives every selected sink its own delivery row and sends Sink.Message v1 (for HTTP, the raw signed body) to a Kafka topic, RabbitMQ exchange, JetStream subject, SQS queue, Pub/Sub topic, Redis channel or HTTP receiver, counting it delivered only when the destination confirms.](diagrams/sinks.png)
 
 ```elixir
 @callback deliver(Envelope.t(), ctx(), opts :: keyword()) :: :ok | {:error, term()}
@@ -346,6 +352,8 @@ and is retried.
 
 ### Routing by content
 
+![Ingest reads the event type once and each sink's filter decides whether it gets a delivery row; at delivery the Kafka topic is rendered from a template (events.invoice.paid, else events.other) and the filtered HTTP sink posts only invoice.paid hooks.](diagrams/content-routing.png)
+
 Three keys, each described in its own section below, decide where a hook goes
 from what the hook says. They compose, and they are read in a fixed order:
 
@@ -391,6 +399,8 @@ an HTTP receiver, any other hook goes to `events.other` only, and a source whose
 only sink is the filtered one answers `filtered: true`.
 
 ### `Sink.Http`: per-tenant destinations
+
+![Each attempt resolves the tenant's URL, headers and secret, adds x-ankusa-* headers and a Standard Webhooks signature, passes the egress policy, posts through a pooled connection and classifies the status: 2xx delivered, 408/425/429/5xx retried, listed 4xx dead-lettered.](diagrams/sink-http.png)
 
 On a shared source (one `stripe` source behind `/webhooks/:tenant/stripe`) the
 receiver differs per tenant. In Elixir config, `url`, `headers` and `secret` may
@@ -702,6 +712,8 @@ The queue-adapter story: an ingest fleet publishing to a broker instead of
 [`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/) for a full
 worked deployment.
 
+![Dispatch encodes the hook as Sink.Message v1 (large bodies as a claim reference), publishes it mandatory and persistent to the ankusa.events topic exchange and counts it delivered only on the broker's confirm that a bound queue took it; unroutable or unconfirmed publishes retry, then dead-letter.](diagrams/sink-rabbitmq.png)
+
 **Publishes to an exchange only, never a queue.** Binding a queue to the
 exchange, and everything downstream of that, is the consumer's job. This
 mirrors real AMQP topology ownership: producers own exchanges, consumers
@@ -859,6 +871,8 @@ sinks: [
 ]
 ```
 
+![Dispatch encodes the hook, hands value, key and headers to one brod client and produces with acks=all to a topic it never creates; the delivery counts only once every in-sync replica has the record, and permanent produce errors dead-letter at once.](diagrams/sink-kafka.png)
+
 **The record key picks the partition.** The same key lands on the same
 partition, and a Kafka consumer reads a key's records in the order they were
 produced. Dispatch does **not** serialize deliveries sharing a key, so produce
@@ -920,6 +934,8 @@ sinks: [
    publish_timeout_ms: 5_000}
 ]
 ```
+
+![Dispatch encodes the hook and publishes it to a subject covered by the operator's JetStream stream, counting it delivered only when JetStream acks with a stream and sequence; the hook id as Nats-Msg-Id collapses retried publishes, and a missing stream retries, then dead-letters.](diagrams/sink-nats.png)
 
 **It never creates the stream.** A stream's storage, retention, replicas, and,
 the part that matters here, its set of subjects are one operator's capacity
@@ -1001,6 +1017,8 @@ sinks: [
 ]
 ```
 
+![Route and source writes land in Redis hashes with a version counter and a pub/sub nudge that makes every node reload its local mirror; each hook costs one EVALSHA for fleet-wide limits and dedupe, with a local fallback, and Sink.Redis publishes delivered hooks to a channel only live subscribers receive.](diagrams/redis-adapters.png)
+
 **Pub/sub keeps no copy, and that is the whole design constraint.** Redis
 stores nothing on a channel: a subscriber that is disconnected — or connects a
 moment later — never sees the message. Two consequences:
@@ -1076,6 +1094,8 @@ sinks: [
    # access_key_id:/secret_access_key:/session_token: — else AWS_* env, IRSA, IMDSv2
 ]
 ```
+
+![Dispatch encodes the hook, a per-queue batcher collects up to ten entries, one SigV4 SendMessageBatch posts them and each entry counts as delivered on its own MD5 match; FIFO queues get the tenant/source group and the hook id as deduplication id.](diagrams/sink-sqs.png)
 
 **It never creates the queue.** A queue's type, retention, visibility timeout,
 redrive policy and encryption are an operator's contract. A queue that does
@@ -1207,6 +1227,8 @@ sinks: [
 ]
 ```
 
+![Dispatch encodes the hook, a per-topic batcher sends up to a thousand messages in one authenticated topics.publish, each settles on its returned id, and an INVALID_ARGUMENT batch is bisected so only the bad message dead-letters.](diagrams/sink-google-pubsub.png)
+
 **It never creates the topic or a subscription.** Retention, schema,
 encryption and who may subscribe are an operator's contract. A topic that does
 not exist is `{:error, {:permanent, {:config, {:pubsub, 404, "NOT_FOUND",
@@ -1295,6 +1317,8 @@ Ankusa's own deliveries are then unordered (see [`Ankusa.Sink`](#ankusasink)).
 No key is sent by default.
 
 ## Ordering lanes
+
+![With ordered: true a sink puts each hook into a lane per ordering key; only the lane head is a due row, delivered one at a time with the next promoted after :ok, a dead head releases the lane, and Kafka keys or SQS FIFO groups carry the lane key.](diagrams/ordering-lanes.png)
 
 Opt-in, per sink entry of a source (ADR
 [0004](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0004-ordering-lanes.md)):
@@ -1470,6 +1494,8 @@ days the old 84-attempt default was assumed to need. Lifecycle events
 cursor for at most that long.
 
 ## Dead letters and replay
+
+![An operator, or the fleet replay command with one job id per node, starts a durable replay job; the replayer revives dead rows page by page at a capped rate, dispatch redelivers them with their original idempotency key plus a replay id, and repeat failures return to the DLQ.](diagrams/dlq-replay.png)
 
 The DLQ is the set of **dead delivery rows** — there is no separate file. When
 a row's sink gives up, the row is marked dead and carries the failure as text:
@@ -1647,6 +1673,8 @@ disk stays flat by draining the archive and never by deleting an acked hook.
 same eviction on demand and answers `{deleted, bytes, unarchived, more}`.
 
 ## Quarantine
+
+![A hook that fails verification is rejected with 401, or under on_verify_failure: quarantine answered 202 and held in the pen; after the secret is fixed a quarantine replay job re-verifies each held hook and commits those that pass into the normal delivery path.](diagrams/quarantine.png)
 
 A durable holding pen for envelopes whose source has
 `on_verify_failure: :quarantine`. The point: a bad secret rotation should

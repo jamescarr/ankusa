@@ -22,20 +22,7 @@ There is one loss window I cannot close: a provider that does not retry on a tim
 
 Here is the pipeline with the default `wal.type: disk`:
 
-```mermaid
-flowchart LR
-    P[Provider] -->|POST catch URL| E[Edge: Bandit + Router]
-    E --> RR[RouteResolver]
-    RR --> IG[Ingest: verify]
-    IG --> B[Group-commit Batcher]
-    B -->|one synced batch per commit| S[(Store\nhooks + delivery rows)]
-    S -->|ack| P
-    S -->|due rows| D[Dispatch Scheduler]
-    S -->|archive obligations| C[Compactor]
-    C --> BS[(Blob store\nsegments + index)]
-    D --> SK[Sinks]
-    D -->|give up| DLQ[(Dead rows)]
-```
+![Numbered request path: the router refuses oversize, unknown or rate-limited requests before the body, the resolver maps the URL to a source and tenant, the verifier applies on_verify_failure, dedupe drops provider retries, and the group commit fsyncs before 201.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/request-path.png)
 
 In order:
 
@@ -101,6 +88,8 @@ There is one retry policy for all sources today. The DLQ is the set of dead deli
 Dispatch writes its outcomes without a per-write fsync. A power failure right after a give-up can undo it, and the hook is retried again. That is at-least-once by construction: the cheap write is allowed to be lost because the loss direction is always "deliver again", never "forget". The cost lands on your receiver, which is why the idempotency key exists. It is `tenant:source_id:dedupe_key` when the source extracted a provider event key, otherwise the hook's `id`, and it arrives as `x-ankusa-idempotency-key` on `Sink.Http`. Read it; do not rebuild it.
 
 ## The other mode: `wal.type: none`
+
+![Direct mode: after verification the request process publishes to every selected sink at once under one 8 s deadline and answers 201 only when each confirms, otherwise 503 with Retry-After; nothing is committed, archived or dead-lettered.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/direct-mode.png)
 
 Group commit is the right answer when Ankusa is the store. Sometimes your broker already is. With `wal.type: none` there is no store for hooks, no batcher, no dispatch, no compactor, and no DLQ. The request publishes to the source's sinks concurrently under one deadline, 8 s by default, and answers `201` only after every sink confirms. The first refusal is a `503` with `Retry-After`, and the provider's retry is the retry.
 

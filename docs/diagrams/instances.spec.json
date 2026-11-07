@@ -1,0 +1,31 @@
+{
+  "title": "Instance model — supervisor, core and isolated failure domains",
+  "legend": true,
+  "nodes": [
+    {"id": "sup", "kind": "service", "label": "Ankusa.Instance", "sub": "rest_for_one supervisor"},
+    {"id": "watch", "kind": "service", "label": "RegistryWatch", "sub": "first child · stops the instance on a Registry restart"},
+    {"id": "registry", "kind": "datastore", "label": "Ankusa.Registry", "sub": "names per instance"},
+    {"id": "sources", "kind": "datastore", "label": "Source store"},
+    {"id": "store", "kind": "message-store", "label": "Ankusa.Store", "sub": "hooks · deliveries · catalogue"},
+    {"id": "edge", "kind": "service", "label": "edge subtree", "sub": "routes · writer · quarantine · batchers", "badges": ["gateway"]},
+    {"id": "dispatch", "kind": "service", "label": "dispatch", "sub": "backoff 1 s → 60 s", "badges": ["retry"]},
+    {"id": "storage", "kind": "service", "label": "storage", "sub": "compactor"},
+    {"id": "listeners", "kind": "service", "label": "admin · routes · claim-check listeners", "badges": ["gateway"]},
+    {"id": "others", "kind": "service", "label": "lifecycle · metrics · backup"},
+    {"id": "domain-note", "kind": "note", "label": "A core crash restarts what started after it. An isolated domain that exhausts its budget is restarted later while hooks wait in the store; each outage counts ankusa_instance_subtree_down_total{domain}.", "attach": "registry"}
+  ],
+  "edges": [
+    {"from": "sup", "to": "watch", "kind": "control", "label": "starts first"},
+    {"from": "watch", "to": "registry", "kind": "data", "label": "monitors"},
+    {"from": "sup", "to": "store", "kind": "control", "label": "core", "route": "below"},
+    {"from": "sup", "to": "edge", "kind": "control", "label": "core, after the store"},
+    {"from": "sup", "to": "dispatch", "kind": "control", "label": "isolated"},
+    {"from": "sup", "to": "storage", "kind": "control", "label": "isolated"},
+    {"from": "sup", "to": "listeners", "kind": "control", "label": "isolated"},
+    {"from": "sup", "to": "others", "kind": "control", "label": "isolated"},
+    {"from": "edge", "to": "store", "kind": "data", "label": "commit"},
+    {"from": "edge", "to": "sources", "kind": "data", "label": "lookup, fails closed"},
+    {"from": "dispatch", "to": "store", "kind": "data", "label": "claim rows, write outcomes"},
+    {"from": "storage", "to": "store", "kind": "data", "label": "archive obligations"}
+  ]
+}

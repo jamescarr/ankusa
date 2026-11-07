@@ -1,0 +1,25 @@
+{
+  "title": "Sink.NATS — JetStream publish, stream ack",
+  "legend": true,
+  "groups": [
+    {"id": "jetstream", "label": "NATS JetStream", "kind": "broker"}
+  ],
+  "nodes": [
+    {"id": "dispatch", "kind": "service", "label": "Dispatch attempt", "sub": "retry policy → DLQ", "badges": ["retry"]},
+    {"id": "encode", "kind": "envelope-wrapper", "label": "Sink.Message v1", "sub": "headers ankusa_* + Nats-Msg-Id"},
+    {"id": "claim", "kind": "claim-check", "label": "Claim check", "sub": "body > inline_max_bytes (64 KiB)"},
+    {"id": "conn", "kind": "channel-adapter", "label": "Gnat connection", "sub": "one per connection · 2 s reconnect"},
+    {"id": "stream", "kind": "pubsub-channel", "label": "Stream ANKUSA", "sub": "operator-owned · never created by the sink", "tags": ["subjects ankusa.>", "Nats-Msg-Id dedupe"], "group": "jetstream"},
+    {"id": "consumer", "kind": "service", "label": "Durable consumer", "sub": "dedupes on idempotency_key", "badges": ["idempotent", "durable"]},
+    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead delivery rows", "sub": "no_stream · max_payload · timeout", "tags": ["node-local"]},
+    {"id": "msgid-note", "kind": "note", "label": "Nats-Msg-Id is the hook id (id:replay:<id> on a replay), so JetStream collapses a lost-ack retry while a deliberate replay is stored.", "attach": "conn"}
+  ],
+  "edges": [
+    {"from": "dispatch", "to": "encode", "type": "event", "message": "hook", "seq": 1},
+    {"from": "encode", "to": "claim", "kind": "data", "label": "too large → claim ref", "seq": 2},
+    {"from": "encode", "to": "conn", "type": "event", "message": "Sink.Message v1", "seq": 3},
+    {"from": "conn", "to": "stream", "kind": "rpc", "message": "PUBLISH <subject>", "label": "ok on {stream, seq} ack", "seq": 4},
+    {"from": "stream", "to": "consumer", "type": "event", "message": "Sink.Message v1", "label": "at-least-once", "seq": 5},
+    {"from": "conn", "to": "dlq", "kind": "dlq", "label": "after the retry policy gives up"}
+  ]
+}

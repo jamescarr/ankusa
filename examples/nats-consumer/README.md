@@ -7,15 +7,7 @@ source [`packages/sdk-rust`](../../packages/sdk-rust)) to redeem large bodies
 from Ankusa's claim-check gateway. No object store, and the worker holds no
 storage credentials.
 
-```mermaid
-flowchart LR
-    P[Provider / curl] -->|POST /webhooks/demo :4000| A[ankusa]
-    A -->|written to disk, then 201| P
-    A -->|publish ankusa.demo, await JetStream ack| N[(NATS stream ANKUSA)]
-    N -->|pull, durable consumer| W[worker]
-    W -.->|large body: redeem claim :4001| A
-    O[You] -->|/health /metrics /v1/dlq :4002| A
-```
+![curl posts to ankusa on 4000, which fsyncs the hook, publishes it to subject ankusa.demo and waits for JetStream's ack; the Rust worker owns the ANKUSA stream and its durable consumer, dedupes on id, redeems large bodies on 4001, and naks or terms failures.](../../docs/diagrams/example-nats-consumer.png)
 
 ## What's here
 

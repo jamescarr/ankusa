@@ -5,6 +5,8 @@ hardened pod spec. The guide (probes, drain and grace period, PVC sizing, topolo
 multi-region) is [`docs/deployment.md`](../../../docs/deployment.md#kubernetes-the-helm-chart);
 every value is commented in [`values.yaml`](values.yaml).
 
+![One chart release renders a StatefulSet with a PVC per pod for wal.type disk or dual (dual also confirming each hook in a Kafka intake topic) or a Deployment with an emptyDir and an HPA for none; every mode gets the Service, PDB, spread and NetworkPolicy, plus an optional claim-check Deployment.](../../../docs/diagrams/helm-chart.png)
+
 ```sh
 helm install ankusa deploy/helm/ankusa -f my-values.yaml
 ```

@@ -19,16 +19,7 @@ This post is how that works, what it costs, and what it does not do yet. Everyth
 
 This is the diagram from [`docs/claim-check.md`](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md):
 
-```mermaid
-flowchart LR
-    P[Provider] -->|POST /webhooks/stripe| A[Ankusa]
-    A -->|body over inline_max_bytes| S[(object store)]
-    A -->|message + claim ref| Q[(queue)]
-    Q --> W[your worker]
-    W --> F[your auth layer<br/>mesh, Envoy, API gateway]
-    F -->|GET /v1/claims/...| G[claim-check gateway :4001]
-    G --> S
-```
+![Dispatch writes any body over 64 KiB once into a pack in the first available claim store and publishes a claim reference plus sha256 instead of the body; the worker redeems it through your auth layer at the read-only gateway on 4001 and checks the sha256 itself.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/claim-check.png)
 
 The provider still gets its `201` only after the hook is durably accepted, same as every other hook. Claim checking happens on the way to the sinks, not on the way in. Bodies at or under `inline_max_bytes` never touch the object store; they ride in the message as `body_base64`. The threshold is per sink, so you can move it if your broker has opinions.
 

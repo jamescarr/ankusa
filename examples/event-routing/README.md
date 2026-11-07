@@ -6,14 +6,7 @@ receiver. The three keys are `event_type:`, a sink's `filter:`, and a
 `{{ var }}` template; the reference is
 [Routing by content](../../docs/delivery.md#routing-by-content).
 
-```mermaid
-flowchart LR
-    P[Provider / curl] -->|POST /webhooks/billing :4000| A[ankusa]
-    A -->|every hook, topic by event type| K[(events.invoice.paid<br/>events.other)]
-    A -->|only invoice.paid, signed| R[receiver]
-    K --> W[worker]
-    O[You] -->|/asyncapi.json /metrics :4002| A
-```
+![A hook to /webhooks/billing has its event_type read once; the Kafka sink renders its topic from a template (events.invoice.paid, else events.other) and the HTTP sink's filter passes only invoice.paid to the receiver, while an unselected hook gets 201 filtered:true.](../../docs/diagrams/example-event-routing.png)
 
 ## What's here
 

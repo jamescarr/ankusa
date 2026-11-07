@@ -12,17 +12,7 @@ cd ankusa/examples/quickstart
 docker compose up --build -d --wait
 ```
 
-```mermaid
-flowchart LR
-    P[Provider / curl] -->|POST /webhooks/demo :4000| A[ankusa]
-    A -->|written to disk, then 201| P
-    A -->|produce ankusa.events, acks=all| T[(Redpanda topic)]
-    T -->|consumer group| B[bridge]
-    B -->|SendMessage, group = key| Q[(SQS FIFO, floci)]
-    Q -->|long poll| W[worker.py]
-    W -.->|large body: redeem claim :4001| A
-    O[You] -->|/health /metrics /v1/dlq :4002| A
-```
+![curl posts to ankusa on 4000, which fsyncs the hook, answers 201 and produces it to ankusa.events; a Redpanda Connect bridge moves records into the ankusa-worker.fifo queue, and worker.py long-polls it, redeems bodies over 8 KiB at the claim check on 4001 and dead-letters permanent failures.](diagrams/example-quickstart.png)
 
 [`ankusa.yml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/ankusa.yml)
 declares one source (`demo`) with one Kafka sink producing to the
@@ -108,6 +98,8 @@ process it, then hands it to the next poll.
 ## 5. When the broker goes down
 
 ### Dead-lettered, then replayed
+
+![An operator, or the fleet replay command with one job id per node, starts a durable replay job; the replayer revives dead rows page by page at a capped rate, dispatch redelivers them with their original idempotency key plus a replay id, and repeat failures return to the DLQ.](diagrams/dlq-replay.png)
 
 ```sh
 docker compose stop redpanda

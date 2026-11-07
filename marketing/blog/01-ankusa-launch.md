@@ -19,17 +19,7 @@ Ankusa is a self-hosted webhook receiver. I point Stripe, GitHub, or any provide
 
 Which system accepts the hook is one config key. By default the node's RocksDB store accepts it. When the destination slows down, Ankusa answers `503` with `Retry-After`, so providers back off and try again instead of losing events.
 
-```mermaid
-flowchart LR
-    P[Provider] -->|POST catch URL| E[Edge]
-    E --> B[Group-commit Batcher]
-    B -->|one fsync| W[(Store)]
-    W -->|ack| P
-    W --> C[Compactor]
-    W --> D[Dispatch]
-    C --> S[(Object store)]
-    D --> SK[Sinks]
-```
+![Provider posts to the edge; the batcher group-commits the hook to the local store and the provider gets 201 only after the fsync. Dispatch delivers due rows to sinks, dead-lettering give-ups; the compactor archives to the blob store.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/overview.png)
 
 ## Run it in 60 seconds
 
@@ -110,19 +100,7 @@ Delivery is a separate reader of the same store. If dispatch or the compactor go
 
 When one box is not enough, I run N independent all-role nodes behind a load balancer. Each node has its own data volume, its own store, and its own DLQ and admin API.
 
-```mermaid
-flowchart LR
-    P[Stripe, GitHub, ...] --> LB[Load balancer]
-    LB --> E1[Ankusa node 1]
-    LB --> E2[Ankusa node 2]
-    LB --> E3[Ankusa node N]
-    E1 --> ST1[("own store\n+ volume")]
-    E2 --> ST2[("own store\n+ volume")]
-    E3 --> ST3[("own store\n+ volume")]
-    ST1 & ST2 & ST3 --> Q[Kafka / NATS / RabbitMQ / HTTP]
-    ST1 & ST2 & ST3 --> S[(S3 / GCS)]
-    Q --> W[Your workers]
-```
+![A load balancer lands each hook on one of N all-role nodes; each node fsyncs to its own store and volume, publishes to the shared broker after the commit, archives under its own prefix in one bucket, optionally shares routes, sources and fleet limits through Redis, and workers redeem claims at one gateway.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/fleet.png)
 
 The caveat: each node is durable to power loss on this host only. Fleet durability comes from running N independent nodes, each owning its store.
 

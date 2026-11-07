@@ -13,6 +13,8 @@ Java 17 or newer. Runtime dependencies are Jackson 3
 HTTP goes through the JDK's own `java.net.http.HttpClient`. Every client is
 immutable and safe to share across threads.
 
+![On the queue path the SDK decodes Sink.Message v1, sends malformed messages to a poison channel, and passes the inline body or the claim-redeemed, sha256-checked bytes to your idempotent handler; on the HTTP path it verifies the signature first; admin, routes and sources clients drive the control APIs.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/sdk-consumer.png)
+
 ## Install
 
 Maven:

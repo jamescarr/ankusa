@@ -20,6 +20,8 @@ The first three share one local store and therefore one BEAM node (see the
 constraint below); `claim_check` is the only role that can run as its own
 container. Under `wal.type: none`, `edge` alone is a complete node.
 
+![edge, dispatch and storage run in one BEAM node around one RocksDB store — edge commits, dispatch delivers and retries, storage archives segments — while claim_check is the only role that can run on another node, reading the shared claim bucket.](diagrams/roles.png)
+
 One image, many deployments: *which* children start is a runtime config
 decision, never a build-time one. Embedding the library instead?
 [`elixir.md#roles-from-code`](elixir.md#roles-from-code) shows the same switch
@@ -247,6 +249,8 @@ Two things to get right once you run more than one node:
   are unique across nodes), so one claim-check gateway serves the claims of
   every node; see [`claim-check.md`](claim-check.md#a-dedicated-claim-store).
 
+![A load balancer lands each hook on one of N all-role nodes; each node fsyncs to its own store and volume, publishes to the shared broker after the commit, archives under its own prefix in one bucket, optionally shares routes, sources and fleet limits through Redis, and workers redeem claims at one gateway.](diagrams/fleet.png)
+
 If per-node state is what you want to get rid of, `wal.type: none` moves the
 durable copy to the broker: replicas then share no queue at all — no hook
 store, no bucket, no DLQ — and you scale them like any stateless web app. The
@@ -291,6 +295,8 @@ in-sync replica of the log's partition are lost together. The price is a hop and
 dependency: ack latency is the larger of the fsync and the broker confirm, and a
 node that cannot confirm in the log refuses (`503 intake_unavailable`) instead of
 acking on its disk alone.
+
+![Under wal.type: dual the writer runs a synced local write and an acks=all Kafka publish in parallel and the provider gets 201 only when both confirm; an open breaker refuses with 503 intake_unavailable, the reconciler completes half-persisted hooks, and recovery replays the log.](diagrams/dual-intake.png)
 
 **1. Provision the log.** One topic for the fleet (`ankusa.intake.<fleet>`, or
 `intake.topic`), created by you; the node never creates or alters one and refuses
@@ -457,6 +463,8 @@ listeners); secrets stay out of it as `${VAR}` references filled from `extraEnv`
 (`ANKUSA_ROLES=claim_check`). `deploy/helm/ankusa/ci/{disk,dual,none}-values.yaml`
 are one worked example per mode.
 
+![One chart release renders a StatefulSet with a PVC per pod for wal.type disk or dual (dual also confirming each hook in a Kafka intake topic) or a Deployment with an emptyDir and an HPA for none; every mode gets the Service, PDB, spread and NetworkPolicy, plus an optional claim-check Deployment.](diagrams/helm-chart.png)
+
 **The pod spec is the restricted Pod Security Standard.** The pod runs as uid 100 /
 gid 101 (`runAsNonRoot`), `readOnlyRootFilesystem: true` (the writable paths are the
 data volume and a 256 MiB `/tmp`, which is the release's `RELEASE_TMP`),
@@ -569,6 +577,8 @@ another region.
   regions, and consumers redeem claims at their own region's gateway. Sinks may be
   anywhere (TLS, the SSRF-safe egress rules apply), but the hook is durable in its home
   region before any of it leaves.
+
+![A global load balancer pins each tenant to a home region; each region runs its own fleet, intake topic and bucket and nothing replicates, except that every backup also goes to a bucket in another region, so losing a region costs the hooks acked since its last backup.](diagrams/multi-region.png)
 
 ## Upgrading between releases
 

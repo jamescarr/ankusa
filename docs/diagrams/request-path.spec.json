@@ -1,0 +1,40 @@
+{
+  "title": "Request path — wal.type: disk, from POST to 201",
+  "legend": true,
+  "nodes": [
+    {"id": "provider", "kind": "external-system", "label": "Provider", "sub": "Stripe · GitHub · any signer"},
+    {"id": "router", "kind": "service", "label": "Edge.Router", "sub": "413 · 404 · 429 before the body"},
+    {"id": "resolver", "kind": "content-based-router", "label": "RouteResolver", "sub": "URL → source + tenant"},
+    {"id": "sources", "kind": "datastore", "label": "SourceStore", "sub": "static · persistent · redis"},
+    {"id": "limiter", "kind": "service", "label": "Rate limits", "sub": "per IP · node · source · tenant", "badges": ["bulkhead"]},
+    {"id": "ingest", "kind": "service", "label": "Edge.Ingest", "sub": "envelope · stored headers · event_type"},
+    {"id": "verifier", "kind": "service", "label": "Verifier", "sub": "hmac · asymmetric · token · client cert"},
+    {"id": "quarantine", "kind": "invalid-message-channel", "label": "Quarantine pen", "sub": "on_verify_failure: quarantine → 202", "tags": ["bucket per source", "1 GiB cap"]},
+    {"id": "dedupe", "kind": "idempotent-receiver", "label": "Dedupe", "sub": "provider event key · TTL 72 h"},
+    {"id": "batcher", "kind": "service", "label": "Group-commit batcher", "sub": "4 partitions · max_batch 256"},
+    {"id": "store", "kind": "message-store", "label": "Store (RocksDB)", "sub": "one synced batch · seq assigned"},
+    {"id": "dispatch", "kind": "service", "label": "Dispatch", "sub": "due rows · breaker per sink key", "badges": ["retry", "circuit-breaker"]},
+    {"id": "sinks", "kind": "external-system", "label": "Sinks", "sub": "HTTP · brokers · streams"},
+    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead rows", "sub": "GET /v1/dlq · replay revives them", "tags": ["node-local", "retention 30 d"]},
+    {"id": "compactor", "kind": "service", "label": "Compactor", "sub": "roll 16 MiB or 30 s"},
+    {"id": "blob", "kind": "message-store", "label": "Blob store", "sub": "segments + index + catalogue"}
+  ],
+  "edges": [
+    {"from": "provider", "to": "router", "kind": "rpc", "message": "POST /webhooks/<source>", "label": "201 after fsync", "seq": 1},
+    {"from": "router", "to": "resolver", "kind": "rpc", "message": "resolve", "label": "404 unknown_source", "seq": 2},
+    {"from": "router", "to": "sources", "kind": "data", "label": "source lookup · 503 if unavailable", "seq": 3},
+    {"from": "router", "to": "limiter", "kind": "rpc", "message": "pre-read limits", "label": "429 before the body", "seq": 4, "route": "above"},
+    {"from": "router", "to": "ingest", "type": "event", "message": "raw body", "label": "≤ max_body_bytes", "seq": 5},
+    {"from": "ingest", "to": "verifier", "kind": "rpc", "message": "verify", "label": "401 reject · 202 quarantine · flag", "seq": 6},
+    {"from": "verifier", "to": "quarantine", "kind": "dlq", "label": "held, re-verified on release", "seq": 7},
+    {"from": "ingest", "to": "limiter", "kind": "rpc", "message": "tenant quota", "label": "429, nothing stored", "seq": 8},
+    {"from": "ingest", "to": "dedupe", "kind": "data", "label": "duplicate → 201, nothing new", "seq": 9},
+    {"from": "ingest", "to": "batcher", "type": "event", "message": "hook", "label": "caller blocks until commit", "seq": 10},
+    {"from": "batcher", "to": "store", "kind": "data", "label": "hook · rows · obligations", "seq": 11},
+    {"from": "store", "to": "dispatch", "kind": "data", "label": "due delivery rows"},
+    {"from": "dispatch", "to": "sinks", "type": "event", "message": "hook", "label": "at-least-once · 30 s attempt"},
+    {"from": "dispatch", "to": "dlq", "kind": "dlq", "label": "give up"},
+    {"from": "store", "to": "compactor", "kind": "data", "label": "archive obligations"},
+    {"from": "compactor", "to": "blob", "kind": "data", "label": "segment + index"}
+  ]
+}

@@ -13,6 +13,8 @@ dependency is `org.clojure/data.json`; HTTP goes through the JDK's own
 `java.net.http.HttpClient`. A client is an immutable value and safe to share
 across threads. It is a native Clojure library, not a wrapper over the Java SDK.
 
+![On the queue path the SDK decodes Sink.Message v1, sends malformed messages to a poison channel, and passes the inline body or the claim-redeemed, sha256-checked bytes to your idempotent handler; on the HTTP path it verifies the signature first; admin, routes and sources clients drive the control APIs.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/sdk-consumer.png)
+
 ## Install
 
 From Clojars, `io.github.jamescarr/ankusa-clj`:

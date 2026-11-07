@@ -7,16 +7,7 @@ object store and publishes a small **reference** in its place. Your worker turns
 and gets the exact bytes back, with an HTTP client and nothing else: no
 Elixir, no cloud SDK, no object-store credentials.
 
-```mermaid
-flowchart LR
-    P[Provider] -->|POST /webhooks/stripe| A[Ankusa]
-    A -->|body over inline_max_bytes| S[(object store)]
-    A -->|message + claim ref| Q[(queue)]
-    Q --> W[your worker]
-    W --> F[your auth layer<br/>mesh, Envoy, API gateway]
-    F -->|GET /v1/claims/...| G[claim-check gateway :4001]
-    G --> S
-```
+![Dispatch writes any body over 64 KiB once into a pack in the first available claim store and publishes a claim reference plus sha256 instead of the body; the worker redeems it through your auth layer at the read-only gateway on 4001 and checks the sha256 itself.](diagrams/claim-check.png)
 
 The machine-readable contract is
 [`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/claim_check.v1.yaml)
