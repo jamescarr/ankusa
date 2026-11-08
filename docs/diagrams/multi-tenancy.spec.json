@@ -2,21 +2,21 @@
   "title": "Catch-URL routing — from the URL to tenant-scoped storage and delivery",
   "legend": true,
   "nodes": [
-    {"id": "provider", "kind": "external-system", "label": "Provider", "sub": "posts a per-customer catch URL"},
-    {"id": "router", "kind": "service", "label": "Edge.Router", "sub": "guard → resolve → lookup", "badges": ["gateway"]},
-    {"id": "resolver", "kind": "content-based-router", "label": "RouteResolver", "sub": "Path · TenantPath · your module"},
-    {"id": "lookup", "kind": "service", "label": "Source lookup", "sub": "binds route, source and tenant"},
-    {"id": "sources", "kind": "datastore", "label": "SourceStore", "sub": "static · persistent · redis"},
-    {"id": "quota", "kind": "service", "label": "Tenant quota", "sub": "after verify, before commit", "badges": ["bulkhead"]},
-    {"id": "store", "kind": "message-store", "label": "Store", "sub": "tenant in every envelope"},
-    {"id": "claims", "kind": "message-store", "label": "Claim stores", "sub": "claims/tenant=<t>/…", "col": 0, "row": 4},
-    {"id": "dispatch", "kind": "service", "label": "Dispatch", "sub": "per-tenant in-flight window", "badges": ["retry"]},
-    {"id": "sink", "kind": "channel-adapter", "label": "Sink", "sub": "url · headers · secret per tenant"},
-    {"id": "acme", "kind": "external-system", "label": "Acme's receiver"},
-    {"id": "globex", "kind": "external-system", "label": "Globex's receiver"},
-    {"id": "erase", "kind": "service", "label": "Tenant erase job", "sub": "close → delete rows + claims → tombstone"},
-    {"id": "ops", "kind": "actor", "label": "Operator", "sub": "tenants:write"},
-    {"id": "binding-note", "kind": "note", "label": "A route bound to another tenant or source is the same 404. A shared source trusts the URL tenant only with a verifier or trust_url_tenant: true.", "attach": "lookup"}
+    {"id": "provider", "kind": "external-system", "label": "Provider", "sub": "posts a per-customer catch URL", "col": 0, "row": 0},
+    {"id": "router", "kind": "service", "label": "Edge.Router", "sub": "guard → resolve → lookup", "badges": ["gateway"], "col": 1, "row": 0},
+    {"id": "resolver", "kind": "content-based-router", "label": "RouteResolver", "sub": "Path · TenantPath · your module", "col": 2, "row": 0},
+    {"id": "lookup", "kind": "service", "label": "Source lookup", "sub": "binds route, source and tenant", "col": 2, "row": 1},
+    {"id": "sources", "kind": "datastore", "label": "SourceStore", "sub": "static · persistent · redis", "col": 3, "row": 0},
+    {"id": "quota", "kind": "service", "label": "Tenant quota", "sub": "after verify, before commit", "badges": ["bulkhead"], "col": 3, "row": 1},
+    {"id": "store", "kind": "message-store", "label": "Store", "sub": "tenant in every envelope", "col": 2, "row": 3},
+    {"id": "claims", "kind": "message-store", "label": "Claim stores", "sub": "claims/tenant=<t>/…", "col": 1, "row": 4},
+    {"id": "dispatch", "kind": "service", "label": "Dispatch", "sub": "per-tenant in-flight window", "badges": ["retry"], "col": 2, "row": 4},
+    {"id": "sink", "kind": "channel-adapter", "label": "Sink", "sub": "url · headers · secret per tenant", "col": 3, "row": 4},
+    {"id": "acme", "kind": "external-system", "label": "Acme's receiver", "col": 3, "row": 3},
+    {"id": "globex", "kind": "external-system", "label": "Globex's receiver", "col": 3, "row": 5},
+    {"id": "erase", "kind": "service", "label": "Tenant erase job", "sub": "close → delete rows + claims → tombstone", "col": 1, "row": 2},
+    {"id": "ops", "kind": "actor", "label": "Operator", "sub": "tenants:write", "col": 0, "row": 2},
+    {"id": "binding-note", "kind": "note", "label": "A route bound to another tenant or source is the same 404. A shared source trusts the URL tenant only with a verifier or trust_url_tenant: true.", "attach": "router"}
   ],
   "edges": [
     {"from": "provider", "to": "router", "kind": "rpc", "message": "POST /webhooks/acme/stripe", "label": "201 · 404 unknown_source · 429", "seq": 1},
@@ -25,13 +25,13 @@
     {"from": "lookup", "to": "sources", "kind": "data", "label": "fetch source"},
     {"from": "lookup", "to": "quota", "kind": "rpc", "message": "charge tenant", "label": "429 tenant_overload", "seq": 4},
     {"from": "lookup", "to": "store", "kind": "data", "label": "tenant_id = acme", "seq": 5},
-    {"from": "store", "to": "dispatch", "kind": "data", "label": "due rows per tenant", "seq": 6, "route": "below"},
+    {"from": "store", "to": "dispatch", "kind": "data", "label": "due rows per tenant", "seq": 6, "route": "straight"},
     {"from": "dispatch", "to": "claims", "kind": "data", "label": "large bodies"},
     {"from": "dispatch", "to": "sink", "type": "event", "message": "hook", "label": "ctx.tenant_id", "seq": 7},
     {"from": "sink", "to": "acme", "kind": "rpc", "message": "POST", "label": "Acme's URL + secret", "seq": 8},
     {"from": "sink", "to": "globex", "kind": "rpc", "message": "POST", "label": "Globex's URL + secret", "seq": 8},
     {"from": "ops", "to": "erase", "kind": "control", "message": "DELETE /v1/tenants/acme", "label": "202 job"},
     {"from": "erase", "to": "store", "kind": "data", "label": "rows + tombstone · new hooks 503"},
-    {"from": "erase", "to": "claims", "kind": "data", "label": "prefix delete", "route": "below"}
+    {"from": "erase", "to": "claims", "kind": "data", "label": "prefix delete", "route": "straight"}
   ]
 }

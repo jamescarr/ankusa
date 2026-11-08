@@ -5,16 +5,16 @@
     {"id": "aws", "label": "Amazon SQS", "kind": "broker"}
   ],
   "nodes": [
-    {"id": "dispatch", "kind": "service", "label": "Dispatch attempt", "sub": "retry policy → DLQ", "badges": ["retry", "circuit-breaker"], "col": 0, "row": 1},
-    {"id": "claim", "kind": "claim-check", "label": "Claim check", "sub": "body > inline_max_bytes (64 KiB)", "col": 1, "row": 0},
+    {"id": "dispatch", "kind": "service", "label": "Dispatch attempt", "sub": "retry policy → DLQ", "badges": ["retry", "circuit-breaker"], "col": 1, "row": 0},
+    {"id": "claim", "kind": "claim-check", "label": "Claim check", "sub": "body > inline_max_bytes (64 KiB)", "col": 0, "row": 1},
     {"id": "encode", "kind": "envelope-wrapper", "label": "Sink.Message v1", "sub": "body + message attributes", "col": 1, "row": 1},
-    {"id": "batcher", "kind": "service", "label": "Sink.Batcher", "sub": "10 entries · 256 KiB · 20 ms linger", "badges": ["bulkhead"], "col": 2, "row": 1},
-    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead delivery rows", "sub": "QueueDoesNotExist · AccessDenied · too large", "tags": ["node-local"], "col": 2, "row": 3},
-    {"id": "creds", "kind": "service", "label": "AWS credentials", "sub": "opts → env → IRSA → IMDSv2", "col": 3, "row": 0},
-    {"id": "signer", "kind": "channel-adapter", "label": "SigV4 request", "sub": "SendMessageBatch", "col": 4, "row": 1},
-    {"id": "queue", "kind": "p2p-channel", "label": "hooks.fifo", "sub": "never created by the sink", "tags": ["FIFO group=tenant/source", "dedup id = hook id"], "group": "aws", "col": 5, "row": 1},
-    {"id": "consumer", "kind": "service", "label": "Worker / Lambda", "sub": "deletes after handling", "badges": ["idempotent", "polling"], "col": 6, "row": 1},
-    {"id": "fifo-note", "kind": "note", "label": "FIFO: MessageGroupId = tenant/source (the lane key when ordered), MessageDeduplicationId = hook id or id:replay:<id>. A standard queue gets neither unless message_group_id is set.", "attach": "signer"}
+    {"id": "batcher", "kind": "service", "label": "Sink.Batcher", "sub": "10 entries · 256 KiB · 20 ms linger", "badges": ["bulkhead"], "col": 1, "row": 2},
+    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead delivery rows", "sub": "QueueDoesNotExist · AccessDenied · too large", "tags": ["node-local"], "col": 0, "row": 2},
+    {"id": "creds", "kind": "service", "label": "AWS credentials", "sub": "opts → env → IRSA → IMDSv2", "col": 0, "row": 3},
+    {"id": "signer", "kind": "channel-adapter", "label": "SigV4 request", "sub": "SendMessageBatch", "col": 1, "row": 3},
+    {"id": "queue", "kind": "p2p-channel", "label": "hooks.fifo", "sub": "never created by the sink", "tags": ["FIFO group=tenant/source", "dedup id = hook id"], "group": "aws", "col": 2, "row": 4},
+    {"id": "consumer", "kind": "service", "label": "Worker / Lambda", "sub": "deletes after handling", "badges": ["idempotent", "polling"], "col": 2, "row": 5},
+    {"id": "fifo-note", "kind": "note", "label": "FIFO: MessageGroupId = tenant/source (the lane key when ordered), MessageDeduplicationId = hook id or id:replay:<id>. A standard queue gets neither unless message_group_id is set.", "attach": "consumer"}
   ],
   "edges": [
     {"from": "dispatch", "to": "encode", "type": "event", "message": "hook", "seq": 1},
