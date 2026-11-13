@@ -349,7 +349,34 @@ per group). Only the verdict is cached; the policy deadline, `on_unavailable`
 and `serve_stale_ms` behave exactly as above, and the resource template decides
 what shares a decision — the default `{{ space }}/{{ key }}` makes every object
 its own, a coarser one (or an OpenFGA `resources` entry) makes a folder one
-call. Options and examples: [the gateway
+call.
+
+The `table` authorizer takes permissions from tables somebody else maintains:
+NDJSON objects in a store, a paged HTTP endpoint, or a customer's Postgres
+database (`ankusa_gateway_postgres` and its `lookup_query`), reduced to rows of
+`principal`, `action`, `space`, `prefix` and `effect`. A row matches the
+caller's identities (by default `user:<id>`, each group, each tenant), the
+action or `*`, the space or `*`, and the key or one of its ancestor
+directories; any deny wins, any allow allows, and no match abstains. In
+`mode: snapshot` the rows are loaded into an ETS table at boot and every
+`refresh_ms`, so a decision never sits in the customer's database's latency;
+`mode: lookup` asks the source once per cache miss. A snapshot that has not
+loaded holds `/ready` at `503` for at most `ready_timeout_ms`, and one older
+than `stale_after_ms` fails closed. Permission rows may not live under a
+`gateway.spaces` space: the configuration refuses the overlap.
+
+```yaml
+gateway:
+  authz:
+    authorizers:
+      teamie:
+        type: table
+        source: {type: object, store: {type: s3, s3: {bucket: perms, region: eu-west-1}}, key: gateway/permissions.ndjson}
+    policies:
+      documents: {mode: first, steps: [teamie]}
+```
+
+Every key, source and range: [the gateway
 section](configuration.md#the-gateway-config_version-2).
 
 Neither side re-derives the same answer for every request:

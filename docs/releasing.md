@@ -10,7 +10,7 @@ the files in it decide where it publishes:
 
 | Package | Kind | Tag | Published by |
 | --- | --- | --- | --- |
-| `ankusa`, `ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats`, `ankusa_redis`, `ankusa_gateway`, `async_api_spex` | Hex (`mix.exs`) | `<pkg>-vX.Y.Z` | [`release.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release.yml) |
+| `ankusa`, `ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats`, `ankusa_redis`, `ankusa_gateway`, `ankusa_gateway_postgres`, `async_api_spex` | Hex (`mix.exs`) | `<pkg>-vX.Y.Z` | [`release.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release.yml) |
 | `ankusa_server` | Docker image `jamescarr/ankusa` (`Dockerfile`, `IMAGE`) | `ankusa_server-vX.Y.Z` | [`docker.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/docker.yml) |
 | `ankusa_gateway_server` | Docker image `jamescarr/ankusa-gateway` (`Dockerfile`, `IMAGE`) | `ankusa_gateway_server-vX.Y.Z` | [`docker.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/docker.yml) |
 | `sdk-typescript` | npm package `ankusa` (`package.json`) | `sdk-typescript-vX.Y.Z` | [`release-npm.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-npm.yml) |
@@ -101,8 +101,10 @@ with nothing else to say gets a one-line "version aligned with `ankusa` X.Y"
 entry, and the adapters' `{:ankusa, "~> X.Y"}` follows. Patch versions are
 each package's own: a fix to one is `X.Y.1` of that one alone.
 
-`ankusa_gateway` (Hex) and `ankusa_gateway_server` (the
-`jamescarr/ankusa-gateway` image) keep their own SemVer, starting at `0.1.0`.
+`ankusa_gateway` (Hex), `ankusa_gateway_postgres` (Hex, which follows
+`ankusa_gateway`'s SemVer and requires `{:ankusa_gateway, "~> 0.1"}`) and
+`ankusa_gateway_server` (the `jamescarr/ankusa-gateway` image) keep their own
+SemVer, starting at `0.1.0`.
 `ankusa_gateway` names its core requirement (`{:ankusa, "~> 0.8"}`), which is
 what pins a gateway release to the core releases it builds against; the image
 bundles the two from this checkout. Neither is tied to `ankusa_server`'s

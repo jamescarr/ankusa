@@ -57,6 +57,14 @@ defmodule Ankusa.Gateway.Supervisor do
   # Tables that live as long as this supervisor: it owns them.
   defp tables!(instance) do
     :ets.new(Authz.log_table(instance), [:named_table, :public, :set])
+
+    :ets.new(Authz.Table.tables_table(instance), [
+      :named_table,
+      :public,
+      :set,
+      read_concurrency: true
+    ])
+
     Ankusa.Gateway.Objects.Budget.setup(instance)
   end
 

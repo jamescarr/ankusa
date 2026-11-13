@@ -8,6 +8,24 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The `table` authorizer: permissions from the customer's own tables.**
+  `Ankusa.Gateway.Authz.Table` decides from rows of `principal`, `action`,
+  `space`, `prefix` and `effect`, matched against the caller's identities
+  (`user:<id>`, each group, each tenant by default), the action or `*`, the
+  space or `*`, and the key or one of its ancestor directories; any deny wins,
+  no match abstains. `mode: :snapshot` loads the rows into an ETS table at boot
+  and every `refresh_ms` (`Ankusa.Gateway.Authz.Table.Snapshot`; `version/2`
+  skips an unchanged load; `max_rows`/`max_bytes` keep the previous table;
+  `stale_after_ms` fails closed; a new generation orphans the old decisions),
+  and `mode: :lookup` asks the source once per cache miss. A snapshot that has
+  never loaded holds `/ready` at `503` for at most `ready_timeout_ms`.
+- **Table sources in the library**: `Source.Object` (NDJSON objects in a store,
+  by `key` or `prefix`) and `Source.Http` (paged JSON over https). A third,
+  `ankusa_gateway_postgres`, is its own package. An object source whose store
+  and prefix overlap a `gateway.spaces` space is refused at boot.
+- `ankusa_gateway_table_refreshes_total`, `ankusa_gateway_table_rows` and
+  `ankusa_gateway_table_bytes`, from `[:ankusa, :gateway, :table_refresh]`.
+
 - **The gateway, carved out of core (ADR 0005).** `Ankusa.Gateway` serves the
   claims API that was `Ankusa.ClaimCheck.Router` (`GET|HEAD
   /v1/claims/:tenant_id/:claim_id`, signed refs, ranges, the manifest check),

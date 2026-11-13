@@ -152,6 +152,32 @@ authorizers: %{
 }
 ```
 
+`Ankusa.Gateway.Authz.Table` takes permissions from tables somebody else
+maintains: rows of `principal`, `action`, `space`, `prefix` and `effect`, from
+an NDJSON object in a store (`Ankusa.Gateway.Authz.Table.Source.Object`), a
+paged HTTP endpoint (`Source.Http`), or a customer's Postgres database
+(`ankusa_gateway_postgres`, its own package so `:postgrex` is opt-in). In
+`mode: :snapshot` the rows load into an ETS table at boot and every
+`refresh_ms`; a new snapshot orphans the decisions cached from the old one, so
+a refresh is visible at once. `mode: :lookup` asks the source once per cache
+miss instead.
+
+```elixir
+authorizers: %{
+  "perms" =>
+    {Ankusa.Gateway.Authz.Table,
+     %{mode: :snapshot,
+       source: {Ankusa.Gateway.Authz.Table.Source.Http,
+                %{url: "https://permissions.internal.example/rows"}}}}
+}
+```
+
+A row matches the caller's identities (`user:<id>`, each group, each tenant by
+default), the action or `*`, the space or `*`, and the key or one of its
+ancestor directories; any deny wins, any allow allows, and no match abstains.
+A snapshot that has not loaded holds `/ready` at `503` for at most
+`ready_timeout_ms`; one older than `stale_after_ms` fails closed.
+
 An authorizer's `kind/1` says where it runs: `:inline` in the request,
 `:cached` behind the decision cache, `:remote` behind the cache and one
 `Ankusa.Gateway.Caller` per backend (coalesced, bounded, batched, behind a

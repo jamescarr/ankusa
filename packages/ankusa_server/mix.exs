@@ -43,7 +43,9 @@ defmodule AnkusaServer.MixProject do
       {:ankusa_nats, path: "../ankusa_nats"},
       {:ankusa_redis, path: "../ankusa_redis"},
       # The gateway (`claim_check` role): `Ankusa.Gateway`, beside the instance.
-      {:ankusa_gateway, path: "../ankusa_gateway"},
+      {:ankusa_gateway, path: "../ankusa_gateway", override: true},
+      # The `table` authorizer's Postgres source (the gateway's YAML names it).
+      {:ankusa_gateway_postgres, path: "../ankusa_gateway_postgres"},
       # The gateway image's package: the YAML machinery both images share (the
       # document pipeline, the typed accessors, the common sections, secrets,
       # logging, tracing) lives there once.
