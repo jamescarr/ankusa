@@ -115,6 +115,61 @@ An authorizer's `kind/1` says where it runs: `:inline` in the request,
 breaker). Authentication is cached too, under the credential's SHA-256, never
 past its expiry. Both caches are bounded (`auth.cache`, `authz.cache`).
 
+## The objects API
+
+A **space** (`spaces`) is an object store, a prefix in it and a policy: the
+gateway then serves `GET`/`HEAD`/`PUT`/`DELETE` on
+`/v1/objects/{space}/{key}` and one page of a listing on
+`/v1/objects/{space}?prefix=&delimiter=&cursor=&limit=`, each authorized by
+the space's policy. One space and one policy over it:
+
+```elixir
+Ankusa.Gateway.Config.new(
+  instance: :default,
+  authz: %{
+    authorizers: %{
+      "teams" =>
+        {Ankusa.Gateway.Authz.Rules,
+         %{
+           rules: [
+             %{effect: :allow, actions: [:read, :list], spaces: ["docs"],
+               keys: ["teams/{team}/**"], when: %{groups_any: ["team-{{ vars.team }}"]}}
+           ]
+         }}
+    },
+    policies: %{"docs" => %{mode: :first, steps: ["teams"]}}
+  },
+  spaces: %{
+    "docs" => %{
+      store: {Ankusa.BlobStore.S3, bucket: "reports", region: "us-east-1"},
+      prefix: "docs/",
+      policy: "docs",
+      max_object_bytes: 16_777_216
+    }
+  },
+  objects: %{max_inflight_bytes: 536_870_912}
+)
+```
+
+* Keys: valid UTF-8, 1 to 1024 bytes, at most 32 segments, none empty, `.` or
+  `..`, none starting with `.ankusa`; a path's segments are percent-decoded
+  once and a decoded `/` or `\` is refused. `my%20file.txt` and
+  `?key=my+file.txt` name one object.
+* Sizes: `PUT` needs `content-length` and is refused past the space's
+  `max_object_bytes` (`413`); a `GET` that would send more is `422
+  object_too_large`. Buffered bytes are capped by
+  `objects.max_inflight_bytes` (`503 overloaded` past it).
+* One `bytes` range (`206`, `416`), `If-None-Match` (`304`) and, on `PUT`,
+  `if-none-match: *` / `if-match: "<version>"` (`412`) are the conditions.
+  Metadata is `x-ankusa-meta-<name>` in and out.
+* `spaces.<name>.read_only` answers `405` on `PUT` and `DELETE`.
+* Store scope: an `s3`, `gcs` or LocalFS store; two spaces on one store may
+  not have overlapping prefixes.
+
+Wire format: `priv/openapi/gateway.v1.yaml`. The operator's view, with the
+statuses and headers: the
+[objects API section](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md#the-objects-api).
+
 ## Metrics
 
 Add `Ankusa.Gateway.Metrics` to core's `metrics.extra`:

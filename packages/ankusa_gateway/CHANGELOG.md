@@ -68,3 +68,9 @@ follows [Semantic Versioning](https://semver.org/).
 - `bench/authz_bench.exs` (`mise run bench:gateway`): self-asserting budgets
   for a `rules` decision, a cached remote decision, a warm authentication and
   the auth overhead on a claim read.
+- **The objects API** (`gateway.spaces`, `gateway.objects`): `GET`/`HEAD`/
+  `PUT`/`DELETE` on `/v1/objects/:space/*key` and one page of a listing on
+  `/v1/objects/:space`, buffered and size-capped (`max_object_bytes`,
+  `read_first_bytes`, a byte budget), decided by the space's policy; one
+  canonical key however it arrives, `Ankusa.Gateway.Spaces`,
+  `Ankusa.Gateway.Http.store_error/2` and `priv/openapi/gateway.v1.yaml`.

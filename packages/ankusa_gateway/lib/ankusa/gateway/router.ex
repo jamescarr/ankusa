@@ -7,6 +7,9 @@ defmodule Ankusa.Gateway.Router do
     * `GET /ready` — readiness (`Ankusa.Gateway.Health`): `200`, or `503` with
       `retry-after: 1`.
     * `GET|HEAD /v1/claims/:tenant_id/:claim_id` — `Ankusa.Gateway.Claims`.
+    * `GET /v1/objects/:space` (one page of a listing) and
+      `GET|HEAD|PUT|DELETE /v1/objects/:space/*key` — `Ankusa.Gateway.Objects`;
+      the key is read from the raw `conn.request_path`, never from the glob.
     * anything else — `404 {"error":"not_found"}`.
 
   Mount it with the instance it serves: `plug: {Ankusa.Gateway.Router,
@@ -44,6 +47,14 @@ defmodule Ankusa.Gateway.Router do
 
   head "/v1/claims/:tenant_id/:claim_id" do
     Ankusa.Gateway.Claims.serve(conn, tenant_id, claim_id)
+  end
+
+  get "/v1/objects/:space" do
+    Ankusa.Gateway.Objects.list(conn, space)
+  end
+
+  match "/v1/objects/:space/*_key" do
+    Ankusa.Gateway.Objects.object(conn, space)
   end
 
   match _ do

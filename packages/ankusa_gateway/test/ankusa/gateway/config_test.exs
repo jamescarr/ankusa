@@ -4,6 +4,7 @@ defmodule Ankusa.Gateway.ConfigTest do
   use ExUnit.Case, async: true
 
   alias Ankusa.Admin.Auth.Token
+  alias Ankusa.BlobStore.LocalFS
   alias Ankusa.Gateway.Config
 
   @tls_dir Path.expand("../../../../ankusa/test/fixtures/tls", __DIR__)
@@ -322,5 +323,91 @@ defmodule Ankusa.Gateway.ConfigTest do
     refute json =~ public["x"]
     assert shown["port"] == 4001
     assert shown["claims"]["policy"] == "claims"
+  end
+
+  describe "spaces and objects" do
+    @tag :tmp_dir
+    test "a space loads with its defaults, and its store opts carry the objects keys", %{
+      tmp_dir: dir
+    } do
+      config =
+        Config.new(
+          spaces: %{"docs" => %{store: {LocalFS, root: dir}, policy: "claims"}},
+          objects: %{timeout_ms: 2_000}
+        )
+
+      space = config.spaces["docs"]
+
+      assert %{
+               name: "docs",
+               prefix: "",
+               max_object_bytes: 67_108_864,
+               read_first_bytes: 1_048_576,
+               read_only: false
+             } = space
+
+      assert Config.store_opts(config, space) == [
+               root: dir,
+               op_deadline_ms: 30_000,
+               timeout_ms: 2_000,
+               retries: 1
+             ]
+    end
+
+    @tag :tmp_dir
+    test "two spaces on one store must not overlap; prefixes obey the key rules", %{tmp_dir: dir} do
+      store = {LocalFS, root: dir}
+      space = fn prefix -> %{store: store, prefix: prefix, policy: "claims"} end
+
+      assert %{} = Config.new(spaces: %{"a" => space.("a/"), "b" => space.("b/")}).spaces
+
+      for {a, b} <- [{"", "a/"}, {"a/", "a/"}, {"a/", "a/b/"}] do
+        assert_raise ArgumentError, ~r/share a store and their prefixes overlap/, fn ->
+          Config.new(spaces: %{"one" => space.(a), "two" => space.(b)})
+        end
+      end
+
+      # Two stores apart: overlapping prefixes are fine.
+      other = %{store: {LocalFS, root: Path.join(dir, "other")}, prefix: "", policy: "claims"}
+      assert %{} = Config.new(spaces: %{"one" => space.(""), "two" => other}).spaces
+
+      for {prefix, message} <- [
+            {"docs/.ankusa/", ~r/not a valid key prefix/},
+            {"docs", ~r/must be empty or end with \//},
+            {"a//", ~r/not a valid key prefix/},
+            {"../", ~r/not a valid key prefix/}
+          ] do
+        assert_raise ArgumentError, message, fn ->
+          Config.new(spaces: %{"docs" => space.(prefix)})
+        end
+      end
+    end
+
+    @tag :tmp_dir
+    test "every error names its key", %{tmp_dir: dir} do
+      store = {LocalFS, root: dir}
+
+      for {spaces, objects, message} <- [
+            {%{"claims" => %{store: store, policy: "claims"}}, %{}, "gateway.spaces.claims"},
+            {%{"Docs" => %{store: store, policy: "claims"}}, %{}, "gateway.spaces: a space name"},
+            {%{"docs" => %{store: store, policy: "nope"}}, %{}, "gateway.spaces.docs.policy"},
+            {%{"docs" => %{store: store}}, %{}, "gateway.spaces.docs.policy"},
+            {%{"docs" => %{store: {LocalFS, []}, policy: "claims"}}, %{}, "needs :root"},
+            {%{"docs" => %{store: {String, []}, policy: "claims"}}, %{},
+             "does not implement the object operations"},
+            {%{"docs" => %{store: store, policy: "claims", colour: "red"}}, %{},
+             "unknown Ankusa.Gateway.Config key: gateway.spaces.docs.colour"},
+            {%{"docs" => %{store: store, policy: "claims", read_first_bytes: 10}}, %{},
+             "gateway.spaces.docs.read_first_bytes"},
+            {%{"docs" => %{store: store, policy: "claims"}}, %{max_inflight_bytes: 1_000},
+             "gateway.objects.max_inflight_bytes (1000) must be at least"},
+            {%{}, %{retries: 11}, "gateway.objects.retries"}
+          ] do
+        error =
+          assert_raise ArgumentError, fn -> Config.new(spaces: spaces, objects: objects) end
+
+        assert error.message =~ message
+      end
+    end
   end
 end
