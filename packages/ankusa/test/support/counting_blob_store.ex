@@ -135,4 +135,21 @@ defmodule Ankusa.Test.CountingBlobStore do
   end
 
   defp local(opts), do: Keyword.take(opts, [:root])
+
+  # The object operations carry their own per-call keys (`:if`, `:metadata`,
+  # ...), so `opts` is passed through whole: `LocalFS` ignores the test hooks.
+  @impl true
+  def head_object(instance, key, opts), do: LocalFS.head_object(instance, key, opts)
+
+  @impl true
+  def get_object(instance, key, opts), do: LocalFS.get_object(instance, key, opts)
+
+  @impl true
+  def put_object(instance, key, data, opts), do: LocalFS.put_object(instance, key, data, opts)
+
+  @impl true
+  def delete_object(instance, key, opts), do: LocalFS.delete_object(instance, key, opts)
+
+  @impl true
+  def list_page(instance, prefix, opts), do: LocalFS.list_page(instance, prefix, opts)
 end
