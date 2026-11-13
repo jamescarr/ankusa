@@ -41,7 +41,7 @@ defmodule Ankusa.Admin.Auth.JWT.Keys do
   alias Ankusa.Admin.Auth
   alias Ankusa.HttpClient
 
-  @sections [:admin, :routes_admin, :claim_check]
+  @sections [:admin, :routes_admin]
   @max_response_bytes 1_048_576
   @max_keys 100
   @fetch_timeout_ms 5_000

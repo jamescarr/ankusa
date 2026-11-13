@@ -1324,7 +1324,7 @@ defmodule Ankusa.Admin.Router do
 
   defp clamp_limit(limit), do: limit |> max(0) |> min(@max_limit)
 
-  # A `:claim_check`-only node with the admin API on runs no store, and the
+  # A gateway-only node (`roles: []`) with the admin API on runs no store, and the
   # store is node-local anyway: a missing or unreadable one is `%{}`, not a
   # 500.
   defp safe_stats(instance) do

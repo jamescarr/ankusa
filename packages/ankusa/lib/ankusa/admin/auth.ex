@@ -1,8 +1,10 @@
 defmodule Ankusa.Admin.Auth do
   @moduledoc """
-  Authentication and authorization for the three control planes: the admin API
-  (`Ankusa.Admin.Router`), the route-management API (`Ankusa.Routes.Router`)
-  and the claim-check gateway (`Ankusa.ClaimCheck.Router`).
+  Authentication and authorization for the two control planes: the admin API
+  (`Ankusa.Admin.Router`) and the route-management API
+  (`Ankusa.Routes.Router`). The claim-check gateway authenticates with its own
+  chain (`Ankusa.Gateway.Authn`, package `ankusa_gateway`), which reuses the
+  token, JWT and certificate checks below.
 
   Each router mounts this module as a plug ahead of `:match`. The plug
   authenticates the request, assigns the `Ankusa.Principal` to
@@ -13,8 +15,7 @@ defmodule Ankusa.Admin.Auth do
 
   ## Modes
 
-  Each listener has its own `auth` block (`admin.auth`, `routes.admin.auth`,
-  `claim_check.auth`):
+  Each listener has its own `auth` block (`admin.auth`, `routes.admin.auth`):
 
       %{
         mode: :none | :token | :jwt | :mtls,
@@ -56,7 +57,7 @@ defmodule Ankusa.Admin.Auth do
   alias Ankusa.{Config, Http, Principal, Verifier}
 
   @typedoc "Which control plane the plug guards."
-  @type section :: :admin | :routes_admin | :claim_check
+  @type section :: :admin | :routes_admin
 
   @typedoc "What an implementation of `c:authenticate/2` is given."
   @type opts :: %{instance: atom(), section: section(), config: map()}
@@ -132,7 +133,6 @@ defmodule Ankusa.Admin.Auth do
   @spec auth_config(Config.t(), section()) :: map()
   def auth_config(%Config{admin: %{auth: auth}}, :admin), do: auth
   def auth_config(%Config{routes: %{admin: %{auth: auth}}}, :routes_admin), do: auth
-  def auth_config(%Config{claim_check: %{auth: auth}}, :claim_check), do: auth
 
   defp unauthenticated(conn) do
     conn
@@ -455,6 +455,27 @@ defmodule Ankusa.Admin.Auth do
       raise ArgumentError,
             "#{key}.jwt needs #{key}.jwt.jwks_url or #{key}.jwt.keys with #{key}.mode: :jwt"
     end
+  end
+
+  @doc false
+  # The rules of one `jwt` block — its keys, the https JWKS URL, the static
+  # keys, the ranges and claim names, then what verifying needs (an issuer, an
+  # audience, and a JWKS URL or keys) — for a verifier outside core that keeps
+  # keys of its own beside these (`ankusa_gateway`'s `jwt` authenticator, which
+  # checks its own unknown keys first). Messages name `key`; returns the block
+  # with its defaults.
+  @spec jwt_block!(term(), String.t()) :: map()
+  def jwt_block!(jwt, key) do
+    jwt = jwt!(jwt, key)
+
+    if is_nil(jwt.issuer), do: raise(ArgumentError, "#{key}.issuer must be set")
+    if jwt.audience in [nil, []], do: raise(ArgumentError, "#{key}.audience must be set")
+
+    if is_nil(jwt.jwks_url) and jwt.keys == [] do
+      raise ArgumentError, "#{key} needs jwks_url or keys"
+    end
+
+    jwt
   end
 
   defp optional_string!(jwt, field, key) do

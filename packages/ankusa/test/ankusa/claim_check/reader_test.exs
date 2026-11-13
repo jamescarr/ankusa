@@ -1,7 +1,7 @@
 defmodule Ankusa.ClaimCheck.ReaderTest do
   @moduledoc """
   The claim gateway's read path under load: `Ankusa.ClaimCheck.Cache` and
-  `Ankusa.ClaimCheck.Reader` started as a `:claim_check` node starts them,
+  `Ankusa.ClaimCheck.Reader` started as a gateway node starts them,
   over one `CountingBlobStore` claim store that reports every ranged read.
   """
 
@@ -22,7 +22,7 @@ defmodule Ankusa.ClaimCheck.ReaderTest do
 
   # One claim store on a tmp root, reporting each ranged read as
   # `{:blob_range, 0}`, under `claim_check` merged into the config; then the
-  # processes a `:claim_check` node reads through.
+  # processes a gateway node reads through.
   defp start_reader(inst, store_opts \\ [], claim_check \\ %{}) do
     root = Path.join(System.tmp_dir!(), "ankusa_claims_#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf(root) end)

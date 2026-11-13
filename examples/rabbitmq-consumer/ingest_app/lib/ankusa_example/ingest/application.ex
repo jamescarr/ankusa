@@ -16,9 +16,10 @@ defmodule AnkusaExample.Ingest.Application do
   exceeds `INLINE_MAX_BYTES`). No collision, no coordination needed between
   them.
 
-  The same image also runs as the standalone `:claim_check`-role gateway
+  The same image also runs as the standalone claim-check gateway
   (`ANKUSA_ROLES=claim_check` — see `docker-compose.yml`'s `claim-check`
-  service): both containers point `storage.blob_store` at the same S3
+  service: a core instance with no role, and `Ankusa.Gateway` from the
+  `ankusa_gateway` package beside it): both containers point `storage.blob_store` at the same S3
   bucket, so a claim ref checked in by the ingest node (using its own S3
   credentials) redeems through the claim-check node's HTTP API — the surface
   the worker actually calls, since the worker holds no S3 credentials of its
@@ -30,38 +31,59 @@ defmodule AnkusaExample.Ingest.Application do
 
   @impl true
   def start(_type, _args) do
-    config = build_config()
+    {roles, gateway?} = roles()
+    config = build_config(roles)
+    gateway = if gateway?, do: [{Ankusa.Gateway, gateway_config(config)}], else: []
 
     Logger.info(
       "[ankusa-example] starting: roles=#{inspect(config.roles)} port=#{config.port} " <>
-        "claim_check_port=#{config.claim_check.port} exchange=#{exchange()} " <>
+        "gateway=#{if gateway?, do: env_int("CLAIM_CHECK_PORT", 4001), else: "off"} exchange=#{exchange()} " <>
         "s3_bucket=#{env("S3_BUCKET", "ankusa-example")} s3_endpoint=#{env("S3_ENDPOINT", "http://localhost:4566")}"
     )
 
-    Supervisor.start_link([{Ankusa.Instance, config}], strategy: :one_for_one, name: __MODULE__)
+    Supervisor.start_link([{Ankusa.Instance, config}] ++ gateway,
+      strategy: :one_for_one,
+      name: __MODULE__
+    )
   end
 
-  defp build_config do
+  defp build_config(roles) do
     Ankusa.Config.new(
       instance: :default,
       port: env_int("PORT", 4000),
       data_dir: env("DATA_DIR", "./data"),
-      roles: roles(),
+      roles: roles,
       storage: %{blob_store: {Ankusa.BlobStore.S3, s3_opts()}},
-      source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => source()}},
-      claim_check: %{
-        port: env_int("CLAIM_CHECK_PORT", 4001),
-        # reached as http://claim-check:4001 from the other containers
-        ip: "0.0.0.0",
-        # Demo: the compose network is the boundary. Real deployments set
-        # auth.mode to :token, :jwt or :mtls (docs/configuration.md).
-        auth: %{mode: :none, allow_insecure: true}
-      }
+      source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => source()}}
     )
   end
 
+  # The gateway runs beside the instance, after it, on the same instance name.
+  defp gateway_config(config) do
+    Ankusa.Gateway.Config.new(
+      instance: config.instance,
+      port: env_int("CLAIM_CHECK_PORT", 4001),
+      # reached as http://claim-check:4001 from the other containers
+      ip: "0.0.0.0",
+      # Demo: the compose network is the boundary. Real deployments list
+      # authenticators (token, jwt, mtls) under auth.authenticators.
+      auth: %{allow_insecure: true}
+    )
+  end
+
+  # `ANKUSA_ROLES` as the images read it: `claim_check` is the gateway, which
+  # runs beside the instance; core gets the rest (none at all is a
+  # gateway-only node).
   defp roles do
-    Ankusa.Config.parse_roles!(System.get_env("ANKUSA_ROLES", "edge,dispatch,storage"))
+    names =
+      "ANKUSA_ROLES"
+      |> System.get_env("edge,dispatch,storage")
+      |> String.split(",", trim: true)
+      |> Enum.map(&String.trim/1)
+
+    {core, gateway} = Enum.split_with(names, &(&1 != "claim_check"))
+    roles = if core == [], do: [], else: Ankusa.Config.parse_roles!(Enum.join(core, ","))
+    {roles, gateway != []}
   end
 
   # A single zero-config `demo` source, matching the root project's own

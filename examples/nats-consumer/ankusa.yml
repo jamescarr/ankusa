@@ -2,6 +2,8 @@
 # with large bodies checked in to the claim-check gateway on this same node.
 # Every key, at its default: https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/reference.yml
 
+config_version: 2
+
 node:
   roles: [edge, dispatch, storage, claim_check]
   data_dir: /var/lib/ankusa
@@ -13,12 +15,13 @@ admin:
   # Demo: published on 127.0.0.1 only. Real deployments set auth.mode.
   auth: {mode: none, allow_insecure: true}
 
-claim_check:
+gateway:
   port: 4001
   # the worker calls http://ankusa:4001
   ip: 0.0.0.0
-  # Demo: the compose network is the boundary. Real deployments set auth.mode.
-  auth: {mode: none, allow_insecure: true}
+  # Demo: the compose network is the boundary. Real deployments list
+  # authenticators (token, jwt, mtls) under auth.authenticators.
+  auth: {allow_insecure: true}
 
 # Short on purpose, so a missing stream dead-letters in seconds, not minutes:
 # 6 attempts over roughly 8-15s. The default retries for 24 hours (`max_elapsed_ms`), backing off to 5 min.

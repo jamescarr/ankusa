@@ -174,9 +174,9 @@ defmodule Ankusa.HealthTest do
     # `wal: :disk` with the defaults: the store, and the backup the fixture turns on.
     assert Map.keys(body) |> Enum.sort() == [:backup, :instance, :status, :store]
 
-    # A node that runs no store (only the claim check gateway) has no `store`
+    # A node that runs no store (a gateway-only node, no role) has no `store`
     # check, and the sinks one is for `wal: :none` alone.
-    refute Health.Check.Store.applies?(Ankusa.Config.new(roles: [:claim_check]))
+    refute Health.Check.Store.applies?(Ankusa.Config.new(roles: []))
     refute Health.Check.Sinks.applies?(config)
 
     # `wal: :none` still runs the store (quarantine, audit): both checks apply.

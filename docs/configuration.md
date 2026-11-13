@@ -72,7 +72,7 @@ is the [key reference](#ankusa-config) below.
 | Section | Keys (default) |
 | --- | --- |
 | `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`), `min_free_bytes` (unset = no check; the free bytes `data_dir`'s file system must keep, or `/ready` answers `503` with `disk: failing`; see [`/ready`](deployment.md#running-the-container)), `region` (unset; a non-empty string of at most 64 bytes, e.g. `eu-west-1`: stamped on every queue message as `region` and on the AsyncAPI document as `x-ankusa-region`; core's `dispatch.region`) |
-| `config_version` | `1`: the version of the file format. Optional; an older file is migrated on load, a newer one is refused. See [Reloading the config](#reloading-the-config) |
+| `config_version` | `2`: the version of the file format. Optional; a file without the key is version 1 and is migrated on load (`claim_check.port`/`ip`/`tls`/`auth`/`max_concurrent_reads`/`integrity_check` move under `gateway`), a newer one is refused. See [Reloading the config](#reloading-the-config) |
 | `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`), `min_free_bytes` (unset = no check; the free bytes `data_dir`'s file system must keep, or `/ready` answers `503` with `disk: failing`; see [`/ready`](deployment.md#running-the-container)) |
 | `log` | `level` (`info`), `format` (`text` \| `json`; `text`), `banner` (`true`; the ASCII-art banner on start, never printed with `format: json`). See [Logs](#logs) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`), `store_headers` (`drop`: `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`; `hash`: none). See [Stored headers](#stored-headers) |
@@ -88,7 +88,8 @@ is the [key reference](#ankusa-config) below.
 | `storage.s3.sse`, `storage.gcs.sse` | `type` (`aes256` \| `kms`), `key_id` (the KMS key; required for `kms` on GCS, optional on S3). Server-side encryption sent on every object this store writes; the same `sse:` key is accepted by the `s3`/`gcs` block of `claim_check.store(s)` and `backup.store`. See [Encryption at rest](storage.md#encryption-at-rest) |
 | `storage.s3.*`, `storage.gcs.*` transport options | `timeout_ms` (10000), `upload_timeout_ms` (60000), `op_deadline_ms` (120000), `multipart_threshold_bytes` (8388608), `multipart_part_bytes` (8388608), `retries` (2), `breaker_failures` (5; 0 = no breaker), `breaker_open_ms` (30000), `breaker_slow_ms` (5000), `pool_size` (32), `pool_count` (1), `pool_timeout` (5000). The same keys are accepted by the `s3`/`gcs` block of `claim_check.store(s)` and `backup.store`. Integers, range-checked when the instance starts. See [Conditional writes, retries, checksums, multipart, pools](storage.md#conditional-writes-retries-checksums-multipart-pools) |
 | `archive` | `retention_days` (`nil` keeps segment objects; an integer deletes a segment object and its index through the blob store, with the catalogue row, once the newest hook in it is that old). See the key reference for its relation to `storage.catalogue_retention_days` |
-| `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `tls` (a TLS block), `auth` (like `admin.auth`; reading a claim needs `claims:read` and the claim's tenant), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`), `stores` (a list of `store`-shaped entries, exclusive with `store`: failover between them), `placement` (`ordered` \| `hash`), `store_cooldown_ms` (30000), `key_layout` (`flat` \| `sharded`), and the gateway's reads: `read_deadline_ms` (5000), `read_timeout_ms` (3000), `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256), `read_cache_bytes` (134217728; 0 = no cache), `read_cache_max_entry_bytes` (1048576), `max_concurrent_reads` (1024; 0 = no cap), and signed refs: `ref_signing_keys` (`[]`; a list or a comma-separated string of `[current, previous…]`, each ≥ 16 bytes; use `${VAR}`), `ref_ttl_ms` (null = the retention, else 30 days), `accept_unsigned_refs` (null = only while no key is set). `claim_check.authorize` is Elixir config only. See [`claim-check.md`](claim-check.md#a-dedicated-claim-store), [Under load](claim-check.md#under-load) and [The reference](claim-check.md#the-reference) |
+| `claim_check` | `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`), `stores` (a list of `store`-shaped entries, exclusive with `store`: failover between them), `placement` (`ordered` \| `hash`), `store_cooldown_ms` (30000), `key_layout` (`flat` \| `sharded`), and the claim read engine's tuning: `read_deadline_ms` (5000), `read_timeout_ms` (3000), `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256), `read_cache_bytes` (134217728; 0 = no cache), `read_cache_max_entry_bytes` (1048576), and signed refs: `ref_signing_keys` (`[]`; a list or a comma-separated string of `[current, previous…]`, each ≥ 16 bytes; use `${VAR}`), `ref_ttl_ms` (null = the retention, else 30 days), `accept_unsigned_refs` (null = only while no key is set). The listener's keys (`port`, `ip`, `tls`, `auth`, `max_concurrent_requests`, `claims.integrity_check`) are the [`gateway` section's](#the-gateway-config_version-2). See [`claim-check.md`](claim-check.md#a-dedicated-claim-store), [Under load](claim-check.md#under-load) and [The reference](claim-check.md#the-reference) |
+| `gateway` | The claim-check listener, run by the `claim_check` role (or the `jamescarr/ankusa-gateway` image): `port` (4001), `ip` (`127.0.0.1`), `tls` (a TLS block), `max_concurrent_requests` (1024; 0 = no cap), `auth.allow_insecure` (`false`), `auth.authenticators` (`[]`: at most 8, at most one `mtls`; each `type` `token`, `jwt` or `mtls`), `claims.enabled` (`true`), `claims.policy` (`claims`), `claims.integrity_check` (`manifest`). The policy engine's `authz.*` keys are Elixir config (`Ankusa.Gateway.Config`) for now. See [The gateway](#the-gateway-config_version-2) |
 | `backup` | `enabled` (`false`), `interval_ms` (60000), `keep` (3), `store` (unset = the `storage` bucket; same shape as `claim_check.store`), `secondary` (a second store of the same shape: every backup is written to both, restore falls back to it), `timeout_ms` (120000), `verify_interval_ms` (unset = never), `signing_key` (a string or a list, e.g. `["${BACKUP_SIGNING_KEY}"]`: the first signs, any verifies), `final_timeout_ms` (20000), `max_age_ms` (unset = no `/ready` label), `require_fresh` (`false`). Continuous backup of the node's store, restored at boot into an empty `data_dir`; keys go under `storage.key_prefix`. See [`storage.md`](storage.md#backup-and-restore) |
 | `routes` | `enabled` (`false`), `max_routes` (1000000), `memory_budget_bytes` (8589934592), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms`/`store.timeout_ms`/`store.load_timeout_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `admin.tls` (a TLS block), `admin.auth` (like `admin.auth` of the operator API), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
@@ -111,6 +112,89 @@ is the [key reference](#ankusa-config) below.
 for every key with its comment and the alternatives.
 
 ![The hook's path from provider to sinks and blob store, each stage annotated with the YAML sections that configure it, plus the admin API on 4002 where reloadable keys change at runtime.](diagrams/configuration-map.png)
+
+### The gateway (config_version 2)
+
+The claim-check listener is `Ankusa.Gateway`, from the `ankusa_gateway`
+package (Hex `ankusa_gateway`); core does not build it in. `jamescarr/ankusa`
+runs it when `node.roles` lists `claim_check`, and the gateway's own image
+(`jamescarr/ankusa-gateway`) runs nothing else. The YAML `gateway:` keys:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `port` | `4001` | The gateway's Bandit port (`ANKUSA_CLAIM_CHECK_PORT`) |
+| `ip` | `127.0.0.1` | The address it binds (`ANKUSA_CLAIM_CHECK_IP`): a strict IPv4/IPv6 literal, or an `:inet` tuple. `0.0.0.0` exposes it on every interface, which a container needs before a published port reaches it |
+| `tls` | `nil` | A TLS block for the gateway listener, the same keys as `listener.tls` (see [Listeners](#listeners-limits-tls-and-mtls)); `auth` `mtls` needs `verify: verify_peer` and a `cacertfile` |
+| `max_concurrent_requests` | `1024` | Requests one gateway serves at once, cache hits included; past it `503 overloaded` with `Retry-After` 1–3 before anything is read. `0` is no cap |
+| `auth.allow_insecure` | `false` | Accept the empty chain off loopback: something in front of the listener authenticates every caller |
+| `auth.authenticators` | `[]` | The chain, tried in order; at most 8 entries, at most one `mtls`. See below |
+| `claims.enabled` | `true` | Serve `GET`/`HEAD /v1/claims/…`; `false` answers `404 not_found` on those routes |
+| `claims.policy` | `claims` | The authorizer policy the claim routes evaluate |
+| `claims.integrity_check` | `manifest` | `manifest`: check every whole-claim `GET` against the sha256 its pack's manifest records, and answer `502 integrity_mismatch` rather than send bytes that differ; `off` serves the store's bytes unchecked and sends no digest |
+
+An authenticator is one list entry with a `type` and a `name` (default
+`"<type>-<index>"`, `[a-z][a-z0-9_-]{0,31}`, unique in the chain). A bearer
+that matches no entry falls through to the next authenticator:
+
+```yaml
+gateway:
+  port: 4001
+  ip: 0.0.0.0
+  auth:
+    authenticators:
+      - type: token
+        tokens:
+          - {id: worker, token: "${CLAIM_TOKEN}", scopes: [claims:read, "tenant:*"]}
+      - type: jwt
+        issuer: "https://login.example.com/"
+        audience: ankusa
+        jwks_url: "https://login.example.com/.well-known/jwks.json"
+      - type: mtls
+        subject_map:
+          "cn:worker.internal": {scopes: [claims:read, "tenant:*"]}
+```
+
+- `token`: `tokens` is a list of `%{id, sha256 | token, scopes, groups, claims}`.
+  The plaintext `token` is hashed at load (that is what `ANKUSA_CLAIM_CHECK_TOKEN`
+  sets); prefer `sha256`.
+- `jwt`: core's `admin.auth.jwt` keys (`issuer`, `audience`, `jwks_url`,
+  `keys`, `refresh_ms`, `min_refresh_ms`, `leeway_s`, `scope_claim`,
+  `tenants_claim`) plus `groups_claim` (`groups`), `header`
+  (`authorization`) and `subject_prefix` (`""`, at most 64 bytes, prepended to
+  `sub` to form the principal id). Several `jwt` authenticators may share one
+  chain, one per issuer: a token is routed by its unverified `iss`.
+- `mtls`: `subject_map` maps a certificate identity (`cn:…`, or a subject
+  alternative name as `dns:`/`email:`/`uri:`/`ip:`) to a list of scopes or a
+  map with `scopes` and `groups`.
+
+In Elixir config (`Ankusa.Gateway.Config`) an entry's `type` may also be a
+module implementing `Ankusa.Gateway.Authenticator`; YAML takes the three types.
+
+An empty chain gives every request the anonymous operator principal, legal only
+on loopback or with `allow_insecure: true`; the gateway logs a warning at start.
+The authenticators answer `401` when a credential of their form is wrong, `503
+auth_unavailable` when an identity provider that had to be asked does not
+answer, and the policy engine answers `403 forbidden` or `503
+authz_unavailable`. Authorizing differently from the built-in scope rule
+(`claims:read` plus the claim's tenant) means a module implementing
+`Ankusa.Gateway.Authorizer` in `authz.authorizers`, named by the `claims`
+policy; that is Elixir config, see
+[`ankusa_gateway/README.md`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway/README.md).
+
+`config_version: 2` is the current format. A file without `config_version` is
+version 1 and is migrated on load: `claim_check.port`/`ip`/`tls` become
+`gateway.port`/`ip`/`tls`, `claim_check.max_concurrent_reads` becomes
+`gateway.max_concurrent_requests`, `claim_check.integrity_check` becomes
+`gateway.claims.integrity_check`, and `claim_check.auth` (`mode`, plus
+`tokens`/`jwt`/`mtls`) becomes `gateway.auth.authenticators` (one entry for
+`token`, `jwt` or `mtls`; `mode: none` is `[]`). A version-2 file that still
+carries one of the moved keys fails with `claim_check.<key>: moved to
+<new key> (config_version 2)`. Environment variables keep their names:
+`ANKUSA_CLAIM_CHECK_PORT` → `gateway.port`, `ANKUSA_CLAIM_CHECK_IP` →
+`gateway.ip`, `ANKUSA_CLAIM_CHECK_TOKEN` → `gateway.auth.authenticators` (one
+token authenticator holding `claims:read` and `tenant:*`; the rest of
+`gateway.auth` is kept). Neither image reloads `gateway.*`: a change needs a
+restart.
 
 ### Tracing
 
@@ -528,7 +612,7 @@ reconfigured without a new file. Env wins over the file.
 
 | Variable | Field |
 | --- | --- |
-| `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`) |
+| `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`; the last one also starts the gateway on this node) |
 | `ANKUSA_DATA_DIR` | `node.data_dir` |
 | `ANKUSA_REGION` | `node.region` |
 | `ANKUSA_LOG_LEVEL` | `log.level` |
@@ -536,12 +620,12 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_BANNER` | `log.banner` |
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
-| `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
+| `ANKUSA_CLAIM_CHECK_PORT` | `gateway.port` |
 | `ANKUSA_ADMIN_IP` | `admin.ip` |
-| `ANKUSA_CLAIM_CHECK_IP` | `claim_check.ip` |
+| `ANKUSA_CLAIM_CHECK_IP` | `gateway.ip` |
 | `ANKUSA_ADMIN_TOKEN` | `admin.auth`: one bearer token holding every scope and `tenant:*`; replaces the file's `admin.auth` block. Only its SHA-256 is kept. See [Control-plane authentication](#control-plane-authentication) |
 | `ANKUSA_ROUTES_ADMIN_TOKEN` | `routes.admin.auth`: one token holding `routes:read`, `routes:write` and `tenant:*` |
-| `ANKUSA_CLAIM_CHECK_TOKEN` | `claim_check.auth`: one token holding `claims:read` and `tenant:*` |
+| `ANKUSA_CLAIM_CHECK_TOKEN` | `gateway.auth.authenticators`: one token authenticator holding `claims:read` and `tenant:*` (the rest of `gateway.auth` is kept) |
 | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
 | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
 | `ANKUSA_SOURCE_STORE_URL` | `source_store.url` |
@@ -646,10 +730,12 @@ and changes with a restart: the reload that finds one changed is refused.
 
 ### Reloading the config
 
-`config_version` is the version of the file format (`1`; a file without the key
+`config_version` is the version of the file format (`2`; a file without the key
 is version 1). An image reads every version up to its own: a file written for an
 older format is migrated as it loads (the loader's migration map, applied before
-`${…}` is substituted), and a file that says a version newer than the image reads
+`${…}` is substituted — version 1 to 2 moves the claim-check listener's
+`claim_check.*` keys under `gateway`, see [The gateway](#the-gateway-config_version-2)),
+and a file that says a version newer than the image reads
 is refused at boot with `config_version` named, so an older image never guesses
 at a newer file.
 
@@ -674,7 +760,8 @@ the seed is deleted, a route created through the API is left alone, and every
 seed route needs an `id`. A lowered dispatch limit never drops a delivery that is
 running: it stops the next start until the count is below it.
 
-Any other key that changed (`http.port`, `wal.type`, a listener's `tls`, …) needs
+Any other key that changed (`http.port`, `wal.type`, a listener's `tls`, any
+`gateway.*` key, …) needs
 a restart. The reload is then refused with nothing applied, over HTTP `409`:
 
 ```json
@@ -776,8 +863,6 @@ config :ankusa,
     max_segments_per_tick: 16
   },
   claim_check: %{
-    port: 4001,
-    ip: "127.0.0.1",
     pack_max_bytes: 16_777_216,
     retention_days: nil,
     sweep_interval_ms: 3_600_000,
@@ -795,11 +880,9 @@ config :ankusa,
     read_queue_max: 256,
     read_cache_bytes: 128 * 1024 * 1024,
     read_cache_max_entry_bytes: 1024 * 1024,
-    max_concurrent_reads: 1_024,
     ref_signing_keys: [],
     ref_ttl_ms: nil,
-    accept_unsigned_refs: nil,
-    authorize: nil
+    accept_unsigned_refs: nil
   },
   backup: %{
     enabled: false,
@@ -859,11 +942,18 @@ config :ankusa,
   }
 ```
 
+The gateway's listener keys are not core's: `Ankusa.Gateway.Config.new/2`
+(package `ankusa_gateway`) takes `instance`, `port`, `ip`, `tls`,
+`max_concurrent_requests`, `auth`, `authz` and `claims`, and
+`{Ankusa.Gateway, config}` starts beside the instance. See
+[The gateway](#the-gateway-config_version-2) and
+[`ankusa_gateway/README.md`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway/README.md).
+
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `instance` | `:default` | Registry namespace. See [`architecture.md#instance-model`](architecture.md#instance-model). Two instances with different names run independently in one VM. |
 | `data_dir` | `"./data"` | Root for on-disk state; actual paths are `<data_dir>/<instance>/{store,segments}`: the node's RocksDB store and the LocalFS blob root. |
-| `roles` | `[:edge, :dispatch, :storage]` | Which children boot. `:claim_check` is a fourth, **opt-in** role. See [`claim-check.md`](claim-check.md). `ANKUSA_ROLES=edge,dispatch` (comma-separated) overrides this at runtime in the default Ankusa.Application. The roles divide the hook's life: `:edge` accepts and commits it, `:dispatch` delivers it, `:storage` archives it, and the hook is deleted once its last obligation clears — so `edge,dispatch` and `edge,dispatch,storage` both reclaim delivered hooks, and an archive that is off or behind never holds up delivery. All the roles share one node-local store, so they run in one BEAM (see [`deployment.md`](deployment.md)). With `wal: :none` the roles that only read the queue (`:dispatch`, `:storage`) are dropped from this list rather than rejected, so an existing all-role deployment can flip `wal.type` with no other change; `GET /health` on the admin port reports the effective roles. |
+| `roles` | `[:edge, :dispatch, :storage]` | Which children boot. Core has three; the gateway is its own library, so a gateway-only node is `roles: []` with `{Ankusa.Gateway, config}` beside the instance (see [`claim-check.md`](claim-check.md)). `ANKUSA_ROLES=edge,dispatch` (comma-separated) overrides this at runtime in the default Ankusa.Application. The roles divide the hook's life: `:edge` accepts and commits it, `:dispatch` delivers it, `:storage` archives it, and the hook is deleted once its last obligation clears — so `edge,dispatch` and `edge,dispatch,storage` both reclaim delivered hooks, and an archive that is off or behind never holds up delivery. All the roles share one node-local store, so they run in one BEAM (see [`deployment.md`](deployment.md)). With `wal: :none` the roles that only read the queue (`:dispatch`, `:storage`) are dropped from this list rather than rejected, so an existing all-role deployment can flip `wal.type` with no other change; `GET /health` on the admin port reports the effective roles. `roles: []` is legal under any `wal`: the node does no queue work, which is what a gateway-only node runs on. |
 | `port` | `4000` | Bandit HTTP port. `PORT` env var overrides in the default Ankusa.Application. |
 | `listener.max_connections`, `listener.num_acceptors` | `20_000`, `nil` (two per scheduler) | Open connections per listener, spread over the acceptors; past it new connections are closed. Positive integers. |
 | `listener.read_timeout_ms` | `10_000` | A connection that sends nothing for this long is closed (slowloris, idle keep-alive). |
@@ -928,8 +1018,6 @@ config :ankusa,
 | `secrets.kek` | `nil` | The key-encryption key for stored source secrets: 32 bytes, base64 (`openssl rand -base64 32`), optionally `"<id>:<base64>"` (the id is written into every value it encrypts; without one it is a digest of the key). Encrypts the secret-bearing fields (those `Ankusa.Admin.Redact` hides) of every spec `Ankusa.SourceStore.Persistent` or `Ankusa.SourceStore.Redis` stores, with AES-256-GCM. A stored source no configured key opens refuses the boot. `/v1/config` shows it as `[REDACTED]`. |
 | `secrets.kek_previous` | `[]` | Keys that may still decrypt, never encrypt: the old key while a rotation is rolled out. Needs `kek` or `kek_provider`. |
 | `secrets.kek_provider` | `nil` | `{module, fun, args}` instead of `kek`: called once when the source store starts, returning `{:ok, [kek \| previous]}` (each a `kek` string or `{id, key}`; the first is current). Exclusive with `kek`. A provider that fails refuses the boot. |
-| `claim_check.port` | `4001` | The `:claim_check` role's Bandit port. |
-| `claim_check.ip` | `"127.0.0.1"` | The address the gateway binds: a strict IPv4/IPv6 literal (or an `:inet` tuple). Loopback by default; `"0.0.0.0"` exposes it on every interface, which a container needs before a published port reaches it. |
 | `claim_check.pack_max_bytes` | `16_777_216` | Target size of one claim pack; a body larger than this still gets a pack of its own. Must be a positive integer. |
 | `claim_check.retention_days` | `nil` | LocalFS-only sweeper retention; `nil` disables the retention pass. A pack a claim lease holds is never deleted, whatever its date. |
 | `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval: the lease pass and one tenant's claim partitions. A tick that left work behind in its tenant is followed by one after 5 s, and one that finished a tenant with more to visit by a step after 100 ms, so a pass over many tenants runs back to back and then waits this interval. |
@@ -941,18 +1029,15 @@ config :ankusa,
 | `claim_check.placement` | `:ordered` | Which store a new pack goes to: `:ordered` the first, the others only while it fails; `:hash` the pack id's random bits pick one, spreading packs over every store. |
 | `claim_check.store_cooldown_ms` | `30_000` | A store that failed a write, or could not answer a read, is skipped by later writes and searched last by later reads for this long, then tried again. Positive integer. |
 | `claim_check.key_layout` | `:flat` | `:flat` = `claims/tenant=<t>/dt=<d>/<pack>`; `:sharded` adds `shard=<c>/` under the tenant (32 prefixes per tenant, against per-prefix request limits like S3's `503 SlowDown`). Reads try both layouts. See [`claim-check.md`](claim-check.md#sharded-keys). |
-| `claim_check.read_deadline_ms` | `5_000` | The gateway answers every claim request within this: past it, `503 store_unavailable`. A store read that outlives it still finishes and fills the cache. Also bounds `redeem/3` on a `:claim_check` node. See [`claim-check.md`](claim-check.md#under-load). |
+| `claim_check.read_deadline_ms` | `5_000` | The gateway answers every claim request within this: past it, `503 store_unavailable`. A store read that outlives it still finishes and fills the cache. Also bounds `redeem/3` on a gateway-only node (core `roles: []` with `Ankusa.Gateway`). See [`claim-check.md`](claim-check.md#under-load). |
 | `claim_check.read_timeout_ms`, `claim_check.read_retries` | `3_000`, `1` | Per store request while reading a claim, and the retries after a failed one. A claim store's own `timeout_ms`/`retries` options are for writes. |
 | `claim_check.read_max_inflight` | `48` | Per store, the ceiling of the gateway's adaptive limit on concurrent store reads: it halves when the store throttles (`429`, `503`) or does not answer, and grows back by one per round of successes. The HTTP stores read through a client connection pool of 50 per host (claim reads get a pool of their own, keyed by `read_timeout_ms`), which is why the default sits under 50: a ceiling above it only queues reads inside the client, and one that waits past the client's 5 s checkout timeout fails as a transport error. Two claim stores on one host share that pool. |
 | `claim_check.read_queue_max` | `256` | Per store, reads waiting for a free slot; past it a read is answered `503` at once. `0` never waits. |
 | `claim_check.read_cache_bytes` | `134_217_728` | Memory for the gateway's cached pack indexes and claims; `0` turns the cache off. |
 | `claim_check.read_cache_max_entry_bytes` | `1_048_576` | A claim larger than this is served but never cached. |
-| `claim_check.max_concurrent_reads` | `1_024` | Gateway requests this node serves at once, cache hits included. A request past it is `503 overloaded` with `Retry-After` 1–3 before anything is read; `0` is no limit. The count is a set of request processes the reader sweeps every second, so a request process that dies never keeps a slot. |
-| `claim_check.integrity_check` | `manifest` | `manifest`: the gateway checks every whole-claim `GET` against the sha256 its pack's manifest records for that claim, and answers `502 integrity_mismatch` rather than send bytes that differ (a damaged claim, or a manifest that does not parse). The manifest is read once per pack, the first time one of its claims is read, and kept in the pack's cache entry (`claim_check.read_cache_bytes`, 32 bytes a claim); `200` and `206` carry the digest as `x-ankusa-sha256`. `off` serves the store's bytes unchecked and sends no digest. With `read_cache_bytes: 0` the manifest is read again for every `GET`: set `off` there. See [`claim-check.md`](claim-check.md#integrity). |
 | `claim_check.ref_signing_keys` | `[]` | `[current \| previous]`: strings of at least 16 bytes. With a key, every claim a node checks in gets a **v2 ref**, `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`, an HMAC-SHA256 under the first key over the tenant, claim and expiry, and the gateway holds each request to it before it reads anything (`400 bad_signature`; `410 ref_expired`). A ref signed with any listed key is served, so a rotation is: put the new key first, drop the old one once every ref it signed has expired. Set the same keys on every claim-writing node, the gateway, and any node calling `redeem/3`. `/v1/config` shows each as `[REDACTED]`. `[]` mints v1 refs. See [`claim-check.md`](claim-check.md#the-reference). |
 | `claim_check.ref_ttl_ms` | `nil` | How long a v2 ref is good for, from the moment it is minted; positive. `nil` is the retention (`claim_check.retention_days`), else 30 days. |
 | `claim_check.accept_unsigned_refs` | `nil` | Whether the gateway (and `redeem/3`) still serves a v1 ref, which carries no expiry. `nil` means only while `ref_signing_keys` is empty, so setting keys refuses every v1 ref (`400 unsigned_ref`); `true` keeps the refs already in queues working while keys roll out. `false` with no keys is a boot error. |
-| `claim_check.authorize` | `nil` | `{module, fun, args}`, Elixir config only: called after authentication and before any read, as `apply(module, fun, [%{principal, tenant_id, claim_id, conn} \| args])`. `:ok` lets the request through; anything else is `403 forbidden`. It replaces the built-in check (`claims:read` plus `tenant:<tenant_id>` or `tenant:*`). The module must export `fun/(length(args) + 1)` at boot. |
 | `backup.enabled` | `false` | Back the store up to an object store while it runs, and restore the latest backup at boot when the store directory holds no database. A backup location that can't be read then refuses the boot (`{:store_restore_failed, path, reason}`) instead of starting empty. See [`storage.md`](storage.md#backup-and-restore). |
 | `backup.interval_ms` | `60_000` | How often a checkpoint is uploaded: the most a lost host loses. Only files the last backup doesn't already have are uploaded. |
 | `backup.keep` | `3` | Backups kept; older ones, and the files only they used, are deleted after each successful backup. |
@@ -969,7 +1054,7 @@ config :ankusa,
 | `queue.max_oldest_due_ms` | `nil` | `/ready` carries `"backlog": "failing"` (reason `"over_threshold"`) while the oldest due delivery has waited longer than this, read from the same counters as `ankusa_queue_oldest_due_age_seconds`. A label: the answer stays `200`, since taking a node that is behind out of the load balancer only moves the load. `nil` = no `backlog` key. An integer >= 1. Not secret. |
 | `admin.enabled` | `false` | Start the admin API and `Ankusa.Metrics` on this instance. Off for embedded use; the `jamescarr/ankusa` image turns it on. |
 | `admin.port` | `4002` | The admin API's Bandit port. |
-| `admin.ip` | `"127.0.0.1"` | The address the admin API binds, same rules as `claim_check.ip`. |
+| `admin.ip` | `"127.0.0.1"` | The address the admin API binds: a strict IPv4/IPv6 literal (or an `:inet` tuple). |
 | `admin.gauge_interval_ms` | `15_000` | How often `Ankusa.Metrics.Gauges` samples store/queue/quarantine depth, disk free, dispatch in-flight and open breakers for `/metrics`. |
 | `admin.tls` | `nil` | A TLS block for the admin listener; see [Listeners](#listeners-limits-tls-and-mtls). |
 | `admin.auth` | `%{mode: :none}` | Who may call the admin API: `mode` (`:none`, `:token`, `:jwt`, `:mtls`), `allow_insecure`, `tokens`, `jwt`, `mtls`. `mode: :none` is accepted only when `admin.ip` is loopback (or `allow_insecure: true`). See [Control-plane authentication](#control-plane-authentication). |
@@ -978,8 +1063,8 @@ config :ankusa,
 | `metrics.detail` | `:tenant` | Which identity labels the per-hook series carry: `:tenant` (`tenant_id`), `:source` (`tenant_id` and `source_id`) or `:none`. See [Metric cardinality](#metric-cardinality). |
 | `metrics.max_series_per_metric` | `5000` | The most label sets one metric keeps; later tenants/sources are folded into an `"other"` series (one slot is reserved for it). A positive integer. |
 | `metrics.extra` | `[]` | Modules exporting `metrics/1` (`instance -> [Telemetry.Metrics.t()]`) whose definitions join this node's scrape, under the same cardinality policy. How a library outside core (`ankusa_gateway`) adds its series; `Ankusa.Metrics.scope/2` keeps a definition to this instance's events. Elixir config only. |
-| `claim_check.tls`, `routes.admin.tls` | `nil` | A TLS block for the claim-check gateway and the route-management API. |
-| `routes.admin.auth`, `claim_check.auth` | `%{mode: :none}` | The same block for the route-management API and the claim-check gateway. |
+| `routes.admin.tls` | `nil` | A TLS block for the route-management API. The gateway's own is `gateway.tls`, in `Ankusa.Gateway.Config` (see [The gateway](#the-gateway-config_version-2)). |
+| `routes.admin.auth` | `%{mode: :none}` | The same block for the route-management API. The gateway's own is `gateway.auth`, in `Ankusa.Gateway.Config`. |
 | `routes.enabled` | `false` | Enforce route management. Off captures every `POST`, as before; on is **deny by default** — see [Route management](#route-management). |
 | `routes.max_routes` | `1_000_000` | Hard cap on definitions. Creating one past it is a `409`; nothing is ever evicted. The table is indexed (see [Route management](#route-management)), so a miss, a create and a list page cost the same at a million routes as at a thousand. |
 | `routes.memory_budget_bytes` | `8_589_934_592` | What this node may spend on route definitions. At boot `max_routes` is multiplied by the per-route estimate (5 KiB: the snapshot rows plus the store's copy of the definition, measured by `bench/routes_bench.exs`; a million routes are about 5 GB of RAM) and a cap that does not fit is a config error naming both keys; a table that a Redis store loads that does not fit refuses the boot (or, on a reload, keeps the table the node is serving). Lower `max_routes` or raise the budget, never one without the other. |
@@ -988,7 +1073,7 @@ config :ankusa,
 | `routes.trusted_proxies` | `[]` | CIDRs whose peers may set `X-Forwarded-For`. Empty means the header is never read. |
 | `routes.ip_rules` | `%{default: :allow, rules: []}` | Ordered global rules, first match wins, plus the `default` when none match. |
 | `routes.admin.port` | `4003` | The management API's own Bandit port. Authenticated by `routes.admin.auth`, like `admin.port`. |
-| `routes.admin.ip` | `"127.0.0.1"` | The address the management API binds, same rules as `claim_check.ip`. |
+| `routes.admin.ip` | `"127.0.0.1"` | The address the management API binds: a strict IPv4/IPv6 literal (or an `:inet` tuple). |
 | `routes.log_sample` | `100` | 1 in N rejections is logged at `:debug`; `0` disables it. |
 | `routes.ip_denied_status` | `403` | Status for an IP denial, or `404` for uniformity with a missing route. With `403` a sender can tell a route that has its own `ip_rules` (which denied it) from a path that does not exist (`404`); `404` removes that distinction. |
 | `routes.seed` | `[]` | Route definitions loaded at boot (see below). With the ETS store they are loaded on **every** boot. |
@@ -1040,13 +1125,13 @@ are booleans, `metrics.ip` an IP address, and a `tls` block names existing
 with a `cacertfile`), non-empty `versions` from `tlsv1.2`/`tlsv1.3` and known
 `ciphers`;
 `batcher.max_delay_ms`, `batcher.group_commit_delay_ms`, `storage.roll_ms`, `storage.interval_ms`,
-`claim_check.read_retries`, `claim_check.read_queue_max`,
-`claim_check.read_cache_bytes` and `claim_check.max_concurrent_reads` may be
+`claim_check.read_retries`, `claim_check.read_queue_max` and
+`claim_check.read_cache_bytes` may be
 `0` (no linger, roll at once, a compactor that runs only when asked, no read
-retry, no waiting for a slot, no claim cache, no request cap);
+retry, no waiting for a slot, no claim cache);
 `claim_check.ref_ttl_ms` is `nil` or ≥ 1, `claim_check.accept_unsigned_refs` is
 `nil`, `true` or `false`, every `claim_check.ref_signing_keys` entry is at
-least 16 bytes, and `claim_check.integrity_check` is `off` or `manifest`;
+least 16 bytes;
 `claim_check.retention_days` and `claim_check.bucket_expiry_days` are `nil` or ≥ 1; `audit.retention_days` is ≥ 1; `tenants.max` is an integer from 1 to 4294967294; every `queue.rocksdb` key is in the range its row names (`write_buffer_bytes` per family, ≥ 65536, an unknown family refused); `storage.key_prefix` is `""` or
 `name/` parts; `dispatch.sink_concurrency` is `nil` or ≥ 1,
 every `dispatch.tenants.default` key and every key of a `dispatch.tenants` entry is
@@ -1055,13 +1140,16 @@ an integer ≥ 1 (a tenant entry holds only `max_inflight`, `max_inflight_bytes`
 `dispatch.breaker_failures` ≥ 0, `breaker_open_ms` positive and
 `breaker_max_open_ms` ≥ `breaker_open_ms`. An embedded source whose verifier secret is missing or
 undecodable fails boot too (`source <id>: verifier secret is missing or
-undecodable`), instead of rejecting every hook later.
+undecodable`), instead of rejecting every hook later. The gateway's own keys
+are checked the same way by `Ankusa.Gateway.Config.new/2`, with messages that
+name the dotted key: `gateway.port must be ...`.
 
 #### Listeners: limits, TLS and mTLS
 
 Bandit's own defaults suit a browser-facing app, not a webhook edge, so every
-HTTP listener the instance runs (ingest, admin, route management, claim-check
-gateway, metrics) is started with the `listener` limits instead:
+HTTP listener (ingest, admin, route management, metrics, and the gateway's own
+4001, started by `Ankusa.Gateway.Supervisor`) is started with the `listener`
+limits instead:
 
 - **Idle and slow clients.** A connection that sends nothing for
   `listener.read_timeout_ms` (10 s) is closed: this bounds a request head
@@ -1080,8 +1168,8 @@ gateway, metrics) is started with the `listener` limits instead:
   what webhook providers send.
 
 `listener.tls` is the ingest listener's TLS block; `admin.tls`,
-`routes.admin.tls`, `claim_check.tls` and `metrics.tls` give each of the other
-listeners its own, with the same keys:
+`routes.admin.tls` and `metrics.tls` give each of the other listeners its own,
+and the gateway has `gateway.tls`, with the same keys:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -1094,9 +1182,10 @@ listeners its own, with the same keys:
 A listener with a `tls` block is HTTPS only (plain HTTP to it gets no answer);
 one without is plain HTTP. The private key's file path is shown by
 `GET /v1/config` (a path is not a secret); the key itself is never read into
-the config. The boot log's "no authentication" warning for the admin,
-route-management and claim-check listeners is skipped when that listener's
-`auth.mode` is not `none`, or when it demands client certificates.
+the config. The boot log's "no authentication" warning for the admin and
+route-management listeners, and the gateway's, is skipped when that listener
+authenticates its callers (its `auth.mode` is not `none`; for the gateway, its
+`auth.authenticators` is not empty), or when it demands client certificates.
 
 ```yaml
 listener:
@@ -1223,10 +1312,13 @@ events](asyncapi.md)).
 
 #### Control-plane authentication
 
-The admin API, the route-management API and the claim-check gateway each carry
-an `auth` block (`admin.auth`, `routes.admin.auth`, `claim_check.auth`). A
-request is authenticated into a principal (an id, a list of scopes, and the
-tenants it may act on), and each route needs a scope: `401` when there is no
+The admin API and the route-management API each carry
+an `auth` block (`admin.auth`, `routes.admin.auth`); the claim-check gateway has
+its own (`gateway.auth`: a chain of authenticators, see
+[The gateway](#the-gateway-config_version-2)). A
+request is authenticated into a principal (an id, a list of scopes, the
+tenants it may act on, and — for the gateway — its groups and the token's
+claims), and each route needs a scope: `401` when there is no
 accepted credential (with `www-authenticate: Bearer realm="ankusa"`, the same
 body whatever was wrong), `403` `{"error":"forbidden","scope":"…"}` when the
 principal lacks the scope. Scopes are checked before anything else, so a caller
@@ -1313,9 +1405,10 @@ valid certificate nobody mapped is `401`.
 
 Tokens and keys are validated at load, and the redacted `GET /v1/config` shows
 each token's `id` and scopes but never its hash. The claim-check gateway's
-readers are your SDK clients: send the token in `Authorization` (the
+readers are your SDK clients: send the credential in `Authorization` (the
 TypeScript `createClaimCheckClient({ baseUrl, headers })` and the Elixir SDK's
-`:headers` option take it as is).
+`:headers` option take it as is), or whatever header the gateway's `jwt`
+authenticator names.
 
 #### Route management
 
@@ -1800,8 +1893,8 @@ vars on top of whatever `config.exs` sets:
 - `PORT`: overrides `config.port`.
 - `ANKUSA_ROLES`: comma-separated, overrides `config.roles` (e.g.
   `ANKUSA_ROLES=edge,dispatch`). Parsed with `Ankusa.Config.parse_roles!/1`:
-  an unknown role name (anything other than `edge`, `dispatch`, `storage`,
-  `claim_check`) raises `ArgumentError` and fails boot rather than silently
+  an unknown role name (anything other than `edge`, `dispatch`, `storage`)
+  raises `ArgumentError` and fails boot rather than silently
   starting with the wrong roles. `edge` commits hooks, `dispatch` delivers
   them, `storage` archives them, and a hook is deleted once its last
   obligation clears: `edge,dispatch` reclaims delivered hooks without the

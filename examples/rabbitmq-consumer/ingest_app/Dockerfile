@@ -15,6 +15,7 @@ WORKDIR /repo
 COPY packages/ankusa ./packages/ankusa
 COPY packages/async_api_spex ./packages/async_api_spex
 COPY packages/ankusa_rabbitmq ./packages/ankusa_rabbitmq
+COPY packages/ankusa_gateway ./packages/ankusa_gateway
 COPY examples/rabbitmq-consumer/ingest_app ./examples/rabbitmq-consumer/ingest_app
 
 WORKDIR /repo/examples/rabbitmq-consumer/ingest_app

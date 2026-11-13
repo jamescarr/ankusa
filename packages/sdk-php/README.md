@@ -31,7 +31,7 @@ installed as dependencies; any other PSR-18 client can be injected instead.
 Redeem a claim-check ref, verify the bytes it returns against the message's
 `sha256`, and classify failures into dead-letter vs. retry, without holding any
 object-store credentials. Conforms to the framework's own contract,
-[`priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/claim_check.v1.yaml):
+[`ankusa_gateway/priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway/priv/openapi/claim_check.v1.yaml):
 the spec is the source of truth, this package conforms to it, not the reverse.
 
 ```php

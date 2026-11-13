@@ -69,7 +69,7 @@ defmodule AnkusaServer.ConfigTest do
            }
 
     # The reference spells the auth blocks out at their defaults.
-    for auth <- [config.admin.auth, config.routes.admin.auth, config.claim_check.auth] do
+    for auth <- [config.admin.auth, config.routes.admin.auth] do
       assert %{mode: :none, allow_insecure: false, tokens: [], mtls: %{subject_map: %{}}} = auth
     end
 
@@ -133,13 +133,26 @@ defmodule AnkusaServer.ConfigTest do
              read_queue_max: 256,
              read_cache_bytes: 134_217_728,
              read_cache_max_entry_bytes: 1_048_576,
-             max_concurrent_reads: 1024,
              ref_signing_keys: [],
              ref_ttl_ms: nil,
-             accept_unsigned_refs: nil,
-             authorize: nil,
-             integrity_check: :manifest
+             accept_unsigned_refs: nil
            } = config.claim_check
+
+    # The gateway's section, at its defaults, for a node that runs it.
+    gateway =
+      Config.load!(
+        path: "config-examples/reference.yml",
+        env: Map.put(@fixture_env, "ANKUSA_ROLES", "edge,dispatch,storage,claim_check")
+      ).gateway
+
+    assert %Ankusa.Gateway.Config{
+             port: 4001,
+             ip: "127.0.0.1",
+             tls: nil,
+             max_concurrent_requests: 1024,
+             auth: %{allow_insecure: false, authenticators: []},
+             claims: %{enabled: true, policy: "claims", integrity_check: :manifest}
+           } = gateway
   end
 
   test "tracing is off by default, takes an endpoint and a ratio, and names a mistake" do
@@ -361,15 +374,16 @@ defmodule AnkusaServer.ConfigTest do
     assert {cc.placement, cc.key_layout, cc.store_cooldown_ms} == {:hash, :sharded, 5000}
   end
 
-  test "claim_check.integrity_check takes off or manifest" do
+  test "gateway.claims.integrity_check takes off or manifest" do
     for {value, expected} <- [{"off", :off}, {"manifest", :manifest}] do
       path =
         tmp_config("""
-        claim_check: {integrity_check: #{value}}
-        sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+        config_version: 2
+        node: {roles: [claim_check]}
+        gateway: {claims: {integrity_check: #{value}}}
         """)
 
-      assert Config.load!(path: path, env: %{}).config.claim_check.integrity_check == expected
+      assert Config.load!(path: path, env: %{}).gateway.claims.integrity_check == expected
     end
   end
 
@@ -445,23 +459,25 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message == "claim_check.read_timeout_ms must be a positive integer, got 0"
   end
 
-  test "claim_check signing keys, ttl, unsigned policy and request cap land in core's config" do
+  test "claim_check signing keys, ttl and unsigned policy land in core's config, the request cap in the gateway's" do
     path =
       tmp_config("""
+      config_version: 2
+      node: {roles: [edge, dispatch, storage, claim_check]}
       claim_check:
         ref_signing_keys: ["#{String.duplicate("a", 16)}", "#{String.duplicate("b", 16)}"]
         ref_ttl_ms: 3600000
         accept_unsigned_refs: true
-        max_concurrent_reads: 0
+      gateway: {max_concurrent_requests: 0}
       sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
       """)
 
-    cc = Config.load!(path: path, env: %{}).config.claim_check
+    loaded = Config.load!(path: path, env: %{})
+    cc = loaded.config.claim_check
 
     assert cc.ref_signing_keys == [String.duplicate("a", 16), String.duplicate("b", 16)]
-
-    assert {cc.ref_ttl_ms, cc.accept_unsigned_refs, cc.max_concurrent_reads} ==
-             {3_600_000, true, 0}
+    assert {cc.ref_ttl_ms, cc.accept_unsigned_refs} == {3_600_000, true}
+    assert loaded.gateway.max_concurrent_requests == 0
 
     # one comma-separated string, the form `${VAR}` carries
     path =
@@ -489,8 +505,6 @@ defmodule AnkusaServer.ConfigTest do
   test "claim_check ref keys: core's ranges name a bad one" do
     for {yaml, message} <- [
           {"{ref_ttl_ms: 0}", "claim_check.ref_ttl_ms must be nil or a positive integer, got 0"},
-          {"{max_concurrent_reads: -1}",
-           "claim_check.max_concurrent_reads must be a non-negative integer, got -1"},
           {"{accept_unsigned_refs: maybe}",
            ~s(claim_check.accept_unsigned_refs: expected a boolean, got "maybe")}
         ] do
@@ -520,8 +534,10 @@ defmodule AnkusaServer.ConfigTest do
            ~s(claim_check.placement: unknown value "nope"; expected one of ordered, hash)},
           {"claim_check: {key_layout: hashed}",
            ~s(claim_check.key_layout: unknown value "hashed"; expected one of flat, sharded)},
-          {"claim_check: {integrity_check: sha1}",
-           ~s(claim_check.integrity_check: unknown value "sha1"; expected one of off, manifest)}
+          {"gateway: {claims: {integrity_check: sha1}}",
+           ~s(gateway.claims.integrity_check: unknown value "sha1"; expected one of off, manifest)},
+          {"gateway: {max_concurrent_requests: -1}",
+           "gateway.max_concurrent_requests must be a non-negative integer, got -1"}
         ] do
       path =
         tmp_config(yaml <> "\nsources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n")
@@ -818,19 +834,22 @@ defmodule AnkusaServer.ConfigTest do
 
     assert Config.load!(path: path, env: %{}).config.admin.ip == "127.0.0.1"
 
-    # Off loopback the admin API must authenticate, so the address comes with a token.
-    config =
+    # Off loopback the admin API and the gateway must authenticate, so each
+    # address comes with a token.
+    loaded =
       Config.load!(
         path: path,
         env: %{
+          "ANKUSA_ROLES" => "edge,dispatch,storage,claim_check",
           "ANKUSA_ADMIN_IP" => "0.0.0.0",
           "ANKUSA_ADMIN_TOKEN" => "operator-token",
-          "ANKUSA_CLAIM_CHECK_IP" => "::"
+          "ANKUSA_CLAIM_CHECK_IP" => "::",
+          "ANKUSA_CLAIM_CHECK_TOKEN" => "worker-token"
         }
-      ).config
+      )
 
-    assert config.admin.ip == "0.0.0.0"
-    assert config.claim_check.ip == "::"
+    assert loaded.config.admin.ip == "0.0.0.0"
+    assert loaded.gateway.ip == "::"
   end
 
   test "ANKUSA_ADMIN_IP off loopback without authentication fails the load, naming admin.auth" do
@@ -871,14 +890,15 @@ defmodule AnkusaServer.ConfigTest do
     defp load_versioned(value),
       do: Config.load!(path: tmp_config("config_version: #{value}\n" <> @minimal), env: %{})
 
-    test "a file without the key is version 1, and so is one that says 1" do
-      assert %{doc: %{"config_version" => 1}} = Config.load!(path: tmp_config(@minimal), env: %{})
-      assert %{doc: %{"config_version" => 1}} = load_versioned(1)
+    test "a file without the key is version 1, migrated to 2, and so is one that says 1" do
+      assert %{doc: %{"config_version" => 2}} = Config.load!(path: tmp_config(@minimal), env: %{})
+      assert %{doc: %{"config_version" => 2}} = load_versioned(1)
+      assert %{doc: %{"config_version" => 2}} = load_versioned(2)
     end
 
     test "a version this image does not read is refused, naming the key" do
-      error = assert_raise ConfigError, fn -> load_versioned(2) end
-      assert error.message =~ "config_version: 2 is newer than this image reads (up to 1)"
+      error = assert_raise ConfigError, fn -> load_versioned(3) end
+      assert error.message =~ "config_version: 3 is newer than this image reads (up to 2)"
 
       for bad <- ["0", "-1", "1.5", "\"1\"", "true", "[1]"] do
         error = assert_raise ConfigError, fn -> load_versioned(bad) end
@@ -939,7 +959,7 @@ defmodule AnkusaServer.ConfigTest do
             ciphers: [TLS_AES_256_GCM_SHA384]
         admin:
           tls: {certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem}
-        claim_check:
+        gateway:
           tls: {certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem}
         routes:
           admin:
@@ -954,7 +974,8 @@ defmodule AnkusaServer.ConfigTest do
         #{@sources}
         """)
 
-      config = Config.load!(path: path, env: %{}).config
+      loaded = Config.load!(path: path, env: %{"ANKUSA_ROLES" => "edge,claim_check"})
+      config = loaded.config
 
       assert %{
                max_connections: 5000,
@@ -978,19 +999,21 @@ defmodule AnkusaServer.ConfigTest do
 
       for tls <- [
             config.admin.tls,
-            config.claim_check.tls,
+            loaded.gateway.tls,
             config.routes.admin.tls,
             config.metrics.tls
           ] do
         assert %{verify: :verify_none, versions: [:"tlsv1.2", :"tlsv1.3"]} = tls
       end
 
+      # The gateway's series join the node's scrape.
       assert %{
                enabled: true,
                port: 9100,
                ip: "0.0.0.0",
                detail: :source,
-               max_series_per_metric: 100
+               max_series_per_metric: 100,
+               extra: [Ankusa.Gateway.Metrics]
              } = config.metrics
     end
 
@@ -1061,8 +1084,8 @@ defmodule AnkusaServer.ConfigTest do
              "listener.tls.cacertfile is required with listener.tls.verify: :verify_peer"},
             {"admin: {tls: {certfile: #{@tls_dir}/server.pem}}",
              "admin.tls.keyfile is required when admin.tls is set"},
-            {"claim_check: {tls: {certfile: /nope.pem, keyfile: /nope-key.pem}}",
-             "claim_check.tls.certfile must be a readable file"},
+            {"gateway: {tls: {certfile: /nope.pem, keyfile: /nope-key.pem}}",
+             "gateway.tls.certfile must be a readable file"},
             {"listener: {max_connections: 0}",
              "listener.max_connections must be a positive integer, got 0"},
             {"metrics: {max_series_per_metric: 0}",
@@ -1129,46 +1152,55 @@ defmodule AnkusaServer.ConfigTest do
       end
     end
 
-    test "jwt and mtls blocks land in core's config" do
-      config =
-        load_auth("""
-        admin:
-          tls: {certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem, cacertfile: #{@tls_dir}/ca.pem, verify: verify_peer}
-          auth:
-            mode: mtls
-            mtls:
-              subject_map:
-                "cn:ops-laptop": [dlq:read, "tenant:*"]
-                "uri:spiffe://prod/ops": metrics:read
-        claim_check:
-          auth:
-            mode: jwt
-            jwt:
-              issuer: https://login.example.com/
-              audience: [ankusa-claims, ankusa]
-              jwks_url: https://login.example.com/jwks.json
-              refresh_ms: 60000
-              leeway_s: 5
-              scope_claim: scp
-        """)
+    test "jwt and mtls blocks land in core's config, and a version-1 claim_check.auth in the gateway's" do
+      loaded =
+        Config.load!(
+          path:
+            tmp_config("""
+            admin:
+              tls: {certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem, cacertfile: #{@tls_dir}/ca.pem, verify: verify_peer}
+              auth:
+                mode: mtls
+                mtls:
+                  subject_map:
+                    "cn:ops-laptop": [dlq:read, "tenant:*"]
+                    "uri:spiffe://prod/ops": metrics:read
+            claim_check:
+              auth:
+                mode: jwt
+                jwt:
+                  issuer: https://login.example.com/
+                  audience: [ankusa-claims, ankusa]
+                  jwks_url: https://login.example.com/jwks.json
+                  refresh_ms: 60000
+                  leeway_s: 5
+                  scope_claim: scp
+            #{@sources}
+            """),
+          env: %{"ANKUSA_ROLES" => "edge,claim_check"}
+        )
+
+      config = loaded.config
 
       assert config.admin.auth.mtls.subject_map == %{
                "cn:ops-laptop" => ["dlq:read", "tenant:*"],
                "uri:spiffe://prod/ops" => ["metrics:read"]
              }
 
-      assert %{
-               mode: :jwt,
-               jwt: %{
-                 issuer: "https://login.example.com/",
-                 audience: ["ankusa-claims", "ankusa"],
-                 jwks_url: "https://login.example.com/jwks.json",
-                 refresh_ms: 60_000,
-                 min_refresh_ms: 10_000,
-                 leeway_s: 5,
-                 scope_claim: "scp"
+      assert [
+               %{
+                 type: :jwt,
+                 config: %{
+                   issuer: "https://login.example.com/",
+                   audience: ["ankusa-claims", "ankusa"],
+                   jwks_url: "https://login.example.com/jwks.json",
+                   refresh_ms: 60_000,
+                   min_refresh_ms: 10_000,
+                   leeway_s: 5,
+                   scope_claim: "scp"
+                 }
                }
-             } = config.claim_check.auth
+             ] = loaded.gateway.auth.authenticators
     end
 
     test "core's rules run at load: mtls needs verify_peer, jwt needs a key source" do
@@ -1185,8 +1217,9 @@ defmodule AnkusaServer.ConfigTest do
 
       assert load_error("admin: {auth: {tokns: []}}") =~ ~s(admin.auth: unknown key "tokns")
 
-      assert load_error("claim_check: {auth: {jwt: {secret: x}}}") =~
-               ~s(claim_check.auth.jwt: unknown key "secret")
+      assert load_error(
+               "gateway: {auth: {authenticators: [{type: jwt, issuer: i, audience: a, secret: x}]}}"
+             ) =~ ~s(gateway.auth.authenticators[0]: unknown key "secret")
     end
 
     test "ANKUSA_ADMIN_TOKEN gives the admin API one token holding every scope and every tenant" do
@@ -1201,19 +1234,23 @@ defmodule AnkusaServer.ConfigTest do
     end
 
     test "the env tokens replace the file's auth block, one per control plane" do
-      config =
-        load_auth(
-          """
-          admin:
-            auth: {mode: none}
-          """,
-          %{
+      loaded =
+        Config.load!(
+          path:
+            tmp_config("""
+            admin:
+              auth: {mode: none}
+            #{@sources}
+            """),
+          env: %{
+            "ANKUSA_ROLES" => "edge,claim_check",
             "ANKUSA_ADMIN_TOKEN" => "a",
             "ANKUSA_ROUTES_ADMIN_TOKEN" => "r",
             "ANKUSA_CLAIM_CHECK_TOKEN" => "c"
           }
         )
 
+      config = loaded.config
       assert [%{id: "ANKUSA_ADMIN_TOKEN"}] = config.admin.auth.tokens
 
       assert [
@@ -1224,13 +1261,269 @@ defmodule AnkusaServer.ConfigTest do
              ] =
                config.routes.admin.auth.tokens
 
-      assert [%{id: "ANKUSA_CLAIM_CHECK_TOKEN", scopes: ["claims:read", "tenant:*"]}] =
-               config.claim_check.auth.tokens
+      assert [%{type: :token, config: %{tokens: [token]}}] = loaded.gateway.auth.authenticators
+      assert %{id: "ANKUSA_CLAIM_CHECK_TOKEN", scopes: ["claims:read", "tenant:*"]} = token
+      assert token.sha256 == Ankusa.Admin.Auth.Token.hash("c")
+    end
+
+    test "ANKUSA_CLAIM_CHECK_TOKEN replaces the authenticators and keeps the rest of gateway.auth" do
+      loaded =
+        Config.load!(
+          path:
+            tmp_config("""
+            config_version: 2
+            node: {roles: [claim_check]}
+            gateway:
+              ip: 0.0.0.0
+              auth:
+                allow_insecure: true
+                authenticators:
+                  - {type: token, tokens: [{id: file, token: from-the-file}]}
+            """),
+          env: %{"ANKUSA_CLAIM_CHECK_TOKEN" => "from-env"}
+        )
+
+      assert loaded.gateway.auth.allow_insecure
+
+      assert [%{config: %{tokens: [%{id: "ANKUSA_CLAIM_CHECK_TOKEN"}]}}] =
+               loaded.gateway.auth.authenticators
+
+      assert load_error("", %{"ANKUSA_CLAIM_CHECK_TOKEN" => ""}) =~
+               "ANKUSA_CLAIM_CHECK_TOKEN is set but empty"
     end
 
     test "an empty token variable is an error, not a way to switch authentication off" do
       assert load_error("", %{"ANKUSA_ADMIN_TOKEN" => ""}) =~
                "ANKUSA_ADMIN_TOKEN is set but empty"
+    end
+  end
+
+  # ── the gateway (config_version 2) ──────────────────────────────────────────
+
+  describe "the gateway" do
+    @token Ankusa.Admin.Auth.Token.hash("worker-token")
+
+    test "a version-1 claim_check listener is migrated to gateway:" do
+      loaded =
+        Config.load!(
+          path:
+            tmp_config("""
+            node: {roles: [claim_check]}
+            claim_check:
+              port: 4100
+              ip: 0.0.0.0
+              max_concurrent_reads: 7
+              integrity_check: "off"
+              auth:
+                mode: token
+                tokens: [{id: worker, sha256: #{@token}, scopes: [claims:read, "tenant:*"]}]
+              read_cache_bytes: 0
+            """),
+          env: %{}
+        )
+
+      assert %Ankusa.Gateway.Config{
+               port: 4100,
+               ip: "0.0.0.0",
+               max_concurrent_requests: 7,
+               claims: %{integrity_check: :off},
+               auth: %{authenticators: [%{type: :token, config: %{tokens: [%{id: "worker"}]}}]}
+             } = loaded.gateway
+
+      # what stays in core stays
+      assert loaded.config.claim_check.read_cache_bytes == 0
+      assert loaded.doc["config_version"] == 2
+      refute Map.has_key?(loaded.doc["claim_check"], "port")
+    end
+
+    test "migration: mode none is an empty chain, allow_insecure is kept, jwt and mtls carry their block" do
+      migrate = fn auth -> Config.migrate_gateway_keys(%{"claim_check" => %{"auth" => auth}}) end
+
+      assert %{"gateway" => %{"auth" => %{"authenticators" => [], "allow_insecure" => true}}} =
+               migrate.(%{"mode" => "none", "allow_insecure" => true})
+
+      assert %{"gateway" => %{"auth" => %{"authenticators" => []}}} = migrate.(%{})
+
+      assert %{
+               "gateway" => %{
+                 "auth" => %{"authenticators" => [%{"type" => "jwt", "issuer" => "i"}]}
+               }
+             } =
+               migrate.(%{"mode" => "jwt", "jwt" => %{"issuer" => "i"}})
+
+      assert %{"gateway" => %{"auth" => %{"authenticators" => [%{"type" => "mtls"}]}}} =
+               migrate.(%{"mode" => "mtls", "mtls" => %{"subject_map" => %{}}})
+
+      # A file with no moved key is left alone.
+      assert Config.migrate_gateway_keys(%{"claim_check" => %{"retention_days" => 3}}) ==
+               %{"claim_check" => %{"retention_days" => 3}}
+    end
+
+    test "migration: a target already set, or a templated mode, is refused" do
+      error =
+        assert_raise ConfigError, fn ->
+          Config.migrate_gateway_keys(%{
+            "claim_check" => %{"port" => 1},
+            "gateway" => %{"port" => 2}
+          })
+        end
+
+      assert error.message == "claim_check.port and gateway.port are both set"
+
+      error =
+        assert_raise ConfigError, fn ->
+          Config.migrate_gateway_keys(%{
+            "claim_check" => %{"integrity_check" => "off"},
+            "gateway" => %{"claims" => %{"integrity_check" => "manifest"}}
+          })
+        end
+
+      assert error.message ==
+               "claim_check.integrity_check and gateway.claims.integrity_check are both set"
+
+      error =
+        assert_raise ConfigError, fn ->
+          Config.migrate_gateway_keys(%{"claim_check" => %{"auth" => %{"mode" => "${MODE}"}}})
+        end
+
+      assert error.message =~ "claim_check.auth.mode: a templated mode cannot be migrated"
+    end
+
+    test "a version-2 file that still names a moved claim_check key says where it went" do
+      for {key, target} <- [
+            {"port", "gateway.port"},
+            {"ip", "gateway.ip"},
+            {"auth", "gateway.auth"},
+            {"max_concurrent_reads", "gateway.max_concurrent_requests"},
+            {"integrity_check", "gateway.claims.integrity_check"}
+          ] do
+        path =
+          tmp_config("""
+          config_version: 2
+          claim_check: {#{key}: null}
+          sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+          """)
+
+        error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+        assert error.message == "claim_check.#{key}: moved to #{target} (config_version 2)"
+      end
+    end
+
+    test "node.roles: [claim_check] alone is a role-less core and a gateway, under any wal" do
+      for wal <- ["", "wal: {type: none}\n"] do
+        loaded =
+          Config.load!(
+            path: tmp_config("config_version: 2\nnode: {roles: [claim_check]}\n" <> wal),
+            env: %{}
+          )
+
+        assert loaded.config.roles == []
+        assert %Ankusa.Gateway.Config{port: 4001, instance: :default} = loaded.gateway
+        assert loaded.config.metrics.extra == [Ankusa.Gateway.Metrics]
+      end
+    end
+
+    test "[claim_check, dispatch] under wal: none keeps booting, as a role-less core" do
+      loaded =
+        Config.load!(
+          path:
+            tmp_config("""
+            node: {roles: [claim_check, dispatch]}
+            wal: {type: none}
+            """),
+          env: %{}
+        )
+
+      assert loaded.config.roles == []
+      assert loaded.gateway != nil
+    end
+
+    test "without the role there is no gateway, but its section is still checked" do
+      loaded = Config.load!(path: tmp_config("gateway: {ip: 0.0.0.0}\n"), env: %{})
+      assert loaded.gateway == nil
+      assert loaded.config.metrics.extra == []
+
+      error =
+        assert_raise ConfigError, fn ->
+          Config.load!(path: tmp_config("gateway: {port: 70000}\n"), env: %{})
+        end
+
+      assert error.message == "gateway.port must be an integer from 0 to 65535, got 70000"
+    end
+
+    test "an exposed gateway with an empty chain is refused when the node runs it" do
+      error =
+        assert_raise ConfigError, fn ->
+          Config.load!(
+            path:
+              tmp_config(
+                "config_version: 2\nnode: {roles: [claim_check]}\ngateway: {ip: 0.0.0.0}\n"
+              ),
+            env: %{}
+          )
+        end
+
+      assert error.message =~ "gateway.auth.authenticators is empty but gateway.ip (0.0.0.0)"
+    end
+
+    test "authenticators of every type load; a plaintext token is hashed" do
+      loaded =
+        Config.load!(
+          path:
+            tmp_config("""
+            config_version: 2
+            node: {roles: [claim_check]}
+            gateway:
+              tls: {certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem, cacertfile: #{@tls_dir}/ca.pem, verify: verify_peer}
+              auth:
+                authenticators:
+                  - type: mtls
+                    subject_map:
+                      "cn:a": [claims:read]
+                      "cn:b": {scopes: [claims:read], groups: [ops]}
+                  - type: token
+                    name: workers
+                    tokens:
+                      - {id: w, token: worker-token, groups: [workers], claims: {team: x}}
+                  - type: jwt
+                    issuer: https://login.example.com/
+                    audience: ankusa
+                    jwks_url: https://login.example.com/jwks.json
+                    groups_claim: roles
+                    subject_prefix: "okta|"
+              claims: {enabled: false}
+            """),
+          env: %{}
+        )
+
+      assert [mtls, token, jwt] = loaded.gateway.auth.authenticators
+      assert mtls.config.subject_map["cn:b"] == %{scopes: ["claims:read"], groups: ["ops"]}
+
+      assert %{
+               name: "workers",
+               config: %{tokens: [%{id: "w", sha256: @token, groups: ["workers"]}]}
+             } =
+               token
+
+      assert %{groups_claim: "roles", subject_prefix: "okta|"} = jwt.config
+      refute loaded.gateway.claims.enabled
+      refute inspect(loaded) =~ "worker-token"
+    end
+
+    test "a gateway mistake is named" do
+      for {yaml, message} <- [
+            {"gateway: {nope: 1}", ~s(gateway: unknown key "nope")},
+            {"gateway: {auth: {authenticators: [{type: basic}]}}",
+             ~s(gateway.auth.authenticators[0].type: unknown value "basic")},
+            {"gateway: {auth: {authenticators: [{type: token, tokens: [{id: a}]}]}}",
+             "gateway.auth.authenticators[0].tokens[0]: needs token or sha256"},
+            {"gateway: {claims: {policy: nope}}",
+             ~s(gateway.claims.policy must name a policy of gateway.authz.policies, got "nope")}
+          ] do
+        path = tmp_config("config_version: 2\n" <> yaml <> "\n")
+        error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+        assert error.message =~ message, "#{yaml}: #{error.message}"
+      end
     end
   end
 

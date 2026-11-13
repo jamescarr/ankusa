@@ -13,18 +13,18 @@ defmodule Ankusa.ClaimCheck do
   together as a `t:claim/0`.
 
   Readers either call `redeem/3` in-process, fetch
-  `GET /v1/claims/<tenant>/<claim_id>` from a `:claim_check`-role node
-  (`Ankusa.ClaimCheck.Router`), or read the objects straight from the bucket.
-  The gateway authenticates and authorizes every request (`claim_check.auth`,
-  `claim_check.authorize`) and holds the ref to `verify_ref/2`; `read/4`,
-  `locate/4` and `read_bytes/5` below do neither, so code calling them has
-  already decided who may read what.
+  `GET /v1/claims/<tenant>/<claim_id>` from the gateway (`Ankusa.Gateway`, in
+  the `ankusa_gateway` package), or read the objects straight from the bucket.
+  The gateway authenticates and authorizes every request (`gateway.auth`,
+  `gateway.authz`) and holds the ref to `verify_ref/2`; `read/4`, `locate/4`
+  and `read_bytes/5` below do neither, so code calling them has already
+  decided who may read what.
 
   Objects are written once under a freshly minted id and never rewritten, so
   every read is safe to cache forever.
 
   The gateway checks what it serves against the pack's manifest
-  (`claim_check.integrity_check: :manifest`, the default): see `digest/3`.
+  (`gateway.claims.integrity_check: :manifest`, the default): see `digest/3`.
 
   Permanent errors (`:not_found`, `:integrity_mismatch`, `:invalid_ref`,
   `:invalid_tenant`, `:invalid_id`, `:unsigned_ref`, `:bad_signature`,
@@ -417,7 +417,7 @@ defmodule Ankusa.ClaimCheck do
   index, or a pack no store has, is `:not_found`; a pack not found while some
   store could not answer is that store's error.
 
-  On a `:claim_check` node the read goes through `Ankusa.ClaimCheck.Reader`,
+  On a gateway node the read goes through `Ankusa.ClaimCheck.Reader`,
   and gives up with `{:unavailable, :deadline}` at `opts[:deadline]` (default
   `deadline/1`); elsewhere it goes straight to the store.
   """
@@ -525,7 +525,7 @@ defmodule Ankusa.ClaimCheck do
   @doc """
   `length` bytes of a located claim, starting `first` bytes into it: the
   whole claim from `Ankusa.ClaimCheck.Cache` when it is there, else one ranged
-  read, through `Ankusa.ClaimCheck.Reader` on a `:claim_check` node (see
+  read, through `Ankusa.ClaimCheck.Reader` on a gateway node (see
   `locate/4` for `opts[:deadline]`). A whole claim of at most
   `claim_check.read_cache_max_entry_bytes` is cached; a range never is. The
   caller keeps the range inside the claim's `length`; a pack that ends before
@@ -603,7 +603,7 @@ defmodule Ankusa.ClaimCheck do
 
   @doc """
   The lowercase hex sha256 of a located claim, as its pack's manifest records
-  it (`claim_check.integrity_check: :manifest`, the gateway's check).
+  it (`gateway.claims.integrity_check: :manifest`, the gateway's check).
 
   The pack's digests come from `Ankusa.ClaimCheck.Cache` (inside the pack's
   entry, so under `claim_check.read_cache_bytes` and aged with it), else from
@@ -729,7 +729,7 @@ defmodule Ankusa.ClaimCheck do
     end
   end
 
-  # Through the reader when it runs (a `:claim_check` node), else straight to
+  # Through the reader when it runs (a gateway node), else straight to
   # the store: no limit, no coalescing, no deadline but the store's timeout.
   defp run(instance, key, store, fun, deadline) do
     case Ankusa.whereis(instance, :claim_reader) do
@@ -769,12 +769,6 @@ defmodule Ankusa.ClaimCheck do
     * `max_body_bytes` of 4 GiB or more: a pack can't hold a body that large
     * `claim_check.ref_signing_keys` must be a list of strings of at least 16
       bytes, and not empty while `claim_check.accept_unsigned_refs` is `false`
-    * `claim_check.authorize` must be `nil` or a `{module, fun, args}` the
-      module exports with arity `length(args) + 1`
-
-  A `:claim_check`-only node with a `LocalFS` claim store boots with a
-  warning: the gateway reads its own disk, and other nodes' claims are only
-  there if that directory is shared with them.
   """
   @spec validate_config!(Config.t()) :: :ok
   def validate_config!(%Config{claim_check: cc} = config) do
@@ -829,17 +823,7 @@ defmodule Ankusa.ClaimCheck do
 
     validate_bucket_expiry!(config, modules)
 
-    if Ankusa.BlobStore.LocalFS in modules and Config.role?(config, :claim_check) and
-         not Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) do
-      Logger.warning(
-        "[ankusa] the claim gateway reads claims from local disk (LocalFS); other nodes' " <>
-          "claims are not here unless this directory is shared with them. Point " <>
-          "claim_check.blob_stores at the stores the dispatch nodes write to."
-      )
-    end
-
     :ok = validate_refs!(cc)
-    validate_authorize!(cc)
   end
 
   @day_ms 86_400_000
@@ -999,23 +983,6 @@ defmodule Ankusa.ClaimCheck do
 
   defp redacted_key(key) when is_binary(key), do: "<#{byte_size(key)} bytes>"
   defp redacted_key(_other), do: "<not a string>"
-
-  defp validate_authorize!(%{authorize: nil}), do: :ok
-
-  defp validate_authorize!(%{authorize: {mod, fun, args}})
-       when is_atom(mod) and is_atom(fun) and is_list(args) do
-    if Code.ensure_loaded?(mod) and function_exported?(mod, fun, length(args) + 1) do
-      :ok
-    else
-      raise ArgumentError,
-            "claim_check.authorize #{inspect(mod)}.#{fun}/#{length(args) + 1} is not defined"
-    end
-  end
-
-  defp validate_authorize!(%{authorize: other}) do
-    raise ArgumentError,
-          "claim_check.authorize must be nil or {module, fun, args}, got #{inspect(other)}"
-  end
 
   # ── internals ─────────────────────────────────────────────────────────────
 

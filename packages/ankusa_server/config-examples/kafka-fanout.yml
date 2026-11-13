@@ -15,6 +15,8 @@
 # `Authorization: Bearer $CLAIM_CHECK_TOKEN` (generate one with
 # `openssl rand -hex 32`). Keep port 4001 on your internal network anyway.
 
+config_version: 2
+
 node:
   roles: [edge, dispatch, storage, claim_check]
   data_dir: /var/lib/ankusa
@@ -23,18 +25,21 @@ admin:
   enabled: true
 
 claim_check:
+  # Target size of one pack object; a body larger than this still gets a pack
+  # of its own. Core defaults this to 16 MiB.
+  pack_max_bytes: 16777216
+
+gateway:
   port: 4001
   # The address the gateway binds (default 127.0.0.1). Consumers on other
   # hosts redeem claims here, so listen on every interface and keep the port
   # on your internal network.
   ip: 0.0.0.0
   auth:
-    mode: token
-    tokens:
-      - {id: consumers, token: "${CLAIM_CHECK_TOKEN}", scopes: [claims:read, "tenant:*"]}
-  # Target size of one pack object; a body larger than this still gets a pack
-  # of its own. Core defaults this to 16 MiB.
-  pack_max_bytes: 16777216
+    authenticators:
+      - type: token
+        tokens:
+          - {id: consumers, token: "${CLAIM_CHECK_TOKEN}", scopes: [claims:read, "tenant:*"]}
 
 sources:
   stripe:

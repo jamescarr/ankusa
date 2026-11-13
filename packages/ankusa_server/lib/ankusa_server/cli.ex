@@ -21,10 +21,11 @@ defmodule AnkusaServer.CLI do
   @doc "Validate the config, print a one-line summary, exit 0. Exit 78 on error."
   @spec check_config() :: no_return()
   def check_config do
-    config = config!()
+    %{config: config, gateway: gateway} = loaded!()
 
     IO.puts(
-      "config OK: roles=#{inspect(config.roles)} sources=#{AnkusaServer.Application.sources(config)} " <>
+      "config OK: roles=#{inspect(config.roles)} gateway=#{AnkusaServer.Application.gateway(gateway)} " <>
+        "sources=#{AnkusaServer.Application.sources(config)} " <>
         "wal=#{Ankusa.Queue.label(config.wal)} storage=#{inspect(elem(config.storage.blob_store, 0))}"
     )
 
@@ -36,11 +37,20 @@ defmodule AnkusaServer.CLI do
 
   Redaction is core's (`Ankusa.Admin.Redact`), the same function behind
   `GET /v1/config`, so printing the config to a terminal and reading it over
-  HTTP can never disagree about what is safe to show.
+  HTTP can never disagree about what is safe to show. The gateway's config,
+  under `"gateway"` (`null` without the `claim_check` role), is redacted by
+  `Ankusa.Gateway.Config.redact/1`.
   """
   @spec print_config() :: no_return()
   def print_config do
-    IO.puts(JSON.encode!(Ankusa.Admin.Redact.config(config!())))
+    %{config: config, gateway: gateway} = loaded!()
+
+    view =
+      config
+      |> Ankusa.Admin.Redact.config()
+      |> Map.put("gateway", gateway && Ankusa.Gateway.Config.redact(gateway))
+
+    IO.puts(JSON.encode!(view))
     halt(0)
   end
 
@@ -126,9 +136,11 @@ defmodule AnkusaServer.CLI do
     halt(0)
   end
 
-  defp config! do
+  defp config!, do: loaded!().config
+
+  defp loaded! do
     ensure_yaml()
-    Config.load_or_halt!().config
+    Config.load_or_halt!()
   end
 
   # `YamlElixir` reads through `yamerl`, whose application must be up. Under

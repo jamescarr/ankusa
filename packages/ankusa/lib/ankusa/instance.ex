@@ -20,8 +20,8 @@ defmodule Ankusa.Instance do
       restarts with the edge. A core that keeps crashing exhausts this
       supervisor's budget and the instance stops, for its parent to restart.
     * **Every other domain** — dispatch, archive/storage, store backup,
-      lifecycle events, metrics, and the admin, route-admin, claim-check and
-      metrics listeners — runs under `Ankusa.Instance.Isolated`. It has its own
+      lifecycle events, metrics, and the admin, route-admin and metrics
+      listeners — runs under `Ankusa.Instance.Isolated`. It has its own
       restart budget, and when that is exhausted it is restarted later with
       backoff instead of taking the instance down. A broken sink, a port
       someone else took or a full object store stops that domain, not the edge
@@ -122,7 +122,6 @@ defmodule Ankusa.Instance do
         routes_admin_children(config) ++
         dispatch_children(config, opts) ++
         storage_children(config, opts) ++
-        claim_check_children(config, opts) ++
         admin_children(config) ++
         metrics_listener_children(config)
 
@@ -148,7 +147,7 @@ defmodule Ankusa.Instance do
   end
 
   defp control_plane_auth(config) do
-    [config.admin.auth, config.routes.admin.auth, config.claim_check.auth]
+    [config.admin.auth, config.routes.admin.auth]
   end
 
   # The Prometheus reporter behind `/metrics` (admin API or metrics listener),
@@ -416,42 +415,6 @@ defmodule Ankusa.Instance do
       gc_memory_check_interval: :timer.seconds(1),
       telemetry: false
     ]
-  end
-
-  # The gateway's read cache and reader start before its listener, in the same
-  # subtree. `Isolated` restarts children one for one, so a reader crash
-  # leaves the listener up: until it is back, reads go straight to the store.
-  defp claim_check_children(config, opts) do
-    if Config.role?(config, :claim_check) do
-      warn_unauthenticated(
-        config.claim_check,
-        "[ankusa] claim-check API on #{listen_addr(config.claim_check, "claim_check.ip")} " <>
-          "has no authentication (claim_check.auth.mode: none); " <>
-          "set claim_check.auth before exposing it beyond this host"
-      )
-
-      cache =
-        if config.claim_check.read_cache_bytes > 0,
-          do: [{Ankusa.ClaimCheck.Cache, opts}],
-          else: []
-
-      isolated(
-        config,
-        :claim_check,
-        cache ++
-          [
-            {Ankusa.ClaimCheck.Reader, opts},
-            bandit_child(
-              Ankusa.ClaimCheck.Router,
-              config,
-              config.claim_check,
-              "claim_check.ip"
-            )
-          ]
-      )
-    else
-      []
-    end
   end
 
   defp dispatch_children(config, opts) do

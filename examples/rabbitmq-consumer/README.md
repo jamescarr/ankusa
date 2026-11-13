@@ -25,7 +25,7 @@ for consumers that shouldn't hold storage credentials.
   exchange), the ingest framework never touches a queue, only the
   exchange, and redeems fat-payload claim refs through `claim-check`'s HTTP
   API, using a client generated straight from
-  [`priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/claim_check.v1.yaml)
+  [`ankusa_gateway/priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway/priv/openapi/claim_check.v1.yaml)
   (`npm run generate:types`) instead of a hand-maintained ref type,
   see ["Redeem a claim"](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md#redeem-a-claim).
 - `floci`: local S3-compatible emulator (see

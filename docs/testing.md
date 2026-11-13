@@ -616,7 +616,9 @@ The always-on tests cover:
   `tick/1` flushes), `storage.max_segments_per_tick`, `reconcile other node` (a
   second node serves the first's segments by day and reconciles them, never
   settling its own obligations) and the legacy `seg/` layout.
-- **Claim Check** (`test/ankusa/claim_check/`, `test/ankusa/dispatch/claim_check_test.exs`):
+- **Claim Check** (`packages/ankusa/test/ankusa/claim_check/`,
+  `test/ankusa/dispatch/claim_check_test.exs`, and the gateway's own suite in
+  `packages/ankusa_gateway/test/ankusa/gateway/`):
   reference parsing (URN grammar, tenant and ULID claim-id rejection, date
   partitions from the pack id's timestamp, claim ids locating their pack and
   position); pack building (index rows, ZIP offsets, manifest, standard-reader
@@ -625,21 +627,31 @@ The always-on tests cover:
   packing per tenant per batch with `pack_max_bytes` splitting and
   failure isolation; check-in-once (a fat hook on two sinks and a failing
   retry writes one object); `validate_config!/1` boot-time rejections; the
-  `:claim_check` role's read-only HTTP API; the gateway's integrity check
-  (`router_test.exs`, "integrity": a flipped body byte or an unparsable
+  gateway's read-only HTTP API
+  (`packages/ankusa_gateway/test/ankusa/gateway/claims_router_test.exs`, which
+  is core's old claim router test moved whole, plus a custom
+  `Ankusa.Gateway.Authorizer` in place of the old `authorize` hook); the
+  gateway's integrity check
+  (`claims_router_test.exs`, "integrity": a flipped body byte or an unparsable
   manifest is `502 integrity_mismatch`, `integrity_check: :off` serves and
   sends no digest, `x-ankusa-sha256` on `200`/`206` only, 100 concurrent
   `HEAD`s of one claim cause one store read and 100 `GET`s three — index,
-  manifest, claim — and the manifest's digests in `pack_test.exs`); and the
+  manifest, claim — and the manifest's digests in `pack_test.exs`); its
+  authentication chain (`authn_test.exs`: chain order, `:skip`, two `jwt`
+  issuers on one keys server, `mtls` identity mapping), its policy engine
+  (`authz_test.exs`: `first`/`all`/`any` and `on_unavailable`), its config and
+  OpenAPI contract (`config_test.exs`, `openapi_test.exs`) and a real socket
+  with `/health`, `/ready` and the `ankusa_gateway_requests_total` series
+  (`supervisor_test.exs`); and the
   `LocalFS` retention sweeper deleting whole `dt=` day partitions (`sweeper_test.exs`,
   "bounded sweep": 10 000 partitions over 100 tenants, one tenant per tick, a
   restart resuming after the persisted cursor, a tenant the budget cut short
   staying the next tick's); a claim batch where an upload process dies or a store
   raises answering `unavailable` for that pack's items only, and the pack limits
-  in `split/3` (`batch_test.exs`, "batch exit handled"). The gateway,
-  sweep and archive series are in `metrics_test.exs` ("gateway metrics",
-  "archive metrics") and the compactor's failure and age events in
-  `storage_test.exs`.
+  in `split/3` (`batch_test.exs`, "batch exit handled"). The gateway's request
+  series are asserted in the gateway package's `supervisor_test.exs`; the sweep
+  and archive series stay in core's `metrics_test.exs` ("archive metrics") and
+  the compactor's failure and age events in `storage_test.exs`.
 - **Property tests** (`test/ankusa/property/`, [StreamData](https://hexdocs.pm/stream_data),
   5 000 runs per property by default; `PROPERTY_RUNS=50000 mix test
   test/ankusa/property` for a long soak; generators in

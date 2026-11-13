@@ -97,7 +97,6 @@ defmodule Ankusa.Admin.Redact do
     config
     |> update_in([:admin, :auth], &auth_view/1)
     |> update_in([:routes, :admin, :auth], &auth_view/1)
-    |> update_in([:claim_check, :auth], &auth_view/1)
     |> update_in([:claim_check, :ref_signing_keys], &Enum.map(&1, fn _key -> @redacted end))
     |> update_in([:backup, :signing_key], &Enum.map(&1, fn _key -> @redacted end))
   end

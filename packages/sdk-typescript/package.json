@@ -33,7 +33,7 @@
     "routes"
   ],
   "scripts": {
-    "generate:types": "openapi-typescript ../ankusa/priv/openapi/claim_check.v1.yaml -o src/claim-check/claim-check-schema.d.ts && openapi-typescript ../ankusa/priv/openapi/admin.v1.yaml -o src/admin/admin-schema.d.ts",
+    "generate:types": "openapi-typescript ../ankusa_gateway/priv/openapi/claim_check.v1.yaml -o src/claim-check/claim-check-schema.d.ts && openapi-typescript ../ankusa/priv/openapi/admin.v1.yaml -o src/admin/admin-schema.d.ts",
     "build": "tsc && cp src/admin/admin-schema.d.ts dist/admin/",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test src/**/*.test.ts",
