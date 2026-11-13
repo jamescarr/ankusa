@@ -23,7 +23,9 @@ defmodule Ankusa.Gateway.Authn do
 
   An empty chain hands every request `Ankusa.Principal.operator/0` (every
   scope, every tenant); `Ankusa.Gateway.Config` only accepts it on loopback or
-  with `auth.allow_insecure: true`.
+  with `auth.allow_insecure: true`. With `gateway.sharing.enabled` the chain
+  ends with the share-link authenticator (`Ankusa.Gateway.Authn.Link`); a
+  chain of that one alone is still empty to a request without a link.
 
   ## The authentication cache
 
@@ -111,12 +113,26 @@ defmodule Ankusa.Gateway.Authn do
   defp result_tag({:error, _}), do: :unauthenticated
 
   # `{result, authenticator name, cached?}`.
-  defp authenticate(_conn, _instance, %{auth: %{authenticators: []}}) do
+  defp authenticate(_conn, _instance, %{auth: %{authenticators: []}}), do: anonymous()
+
+  # A chain of only the share-link authenticator (sharing on, no chain of
+  # your own) is an empty chain to whoever brings no link.
+  defp authenticate(conn, instance, %{auth: %{authenticators: authenticators}} = gateway) do
+    case chain(conn, instance, gateway) do
+      {{:error, :unauthenticated}, "none", false} = refused ->
+        if Enum.all?(authenticators, &(&1.type == :link)), do: anonymous(), else: refused
+
+      result ->
+        result
+    end
+  end
+
+  defp anonymous do
     principal = Principal.operator()
     {{:ok, principal, :anonymous, subject_key(:anonymous, principal)}, "none", false}
   end
 
-  defp authenticate(conn, instance, %{auth: %{authenticators: authenticators, cache: cache}}) do
+  defp chain(conn, instance, %{auth: %{authenticators: authenticators, cache: cache}}) do
     authenticators
     |> Enum.with_index()
     |> Enum.reduce_while({{:error, :unauthenticated}, "none", false}, fn {authenticator, index},

@@ -74,3 +74,35 @@ follows [Semantic Versioning](https://semver.org/).
   `read_first_bytes`, a byte budget), decided by the space's policy; one
   canonical key however it arrives, `Ankusa.Gateway.Spaces`,
   `Ankusa.Gateway.Http.store_error/2` and `priv/openapi/gateway.v1.yaml`.
+- **Sharing** (`gateway.sharing`): native grants, ownership and share links.
+  With `enabled` the gateway defines the `grants` authorizer (an object's
+  owner, or a live `user:`/`group:`/`tenant:`/`anyone`/`link` grant on the
+  object or any of its ancestor prefixes; at most 34 cache reads, the misses
+  read concurrently), appends the `link` authenticator, and makes `PUT` record
+  `ankusa-owner` and `ankusa-incarnation` on a new object (carried over
+  unchanged on an overwrite; a lost race is one retry, then `409 conflict`).
+  An ACL document v1 (`Ankusa.Gateway.ACL`, `Ankusa.Gateway.ACL.Store`) lives
+  at `.ankusa/acl/v1/` in the space's own store, compare-and-swap written,
+  cached for `acl_cache_ttl_ms`, and dead when its `incarnation` is not the
+  object's current one — the grants of a deleted object never land on a later
+  object of the same key.
+- **The Sharing API v1**: `GET /v1/spaces/:space/acl`, `POST
+  /v1/spaces/:space/grants`, `DELETE /v1/spaces/:space/grants/:id` and `POST
+  /v1/spaces/:space/links` (`404` unless sharing is on), each authorizing
+  `share` and — for a new grant or link — every action it hands out (`403`
+  naming the missing `action`), each mutation writing an **audit record v1**
+  under `.ankusa/audit/v1/dt=<date>/` first (`503 audit_unavailable` and
+  nothing changed when that fails).
+- **Share links v1** (`Ankusa.Gateway.Sharing.Link`, `Ankusa.Gateway.Authn.Link`):
+  `/v1/objects/<space>/<key>?link=&exp=&sig=`, an unpadded base64url
+  HMAC-SHA256 over `urn:ankusa:link:v1:<space>:<grant id>:<exp>` under
+  `sharing.signing_keys` (first signs, any verifies; rotate in front).
+  `410 link_expired` past `exp`; the credential is accepted on `GET`/`HEAD` of
+  one object only, and only the `grants` step ever sees it.
+- `priv/openapi/gateway.v1.yaml` documents the Sharing API (`Grant`, `Acl`,
+  `Link`, `GrantRequest`, `LinkRequest`), the share-link query parameters and
+  `410 link_expired` on `GET`/`HEAD`, `409 conflict` on `PUT`, and the
+  reserved `ankusa-owner`/`ankusa-incarnation` metadata.
+- `Ankusa.Gateway.Metrics` gains
+  `ankusa_gateway_shares_total{instance,action,result}` from
+  `[:ankusa, :gateway, :share]`.

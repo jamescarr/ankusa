@@ -63,9 +63,10 @@ defmodule Ankusa.Gateway.OpenApiTest do
           authorizers: %{
             "all" => {Ankusa.Gateway.Authz.Rules, %{rules: [%{effect: :allow, actions: ["*"]}]}}
           },
-          policies: %{"objects" => %{mode: :first, steps: ["all"]}}
+          policies: %{"objects" => %{mode: :first, steps: ["all", "grants"]}}
         },
-        spaces: %{"docs" => %{store: {LocalFS, [root: root]}, prefix: "docs/", policy: "objects"}}
+        spaces: %{"docs" => %{store: {LocalFS, [root: root]}, prefix: "docs/", policy: "objects"}},
+        sharing: %{enabled: true, signing_keys: ["0123456789abcdef0123"]}
       )
 
     start_supervised!({Ankusa.Gateway, gateway})

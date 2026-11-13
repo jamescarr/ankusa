@@ -36,6 +36,8 @@ defmodule Ankusa.Gateway.Objects do
   Emits `[:ankusa, :gateway, :request]` with `api: :objects` for every answer.
   """
 
+  require Logger
+
   alias Ankusa.ClaimCheck.Reader
   alias Ankusa.Gateway.{Authz, Config, Range, Spaces}
   alias Ankusa.Gateway.Authz.Request
@@ -202,8 +204,35 @@ defmodule Ankusa.Gateway.Objects do
     opts = Config.store_opts(gateway, space)
 
     case module.delete_object(gateway.instance, Spaces.object_key(space, key), opts) do
-      :ok -> Plug.Conn.send_resp(conn, 204, "")
-      {:error, reason} -> Ankusa.Gateway.Http.store_error(conn, reason)
+      :ok ->
+        if gateway.sharing.enabled, do: forget_acl(gateway.instance, space, key)
+        Plug.Conn.send_resp(conn, 204, "")
+
+      {:error, reason} ->
+        Ankusa.Gateway.Http.store_error(conn, reason)
+    end
+  end
+
+  # A deleted object's document goes too, best effort: one left behind is dead
+  # by its incarnation, never read again.
+  defp forget_acl(instance, space, key) do
+    Ankusa.Gateway.ACL.Store.invalidate(instance, space, key)
+
+    case Ankusa.Gateway.ACL.Store.delete_object_doc(instance, space, key) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[ankusa] gateway: could not delete the ACL document of #{space.name}/#{key}: " <>
+            inspect(reason, limit: 20, printable_limit: 512)
+        )
+
+        Telemetry.emit([:gateway, :share], %{}, %{
+          instance: instance,
+          action: :acl_cleanup,
+          result: :unavailable
+        })
     end
   end
 
@@ -513,31 +542,128 @@ defmodule Ankusa.Gateway.Objects do
     end
   end
 
+  defp store_put(conn, %{sharing: %{enabled: true}} = gateway, space, key, body, metadata),
+    do: owned_put(conn, gateway, space, key, body, metadata, 1)
+
   defp store_put(conn, gateway, space, key, body, metadata) do
-    {module, _opts} = space.store
-
-    opts =
-      Config.store_opts(gateway, space) ++
-        [content_type: content_type(conn), metadata: metadata] ++ condition(conn)
-
-    case module.put_object(gateway.instance, Spaces.object_key(space, key), body, opts) do
+    case write(gateway, space, key, body, content_type(conn), metadata, condition(conn)) do
       {:ok, version} ->
-        conn
-        |> Plug.Conn.put_resp_header("etag", etag(version))
-        |> Http.send_json(200, %{
-          space: space.name,
-          key: key,
-          size: byte_size(body),
-          version: version
-        })
+        written(conn, space, key, body, version)
 
       {:error, reason} when reason in [:already_exists, :version_mismatch] ->
-        Http.send_json(conn, 412, %{error: "precondition_failed"})
+        precondition_failed(conn)
 
       {:error, reason} ->
         Ankusa.Gateway.Http.store_error(conn, reason)
     end
   end
+
+  # With sharing on, a new object is created with its incarnation and (unless
+  # the caller is anonymous) its owner; an existing one keeps both, absent ones
+  # stay absent: overwriting never makes anyone an owner. A condition the
+  # gateway added itself that loses a race is tried once more, then `409`.
+  defp owned_put(conn, gateway, space, key, body, metadata, attempt) do
+    {module, _opts} = space.store
+    object_key = Spaces.object_key(space, key)
+    client = condition(conn)
+
+    case module.head_object(gateway.instance, object_key, Config.store_opts(gateway, space)) do
+      {:error, :not_found} when client in [[], [if: :absent]] ->
+        metadata = Map.merge(metadata, created(conn))
+
+        ownership_write(
+          conn,
+          gateway,
+          space,
+          key,
+          body,
+          metadata,
+          {[if: :absent], client == []},
+          attempt
+        )
+
+      {:error, :not_found} ->
+        precondition_failed(conn)
+
+      {:ok, head} ->
+        kept = Map.take(head.metadata, ["ankusa-owner", "ankusa-incarnation"])
+        own = if client == [], do: [if: {:version, head.version}], else: client
+
+        ownership_write(
+          conn,
+          gateway,
+          space,
+          key,
+          body,
+          Map.merge(metadata, kept),
+          {own, client == []},
+          attempt
+        )
+
+      {:error, reason} ->
+        Ankusa.Gateway.Http.store_error(conn, reason)
+    end
+  end
+
+  defp created(conn) do
+    owner =
+      case conn.assigns do
+        %{principal_via: :anonymous} -> %{}
+        %{principal: %{id: id}} -> %{"ankusa-owner" => id}
+        _ -> %{}
+      end
+
+    Map.put(owner, "ankusa-incarnation", Ankusa.Gateway.ACL.ulid())
+  end
+
+  defp ownership_write(conn, gateway, space, key, body, metadata, {condition, own?}, attempt) do
+    result = write(gateway, space, key, body, content_type(conn), metadata, condition)
+    Ankusa.Gateway.ACL.Store.invalidate(gateway.instance, space, key)
+
+    case result do
+      {:ok, version} ->
+        written(conn, space, key, body, version)
+
+      {:error, reason}
+      when reason in [:already_exists, :version_mismatch] and own? and attempt == 1 ->
+        owned_put(
+          conn,
+          gateway,
+          space,
+          key,
+          body,
+          Map.drop(metadata, ["ankusa-owner", "ankusa-incarnation"]),
+          2
+        )
+
+      {:error, reason} when reason in [:already_exists, :version_mismatch] and own? ->
+        Http.send_json(conn, 409, %{error: "conflict"})
+
+      {:error, reason} when reason in [:already_exists, :version_mismatch] ->
+        precondition_failed(conn)
+
+      {:error, reason} ->
+        Ankusa.Gateway.Http.store_error(conn, reason)
+    end
+  end
+
+  defp write(gateway, space, key, body, content_type, metadata, condition) do
+    {module, _opts} = space.store
+
+    opts =
+      Config.store_opts(gateway, space) ++
+        [content_type: content_type, metadata: metadata] ++ condition
+
+    module.put_object(gateway.instance, Spaces.object_key(space, key), body, opts)
+  end
+
+  defp written(conn, space, key, body, version) do
+    conn
+    |> Plug.Conn.put_resp_header("etag", etag(version))
+    |> Http.send_json(200, %{space: space.name, key: key, size: byte_size(body), version: version})
+  end
+
+  defp precondition_failed(conn), do: Http.send_json(conn, 412, %{error: "precondition_failed"})
 
   defp content_type(conn) do
     case Plug.Conn.get_req_header(conn, "content-type") do

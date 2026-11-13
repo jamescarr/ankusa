@@ -1046,4 +1046,59 @@ defmodule AnkusaGatewayServer.ConfigTest do
       end
     end
   end
+
+  describe "gateway.sharing" do
+    @tag :tmp_dir
+    test "loads with signing keys as a list or a comma-separated string, and defines grants", %{
+      tmp_dir: dir
+    } do
+      for keys <- [
+            "[0123456789abcdef0123, previous-key-0123456]",
+            ~s("0123456789abcdef0123, previous-key-0123456")
+          ] do
+        loaded =
+          load!("""
+          config_version: 2
+          gateway:
+            sharing:
+              enabled: true
+              signing_keys: #{keys}
+              acl_cache_ttl_ms: 500
+              link_max_ttl_s: 3600
+            authz:
+              policies:
+                docs: {steps: [grants]}
+            spaces:
+              docs:
+                store: {type: local, root: "#{dir}"}
+                policy: docs
+          """)
+
+        sharing = loaded.gateway.sharing
+
+        assert %{enabled: true, acl_cache_ttl_ms: 500, link_max_ttl_s: 3600} = sharing
+        assert sharing.signing_keys == ["0123456789abcdef0123", "previous-key-0123456"]
+        assert %{module: Ankusa.Gateway.Authz.Grants} = loaded.gateway.authz.authorizers["grants"]
+        assert List.last(loaded.gateway.auth.authenticators).type == :link
+
+        redacted = loaded.gateway |> Ankusa.Gateway.Config.redact() |> JSON.encode!()
+        refute redacted =~ "0123456789abcdef0123"
+      end
+    end
+
+    test "every error names its key" do
+      for {yaml, message} <- [
+            {"gateway: {sharing: {enabled: true}}", "gateway.sharing.signing_keys must hold"},
+            {"gateway: {sharing: {signing_keys: [short]}}", "gateway.sharing.signing_keys"},
+            {"gateway: {sharing: {link_max_ttl_s: 0}}", "gateway.sharing.link_max_ttl_s"},
+            {"gateway: {sharing: {acl_cache_ttl_ms: 60001}}", "gateway.sharing.acl_cache_ttl_ms"},
+            {"gateway: {sharing: {colour: red}}", "gateway.sharing"},
+            {"gateway: {authz: {policies: {p: {steps: [grants]}}}}", "names grants"},
+            {"gateway: {authz: {authorizers: {grants: {type: rules, rules: [{effect: allow, actions: [read]}]}}}}",
+             "reserved"}
+          ] do
+        assert error!("config_version: 2\n" <> yaml <> "\n") =~ message, yaml
+      end
+    end
+  end
 end

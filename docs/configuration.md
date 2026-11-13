@@ -152,6 +152,12 @@ runs it when `node.roles` lists `claim_check`, and the gateway's own image
 | `objects.op_deadline_ms` | `30000` | 1000..600000: one store operation's deadline, every attempt included; past it `503 store_unavailable` |
 | `objects.timeout_ms` | `10000` | 1..600000: one store request, the store's own `timeout_ms` overridden |
 | `objects.retries` | `1` | 0..10: extra attempts after a transient store failure, the store's own `retries` overridden |
+| `sharing.enabled` | `false` | Serve the Sharing API (`/v1/spaces/…`), define the `grants` authorizer, append the `link` authenticator, and record ownership on `PUT`. See [Sharing](claim-check.md#sharing) |
+| `sharing.signing_keys` | `[]` | The share-link HMAC-SHA256 keys, `[current, previous…]`, each at least 16 bytes; in YAML a list or one comma-separated string. Required non-empty when `enabled`: the first signs, any verifies. Redacted by `print-config` |
+| `sharing.link_max_ttl_s` | `604800` | 1..31536000: the longest a share link may live (`expires_in_s` past it is `400 invalid_link`) |
+| `sharing.acl_cache_ttl_ms` | `2000` | 0..60000: how long a node reuses an ACL document and an object's owner; the cross-node bound of a revocation and of a re-created object's old grants (`0` reads the store every time) |
+| `sharing.acl_cache_max_entries`, `sharing.acl_cache_max_bytes` | `100000`, `67108864` | The ACL cache's bounds; an eviction only costs a store read |
+| `sharing.max_grants_per_resource` | `256` | 1..1024: live grants one object or prefix may hold; past it `409 too_many_grants` |
 
 An authenticator is one list entry with a `type` and a `name` (default
 `"<type>-<index>"`, `[a-z][a-z0-9_-]{0,31}`, unique in the chain). A bearer
@@ -190,6 +196,9 @@ gateway:
 
 In Elixir config (`Ankusa.Gateway.Config`) an entry's `type` may also be a
 module implementing `Ankusa.Gateway.Authenticator`; YAML takes the three types.
+With `gateway.sharing.enabled` a fourth, `link`, is appended by the gateway
+itself: it accepts a share link (`link`, `exp` and `sig` in the query of a
+`GET`/`HEAD` of one object) and answers `410 link_expired` past its `exp`.
 
 An empty chain gives every request the anonymous operator principal, legal only
 on loopback or with `allow_insecure: true`; the gateway logs a warning at start.
@@ -232,7 +241,9 @@ The whole policy has `authz.deadline_ms`.
 
 Two authorizers ship: `scopes` (reserved, always defined: `claims:read` **and**
 the claim's tenant, `tenant:<tenant_id>` or `tenant:*`) and `rules`, which
-decides from the token alone:
+decides from the token alone. With `gateway.sharing.enabled` a third, `grants`
+(reserved too), reads the native grants: a policy takes the grants into account
+only when its steps list it ([Sharing](claim-check.md#sharing)).
 
 ```yaml
 gateway:

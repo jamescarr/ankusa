@@ -883,6 +883,26 @@ gateway:
   #   op_deadline_ms: 30000          # one store operation, every attempt included
   #   timeout_ms: 10000              # one store request
   #   retries: 1                     # extra attempts after a transient failure
+  # Native grants, ownership and share links. On, the gateway serves the
+  # Sharing API under /v1/spaces/<space> (ACL documents at
+  # .ankusa/acl/v1/ and audit records at .ankusa/audit/v1/, in the space's own
+  # store), defines the `grants` authorizer, appends the `link` authenticator,
+  # and records ankusa-owner/ankusa-incarnation on a new object. A policy takes
+  # the grants into account only when its steps list `grants`; nobody hands out
+  # what they do not hold (a new grant needs each of its actions too).
+  # sharing:
+  #   enabled: true
+  #   # HMAC-SHA256 keys of a share link, a list or one comma-separated string,
+  #   # each at least 16 bytes. The first signs, any verifies: rotate by putting
+  #   # the new key first. Required when enabled; redacted by print-config.
+  #   signing_keys: ["${LINK_SIGNING_KEY}"]
+  #   link_max_ttl_s: 604800         # 7 days; the longest a link may live
+  #   acl_cache_ttl_ms: 2000         # the cross-node bound of a revocation; 0 = read every time
+  #   acl_cache_max_entries: 100000
+  #   acl_cache_max_bytes: 67108864
+  #   max_grants_per_resource: 256   # live grants one object or prefix may hold
+  # A LocalFS space cannot compare-and-swap across nodes: grant updates from
+  # one gateway node only (the supervisor logs a warning at boot).
   claims:
     # Serve the claims API (else its routes answer 404).
     enabled: true
