@@ -14,8 +14,21 @@ defmodule AnkusaGatewayServer.GatewaySection do
 
   @auth_jwt_keys ~w(issuer audience jwks_url keys refresh_ms min_refresh_ms leeway_s scope_claim tenants_claim)
   @auth_mtls_keys ~w(subject_map)
-  @gateway_keys ~w(port ip tls auth max_concurrent_requests claims)
-  @gateway_auth_keys ~w(allow_insecure authenticators)
+  @gateway_keys ~w(port ip tls auth authz max_concurrent_requests claims)
+  @gateway_auth_keys ~w(allow_insecure authenticators cache)
+  @gateway_auth_cache_keys ~w(ttl_ms negative_ttl_ms max_entries max_bytes)a
+  @gateway_authz_keys ~w(deadline_ms cache authorizers policies)
+  @gateway_authz_cache_keys ~w(max_entries max_bytes allow_ttl_ms deny_ttl_ms refresh_ahead serve_stale_ms)a
+  @gateway_policy_keys ~w(mode steps)
+  @gateway_step_keys ~w(use on_unavailable)
+  # Every authorizer type the YAML knows, and its module.
+  @authorizer_types %{"rules" => Ankusa.Gateway.Authz.Rules}
+  # A rule's keys and its `when` keys, string to atom (closed sets).
+  @rule_keys Map.new(~w(effect actions spaces keys when)a, &{Atom.to_string(&1), &1})
+  @rule_when_keys Map.new(
+                    ~w(groups_any groups_all scopes_any scopes_all tenants_any principals claims)a,
+                    &{Atom.to_string(&1), &1}
+                  )
   @gateway_authenticator_types ~w(token jwt mtls)
   @gateway_token_keys ~w(id token sha256 scopes groups claims)
   @gateway_jwt_keys @auth_jwt_keys ++ ~w(groups_claim header subject_prefix)
@@ -46,6 +59,7 @@ defmodule AnkusaGatewayServer.GatewaySection do
       |> put_opt(:tls, tls_opt(gateway, path))
       |> put_opt(:max_concurrent_requests, int_opt(gateway, "max_concurrent_requests", path))
       |> put_opt(:auth, gateway_auth(gateway, path))
+      |> put_opt(:authz, gateway_authz(gateway, path))
       |> put_opt(:claims, gateway_claims(gateway, path))
 
     try do
@@ -68,8 +82,175 @@ defmodule AnkusaGatewayServer.GatewaySection do
         []
         |> put_opt(:allow_insecure, bool_opt(auth, "allow_insecure", path))
         |> put_opt(:authenticators, gateway_authenticators(auth, path))
+        |> put_opt(:cache, int_section(auth, "cache", @gateway_auth_cache_keys, path))
     end
   end
+
+  # A section whose keys (atoms, a closed set) all take integers.
+  defp int_section(parent, key, keys, path) do
+    case parent[key] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ [key]
+        section = section!(value, Enum.map(keys, &Atom.to_string/1), path)
+        Enum.reduce(keys, [], &put_opt(&2, &1, int_opt(section, Atom.to_string(&1), path)))
+    end
+  end
+
+  # ── authz ───────────────────────────────────────────────────────────────────
+
+  defp gateway_authz(gateway, path) do
+    case gateway["authz"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["authz"]
+        authz = section!(value, @gateway_authz_keys, path)
+
+        []
+        |> put_opt(:deadline_ms, int_opt(authz, "deadline_ms", path))
+        |> put_opt(:cache, authz_cache(authz, path))
+        |> put_opt(:authorizers, authorizers(authz, path))
+        |> put_opt(:policies, policies(authz, path))
+    end
+  end
+
+  defp authz_cache(authz, path) do
+    case authz["cache"] do
+      nil ->
+        nil
+
+      value ->
+        ints = @gateway_authz_cache_keys -- [:refresh_ahead]
+
+        cache =
+          int_section(
+            %{"cache" => Map.delete(expect_map(value, path ++ ["cache"]), "refresh_ahead")},
+            "cache",
+            ints,
+            path
+          )
+
+        put_opt(cache, :refresh_ahead, bool_opt(value, "refresh_ahead", path ++ ["cache"]))
+    end
+  end
+
+  defp authorizers(authz, path) do
+    case authz["authorizers"] do
+      nil ->
+        nil
+
+      %{} = map ->
+        Map.new(map, fn {name, entry} ->
+          name = to_string(name)
+          {name, authorizer_entry!(entry, path ++ ["authorizers", name])}
+        end)
+
+      other ->
+        raise ConfigError,
+          message: type_error(path ++ ["authorizers"], "a mapping of authorizers", other)
+    end
+  end
+
+  # `{type: <t>, ...}`: the type picks the module; the rest are its options,
+  # which the module validates (its messages name the dotted key).
+  defp authorizer_entry!(entry, path) do
+    map = expect_map(entry, path)
+
+    case Map.fetch(@authorizer_types, map["type"]) do
+      {:ok, module} ->
+        {module, authorizer_opts(module, Map.delete(map, "type"), path)}
+
+      :error ->
+        known = @authorizer_types |> Map.keys() |> Enum.sort() |> Enum.join(", ")
+
+        raise ConfigError,
+          message:
+            "#{render_path(path)}.type: unknown type #{inspect(map["type"])} (known: #{known})"
+    end
+  end
+
+  defp authorizer_opts(Ankusa.Gateway.Authz.Rules, map, path) do
+    section!(map, ~w(rules), path)
+
+    case map["rules"] do
+      list when is_list(list) ->
+        rules =
+          list
+          |> Enum.with_index()
+          |> Enum.map(fn {rule, index} -> rule!(rule, path ++ ["rules", index]) end)
+
+        %{rules: rules}
+
+      other ->
+        raise ConfigError, message: type_error(path ++ ["rules"], "a list of rules", other)
+    end
+  end
+
+  # The values (`effect`, `actions`, patterns, templates) are the module's to
+  # check; its messages name the same dotted key.
+  defp rule!(rule, path) do
+    rule = section!(rule, Map.keys(@rule_keys), path)
+
+    Map.new(rule, fn
+      {"when", value} ->
+        conditions = section!(value, Map.keys(@rule_when_keys), path ++ ["when"])
+        {:when, Map.new(conditions, fn {k, v} -> {Map.fetch!(@rule_when_keys, k), v} end)}
+
+      {key, value} ->
+        {Map.fetch!(@rule_keys, key), value}
+    end)
+  end
+
+  defp policies(authz, path) do
+    case authz["policies"] do
+      nil ->
+        nil
+
+      %{} = map ->
+        Map.new(map, fn {name, policy} ->
+          name = to_string(name)
+          {name, policy!(policy, path ++ ["policies", name])}
+        end)
+
+      other ->
+        raise ConfigError,
+          message: type_error(path ++ ["policies"], "a mapping of policies", other)
+    end
+  end
+
+  defp policy!(policy, path) do
+    policy = section!(policy, @gateway_policy_keys, path)
+
+    %{}
+    |> put_map(:mode, atom_enum_opt(policy, "mode", ~w(first all any), path))
+    |> put_map(:steps, steps!(policy["steps"], path ++ ["steps"]))
+  end
+
+  defp steps!(list, path) when is_list(list) do
+    list
+    |> Enum.with_index()
+    |> Enum.map(fn
+      {name, _index} when is_binary(name) ->
+        name
+
+      {step, index} ->
+        step_path = path ++ [index]
+        step = section!(step, @gateway_step_keys, step_path)
+
+        %{use: step["use"]}
+        |> put_map(
+          :on_unavailable,
+          atom_enum_opt(step, "on_unavailable", ~w(fail abstain deny), step_path)
+        )
+    end)
+  end
+
+  defp steps!(other, path),
+    do: raise(ConfigError, message: type_error(path, "a list of steps", other))
 
   defp gateway_authenticators(auth, path) do
     case auth["authenticators"] do

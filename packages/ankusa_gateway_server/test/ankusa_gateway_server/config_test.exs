@@ -625,7 +625,7 @@ defmodule AnkusaGatewayServer.ConfigTest do
           allow_insecure: true
       """)
 
-    assert loaded.gateway.auth == %{allow_insecure: true, authenticators: []}
+    assert %{allow_insecure: true, authenticators: []} = loaded.gateway.auth
 
     loaded =
       load!("""
@@ -765,7 +765,7 @@ defmodule AnkusaGatewayServer.ConfigTest do
   test "a gateway auth block may be allow_insecure alone; its shapes are checked" do
     loaded = load!("gateway: {auth: {allow_insecure: true}}\n")
 
-    assert loaded.gateway.auth == %{allow_insecure: true, authenticators: []}
+    assert %{allow_insecure: true, authenticators: []} = loaded.gateway.auth
 
     for {yaml, message} <- [
           {"gateway: {auth: {authenticators: 5}}", "expected a list of authenticators"},
@@ -871,5 +871,73 @@ defmodule AnkusaGatewayServer.ConfigTest do
   test "a core validation that raises ArgumentError becomes a ConfigError naming the key" do
     assert error!("claim_check: {read_timeout_ms: 0}\n") ==
              "claim_check.read_timeout_ms must be a positive integer, got 0"
+  end
+
+  describe "gateway.authz and gateway.auth.cache" do
+    test "a rules authorizer, a policy over it, and the cache keys load" do
+      loaded =
+        load!("""
+        config_version: 2
+        gateway:
+          auth:
+            cache: {ttl_ms: 30000, negative_ttl_ms: 1000}
+          authz:
+            deadline_ms: 100
+            cache: {allow_ttl_ms: 2000, refresh_ahead: false, serve_stale_ms: 5000}
+            authorizers:
+              teams:
+                type: rules
+                rules:
+                  - effect: allow
+                    actions: [read, list]
+                    spaces: [docs]
+                    keys: ["teams/{team}/**"]
+                    when: {groups_any: ["team-{{ vars.team }}"]}
+            policies:
+              docs: {mode: first, steps: [teams, {use: scopes, on_unavailable: abstain}]}
+        """)
+
+      gateway = loaded.gateway
+      assert gateway.auth.cache.ttl_ms == 30_000
+      assert gateway.auth.cache.negative_ttl_ms == 1_000
+      assert gateway.auth.cache.max_entries == 100_000
+      assert gateway.authz.deadline_ms == 100
+
+      assert %{allow_ttl_ms: 2_000, refresh_ahead: false, serve_stale_ms: 5_000} =
+               gateway.authz.cache
+
+      assert %{module: Ankusa.Gateway.Authz.Rules} = gateway.authz.authorizers["teams"]
+
+      assert gateway.authz.policies["docs"] == %{
+               mode: :first,
+               steps: [
+                 %{use: "teams", on_unavailable: :fail},
+                 %{use: "scopes", on_unavailable: :abstain}
+               ]
+             }
+    end
+
+    test "every error names its key" do
+      for {yaml, message} <- [
+            {"gateway: {authz: {authorizers: {x: {type: opa}}}}",
+             ~s[gateway.authz.authorizers.x.type: unknown type "opa" (known: rules)]},
+            {"gateway: {authz: {authorizers: {x: {type: rules, rules: [{effect: allow, verbs: [read]}]}}}}",
+             "gateway.authz.authorizers.x.rules[0]"},
+            {"gateway: {authz: {authorizers: {x: {type: rules, rules: [{effect: maybe, actions: [read]}]}}}}",
+             "gateway.authz.authorizers.x.rules[0].effect"},
+            {"gateway: {authz: {authorizers: {x: {type: rules, rules: [{effect: allow, actions: [read], when: {teams_any: [a]}}]}}}}",
+             "gateway.authz.authorizers.x.rules[0].when"},
+            {"gateway: {authz: {policies: {p: {mode: most, steps: [scopes]}}}}",
+             "gateway.authz.policies.p.mode"},
+            {"gateway: {authz: {policies: {p: {steps: [nope]}}}}",
+             "gateway.authz.policies.p.steps[0].use names nope"},
+            {"gateway: {authz: {deadline_ms: 5}}", "gateway.authz.deadline_ms"},
+            {"gateway: {authz: {cache: {deny_ttl_ms: -1}}}", "gateway.authz.cache.deny_ttl_ms"},
+            {"gateway: {auth: {cache: {negative_ttl_ms: 600000}}}",
+             "gateway.auth.cache.negative_ttl_ms"}
+          ] do
+        assert error!("config_version: 2\n" <> yaml <> "\n") =~ message, yaml
+      end
+    end
   end
 end

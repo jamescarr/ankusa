@@ -36,6 +36,10 @@ own ([`docs/releasing.md`](../../docs/releasing.md)).
 
 ### Added
 
+- **The gateway's `authz` keys in `gateway:`.** The full image reads the
+  gateway's new `gateway.auth.cache` and `gateway.authz` (`deadline_ms`,
+  `cache`, `authorizers` with `type: rules`, `policies`) when it runs the
+  gateway; `config-examples/reference.yml` documents them.
 - **`{{ var }}` templates on sink addresses (CR-3).** Any sink of a source (YAML
   or the admin API) may template its per-hook address keys: `kafka` `topic` /
   `key`, `rabbitmq` `routing_key`, `nats` `subject`, `redis` `channel`, `sqs`
