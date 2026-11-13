@@ -225,8 +225,8 @@ defmodule Ankusa.Gateway.ACL do
   seconds): unexpired, carrying the action, and naming the principal:
   `user:<id>`; `group:<g>` for each of its groups; `tenant:<t>` for each of
   its tenants (any tenant when it holds them all); `anyone` for any principal
-  that is neither anonymous nor a share link; `link` only for the share link
-  `link:<that grant's id>`.
+  that is not a share link; `link` only for the share link `link:<that
+  grant's id>`. An anonymous request (an empty chain) matches no grant.
   """
   @spec matching_grants(doc() | nil, Request.t(), integer()) :: [grant()]
   def matching_grants(nil, _request, _now), do: []
@@ -248,7 +248,10 @@ defmodule Ankusa.Gateway.ACL do
 
   defp subject?(_grant, _principal, :link), do: false
   defp subject?(%{subject: "link"}, _principal, _via), do: false
-  defp subject?(%{subject: "anyone"}, _principal, :anonymous), do: false
+  # The anonymous principal (an empty chain) is the operator, `anonymous`
+  # with every tenant: it must not inherit a `tenant:` or `user:anonymous`
+  # grant meant for someone who authenticated.
+  defp subject?(_grant, _principal, :anonymous), do: false
   defp subject?(%{subject: "anyone"}, _principal, _via), do: true
   defp subject?(%{subject: "user:" <> id}, %Principal{id: id}, _via), do: true
 
