@@ -456,6 +456,25 @@ defmodule Ankusa.Gateway.ClaimsRouterTest do
       assert authed_call(inst, :head, globex, "acme-reader").status == 403
     end
 
+    test "a policy's 403 is counted on the request event", %{inst: inst, globex: globex} do
+      test = self()
+      handler = "claims-403-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:ankusa, :gateway, :request],
+        fn _event, _measurements, meta, _ ->
+          if meta.instance == inst, do: send(test, {:gateway, meta})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      assert authed_call(inst, :get, globex, "acme-reader").status == 403
+      assert_received {:gateway, %{api: :claims, method: "GET", status: 403}}
+    end
+
     test "tenant:* reads every tenant's claims", %{inst: inst, acme: acme, globex: globex} do
       assert authed_call(inst, :get, acme, "any-reader").resp_body == "acme bytes"
       assert authed_call(inst, :get, globex, "any-reader").resp_body == "globex bytes"
