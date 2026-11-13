@@ -27,6 +27,18 @@ defmodule Ankusa.Gateway.Authn do
   ends with the share-link authenticator (`Ankusa.Gateway.Authn.Link`); a
   chain of that one alone is still empty to a request without a link.
 
+  ## Enrichment
+
+  After an authenticator accepts a credential and before the principal is
+  fingerprinted, `gateway.auth.enrichers` runs in order: each may add groups
+  and claims (`Ankusa.Gateway.Enricher`), so an authorizer decides on the
+  groups the identity provider's API knows, not only those in the token. What
+  is fingerprinted and cached is the enriched principal. An enricher that
+  cannot answer is `503 auth_unavailable`, or — with `on_unavailable: :skip` —
+  the principal is used unenriched and cached for `auth.cache.negative_ttl_ms`
+  instead of `auth.cache.ttl_ms`. The anonymous principal (an empty chain) is
+  not enriched.
+
   ## The authentication cache
 
   Each authenticator's result is cached (`Ankusa.Gateway.Cache`, `:authn`)
@@ -48,12 +60,13 @@ defmodule Ankusa.Gateway.Authn do
 
   import Plug.Conn
 
-  alias Ankusa.Gateway.{Authenticator, Cache}
+  alias Ankusa.Gateway.{Authenticator, Cache, Caller, Enricher}
   alias Ankusa.{Http, Principal, Telemetry}
 
   @exempt [["health"], ["ready"]]
   @challenge ~s(Bearer realm="ankusa")
   @max_credential_bytes 16_384
+  @max_groups 1_000
 
   @impl true
   def init(opts), do: opts
@@ -132,7 +145,7 @@ defmodule Ankusa.Gateway.Authn do
     {{:ok, principal, :anonymous, subject_key(:anonymous, principal)}, "none", false}
   end
 
-  defp chain(conn, instance, %{auth: %{authenticators: authenticators, cache: cache}}) do
+  defp chain(conn, instance, %{auth: %{authenticators: authenticators} = auth}) do
     authenticators
     |> Enum.with_index()
     |> Enum.reduce_while({{:error, :unauthenticated}, "none", false}, fn {authenticator, index},
@@ -141,7 +154,7 @@ defmodule Ankusa.Gateway.Authn do
 
       case authenticator.module.credential(conn, ctx) do
         {:ok, credential} when byte_size(credential) <= @max_credential_bytes ->
-          cached_step(authenticator, conn, ctx, credential, cache, acc)
+          cached_step(authenticator, conn, ctx, credential, auth, acc)
 
         _none_or_too_long ->
           {:cont, acc}
@@ -149,7 +162,7 @@ defmodule Ankusa.Gateway.Authn do
     end)
   end
 
-  defp cached_step(authenticator, conn, ctx, credential, cache, acc) do
+  defp cached_step(authenticator, conn, ctx, credential, auth, acc) do
     key = {ctx.index, :crypto.hash(:sha256, credential)}
     now = System.os_time(:second)
 
@@ -162,31 +175,113 @@ defmodule Ankusa.Gateway.Authn do
         {:halt, {{:error, :unauthenticated}, ctx.name, true}}
 
       _miss ->
-        step(authenticator, conn, ctx, key, cache, acc)
+        step(authenticator, conn, ctx, key, auth, acc)
     end
   end
 
-  defp step(authenticator, conn, ctx, key, cache, acc) do
+  defp step(authenticator, conn, ctx, key, auth, acc) do
     case authenticator.module.authenticate(conn, ctx) do
       {:ok, %Principal{} = principal, expires_at} ->
-        via = authenticator.type
-        subject_key = subject_key(via, principal)
-        value = {:ok, principal, via, subject_key, expires_at}
-        remember(ctx.instance, key, value, expires_at, cache)
-        {:halt, {{:ok, principal, via, subject_key}, ctx.name, false}}
+        # A share link is a grant, not a person: nothing to enrich.
+        enriched =
+          if authenticator.type == :link, do: {:ok, principal}, else: enrich(ctx, auth, principal)
+
+        case enriched do
+          {:ok, enriched} ->
+            authenticated(authenticator, ctx, key, auth, enriched, expires_at, false)
+
+          {:degraded, enriched} ->
+            authenticated(authenticator, ctx, key, auth, enriched, expires_at, true)
+
+          {:error, reason} ->
+            {:halt, {{:error, {:unavailable, reason}}, ctx.name, false}}
+        end
 
       :skip ->
         {:cont, acc}
 
       {:error, :unauthenticated} = error ->
         if negative?(authenticator.module),
-          do: Cache.put(ctx.instance, :authn, key, :negative, cache.negative_ttl_ms)
+          do: Cache.put(ctx.instance, :authn, key, :negative, auth.cache.negative_ttl_ms)
 
         {:halt, {error, ctx.name, false}}
 
       {:error, _} = error ->
         {:halt, {error, ctx.name, false}}
     end
+  end
+
+  defp authenticated(authenticator, ctx, key, auth, principal, expires_at, degraded?) do
+    via = authenticator.type
+    subject_key = subject_key(via, principal)
+    value = {:ok, principal, via, subject_key, expires_at}
+
+    if degraded?,
+      do: remember_degraded(ctx.instance, key, value, expires_at, auth.cache),
+      else: remember(ctx.instance, key, value, expires_at, auth.cache)
+
+    {:halt, {{:ok, principal, via, subject_key}, ctx.name, false}}
+  end
+
+  # ── enrichers ───────────────────────────────────────────────────────────────
+
+  # `{:ok, principal}` enriched, `{:degraded, principal}` when one answered
+  # `on_unavailable: :skip`, or `{:error, reason}` (`503 auth_unavailable`).
+  defp enrich(_ctx, %{enrichers: []}, principal), do: {:ok, principal}
+
+  defp enrich(ctx, %{enrichers: enrichers}, principal) do
+    enrichers
+    |> Enum.with_index()
+    |> Enum.reduce_while({principal, false}, fn {enricher, index}, {current, degraded?} ->
+      if applies?(enricher, ctx.name) do
+        case enrich_one(ctx, index, enricher, current) do
+          {:ok, enriched} -> {:cont, {enriched, degraded?}}
+          :skipped -> {:cont, {current, true}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      else
+        {:cont, {current, degraded?}}
+      end
+    end)
+    |> case do
+      {:error, _reason} = error -> error
+      {principal, true} -> {:degraded, principal}
+      {principal, false} -> {:ok, principal}
+    end
+  end
+
+  defp applies?(%{config: config}, authenticator),
+    do: config.only == [] or authenticator in config.only
+
+  defp enrich_one(ctx, index, %{config: config}, principal) do
+    key = Enricher.key(index, ctx.name, principal.id)
+
+    case Cache.fetch(ctx.instance, :authn, key) do
+      {:ok, %{groups: groups, claims: claims}} ->
+        {:ok, merge(principal, groups, claims)}
+
+      _miss ->
+        deadline = System.monotonic_time(:millisecond) + config.timeout_ms
+        item = {principal, ctx.name}
+
+        case Caller.call(ctx.instance, {:enrich, index}, key, :authn, item, deadline) do
+          {:ok, %{groups: groups, claims: claims}} -> {:ok, merge(principal, groups, claims)}
+          {:error, reason} -> unavailable(config, reason)
+        end
+    end
+  end
+
+  defp unavailable(%{on_unavailable: :skip}, _reason), do: :skipped
+  defp unavailable(_config, reason), do: {:error, reason}
+
+  # What an enricher contributed: its groups joined to the token's, its claims
+  # below the token's (an enricher adds, it does not rewrite).
+  defp merge(principal, groups, claims) do
+    %{
+      principal
+      | groups: (principal.groups ++ groups) |> Enum.uniq() |> Enum.take(@max_groups),
+        claims: Map.merge(claims, principal.claims)
+    }
   end
 
   # Never past the credential's own expiry, and not at all with `ttl_ms: 0`.
@@ -198,6 +293,13 @@ defmodule Ankusa.Gateway.Authn do
   defp remember(instance, key, value, expires_at, %{ttl_ms: ttl}) do
     left_ms = (expires_at - System.os_time(:second)) * 1000
     Cache.put(instance, :authn, key, value, min(ttl, left_ms))
+  end
+
+  # An unenriched principal is only good until the source may answer again.
+  defp remember_degraded(_instance, _key, _value, _expires_at, %{ttl_ms: 0}), do: :ok
+
+  defp remember_degraded(instance, key, value, expires_at, cache) do
+    remember(instance, key, value, expires_at, %{cache | ttl_ms: cache.negative_ttl_ms})
   end
 
   defp negative?(module),

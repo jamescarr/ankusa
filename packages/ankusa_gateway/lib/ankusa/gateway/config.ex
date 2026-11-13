@@ -27,6 +27,7 @@ defmodule Ankusa.Gateway.Config do
   | `auth.cache.ttl_ms` | `60000` | how long an authenticated credential is remembered (never past its own expiry); `0` = off |
   | `auth.cache.negative_ttl_ms` | `5000` | how long a refusal by an authenticator that calls out is remembered |
   | `auth.cache.max_entries`, `auth.cache.max_bytes` | `100000`, `33554432` | the authentication cache's bounds |
+  | `auth.enrichers` | `[]` | at most 4: groups and claims added to a freshly authenticated principal (see `Ankusa.Gateway.Enricher`) |
   | `authz.deadline_ms` | `250` | the whole policy's budget per request |
   | `authz.cache.max_entries`, `authz.cache.max_bytes` | `200000`, `67108864` | the decision cache's bounds |
   | `authz.cache.allow_ttl_ms`, `authz.cache.deny_ttl_ms` | `5000`, `1000` | how long a `:cached`/`:remote` authorizer's allow, and deny or abstain, is reused (`0` = never) |
@@ -49,19 +50,24 @@ defmodule Ankusa.Gateway.Config do
   | `sharing.acl_cache_max_entries`, `sharing.acl_cache_max_bytes` | `100000`, `67108864` | the ACL cache's bounds |
   | `sharing.max_grants_per_resource` | `256` | 1..1024 |
 
-  An authenticator is `%{type: :token | :jwt | :mtls | MyModule, name: "..."}`
-  plus its own keys (see `Ankusa.Gateway.Authn.Token`, `Ankusa.Gateway.Authn.JWT`
-  and `Ankusa.Gateway.Authn.MTLS`); `name` defaults to `"<type>-<index>"`. A
-  policy step is an authorizer name or `%{use: name, on_unavailable: :fail |
-  :abstain | :deny}` (`:fail`, the default, answers `503 authz_unavailable`
-  when the step cannot decide).
+  An authenticator is `%{type: :token | :jwt | :mtls | :introspection | :okta |
+  MyModule, name: "..."}` plus its own keys (see `Ankusa.Gateway.Authn.Token`,
+  `Ankusa.Gateway.Authn.JWT`, `Ankusa.Gateway.Authn.MTLS`,
+  `Ankusa.Gateway.Authn.Introspection` and `Ankusa.Gateway.Authn.Okta`);
+  `name` defaults to `"<type>-<index>"`. At most one authenticator calls out to
+  introspect a token, and nothing that reads the bearer token may follow it. An
+  enricher is `%{type: :okta_groups | :http | MyModule, ...}` plus
+  `Ankusa.Gateway.Enricher`'s common keys (`only`, `on_unavailable`, `ttl_ms`,
+  `timeout_ms`). A policy step is an authorizer name or `%{use: name,
+  on_unavailable: :fail | :abstain | :deny}` (`:fail`, the default, answers
+  `503 authz_unavailable` when the step cannot decide).
 
   `new/2` raises `ArgumentError`; every message starts with the dotted key.
   With `check_exposure: false` an empty chain on a non-loopback address is
   accepted (a loader that has not decided yet whether the gateway runs).
   """
 
-  alias Ankusa.Gateway.{Authn, Authz, Options}
+  alias Ankusa.Gateway.{Authn, Authz, Enricher, Options}
 
   defstruct instance: :default,
             port: 4001,
@@ -71,6 +77,7 @@ defmodule Ankusa.Gateway.Config do
             auth: %{
               allow_insecure: false,
               authenticators: [],
+              enrichers: [],
               cache: %{
                 ttl_ms: 60_000,
                 negative_ttl_ms: 5_000,
@@ -110,6 +117,7 @@ defmodule Ankusa.Gateway.Config do
             }
 
   @type authenticator :: %{type: atom(), name: String.t(), module: module(), config: map()}
+  @type enricher :: %{type: atom(), name: String.t(), module: module(), config: map()}
   @type authorizer :: %{module: module(), state: map()}
   @type step :: %{use: String.t(), on_unavailable: :fail | :abstain | :deny}
   @type policy :: %{mode: :first | :all | :any, steps: [step()]}
@@ -120,7 +128,12 @@ defmodule Ankusa.Gateway.Config do
           ip: String.t() | :inet.ip_address(),
           tls: map() | nil,
           max_concurrent_requests: non_neg_integer(),
-          auth: %{allow_insecure: boolean(), authenticators: [authenticator()], cache: map()},
+          auth: %{
+            allow_insecure: boolean(),
+            authenticators: [authenticator()],
+            enrichers: [enricher()],
+            cache: map()
+          },
           authz: %{
             authorizers: %{String.t() => authorizer()},
             policies: %{String.t() => policy()},
@@ -172,7 +185,7 @@ defmodule Ankusa.Gateway.Config do
     timeout_ms: 1..600_000,
     retries: 0..10
   }
-  @auth_keys [:allow_insecure, :authenticators, :cache]
+  @auth_keys [:allow_insecure, :authenticators, :cache, :enrichers]
   @authz_keys [:authorizers, :policies, :deadline_ms, :cache]
   @auth_cache %{
     ttl_ms: 0..3_600_000,
@@ -191,8 +204,17 @@ defmodule Ankusa.Gateway.Config do
   @policy_keys [:mode, :steps]
   @step_keys [:use, :on_unavailable]
 
-  @authenticators %{token: Authn.Token, jwt: Authn.JWT, mtls: Authn.MTLS}
+  @authenticators %{
+    token: Authn.Token,
+    jwt: Authn.JWT,
+    mtls: Authn.MTLS,
+    introspection: Authn.Introspection
+  }
+  # `okta` is sugar: `Ankusa.Gateway.Authn.Okta` expands it into one of the above.
+  @authenticator_types [:okta | Map.keys(@authenticators)]
   @max_authenticators 8
+  @max_enrichers 4
+  @enrichers %{okta_groups: Enricher.OktaGroups, http: Enricher.Http}
   @reserved_authorizers %{"scopes" => Authz.Scopes}
   # Defined only with `sharing.enabled`, but never a name of your own.
   @sharing_authorizers %{"grants" => Authz.Grants}
@@ -206,7 +228,8 @@ defmodule Ankusa.Gateway.Config do
             groups_claim subject_prefix id scopes groups policy mode use on_unavailable steps
             prefix protocol evaluation_path evaluations_path allow_path ttl_path actions relations
             consistency store_id authorization_model_id user object match space items_key
-            results_path)
+            results_path domain authorization_server subject_claim token_type_hint only
+            groups_path claims_path user_id)
 
   @doc "Validate `opts` into a config. Raises `ArgumentError` naming the key."
   @spec new(keyword() | map(), keyword()) :: t()
@@ -320,10 +343,12 @@ defmodule Ankusa.Gateway.Config do
       end
 
     chain!(authenticators, tls)
+    enrichers = enrichers!(Map.get(given, :enrichers, []), authenticators)
 
     %{
       allow_insecure: allow_insecure,
       authenticators: authenticators,
+      enrichers: enrichers,
       cache:
         ranged!(
           Map.get(given, :cache, %{}),
@@ -349,7 +374,21 @@ defmodule Ankusa.Gateway.Config do
   defp authenticator!(entry, index) do
     key = "gateway.auth.authenticators[#{index}]"
     given = Options.map!(entry, key)
-    {type, module} = authenticator_type!(Map.get(given, :type), key)
+
+    # `okta` is Okta's layout for one of the real types, expanded here so the
+    # chain holds a `jwt` or an `introspection` authenticator either way.
+    case Map.get(given, :type) do
+      :okta ->
+        {type, given} = Authn.Okta.expand!(given, key)
+        build_authenticator(type, given, index, key)
+
+      type ->
+        build_authenticator(type, given, index, key)
+    end
+  end
+
+  defp build_authenticator(type, given, index, key) do
+    {type, module} = authenticator_type!(type, key)
     name = Options.name!(Map.get(given, :name, default_name(type, index)), "#{key}.name")
     config = module.init!(Map.drop(given, [:type, :name]), key)
     %{type: type, name: name, module: module, config: config}
@@ -367,7 +406,7 @@ defmodule Ankusa.Gateway.Config do
   defp authenticator_type!(other, key), do: raise(ArgumentError, bad_type(other, key))
 
   defp bad_type(type, key) do
-    "#{key}.type must be one of #{inspect(Map.keys(@authenticators) |> Enum.sort())} or a " <>
+    "#{key}.type must be one of #{inspect(Enum.sort(@authenticator_types))} or a " <>
       "module implementing Ankusa.Gateway.Authenticator, got #{inspect(type)}"
   end
 
@@ -404,7 +443,89 @@ defmodule Ankusa.Gateway.Config do
               "and a cacertfile"
     end
 
-    :ok
+    introspection!(authenticators)
+  end
+
+  # At most one introspection entry, and nothing that reads the same bearer
+  # token after it: the first that answers for a token ends the chain, so a
+  # token entry behind it would never be reached.
+  defp introspection!(authenticators) do
+    entries =
+      for {%{type: :introspection}, index} <- Enum.with_index(authenticators), do: index
+
+    if length(entries) > 1 do
+      raise ArgumentError,
+            "gateway.auth.authenticators has #{length(entries)} introspection entries; at most one"
+    end
+
+    case entries do
+      [introspection] ->
+        for {%{} = later, index} <- Enum.with_index(authenticators),
+            index > introspection,
+            reads_bearer?(later) do
+          raise ArgumentError,
+                "gateway.auth.authenticators[#{index}] reads the bearer token after the " <>
+                  "introspection authenticator at [#{introspection}], which would answer for it " <>
+                  "first; put the introspection authenticator last"
+        end
+
+        :ok
+
+      [] ->
+        :ok
+    end
+  end
+
+  defp reads_bearer?(%{type: :token}), do: true
+  defp reads_bearer?(%{type: :jwt, config: %{header: "authorization"}}), do: true
+  defp reads_bearer?(_authenticator), do: false
+
+  # ── enrichers ───────────────────────────────────────────────────────────────
+
+  defp enrichers!(list, authenticators) when is_list(list) do
+    if length(list) > @max_enrichers do
+      raise ArgumentError,
+            "gateway.auth.enrichers has #{length(list)} entries; at most #{@max_enrichers}"
+    end
+
+    names = Enum.map(authenticators, & &1.name)
+    list |> Enum.with_index() |> Enum.map(fn {entry, i} -> enricher!(entry, i, names) end)
+  end
+
+  defp enrichers!(other, _authenticators) do
+    raise ArgumentError, "gateway.auth.enrichers must be a list, got #{inspect(other)}"
+  end
+
+  defp enricher!(entry, index, authenticator_names) do
+    key = "gateway.auth.enrichers[#{index}]"
+    given = Options.map!(entry, key)
+    {type, module} = enricher_type!(Map.get(given, :type), key)
+    name = Options.name!(Map.get(given, :name, "#{type}-#{index}"), "#{key}.name")
+    config = module.init!(Map.drop(given, [:type, :name]), key)
+
+    for only <- config.only, only not in authenticator_names do
+      raise ArgumentError,
+            "#{key}.only names #{only}, which is not an authenticator of the chain (defined: " <>
+              "#{authenticator_names |> Enum.sort() |> Enum.join(", ")})"
+    end
+
+    %{type: type, name: name, module: module, config: config}
+  end
+
+  defp enricher_type!(type, _key) when is_map_key(@enrichers, type),
+    do: {type, Map.fetch!(@enrichers, type)}
+
+  defp enricher_type!(module, key) when is_atom(module) and module != nil do
+    if Options.implements?(module, init!: 2, enrich: 3),
+      do: {module, module},
+      else: raise(ArgumentError, enricher_bad_type(module, key))
+  end
+
+  defp enricher_type!(other, key), do: raise(ArgumentError, enricher_bad_type(other, key))
+
+  defp enricher_bad_type(type, key) do
+    "#{key}.type must be one of #{inspect(@enrichers |> Map.keys() |> Enum.sort())} or a " <>
+      "module implementing Ankusa.Gateway.Enricher, got #{inspect(type)}"
   end
 
   defp exposure!(%{authenticators: [], allow_insecure: false}, address) do

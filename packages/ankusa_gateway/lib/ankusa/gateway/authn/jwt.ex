@@ -50,6 +50,10 @@ defmodule Ankusa.Gateway.Authn.JWT do
   @max_header_bytes 8_192
   @max_groups 1_000
 
+  @doc "The keys one `jwt` entry may set."
+  @spec keys() :: [atom()]
+  def keys, do: @core_keys ++ @own_keys
+
   @doc "The `Ankusa.Admin.Auth.JWT.Keys` server every `jwt` authenticator's keys live in."
   @spec keys_server() :: atom()
   def keys_server, do: :gateway_auth_keys

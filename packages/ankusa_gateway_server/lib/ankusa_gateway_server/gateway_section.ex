@@ -10,7 +10,7 @@ defmodule AnkusaGatewayServer.GatewaySection do
   import AnkusaGatewayServer.Schema
 
   import AnkusaGatewayServer.Sections,
-    only: [claim_store!: 2, jwt_opts: 2, tls_opt: 2, token_sha256!: 2]
+    only: [claim_store!: 2, jwt_opts: 2, jwt_audience: 2, tls_opt: 2, token_sha256!: 2]
 
   alias AnkusaGatewayServer.ConfigError
 
@@ -19,7 +19,14 @@ defmodule AnkusaGatewayServer.GatewaySection do
   @gateway_keys ~w(port ip tls auth authz max_concurrent_requests claims spaces objects sharing)
   @gateway_sharing_ints ~w(link_max_ttl_s acl_cache_ttl_ms acl_cache_max_entries acl_cache_max_bytes
                            max_grants_per_resource)a
-  @gateway_auth_keys ~w(allow_insecure authenticators cache)
+  @gateway_auth_keys ~w(allow_insecure authenticators cache enrichers)
+  @gateway_enricher_types ~w(okta_groups http)
+  @gateway_enricher_common_keys ~w(name only on_unavailable ttl_ms timeout_ms)
+  @gateway_okta_groups_keys ~w(domain api_token user_id max_groups)
+  @gateway_http_enricher_keys ~w(url headers groups_path claims_path)
+  # A closed set, so no `String.to_atom/1` on a file's value.
+  @gateway_enricher_atoms %{"okta_groups" => :okta_groups, "http" => :http}
+  @max_enrichers 4
   @gateway_auth_cache_keys ~w(ttl_ms negative_ttl_ms max_entries max_bytes)a
   @gateway_authz_keys ~w(deadline_ms cache authorizers policies)
   @gateway_authz_cache_keys ~w(max_entries max_bytes allow_ttl_ms deny_ttl_ms refresh_ahead serve_stale_ms)a
@@ -77,9 +84,18 @@ defmodule AnkusaGatewayServer.GatewaySection do
                     ~w(groups_any groups_all scopes_any scopes_all tenants_any principals claims)a,
                     &{Atom.to_string(&1), &1}
                   )
-  @gateway_authenticator_types ~w(token jwt mtls)
+  @gateway_authenticator_types ~w(token jwt mtls okta introspection)
   @gateway_token_keys ~w(id token sha256 scopes groups claims)
   @gateway_jwt_keys @auth_jwt_keys ++ ~w(groups_claim header subject_prefix)
+  @gateway_introspection_keys ~w(client_id client_secret url token_type_hint timeout_ms max_inflight
+                                 queue_max issuer audience subject_claim scope_claim tenants_claim
+                                 groups_claim subject_prefix)
+  # `okta` takes the jwt block's keys and the introspection block's: which of
+  # them apply is its `authorization_server` ("org" introspects).
+  @gateway_okta_keys Enum.uniq(
+                       @gateway_introspection_keys ++
+                         @gateway_jwt_keys ++ ~w(domain authorization_server)
+                     )
   @gateway_claims_keys ~w(enabled policy integrity_check)
   @gateway_space_keys ~w(store prefix policy max_object_bytes read_first_bytes read_only)
   @gateway_objects_keys ~w(max_inflight_bytes op_deadline_ms timeout_ms retries)
@@ -135,6 +151,7 @@ defmodule AnkusaGatewayServer.GatewaySection do
         []
         |> put_opt(:allow_insecure, bool_opt(auth, "allow_insecure", path))
         |> put_opt(:authenticators, gateway_authenticators(auth, path))
+        |> put_opt(:enrichers, gateway_enrichers(auth, path))
         |> put_opt(:cache, int_section(auth, "cache", @gateway_auth_cache_keys, path))
     end
   end
@@ -501,6 +518,10 @@ defmodule AnkusaGatewayServer.GatewaySection do
 
   defp authenticator_keys("mtls"), do: @auth_mtls_keys
 
+  defp authenticator_keys("okta"), do: @gateway_okta_keys
+
+  defp authenticator_keys("introspection"), do: @gateway_introspection_keys
+
   defp authenticator_opts("token", entry, path) do
     case entry["tokens"] do
       list when is_list(list) ->
@@ -522,6 +543,44 @@ defmodule AnkusaGatewayServer.GatewaySection do
     |> jwt_opts(path)
     |> put_opt(:groups_claim, string_opt(entry, "groups_claim", path))
     |> put_opt(:header, string_opt(entry, "header", path))
+    |> put_opt(:subject_prefix, string_opt(entry, "subject_prefix", path))
+  end
+
+  # Okta's layout: `domain` + `authorization_server` pick the issuer; the rest,
+  # jwt and introspection keys alike, override what `Ankusa.Gateway.Authn.Okta`
+  # derives (it refuses one the expanded type does not know).
+  defp authenticator_opts("okta", entry, path) do
+    []
+    |> put_opt(:domain, string_opt(entry, "domain", path))
+    |> put_opt(:authorization_server, string_opt(entry, "authorization_server", path))
+    |> put_opt(:client_id, string_opt(entry, "client_id", path))
+    |> put_opt(:client_secret, string_opt(entry, "client_secret", path))
+    |> put_opt(:header, string_opt(entry, "header", path))
+    |> put_opt(:subject_claim, string_opt(entry, "subject_claim", path))
+    |> put_opt(:token_type_hint, string_opt(entry, "token_type_hint", path))
+    |> put_opt(:timeout_ms, int_opt(entry, "timeout_ms", path))
+    |> put_opt(:max_inflight, int_opt(entry, "max_inflight", path))
+    |> put_opt(:queue_max, int_opt(entry, "queue_max", path))
+    |> put_opt(:subject_prefix, string_opt(entry, "subject_prefix", path))
+    |> Kernel.++(jwt_opts(entry, path))
+    |> put_opt(:groups_claim, string_opt(entry, "groups_claim", path))
+  end
+
+  defp authenticator_opts("introspection", entry, path) do
+    []
+    |> put_opt(:url, string_opt(entry, "url", path))
+    |> put_opt(:client_id, string_opt(entry, "client_id", path))
+    |> put_opt(:client_secret, string_opt(entry, "client_secret", path))
+    |> put_opt(:token_type_hint, string_opt(entry, "token_type_hint", path))
+    |> put_opt(:timeout_ms, int_opt(entry, "timeout_ms", path))
+    |> put_opt(:max_inflight, int_opt(entry, "max_inflight", path))
+    |> put_opt(:queue_max, int_opt(entry, "queue_max", path))
+    |> put_opt(:issuer, string_opt(entry, "issuer", path))
+    |> put_opt(:audience, jwt_audience(entry, path))
+    |> put_opt(:subject_claim, string_opt(entry, "subject_claim", path))
+    |> put_opt(:scope_claim, string_opt(entry, "scope_claim", path))
+    |> put_opt(:tenants_claim, string_opt(entry, "tenants_claim", path))
+    |> put_opt(:groups_claim, string_opt(entry, "groups_claim", path))
     |> put_opt(:subject_prefix, string_opt(entry, "subject_prefix", path))
   end
 
@@ -559,6 +618,87 @@ defmodule AnkusaGatewayServer.GatewaySection do
     |> put_map(:scopes, token["scopes"] && string_list!(token["scopes"], path ++ ["scopes"]))
     |> put_map(:groups, token["groups"] && string_list!(token["groups"], path ++ ["groups"]))
     |> put_map(:claims, token["claims"] && expect_map(token["claims"], path ++ ["claims"]))
+  end
+
+  # ── enrichers ───────────────────────────────────────────────────────────────
+
+  defp gateway_enrichers(auth, path) do
+    case auth["enrichers"] do
+      nil ->
+        nil
+
+      list when is_list(list) ->
+        if length(list) > @max_enrichers,
+          do:
+            raise(
+              ConfigError,
+              message:
+                "#{render_path(path ++ ["enrichers"])} has #{length(list)} entries; " <>
+                  "at most #{@max_enrichers}"
+            )
+
+        list
+        |> Enum.with_index()
+        |> Enum.map(fn {entry, index} -> enricher!(entry, path ++ ["enrichers", index]) end)
+
+      other ->
+        raise ConfigError,
+          message: type_error(path ++ ["enrichers"], "a list of enrichers", other)
+    end
+  end
+
+  defp enricher!(entry, path) do
+    map = expect_map(entry, path)
+    type = enum!(map["type"], @gateway_enricher_types, path ++ ["type"])
+
+    section =
+      section!(
+        map,
+        ~w(type) ++ @gateway_enricher_common_keys ++ enricher_keys(type),
+        path
+      )
+
+    [type: Map.fetch!(@gateway_enricher_atoms, type)]
+    |> put_opt(:name, string_opt(section, "name", path))
+    |> put_opt(:only, section["only"] && string_list!(section["only"], path ++ ["only"]))
+    |> put_opt(:on_unavailable, atom_enum_opt(section, "on_unavailable", ~w(fail skip), path))
+    |> put_opt(:ttl_ms, int_opt(section, "ttl_ms", path))
+    |> put_opt(:timeout_ms, int_opt(section, "timeout_ms", path))
+    |> Kernel.++(enricher_opts(type, section, path))
+  end
+
+  defp enricher_keys("okta_groups"), do: @gateway_okta_groups_keys
+  defp enricher_keys("http"), do: @gateway_http_enricher_keys
+
+  defp enricher_opts("okta_groups", entry, path) do
+    []
+    |> put_opt(:domain, string_opt(entry, "domain", path))
+    |> put_opt(:api_token, string_opt(entry, "api_token", path))
+    |> put_opt(:user_id, string_opt(entry, "user_id", path))
+    |> put_opt(:max_groups, int_opt(entry, "max_groups", path))
+  end
+
+  defp enricher_opts("http", entry, path) do
+    []
+    |> put_opt(:url, string_opt(entry, "url", path))
+    |> put_opt(:headers, headers_opt(entry, path))
+    |> put_opt(:groups_path, string_opt(entry, "groups_path", path))
+    |> put_opt(:claims_path, string_opt(entry, "claims_path", path))
+  end
+
+  defp headers_opt(entry, path) do
+    case entry["headers"] do
+      nil ->
+        nil
+
+      %{} = headers ->
+        Map.new(headers, fn {name, value} ->
+          {to_string(name), expect_string(value, path ++ ["headers", to_string(name)])}
+        end)
+
+      other ->
+        raise ConfigError, message: type_error(path ++ ["headers"], "a mapping", other)
+    end
   end
 
   defp gateway_claims(gateway, path) do

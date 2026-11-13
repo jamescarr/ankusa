@@ -127,3 +127,24 @@ follows [Semantic Versioning](https://semver.org/).
 - `Ankusa.Gateway.Metrics` gains
   `ankusa_gateway_shares_total{instance,action,result}` from
   `[:ankusa, :gateway, :share]`.
+- **`type: okta`**, Okta's issuer layout expanded at boot
+  (`Ankusa.Gateway.Authn.Okta`) into a `jwt` authenticator for a custom
+  authorization server (`issuer`/`jwks_url` derived from `domain` and
+  `authorization_server`, `groups_claim: groups`) or an `introspection` one for
+  `authorization_server: org` (org-server access tokens are opaque). Any `jwt`
+  or `introspection` option in the entry overrides what it derives; no network
+  at boot.
+- **`Ankusa.Gateway.Authn.Introspection`** (`type: :introspection`): RFC 7662
+  token introspection, one `Ankusa.Gateway.Caller` per authenticator (a hundred
+  requests carrying one token make one call), Basic client credentials, a
+  form-encoded body built by `URI.encode_query/1`, checked `iss`/`aud`, the
+  response as the principal's claims, negative caching of an inactive token.
+  At most one per chain, and nothing that reads the bearer token may follow it.
+- **Enrichers** (`gateway.auth.enrichers`, at most 4,
+  `Ankusa.Gateway.Enricher`): groups and claims added to a freshly
+  authenticated principal before it is fingerprinted and cached —
+  `okta_groups` (Okta's Users API, paged through the `link` header,
+  `max_groups`) and `http` (a JSON API of your own, URL templated after a
+  literal origin, `groups_path`/`claims_path`). Per-enricher result cache
+  (`ttl_ms`) through its own `Caller`; `only`, `on_unavailable: :fail | :skip`,
+  `timeout_ms`.

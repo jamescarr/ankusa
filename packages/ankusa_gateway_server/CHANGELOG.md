@@ -57,3 +57,9 @@ All notable changes to the Ankusa gateway image are documented here. It is the
   one-node warning at boot. The key is parsed by
   `AnkusaGatewayServer.GatewaySection`; the ranges are
   `Ankusa.Gateway.Config`'s.
+- **`gateway.auth` gains `okta` and `introspection` authenticators and
+  `enrichers`** in `gateway.yml`, parsed by `AnkusaGatewayServer.GatewaySection`
+  (`type: okta_groups` / `type: http` with their common `only`,
+  `on_unavailable`, `ttl_ms` and `timeout_ms`). The secrets — a client secret,
+  an Okta API token, an enricher's header value — are `[REDACTED]` in
+  `print-config`.

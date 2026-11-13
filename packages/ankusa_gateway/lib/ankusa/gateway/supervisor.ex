@@ -9,7 +9,8 @@ defmodule Ankusa.Gateway.Supervisor do
     2. the `:gateway` failure domain (`Ankusa.Instance.Isolated`), in order:
        the keys server of the chain's `jwt` authenticators, the three caches
        (`Ankusa.Gateway.Cache`: `:authn`, `:authz`, `:acl`), every
-       authenticator's own children, one `Ankusa.Gateway.Caller` per
+       authenticator's own children then every enricher's, one
+       `Ankusa.Gateway.Caller` per
        `:remote` authorizer and every authorizer's own children, the
        connection pools of the spaces' stores, the claim
        read cache (`Ankusa.ClaimCheck.Cache`, when the claims API is on and
@@ -62,7 +63,7 @@ defmodule Ankusa.Gateway.Supervisor do
   defp domain_children(config, %Config{instance: instance} = gateway) do
     keys_children(gateway) ++
       cache_children(gateway) ++
-      authenticator_children(gateway) ++
+      authn_children(gateway) ++
       Authz.caller_specs(gateway) ++
       sharing_children(gateway) ++
       authorizer_children(gateway) ++
@@ -130,6 +131,13 @@ defmodule Ankusa.Gateway.Supervisor do
     ]
   end
 
+  @doc false
+  # Every authenticator's children, then every enricher's, in chain order.
+  # Public for tests that drive the authentication plug without the whole tree.
+  @spec authn_children(Config.t()) :: [Supervisor.child_spec() | {module(), keyword()}]
+  def authn_children(%Config{} = config),
+    do: authenticator_children(config) ++ enricher_children(config)
+
   defp authenticator_children(%Config{
          instance: instance,
          auth: %{authenticators: authenticators}
@@ -138,6 +146,13 @@ defmodule Ankusa.Gateway.Supervisor do
         function_exported?(module, :child_specs, 1),
         spec <-
           module.child_specs(%{instance: instance, index: index, name: name, config: config}),
+        do: spec
+  end
+
+  defp enricher_children(%Config{instance: instance, auth: %{enrichers: enrichers}}) do
+    for {%{module: module, config: config}, index} <- Enum.with_index(enrichers),
+        function_exported?(module, :child_specs, 3),
+        spec <- module.child_specs(instance, index, config),
         do: spec
   end
 
