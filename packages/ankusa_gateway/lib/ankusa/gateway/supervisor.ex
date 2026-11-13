@@ -29,9 +29,6 @@ defmodule Ankusa.Gateway.Supervisor do
 
   alias Ankusa.Gateway.{Authn, Authz, Cache, Config}
 
-  # The ACL cache's bounds until `gateway.sharing` configures them.
-  @acl_cache [max_entries: 100_000, max_bytes: 67_108_864, max_ttl_ms: 60_000]
-
   @spec start_link(atom()) :: Supervisor.on_start()
   def start_link(instance) when is_atom(instance),
     do: Supervisor.start_link(__MODULE__, instance, name: Ankusa.via(instance, :gateway))
@@ -67,6 +64,7 @@ defmodule Ankusa.Gateway.Supervisor do
       cache_children(gateway) ++
       authenticator_children(gateway) ++
       Authz.caller_specs(gateway) ++
+      sharing_children(gateway) ++
       authorizer_children(gateway) ++
       space_pools(gateway) ++
       claim_children(config, gateway) ++
@@ -102,7 +100,13 @@ defmodule Ankusa.Gateway.Supervisor do
     Ankusa.BlobStore.Pool.child_specs_for(instance, stores)
   end
 
-  defp cache_children(%Config{instance: instance, auth: auth, authz: authz}) do
+  # The `:acl` caller the `grants` authorizer and ownership read through.
+  defp sharing_children(%Config{sharing: %{enabled: true}, instance: instance}),
+    do: [Ankusa.Gateway.ACL.Store.caller_spec(instance)]
+
+  defp sharing_children(_gateway), do: []
+
+  defp cache_children(%Config{instance: instance, auth: auth, authz: authz} = gateway) do
     authz_max_ttl =
       Enum.max([authz.cache.allow_ttl_ms, authz.cache.deny_ttl_ms, 60_000]) +
         authz.cache.serve_stale_ms
@@ -118,7 +122,11 @@ defmodule Ankusa.Gateway.Supervisor do
         max_bytes: authz.cache.max_bytes,
         max_ttl_ms: authz_max_ttl
       ),
-      Cache.child_spec_for(instance, :acl, @acl_cache)
+      Cache.child_spec_for(instance, :acl,
+        max_entries: gateway.sharing.acl_cache_max_entries,
+        max_bytes: gateway.sharing.acl_cache_max_bytes,
+        max_ttl_ms: gateway.sharing.acl_cache_ttl_ms
+      )
     ]
   end
 
@@ -175,6 +183,15 @@ defmodule Ankusa.Gateway.Supervisor do
         Ankusa.ClaimCheck.Stores.list(config),
         &match?({_, Ankusa.BlobStore.LocalFS, _}, &1)
       )
+
+    if gateway.sharing.enabled do
+      for {name, %{store: {Ankusa.BlobStore.LocalFS, _}}} <- Enum.sort(gateway.spaces) do
+        Logger.warning(
+          "[ankusa] gateway.sharing on a LocalFS space (#{name}): grant updates are only safe " <>
+            "from one gateway node"
+        )
+      end
+    end
 
     if gateway.claims.enabled and config.roles == [] and local? do
       Logger.warning(

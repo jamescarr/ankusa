@@ -21,6 +21,9 @@ defmodule Ankusa.Gateway.Metrics do
       `{instance,cache}` — the `authn`, `authz` and `acl` caches.
     * `ankusa_gateway_objects_inflight_bytes{instance}` — object bytes the
       objects API holds in memory now.
+    * `ankusa_gateway_shares_total{instance,action,result}` — sharing
+      mutations (`grant_create`, `grant_revoke`, `link_create`, and
+      `acl_cleanup` when a deleted object's ACL document could not be removed).
 
   Every label value is fixed or operator configuration: nothing a caller sends
   (a tenant, a claim id, a method) is a label.
@@ -109,6 +112,13 @@ defmodule Ankusa.Gateway.Metrics do
           unit: :second,
           tags: [:instance, :caller],
           reporter_options: [buckets: @seconds_buckets]
+        )
+      ),
+      counter(
+        "ankusa.gateway.shares.total",
+        Ankusa.Metrics.scope(instance,
+          event_name: [:ankusa, :gateway, :share],
+          tags: [:instance, :action, :result]
         )
       ),
       counter(
