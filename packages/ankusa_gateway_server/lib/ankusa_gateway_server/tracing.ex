@@ -24,7 +24,7 @@ defmodule AnkusaGatewayServer.Tracing do
   resource is `service.name = "ankusa"` and `service.version` the image's.
   """
 
-  @typedoc "The traced service: `%{name: \"ankusa\", version: \"0.8.0\"}`."
+  @typedoc ~S(The traced service: `%{name: "ankusa", version: "0.8.0"}`.)
   @type service :: %{name: String.t(), version: String.t()}
 
   @doc """

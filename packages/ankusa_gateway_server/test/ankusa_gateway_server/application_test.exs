@@ -7,20 +7,45 @@ defmodule AnkusaGatewayServer.ApplicationTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
+  alias Ankusa.Admin.Auth.Token
+  alias AnkusaGatewayServer.LogFormatter
+
   @moduletag :capture_log
 
   setup do
     port = Ankusa.TestHelpers.free_port()
+    metrics_port = Ankusa.TestHelpers.free_port()
     dir = Path.join(System.tmp_dir!(), "gateway_app_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     path = Path.join(dir, "gateway.yml")
+
+    jwk =
+      JOSE.JWK.generate_key({:ec, "P-256"})
+      |> JOSE.JWK.to_public()
+      |> JOSE.JWK.to_map()
+      |> elem(1)
+
+    key = Enum.map_join(jwk, ", ", fn {k, v} -> ~s("#{k}": "#{v}") end)
 
     File.write!(path, """
     config_version: 2
     node: {data_dir: #{dir}/data}
     # No pause before the listener closes: the drain is what is tested, not its timing.
     listener: {drain_delay_ms: 0}
-    gateway: {port: #{port}}
+    log: {format: json}
+    metrics: {enabled: true, port: #{metrics_port}, ip: "127.0.0.1"}
+    gateway:
+      port: #{port}
+      auth:
+        authenticators:
+          - type: token
+            tokens: [{id: w, sha256: "#{Token.hash("w")}", scopes: [claims:read]}]
+          - type: jwt
+            issuer: https://login.example.com/
+            audience: ankusa
+            keys: [{#{key}}]
     """)
 
     previous = System.get_env("ANKUSA_CONFIG")
@@ -30,6 +55,7 @@ defmodule AnkusaGatewayServer.ApplicationTest do
     on_exit(fn ->
       Application.stop(:ankusa_gateway_server)
       Application.put_env(:ankusa_gateway_server, :autostart, false)
+      LogFormatter.install(:text, :default)
 
       if previous,
         do: System.put_env("ANKUSA_CONFIG", previous),
@@ -41,8 +67,28 @@ defmodule AnkusaGatewayServer.ApplicationTest do
 
     # The test run started the application with autostart off: start it again.
     _ = Application.stop(:ankusa_gateway_server)
-    {:ok, _apps} = Application.ensure_all_started(:ankusa_gateway_server)
-    %{url: "http://127.0.0.1:#{port}"}
+
+    log =
+      capture_log(fn ->
+        {:ok, _apps} = Application.ensure_all_started(:ankusa_gateway_server)
+      end)
+
+    %{
+      url: "http://127.0.0.1:#{port}",
+      log: log,
+      gateway_port: port
+    }
+  end
+
+  test "the boot line names the port, claims, the authenticator types and the metrics port", %{
+    log: log,
+    gateway_port: port
+  } do
+    assert log =~ "ankusa_gateway_server"
+    assert log =~ "port=#{port}"
+    assert log =~ "claims=on"
+    assert log =~ "authenticators=token,jwt"
+    assert log =~ ~r/metrics=\d+/
   end
 
   test "the gateway answers, and a drain flips /ready to 503", %{url: url} do

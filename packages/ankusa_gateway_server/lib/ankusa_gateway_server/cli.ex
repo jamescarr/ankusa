@@ -11,15 +11,17 @@ defmodule AnkusaGatewayServer.CLI do
   @doc "Validate the config, print a one-line summary, exit 0. Exit 78 on error."
   @spec check_config() :: no_return()
   def check_config do
-    %{config: config, gateway: gateway} = loaded!()
-
-    IO.puts(
-      "config OK: gateway=#{gateway.port} " <>
-        "claims=#{if gateway.claims.enabled, do: "on", else: "off"} " <>
-        "storage=#{inspect(elem(config.storage.blob_store, 0))}"
-    )
-
+    IO.puts(check_config_line(loaded!()))
     halt(0)
+  end
+
+  @doc false
+  # The line `check_config/0` prints: what the operator's smoke test greps.
+  @spec check_config_line(Config.loaded()) :: String.t()
+  def check_config_line(%{config: config, gateway: gateway}) do
+    "config OK: gateway=#{gateway.port} " <>
+      "claims=#{if gateway.claims.enabled, do: "on", else: "off"} " <>
+      "storage=#{inspect(elem(config.storage.blob_store, 0))}"
   end
 
   @doc """
@@ -29,15 +31,17 @@ defmodule AnkusaGatewayServer.CLI do
   """
   @spec print_config() :: no_return()
   def print_config do
-    %{config: config, gateway: gateway} = loaded!()
-
-    view =
-      config
-      |> Ankusa.Admin.Redact.config()
-      |> Map.put("gateway", Ankusa.Gateway.Config.redact(gateway))
-
-    IO.puts(JSON.encode!(view))
+    IO.puts(JSON.encode!(config_view(loaded!())))
     halt(0)
+  end
+
+  @doc false
+  # The object `print_config/0` prints.
+  @spec config_view(Config.loaded()) :: map()
+  def config_view(%{config: config, gateway: gateway}) do
+    config
+    |> Ankusa.Admin.Redact.config()
+    |> Map.put("gateway", Ankusa.Gateway.Config.redact(gateway))
   end
 
   @doc "Print the image's, the gateway library's and core's versions, exit 0."

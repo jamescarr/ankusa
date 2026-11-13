@@ -90,4 +90,34 @@ defmodule AnkusaGatewayServer.GcpTokenTest do
     # 30 s of life is inside the 60 s margin: every call refetches.
     assert requests() == 2
   end
+
+  test "a token body the metadata server should not send is :error, not a cached token" do
+    stub(fn conn -> Req.Test.json(conn, %{"access_token" => "tok"}) end)
+
+    assert GcpToken.metadata() == :error
+    assert requests() == 1
+  end
+
+  test "expires_in may be quoted" do
+    stub(fn conn ->
+      Req.Test.json(conn, %{"access_token" => "quoted", "expires_in" => "3600"})
+    end)
+
+    assert {:ok, "quoted"} = GcpToken.metadata()
+  end
+
+  test "an expires_in that is not a number of seconds is :error" do
+    stub(fn conn -> Req.Test.json(conn, %{"access_token" => "x", "expires_in" => "soon"}) end)
+    assert GcpToken.metadata() == :error
+
+    stub(fn conn -> Req.Test.json(conn, %{"access_token" => "x", "expires_in" => 1.5}) end)
+    assert GcpToken.metadata() == :error
+  end
+
+  test "a transport failure is :error after one request" do
+    stub(fn conn -> Req.Test.transport_error(conn, :econnrefused) end)
+
+    assert GcpToken.metadata() == :error
+    assert requests() == 1
+  end
 end
