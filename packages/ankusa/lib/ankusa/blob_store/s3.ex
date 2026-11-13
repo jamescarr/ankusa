@@ -50,6 +50,18 @@ defmodule Ankusa.BlobStore.S3 do
   multipart upload (create, parts each with `Content-MD5`, complete, abort on
   failure).
 
+  ## Object operations
+
+  `head_object/3`, `get_object/3`, `put_object/4`, `delete_object/3` and
+  `list_page/3` — the gateway's objects API — speak S3's own vocabulary: an
+  object's version is its `ETag` with the quotes stripped, `if: {:version, v}`
+  is `If-Match: "<v>"`, `if: :absent` is `If-None-Match: *`, a read `:range` is
+  a `Range: bytes=first-last` request, and stored metadata is the
+  `x-amz-meta-*` headers. A `put_object/4` above `multipart_threshold_bytes`
+  carries the content type and metadata on `CreateMultipartUpload` and the
+  condition on `CompleteMultipartUpload`, whose `<ETag>` is the version
+  returned; `list_page/3` is one ListObjectsV2 page.
+
   Addressing is always path-style (`{endpoint}/{bucket}/{key}`) — the one
   scheme every target (AWS, MinIO, R2, floci) accepts unambiguously.
 
@@ -146,6 +158,178 @@ defmodule Ankusa.BlobStore.S3 do
     end
   end
 
+  # ── objects (Ankusa.BlobStore's optional callbacks) ───────────────────────
+
+  @impl true
+  def head_object(instance, key, opts) do
+    opts = Options.with_deadline(opts)
+
+    case request(instance, opts, :small, :head, object_url(opts, key), nil, []) do
+      {:ok, status, headers, _body} when status in 200..299 ->
+        {:ok, object_meta(headers, nil)}
+
+      other ->
+        HTTP.object_reply(other, nil)
+    end
+  end
+
+  @impl true
+  def get_object(instance, key, opts) do
+    condition = Keyword.get(opts, :if)
+    range = Keyword.get(opts, :range)
+    max_bytes = Keyword.get(opts, :max_bytes)
+    opts = opts |> Options.with_deadline() |> limit_response(max_bytes)
+
+    case request(
+           instance,
+           opts,
+           :bulk,
+           :get,
+           object_url(opts, key),
+           nil,
+           read_headers(range, condition)
+         ) do
+      {:ok, status, _headers, {:truncated, _read}} when status in 200..299 ->
+        {:error, :too_large}
+
+      {:ok, status, headers, body} when status in 200..299 ->
+        with :ok <- read_checksum(range, headers, body) do
+          {:ok, object_meta(headers, body), body}
+        end
+
+      other ->
+        HTTP.object_reply(other, condition)
+    end
+  end
+
+  @impl true
+  def put_object(instance, key, data, opts) do
+    opts = Options.with_deadline(opts)
+    size = IO.iodata_length(data)
+    condition = Keyword.get(opts, :if)
+
+    if size > Options.get(opts, :multipart_threshold_bytes),
+      do: big_object(instance, opts, key, IO.iodata_to_binary(data), condition),
+      else: small_object(instance, opts, key, data, size, condition)
+  end
+
+  @impl true
+  def delete_object(instance, key, opts) do
+    opts = Options.with_deadline(opts)
+
+    case request(instance, opts, :small, :delete, object_url(opts, key), nil, []) do
+      {:ok, status, _headers, _body} when status in 200..299 -> :ok
+      {:ok, 404, _headers, _body} -> :ok
+      other -> HTTP.reply(other)
+    end
+  end
+
+  @impl true
+  def list_page(instance, prefix, opts) do
+    opts = Options.with_deadline(opts)
+    cursor = Keyword.get(opts, :cursor)
+    delimiter = Keyword.get(opts, :delimiter)
+    limit = Keyword.get(opts, :limit, 1000)
+
+    query =
+      [{"list-type", "2"}, {"prefix", prefix}, {"max-keys", Integer.to_string(limit)}] ++
+        if(delimiter, do: [{"delimiter", delimiter}], else: []) ++
+        if(cursor, do: [{"continuation-token", cursor}], else: [])
+
+    url = endpoint(opts) <> "/" <> bucket(opts) <> "?" <> URI.encode_query(query, :rfc3986)
+
+    with {:ok, body} <- HTTP.reply(request(instance, opts, :small, :get, url, nil, [])),
+         do: parse_object_page(body)
+  end
+
+  defp object_meta(headers, body) do
+    %{
+      size: HTTP.object_size(headers) || length_or_zero(body),
+      version: HTTP.version(HTTP.header(headers, "etag")) || "",
+      content_type: HTTP.header(headers, "content-type"),
+      last_modified: HTTP.http_date(HTTP.header(headers, "last-modified")),
+      metadata: HTTP.metadata(headers, "x-amz-meta-")
+    }
+  end
+
+  defp length_or_zero(nil), do: 0
+  defp length_or_zero(body), do: byte_size(body)
+
+  # A ranged read has no whole-object digest to check, and the checksum mode
+  # header would make S3 compute one it does not need.
+  defp read_headers(range, condition) do
+    condition_headers(condition) ++
+      if(range, do: [HTTP.range_header(range)], else: [{"x-amz-checksum-mode", "ENABLED"}])
+  end
+
+  defp read_checksum(range, _headers, _body) when not is_nil(range), do: :ok
+
+  defp read_checksum(nil, headers, body) do
+    case Checksum.check_response(headers, body, :sha256, ["x-amz-checksum-sha256"]) do
+      {:ok, _body} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp small_object(instance, opts, key, data, size, condition) do
+    headers = SSE.headers(opts, :s3) ++ object_headers(opts) ++ condition_headers(condition)
+
+    case request(instance, opts, Options.kind(size), :put, object_url(opts, key), data, headers) do
+      {:ok, status, response_headers, _body} when status in 200..299 ->
+        object_version(response_headers)
+
+      other ->
+        HTTP.object_reply(other, condition)
+    end
+  end
+
+  defp big_object(instance, opts, key, data, condition) do
+    upload_opts = %{
+      start_headers: SSE.headers(opts, :s3) ++ object_headers(opts),
+      condition: condition,
+      exists_statuses: []
+    }
+
+    case upload(instance, opts, key, data, upload_opts) do
+      {:ok, nil} -> {:error, :missing_version}
+      other -> other
+    end
+  end
+
+  defp object_headers(opts) do
+    [{"content-type", content_type(opts)} | meta_headers(Keyword.get(opts, :metadata) || %{})]
+  end
+
+  defp content_type(opts), do: Keyword.get(opts, :content_type, "application/octet-stream")
+
+  defp meta_headers(metadata) do
+    for {name, value} <- metadata do
+      {"x-amz-meta-" <> String.downcase(to_string(name)), to_string(value)}
+    end
+  end
+
+  defp condition_headers(nil), do: []
+  defp condition_headers(:absent), do: [{"if-none-match", "*"}]
+  defp condition_headers({:version, version}), do: [{"if-match", ~s("#{version}")}]
+
+  defp object_version(headers) do
+    case HTTP.version(HTTP.header(headers, "etag")) do
+      nil -> {:error, :missing_version}
+      version -> {:ok, version}
+    end
+  end
+
+  # A capped body: the HTTP client stops reading past `max` bytes and reports
+  # the body as `{:truncated, read}`, which `get_object/3` answers `:too_large`.
+  defp limit_response(opts, nil), do: opts
+
+  defp limit_response(opts, max_bytes) do
+    req_options =
+      opts |> Keyword.get(:req_options, []) |> Keyword.put(:max_response_bytes, max_bytes)
+
+    Keyword.put(opts, :req_options, req_options)
+  end
+
   # ── writes ────────────────────────────────────────────────────────────────
 
   defp write(instance, key, data, opts, conditional?) do
@@ -158,9 +342,12 @@ defmodule Ankusa.BlobStore.S3 do
   end
 
   defp single(instance, opts, key, data, size, conditional?) do
+    condition = if conditional?, do: :absent, else: nil
+
     headers =
       SSE.headers(opts, :s3) ++
-        [{"x-amz-checksum-sha256", Checksum.sha256_base64(data)}] ++ precondition(conditional?)
+        [{"x-amz-checksum-sha256", Checksum.sha256_base64(data)}] ++
+        condition_headers(condition)
 
     instance
     |> request(opts, Options.kind(size), :put, object_url(opts, key), data, headers)
@@ -169,8 +356,6 @@ defmodule Ankusa.BlobStore.S3 do
 
   # S3 answers a failed `If-None-Match` with 412, and a conflicting concurrent
   # conditional write with 409.
-  defp precondition(true), do: [{"if-none-match", "*"}]
-  defp precondition(false), do: []
   defp exists_statuses(true), do: [409, 412]
   defp exists_statuses(false), do: []
 
@@ -178,14 +363,28 @@ defmodule Ankusa.BlobStore.S3 do
   # part, all inside the operation's one deadline), complete; abort on any
   # failure so no orphan parts are billed.
   defp multipart(instance, opts, key, data, conditional?) do
+    upload_opts = %{
+      start_headers: SSE.headers(opts, :s3),
+      condition: if(conditional?, do: :absent, else: nil),
+      exists_statuses: exists_statuses(conditional?)
+    }
+
+    case upload(instance, opts, key, data, upload_opts) do
+      {:ok, _version} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp upload(instance, opts, key, data, upload_opts) do
     url = object_url(opts, key)
     parts = HTTP.chunks(data, Options.get(opts, :multipart_part_bytes))
 
-    case create_upload(instance, opts, url) do
+    case create_upload(instance, opts, url, upload_opts.start_headers) do
       {:ok, upload_id} ->
         with {:ok, etags} <- upload_parts(instance, opts, url, upload_id, parts),
-             :ok <- complete_upload(instance, opts, url, upload_id, etags, conditional?) do
-          :ok
+             {:ok, version} <-
+               complete_upload(instance, opts, url, upload_id, etags, upload_opts) do
+          {:ok, version}
         else
           {:error, _reason} = error ->
             abort_upload(instance, opts, url, upload_id)
@@ -197,9 +396,8 @@ defmodule Ankusa.BlobStore.S3 do
     end
   end
 
-  defp create_upload(instance, opts, url) do
-    result =
-      request(instance, opts, :small, :post, url <> "?uploads=", "", SSE.headers(opts, :s3))
+  defp create_upload(instance, opts, url, headers) do
+    result = request(instance, opts, :small, :post, url <> "?uploads=", "", headers)
 
     with {:ok, body} <- HTTP.reply(result) do
       case parse_upload_id(body) do
@@ -233,8 +431,34 @@ defmodule Ankusa.BlobStore.S3 do
     end
   end
 
-  defp complete_upload(instance, opts, url, upload_id, etags, conditional?) do
-    xml = [
+  defp complete_upload(instance, opts, url, upload_id, etags, upload_opts) do
+    xml = complete_xml(etags)
+    headers = [{"content-type", "application/xml"}] ++ condition_headers(upload_opts.condition)
+    complete_url = url <> "?" <> URI.encode_query([{"uploadId", upload_id}], :rfc3986)
+
+    case request(instance, opts, :small, :post, complete_url, xml, headers) do
+      # S3 can answer 200 and put the failure in the body.
+      {:ok, status, response_headers, body} when status in 200..299 ->
+        if String.contains?(body, "<Error>") do
+          {:error, {:status, status, body}}
+        else
+          {:ok, completed_version(body, response_headers)}
+        end
+
+      {:ok, status, headers, body} ->
+        if status in upload_opts.exists_statuses do
+          {:error, :already_exists}
+        else
+          HTTP.object_reply({:ok, status, headers, body}, upload_opts.condition)
+        end
+
+      other ->
+        HTTP.object_reply(other, upload_opts.condition)
+    end
+  end
+
+  defp complete_xml(etags) do
+    [
       "<CompleteMultipartUpload>",
       for {number, etag} <- etags do
         [
@@ -247,18 +471,12 @@ defmodule Ankusa.BlobStore.S3 do
       end,
       "</CompleteMultipartUpload>"
     ]
+  end
 
-    headers = [{"content-type", "application/xml"}] ++ precondition(conditional?)
-    complete_url = url <> "?" <> URI.encode_query([{"uploadId", upload_id}], :rfc3986)
-
-    case request(instance, opts, :small, :post, complete_url, xml, headers) do
-      # S3 can answer 200 and put the failure in the body.
-      {:ok, status, _headers, body} when status in 200..299 ->
-        if String.contains?(body, "<Error>"), do: {:error, {:status, status, body}}, else: :ok
-
-      other ->
-        HTTP.write_reply(other, exists_statuses(conditional?))
-    end
+  # The version a completing upload reports: the `<ETag>` of the XML body, or
+  # the response's `etag` header when the body does not carry one.
+  defp completed_version(body, headers) do
+    parse_etag(body) || HTTP.version(HTTP.header(headers, "etag"))
   end
 
   # Best effort, under a short deadline of its own: the operation's may be spent.
@@ -376,6 +594,48 @@ defmodule Ankusa.BlobStore.S3 do
   defp parse_upload_id(xml_body) do
     {doc, _rest} = :xmerl_scan.string(:binary.bin_to_list(xml_body), quiet: true)
     text(doc, ~c"//UploadId/text()")
+  catch
+    :exit, _not_xml -> nil
+  end
+
+  # One ListObjectsV2 page: `<Contents>` keys with their sizes, the
+  # `<CommonPrefixes>` a delimiter rolled up, and the token the next page needs.
+  defp parse_object_page(xml_body) do
+    {doc, _rest} = :xmerl_scan.string(:binary.bin_to_list(xml_body), quiet: true)
+
+    objects =
+      for node <- :xmerl_xpath.string(~c"//Contents", doc) do
+        %{key: text(node, ~c"Key/text()") || "", size: page_size(node)}
+      end
+
+    prefixes =
+      ~c"//CommonPrefixes/Prefix/text()"
+      |> :xmerl_xpath.string(doc)
+      |> Enum.map(fn {:xmlText, _parents, _pos, _lang, value, _type} -> List.to_string(value) end)
+
+    {:ok,
+     %{objects: objects, prefixes: prefixes, next: text(doc, ~c"//NextContinuationToken/text()")}}
+  catch
+    :exit, _not_xml -> {:error, :list_unreadable}
+  end
+
+  defp page_size(node) do
+    case text(node, ~c"Size/text()") do
+      nil ->
+        0
+
+      value ->
+        case Integer.parse(value) do
+          {size, ""} -> size
+          _not_an_integer -> 0
+        end
+    end
+  end
+
+  # The `<ETag>` a completing multipart upload reports, quotes stripped.
+  defp parse_etag(xml_body) do
+    {doc, _rest} = :xmerl_scan.string(:binary.bin_to_list(xml_body), quiet: true)
+    HTTP.version(text(doc, ~c"//ETag/text()"))
   catch
     :exit, _not_xml -> nil
   end

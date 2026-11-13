@@ -85,6 +85,102 @@ defmodule Ankusa.BlobStore.HTTP do
 
   def write_reply({:error, reason}, _exists), do: {:error, reason}
 
+  @doc """
+  An object operation's response (`Ankusa.BlobStore`'s optional callbacks):
+  a 2xx as it came, `{:ok, status, headers, body}`; `404` `:not_found`; `412`
+  `:already_exists` when the request carried the `:absent` condition, else
+  `:version_mismatch`; `409` on a conditional request likewise (Azure and S3
+  answer an `If-None-Match: *` that lost with `409`, as `put_if_absent/4`
+  already reads it);
+  `416` `:range_not_satisfiable`; anything else as `reply/1`.
+  """
+  @spec object_reply(
+          Retry.http_result() | {:error, term()},
+          nil | :absent | {:version, String.t()}
+        ) ::
+          Retry.http_result() | {:error, term()}
+  def object_reply({:ok, status, _headers, _body} = ok, _condition) when status in 200..299,
+    do: ok
+
+  def object_reply({:ok, 404, _headers, _body}, _condition), do: {:error, :not_found}
+  def object_reply({:ok, 412, _headers, _body}, :absent), do: {:error, :already_exists}
+  def object_reply({:ok, 412, _headers, _body}, _condition), do: {:error, :version_mismatch}
+
+  def object_reply({:ok, 409, _headers, _body}, :absent), do: {:error, :already_exists}
+
+  def object_reply({:ok, 409, _headers, _body}, {:version, _version}),
+    do: {:error, :version_mismatch}
+
+  def object_reply({:ok, 416, _headers, _body}, _condition), do: {:error, :range_not_satisfiable}
+  def object_reply(other, _condition), do: reply(other)
+
+  @doc "The first value of response header `name` (lowercase), or `nil`."
+  @spec header(%{String.t() => [String.t()]}, String.t()) :: String.t() | nil
+  def header(headers, name) do
+    case Map.get(headers, name) do
+      [value | _] -> value
+      _ -> nil
+    end
+  end
+
+  @doc "A version as the object API reports it: an ETag without its surrounding double quotes."
+  @spec version(String.t() | nil) :: String.t() | nil
+  def version(nil), do: nil
+  def version(etag), do: etag |> String.trim() |> String.trim_leading("W/") |> String.trim("\"")
+
+  @doc "The user metadata of the response headers that start with `prefix` (`x-amz-meta-`, ...), names lowercase."
+  @spec metadata(%{String.t() => [String.t()]}, String.t()) :: %{String.t() => String.t()}
+  def metadata(headers, prefix) do
+    for {name, [value | _]} <- headers,
+        name = String.downcase(name),
+        String.starts_with?(name, prefix),
+        into: %{},
+        do: {String.replace_prefix(name, prefix, ""), value}
+  end
+
+  @doc """
+  The whole object's size of a response: the total of `content-range`
+  (`bytes 0-9/1234`) on a ranged read, else `content-length`.
+  """
+  @spec object_size(%{String.t() => [String.t()]}) :: non_neg_integer() | nil
+  def object_size(headers) do
+    with range when is_binary(range) <- header(headers, "content-range"),
+         [_, total] <- String.split(range, "/", parts: 2),
+         {size, ""} <- Integer.parse(total) do
+      size
+    else
+      _ ->
+        case Integer.parse(header(headers, "content-length") || "") do
+          {size, ""} -> size
+          _ -> nil
+        end
+    end
+  end
+
+  @months ~w(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec)
+
+  @doc "An HTTP date (`last-modified`, IMF-fixdate: `Sun, 06 Nov 1994 08:49:37 GMT`) as Unix seconds, or `nil`."
+  @spec http_date(String.t() | nil) :: integer() | nil
+  def http_date(value) when is_binary(value) do
+    with [_weekday, day, month, year, time, "GMT"] <- String.split(value, " ", trim: true),
+         month when is_integer(month) <- Enum.find_index(@months, &(&1 == month)),
+         {:ok, date} <- Date.new(String.to_integer(year), month + 1, String.to_integer(day)),
+         {:ok, time} <- Time.from_iso8601(time),
+         {:ok, datetime} <- DateTime.new(date, time, "Etc/UTC") do
+      DateTime.to_unix(datetime)
+    else
+      _ -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  def http_date(_value), do: nil
+
+  @doc "A `range` request header for `{first, last}` (inclusive)."
+  @spec range_header({non_neg_integer(), non_neg_integer()}) :: {String.t(), String.t()}
+  def range_header({first, last}), do: {"range", "bytes=#{first}-#{last}"}
+
   @doc "`data` cut into slices of at most `part_bytes`, in order."
   @spec chunks(binary(), pos_integer()) :: [binary()]
   def chunks(data, part_bytes) when is_binary(data) do
