@@ -1,22 +1,25 @@
 name: Docker image
 
-# Builds and smoke-tests the jamescarr/ankusa image on every relevant change, and
-# publishes it on a server tag. The tag is the release: `ankusa_server-vX.Y.Z`
-# is cut by `mise run release:tag ankusa_server`, which runs the same preflight
-# checks this workflow's `resolve` job repeats (a tag can be pushed by anyone,
-# so the workflow verifies rather than trusts).
+# Builds and smoke-tests both images on every relevant change, and publishes one
+# of them on its own release tag: `ankusa_server-vX.Y.Z` ships jamescarr/ankusa,
+# `ankusa_gateway_server-vX.Y.Z` ships jamescarr/ankusa-gateway. Each tag is cut
+# by `mise run release:tag <package>`, which runs the same preflight checks this
+# workflow's `resolve` job repeats (a tag can be pushed by anyone, so the
+# workflow verifies rather than trusts). Every Docker Hub repository name comes
+# from the package's `IMAGE` file through `pkg_docker_image`: no image name is
+# written down here.
 #
-# Note on the filters below: path filters are not evaluated for tag pushes, so
-# `ankusa_server-v*` always builds regardless of which files the tagged commit
+# Note on the filters below: path filters are not evaluated for tag pushes, so a
+# `<package>-v*` tag always builds regardless of which files the tagged commit
 # touched — which is what a release needs. `.github/workflows/ci.yml` is
-# deliberately not among the filters: a CI-only diff cannot change the image,
+# deliberately not among the filters: a CI-only diff cannot change an image,
 # and the only job here that reads it (`ci`) is `if: github.ref_type == 'tag'`,
 # where filters do not apply — so a release still runs the full suite first.
 
 on:
   push:
     branches: [main]
-    tags: ["ankusa_server-v*"]
+    tags: ["ankusa_server-v*", "ankusa_gateway_server-v*"]
     paths:
       - "packages/ankusa*/**"
       - "packages/async_api_spex/**"
@@ -38,9 +41,6 @@ concurrency:
 permissions:
   contents: write
 
-env:
-  IMAGE: jamescarr/ankusa
-
 jobs:
   resolve:
     name: Resolve version and tags
@@ -49,6 +49,9 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       tags: ${{ steps.resolve.outputs.tags }}
       push: ${{ steps.resolve.outputs.push }}
+      # The packages to build: one on a tag run (the tagged image), both on a
+      # branch or pull request.
+      packages: ${{ steps.resolve.outputs.packages }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -76,14 +79,17 @@ jobs:
               TAGS="$VERSION,$MAJOR.$MINOR,latest"
               [ "$MAJOR" -ge 1 ] && TAGS="$TAGS,$MAJOR"
             fi
+            PACKAGES="\"$PKG\""
             PUSH=true
           elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
             VERSION=""
             TAGS="edge,sha-${GITHUB_SHA:0:7}"
+            PACKAGES='"ankusa_server","ankusa_gateway_server"'
             PUSH=true
           else
             VERSION=""
             TAGS=""
+            PACKAGES='"ankusa_server","ankusa_gateway_server"'
             PUSH=false
           fi
 
@@ -91,9 +97,10 @@ jobs:
             echo "version=$VERSION"
             echo "tags=$TAGS"
             echo "push=$PUSH"
+            echo "packages=[$PACKAGES]"
           } >> "$GITHUB_OUTPUT"
 
-          echo "version=${VERSION:-<none>} tags=${TAGS:-<none>} push=$PUSH"
+          echo "version=${VERSION:-<none>} tags=${TAGS:-<none>} packages=[$PACKAGES] push=$PUSH"
 
   # The full test suite, on tag runs only: a release must not ship an image
   # built from code that does not pass CI. Branch and PR runs already get CI
@@ -105,19 +112,21 @@ jobs:
     secrets: inherit
 
   build:
-    name: Build and smoke (${{ matrix.platform }})
+    name: Build and smoke (${{ matrix.package }}, ${{ matrix.target.platform }})
     needs: [resolve, ci]
     # `ci` is skipped on non-tag runs, and a job that needs a skipped job is
     # itself skipped — so the condition is explicit rather than implied.
     if: ${{ always() && needs.resolve.result == 'success' && (needs.ci.result == 'success' || needs.ci.result == 'skipped') }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.target.runner }}
     env:
       # Fork PRs get no secrets; skip the login there rather than fail it.
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     strategy:
       fail-fast: false
       matrix:
-        include:
+        # Every image to build (from `resolve`), each on both platforms.
+        package: ${{ fromJSON(needs.resolve.outputs.packages) }}
+        target:
           # Native builds, no QEMU: an emulated arm64 build of a BEAM release
           # plus a C++ NIF takes long enough to time out.
           - platform: linux/amd64
@@ -128,6 +137,11 @@ jobs:
             arch: arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The Docker Hub repository of this package, from its IMAGE file: the one
+      # place a job learns which image it is building.
+      - name: Resolve the image name
+        run: source .mise/lib/pkg.sh && echo "IMAGE=$(pkg_docker_image "${{ matrix.package }}")" >> "$GITHUB_ENV"
 
       # Before buildx: setup-buildx pulls moby/buildkit and the build pulls
       # the base images, all from Docker Hub. Also the push credentials below.
@@ -146,18 +160,17 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: packages/ankusa_server/Dockerfile
-          platforms: ${{ matrix.platform }}
+          file: packages/${{ matrix.package }}/Dockerfile
+          platforms: ${{ matrix.target.platform }}
           load: true
           tags: ${{ env.IMAGE }}:test
-          cache-from: type=gha,scope=${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.package }}-${{ matrix.target.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.package }}-${{ matrix.target.platform }}
 
-      # The same script `mise run docker:smoke` runs: demo hook accepted then
-      # deduped, metrics, config with no credentials, and exit 78 on a bad
-      # config. An image that fails this never reaches Docker Hub.
+      # The same script `mise run docker:smoke <package>` runs. An image that
+      # fails this never reaches Docker Hub.
       - name: Smoke test
-        run: packages/ankusa_server/scripts/smoke.sh ${{ env.IMAGE }}:test
+        run: packages/${{ matrix.package }}/scripts/smoke.sh ${{ env.IMAGE }}:test
 
       # Push per-architecture digests; the `merge` job below combines them into
       # one multi-arch tag set, which is what makes `docker pull` pick the right
@@ -170,9 +183,9 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: packages/ankusa_server/Dockerfile
-          platforms: ${{ matrix.platform }}
-          cache-from: type=gha,scope=${{ matrix.platform }}
+          file: packages/${{ matrix.package }}/Dockerfile
+          platforms: ${{ matrix.target.platform }}
+          cache-from: type=gha,scope=${{ matrix.package }}-${{ matrix.target.platform }}
           sbom: generator=docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9
           provenance: mode=max
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
@@ -181,23 +194,27 @@ jobs:
         if: ${{ needs.resolve.outputs.push == 'true' }}
         run: |
           set -euo pipefail
-          echo "${{ steps.push.outputs.digest }}" > "$RUNNER_TEMP/digest-${{ matrix.arch }}"
+          echo "${{ steps.push.outputs.digest }}" > "$RUNNER_TEMP/digest-${{ matrix.package }}-${{ matrix.target.arch }}"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ needs.resolve.outputs.push == 'true' }}
         with:
-          name: digest-${{ matrix.arch }}
-          path: ${{ runner.temp }}/digest-${{ matrix.arch }}
+          name: digest-${{ matrix.package }}-${{ matrix.target.arch }}
+          path: ${{ runner.temp }}/digest-${{ matrix.package }}-${{ matrix.target.arch }}
           if-no-files-found: error
           retention-days: 1
 
   merge:
-    name: Merge digests into tags, sign, verify
+    name: Merge digests into tags, sign, verify (${{ matrix.package }})
     needs: [resolve, build]
     # `ci` is skipped on non-tag runs, and a skipped ancestor fails the implied
     # `success()` even when `build` succeeded — hence the explicit condition.
     if: ${{ always() && needs.build.result == 'success' && needs.resolve.outputs.push == 'true' }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.resolve.outputs.packages) }}
     permissions:
       contents: read
       # The keyless cosign signature: GitHub's OIDC token is the signing
@@ -207,10 +224,13 @@ jobs:
       # The smoke script and its TLS fixtures come from the commit being published.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Resolve the image name
+        run: source .mise/lib/pkg.sh && echo "IMAGE=$(pkg_docker_image "${{ matrix.package }}")" >> "$GITHUB_ENV"
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: ${{ runner.temp }}/digests
-          pattern: digest-*
+          pattern: digest-${{ matrix.package }}-*
           merge-multiple: true
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -283,20 +303,29 @@ jobs:
 
       # The published artifact, by digest, through the same smoke script that
       # gated the local build: it first runs `cosign verify` against the
-      # signature just made (identity: this repo's docker.yml on main or a server
-      # tag), then starts the image Docker Hub serves and exercises it.
+      # signature just made (identity: this repo's docker.yml on main or a
+      # release tag), then starts the image Docker Hub serves and exercises it.
       - name: Smoke test the signed image (cosign verify)
         env:
           DIGEST: ${{ steps.index.outputs.digest }}
-        run: packages/ankusa_server/scripts/smoke.sh "${IMAGE}@${DIGEST}"
+        run: packages/${{ matrix.package }}/scripts/smoke.sh "${IMAGE}@${DIGEST}"
 
   publish-meta:
-    name: Docker Hub description + GitHub release
+    name: Docker Hub description + GitHub release (${{ matrix.package }})
     needs: [resolve, merge]
     if: ${{ github.ref_type == 'tag' && needs.resolve.outputs.push == 'true' }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # A tag run has one package, so one job: `merge` needs the tag set that
+        # only this image's digests made.
+        package: ${{ fromJSON(needs.resolve.outputs.packages) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve the image name
+        run: source .mise/lib/pkg.sh && echo "IMAGE=$(pkg_docker_image "${{ matrix.package }}")" >> "$GITHUB_ENV"
 
       # The repo description on Docker Hub is the README operators land on when
       # they search for the image.
@@ -309,7 +338,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ env.IMAGE }}
-          readme-filepath: packages/ankusa_server/README.md
+          readme-filepath: packages/${{ matrix.package }}/README.md
 
       - name: Create GitHub release
         env:
@@ -317,5 +346,5 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
-          source .mise/lib/pkg.sh && pkg_notes ankusa_server "$VERSION" > "$RUNNER_TEMP/notes.md"
+          source .mise/lib/pkg.sh && pkg_notes "${{ matrix.package }}" "$VERSION" > "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"

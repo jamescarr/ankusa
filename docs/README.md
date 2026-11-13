@@ -27,7 +27,7 @@ If you want to run it first, start with [quickstart.md](quickstart.md).
 | --- | --- |
 | [testing.md](testing.md) | Which suites exist, what does each cover, and what local infrastructure do they need? |
 | [packaging.md](packaging.md) | Why are adapters separate packages, and how do I add one? |
-| [releasing.md](releasing.md) | How do I release a package, an SDK, or the server image? |
+| [releasing.md](releasing.md) | How do I release a package, an SDK, or an image? |
 | [critical-review.md](critical-review.md) | What did the 2026-10 end-to-end review find, by root cause, and what is fixed? |
 | [adr/](adr/README.md) | Why is the tenant key layout, or the dual-commit intake log, the way it is? |
 | [CONTRIBUTING.md](https://github.com/jamescarr/ankusa/blob/main/CONTRIBUTING.md) | What must a PR include? |

@@ -28,7 +28,8 @@ replicas: 3
 
 # The server's YAML config (docs/configuration.md), merged over what the chart
 # derives from the values below: node.data_dir, log (json, no banner), wal.type,
-# listener.drain_*, the admin and claim_check listeners. Whatever is set here wins.
+# listener.drain_*, the admin listener. Whatever is set here wins. The gateway
+# Deployment reads its own gateway.yml instead (see `claimCheck.config` below).
 # `${VAR}` references are resolved by the server from the container's
 # environment (extraEnv / extraEnvFrom), so secrets stay out of the ConfigMap.
 # Empty, the node starts with no sources and refuses every hook: define yours
@@ -63,13 +64,28 @@ admin:
   tokenSecret: {name: "", key: token}
   allowInsecure: false
 
-# The claim-check gateway (port 4001): its own Deployment, role claim_check,
-# no store. Reads the claim bucket in config.storage / config.claim_check.store.
+# The claim-check gateway (port 4001): its own Deployment of the gateway image
+# (packages/ankusa_gateway_server), no core role, no store. Reads the claim bucket
+# in config.storage / config.claim_check.store, from its own gateway.yml.
 claimCheck:
   enabled: false
   replicas: 2
+  # The gateway image's last release, kept by hand like `Chart.yaml`'s appVersion:
+  # 0.1.0 is its first, cut from `@version "0.0.0"` by
+  # `mise run release:prepare minor ankusa_gateway_server`. A digest wins over the
+  # tag. An image not on Docker Hub yet (an `edge` or `sha-` tag) goes here.
+  image:
+    repository: jamescarr/ankusa-gateway
+    tag: "0.1.0"
+    digest: ""
   tokenSecret: {name: "", key: token}
   allowInsecure: false
+  # Merged over the gateway.yml the chart derives (templates/_helpers.tpl,
+  # `ankusa.gatewayConfig`): node.data_dir, log, listener.drain_*, the `gateway`
+  # listener, and the `storage` and `claim_check` blocks of `config` above. There
+  # is no `config_version` key, so a `claim_check:` block carried over from an
+  # older values file is migrated like a version-1 document.
+  config: {}
   terminationGracePeriodSeconds: 30
   resources:
     requests: {cpu: 100m, memory: 256Mi}

@@ -2,8 +2,9 @@
 
 See [`architecture.md#deployment-topologies`](architecture.md#deployment-topologies)
 for the shapes this section explains how to actually run. Every topology
-below runs the same image, `jamescarr/ankusa:edge`; which parts of the pipeline
-a container runs is decided at startup.
+below runs the same image, `jamescarr/ankusa:edge`, except the claim-check
+gateway, which has its own (`jamescarr/ankusa-gateway:edge`); which parts of the
+pipeline a container runs is decided at startup.
 
 ## Roles and topologies
 
@@ -14,13 +15,13 @@ chosen per container with `ANKUSA_ROLES`:
 
 ```sh
 docker run -e ANKUSA_ROLES=edge,dispatch,storage ...  jamescarr/ankusa:edge       # a store-backed node
-docker run -e ANKUSA_ROLES=claim_check ...            jamescarr/ankusa:edge       # gateway only
-docker run ...                                        jamescarr/ankusa-gateway    # nothing but the gateway
+docker run -e ANKUSA_ROLES=claim_check ...            jamescarr/ankusa:edge       # the gateway, beside a role-less instance
+docker run ...                                        jamescarr/ankusa-gateway    # the gateway image: nothing else runs
 ```
 
 The first three share one local store and therefore one BEAM node (see the
-constraint below); `claim_check` is the only role that can run as its own
-container, and it has an image of its own. Under `wal.type: none`, `edge` alone
+constraint below); the gateway can also run as its own container, and has an
+image of its own that runs nothing but it. Under `wal.type: none`, `edge` alone
 is a complete node.
 
 ![edge, dispatch and storage run in one BEAM node around one RocksDB store — edge commits, dispatch delivers and retries, storage archives segments — while claim_check is the only role that can run on another node, reading the shared claim bucket.](diagrams/roles.png)
@@ -33,9 +34,13 @@ inside your own supervision tree.
 **`claim_check` is an opt-in role that starts the gateway**, absent from the
 default `roles` list (`[:edge, :dispatch, :storage]`) because it opens a port
 that serves stored payloads. The gateway is its own library and its own image
-(`jamescarr/ankusa-gateway`); the role only bundles it into this one. A node
-running it alone needs no store — core boots with `roles: []`, no queue — only
-blob-store credentials, and can be scaled independently
+(`jamescarr/ankusa-gateway`); the role only bundles it into this one. The image
+itself is the standalone form: it reads `/etc/ankusa/gateway.yml`
+(`ANKUSA_CONFIG`), runs no core role at all, and serves 4001 plus, with
+`metrics.enabled`, `/metrics` on 4004 — see
+[`ankusa_gateway_server/README.md`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway_server/README.md).
+A node running it alone needs no store — core boots with `roles: []`, no queue —
+only blob-store credentials, and can be scaled independently
 from ingest/dispatch/storage exactly like any other role. It authenticates its
 readers (`gateway.auth`: an ordered chain of token, jwt and mtls
 authenticators) and authorizes them with a policy (`gateway.authz`; the
@@ -182,7 +187,8 @@ store, no threshold set, another `wal` mode) has no key. The node answers `503`
 A node with none of these checks (a claim-check-only gateway: no store)
 is ready while it runs; the gateway's own `GET /ready` (on 4001, no
 credential) adds `"gateway": "ok"` to that answer. Both probes are on the
-ingest port and on the admin port. Point a Kubernetes `livenessProbe` at
+ingest port and on the admin port, and on the gateway image's 4001 (and its
+4004 with `metrics.enabled`). Point a Kubernetes `livenessProbe` at
 `/health` and the `readinessProbe`
 at `:4000/ready` (a probe from outside the pod hits the pod address, and `:4002`
 binds loopback unless `admin.ip` says otherwise), so a node with a full disk
@@ -217,17 +223,20 @@ curl localhost:4002/v1/dlq                                   # 401 (nginx)
 curl -u admin:change-me localhost:4002/v1/dlq                # {"total":0,"entries":[]} (nginx adds the node's token)
 ```
 
-Image tags:
+Image tags, one scheme for both images (`jamescarr/ankusa` from
+`packages/ankusa_server`, `jamescarr/ankusa-gateway` from
+`packages/ankusa_gateway_server`):
 
 | Tag | Means |
 | --- | --- |
-| `X.Y.Z` | an exact release (`ankusa_server-vX.Y.Z` in the repo) |
+| `X.Y.Z` | an exact release (`ankusa_server-vX.Y.Z` or `ankusa_gateway_server-vX.Y.Z` in the repo) |
 | `X.Y` | the newest release in that minor line |
 | `X` | the newest release in that major line (from 1.0 on) |
 | `latest` | the newest release |
 | `edge` | the tip of `main`; not a release, may be broken |
 
-`linux/amd64` and `linux/arm64`. Until the first release, use `edge`.
+Both are published for `linux/amd64` and `linux/arm64`. Until the first release,
+use `edge`.
 
 ## Scaling the ingest fleet
 
@@ -465,11 +474,17 @@ helm install ankusa deploy/helm/ankusa -f my-values.yaml
 ```
 
 The server's YAML goes under `config:` in your values (merged over what the chart
-derives: `wal.type`, `listener.drain_*`, JSON logs, the admin and claim-check
-listeners); secrets stay out of it as `${VAR}` references filled from `extraEnv` /
-`extraEnvFrom`. `claimCheck.enabled` adds the gateway as a Deployment of its own
-(`ANKUSA_ROLES=claim_check`, so core boots with `roles: []` in that pod and the
-gateway serves 4001). `deploy/helm/ankusa/ci/{disk,dual,none}-values.yaml`
+derives: `wal.type`, `listener.drain_*`, JSON logs and the admin listener);
+secrets stay out of it as `${VAR}` references filled from `extraEnv` /
+`extraEnvFrom`. `claimCheck.enabled` adds the gateway as a Deployment of its own,
+running the **gateway image** (`claimCheck.image`, `jamescarr/ankusa-gateway`,
+released on its own from `packages/ankusa_gateway_server`) rather than the server
+image: no core role, no store. The chart renders it a ConfigMap of its own
+(`<fullname>-claim-check`, key `gateway.yml`) holding `node.data_dir`, JSON logs,
+the drain, the `gateway` listener and the `storage` and `claim_check` blocks of
+`config`, with `claimCheck.config` merged over that; a `claim_check:` block your
+values still carry is migrated as a version-1 document.
+`deploy/helm/ankusa/ci/{disk,dual,none}-values.yaml`
 are one worked example per mode.
 
 ![One chart release renders a StatefulSet with a PVC per pod for wal.type disk or dual (dual also confirming each hook in a Kafka intake topic) or a Deployment with an emptyDir and an HPA for none; every mode gets the Service, PDB, spread and NetworkPolicy, plus an optional claim-check Deployment.](diagrams/helm-chart.png)
@@ -487,9 +502,10 @@ so a cluster policy that needs another uid changes the chart's input, not its te
 the startup probe allows 10 minutes, for a store's boot migrations), `readinessProbe`
 is `GET /ready` with `failureThreshold: 1`: a full disk, a reopening store, an intake
 log that is down, or a drain takes the pod out of the Service within one period
-([Liveness and readiness](#running-the-container)). A claim-check pod's three probes are `GET /health` on 4001
-(the gateway's unauthenticated `/ready`, with `"gateway": "ok"` in the body, is
-the endpoint a probe outside the chart would use).
+([Liveness and readiness](#running-the-container)). A claim-check pod's
+`readinessProbe` is `GET /ready` (the gateway answers it without a credential,
+`"gateway": "ok"` in the body); its startup and liveness probes are
+`GET /health`.
 
 **`terminationGracePeriodSeconds` is computed from the drain.** The chart writes
 `drain.delayMs` / `drain.timeoutMs` into `listener.drain_delay_ms` /
@@ -511,8 +527,9 @@ every client (providers), 4001-4004 (claim check, admin and `/metrics`, route
 management, the metrics listener) only to the namespaces in
 `networkPolicy.operatorNamespaces` (the release's own by default). The admin API and the
 gateway bind their pod address only when `admin.expose` / `claimCheck.enabled` ask, and
-the chart refuses to render one without a token Secret (`tokenSecret.name`, which becomes
-`ANKUSA_ADMIN_TOKEN` / `ANKUSA_CLAIM_CHECK_TOKEN`) or `allowInsecure: true`. Egress is
+the chart refuses to render one without a token Secret (`admin.tokenSecret.name` /
+`claimCheck.tokenSecret.name`, which become `ANKUSA_ADMIN_TOKEN` /
+`ANKUSA_CLAIM_CHECK_TOKEN`) or `allowInsecure: true`. Egress is
 open: sinks, the intake log and the object store are wherever your config says.
 
 **Sizing the PVC.** The volume holds everything the node has acked and not yet

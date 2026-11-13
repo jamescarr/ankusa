@@ -7,4 +7,4 @@ cd "$ROOT"
 
 # DURATION, RATE, CONCURRENCY, BODY_BYTES, SAMPLE_INTERVAL, DRAIN_TIMEOUT,
 # MAX_RSS_GROWTH and SOAK_OUT are documented at the top of the script.
-exec packages/ankusa_server/scripts/soak.sh "$DOCKER_IMAGE:dev"
+exec packages/ankusa_server/scripts/soak.sh "$(pkg_docker_image ankusa_server):dev"

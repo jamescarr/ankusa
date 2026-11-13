@@ -26,6 +26,13 @@ own ([`docs/releasing.md`](../../docs/releasing.md)).
   `ankusa_gateway_requests_total{api,status}` and
   `ankusa_gateway_request_duration_seconds{api}` (were
   `ankusa_claim_gateway_*`), and it answers `GET /ready`.
+- The YAML machinery is shared with the gateway image (`jamescarr/ankusa-gateway`,
+  package `ankusa_gateway_server`, which this image now depends on): the
+  document pipeline, the typed accessors, the common sections, secrets and
+  their providers, the JSON log formatter, tracing and the GCP token cache
+  moved there (`AnkusaServer.ConfigError`, `Secrets`, `SecretProvider.*`,
+  `LogFormatter`, `Tracing`, `GcpToken` are `AnkusaGatewayServer.*`). No
+  change to the file format or the image's behaviour.
 
 ### Added
 

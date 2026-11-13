@@ -11,7 +11,8 @@ defmodule AnkusaServer.ConfigTest do
 
   use ExUnit.Case, async: true
 
-  alias AnkusaServer.{Config, ConfigError}
+  alias AnkusaGatewayServer.{ConfigError, Document}
+  alias AnkusaServer.Config
 
   @fixture_env %{
     "S3_BUCKET" => "fixture-bucket",
@@ -1337,7 +1338,9 @@ defmodule AnkusaServer.ConfigTest do
     end
 
     test "migration: mode none is an empty chain, allow_insecure is kept, jwt and mtls carry their block" do
-      migrate = fn auth -> Config.migrate_gateway_keys(%{"claim_check" => %{"auth" => auth}}) end
+      migrate = fn auth ->
+        Document.migrate_gateway_keys(%{"claim_check" => %{"auth" => auth}})
+      end
 
       assert %{"gateway" => %{"auth" => %{"authenticators" => [], "allow_insecure" => true}}} =
                migrate.(%{"mode" => "none", "allow_insecure" => true})
@@ -1355,14 +1358,14 @@ defmodule AnkusaServer.ConfigTest do
                migrate.(%{"mode" => "mtls", "mtls" => %{"subject_map" => %{}}})
 
       # A file with no moved key is left alone.
-      assert Config.migrate_gateway_keys(%{"claim_check" => %{"retention_days" => 3}}) ==
+      assert Document.migrate_gateway_keys(%{"claim_check" => %{"retention_days" => 3}}) ==
                %{"claim_check" => %{"retention_days" => 3}}
     end
 
     test "migration: a target already set, or a templated mode, is refused" do
       error =
         assert_raise ConfigError, fn ->
-          Config.migrate_gateway_keys(%{
+          Document.migrate_gateway_keys(%{
             "claim_check" => %{"port" => 1},
             "gateway" => %{"port" => 2}
           })
@@ -1372,7 +1375,7 @@ defmodule AnkusaServer.ConfigTest do
 
       error =
         assert_raise ConfigError, fn ->
-          Config.migrate_gateway_keys(%{
+          Document.migrate_gateway_keys(%{
             "claim_check" => %{"integrity_check" => "off"},
             "gateway" => %{"claims" => %{"integrity_check" => "manifest"}}
           })
@@ -1383,7 +1386,7 @@ defmodule AnkusaServer.ConfigTest do
 
       error =
         assert_raise ConfigError, fn ->
-          Config.migrate_gateway_keys(%{"claim_check" => %{"auth" => %{"mode" => "${MODE}"}}})
+          Document.migrate_gateway_keys(%{"claim_check" => %{"auth" => %{"mode" => "${MODE}"}}})
         end
 
       assert error.message =~ "claim_check.auth.mode: a templated mode cannot be migrated"
@@ -3457,10 +3460,10 @@ defmodule AnkusaServer.ConfigTest do
 
   test "storage.gcs.auth selects the token provider" do
     assert {Ankusa.BlobStore.GCS, opts} = gcs_opts(%{auth: "metadata"})
-    assert opts[:token_provider] == {AnkusaServer.GcpToken, :metadata, []}
+    assert opts[:token_provider] == {AnkusaGatewayServer.GcpToken, :metadata, []}
 
     assert {Ankusa.BlobStore.GCS, opts} = gcs_opts(%{auth: "token", token: "ya29.static"})
-    assert opts[:token_provider] == {AnkusaServer.GcpToken, :static, ["ya29.static"]}
+    assert opts[:token_provider] == {AnkusaGatewayServer.GcpToken, :static, ["ya29.static"]}
 
     assert {Ankusa.BlobStore.GCS, opts} = gcs_opts(%{auth: "none"})
     refute Keyword.has_key?(opts, :token_provider)
@@ -3573,7 +3576,7 @@ defmodule AnkusaServer.ConfigTest do
     assert pubsub[:max_message_bytes] == 1000
     assert pubsub[:batch] == false
     refute Keyword.has_key?(pubsub, :batch_linger_ms)
-    assert pubsub[:token_provider] == {AnkusaServer.GcpToken, :metadata, []}
+    assert pubsub[:token_provider] == {AnkusaGatewayServer.GcpToken, :metadata, []}
   end
 
   test "ordered and ordering_key (ADR 0004) are translated on every queue and HTTP sink" do

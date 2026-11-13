@@ -25,6 +25,7 @@ on:
       - "examples/fleet-e2e/**"
       - "tools/loadgen/**"
       - "packages/ankusa_server/Dockerfile"
+      - "packages/ankusa_gateway_server/Dockerfile"
 
 jobs:
   fleet:
@@ -34,6 +35,7 @@ jobs:
     env:
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
       ANKUSA_IMAGE: ankusa-fleet-e2e:local
+      GATEWAY_IMAGE: ankusa-gateway-fleet-e2e:local
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
@@ -58,6 +60,16 @@ jobs:
           tags: ${{ env.ANKUSA_IMAGE }}
           cache-from: type=gha,scope=fleet-e2e
           cache-to: type=gha,mode=max,scope=fleet-e2e
+      # The gateway image the compose file's claim-check service runs.
+      - name: Build the gateway image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: packages/ankusa_gateway_server/Dockerfile
+          load: true
+          tags: ${{ env.GATEWAY_IMAGE }}
+          cache-from: type=gha,scope=fleet-e2e-gateway
+          cache-to: type=gha,mode=max,scope=fleet-e2e-gateway
       - run: mix local.hex --force && mix local.rebar --force
       # The default drill, plus DEL-6's: a tenant-filtered fleet replay (`docker-entrypoint
       # replay`) over a DLQ on each node, with a node killed while it moves.

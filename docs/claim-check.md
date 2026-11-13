@@ -98,14 +98,21 @@ The gateway is `Ankusa.Gateway`, from the `ankusa_gateway` library
 ([README](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway/README.md)),
 and it is read-only: no writes, no listing, no delete. It reads the same
 `storage` block as the nodes that write claims, and needs no store of its own.
-Two ways to run it:
+Three ways to run it:
 
 - **In `jamescarr/ankusa`**, with `node.roles: [claim_check]`: the node runs the
   gateway beside its instance, and core gets the other roles. A node with only
   that role is a gateway-only node: core runs with `roles: []`, which is a legal
   instance with no queue and no store.
 - **As `jamescarr/ankusa-gateway`**, the gateway's own image: nothing but the
-  gateway runs.
+  gateway runs. It reads `/etc/ankusa/gateway.yml` (`ANKUSA_CONFIG`), the full
+  image's format restricted to the sections a gateway reads (`config_version
+  node log listener metrics tracing secrets egress storage claim_check gateway`;
+  a full-image section such as `sources:` exits 78 naming it), and `node.roles`,
+  when present, must be `[claim_check]`. It serves 4001 and, with
+  `metrics.enabled`, `/metrics` on 4004. Its environment variables are the full
+  image's (`ANKUSA_CLAIM_CHECK_PORT`, `ANKUSA_CLAIM_CHECK_IP`,
+  `ANKUSA_CLAIM_CHECK_TOKEN`, `ANKUSA_STORAGE_TYPE`, …).
 - **Embedded** in your own Elixir application: add `ankusa_gateway` and start
   `{Ankusa.Gateway, Ankusa.Gateway.Config.new(instance: ..., ...)}` after
   `{Ankusa.Instance, config}` under a `:one_for_one` supervisor — the gateway
@@ -144,6 +151,16 @@ docker run -p 127.0.0.1:4001:4001 \
   jamescarr/ankusa:edge
 curl localhost:4001/health    # {"status":"ok"}
 curl localhost:4001/ready     # {"status":"ready","instance":"default",…,"gateway":"ok"}
+```
+
+The gateway image reads the same file minus the sections only the full image
+reads (`node.roles` may be left out), mounted at its own path:
+
+```sh
+docker run -p 127.0.0.1:4001:4001 \
+  -v "$PWD/gateway.yml:/etc/ankusa/gateway.yml:ro" \
+  -e S3_BUCKET -e S3_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+  jamescarr/ankusa-gateway:edge
 ```
 
 `GET /health` is liveness; `GET /ready` needs no credential and answers `200`

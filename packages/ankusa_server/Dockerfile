@@ -31,6 +31,7 @@ COPY packages/ankusa_kafka/mix.exs packages/ankusa_kafka/mix.lock ./packages/ank
 COPY packages/ankusa_nats/mix.exs packages/ankusa_nats/mix.lock ./packages/ankusa_nats/
 COPY packages/ankusa_redis/mix.exs packages/ankusa_redis/mix.lock ./packages/ankusa_redis/
 COPY packages/ankusa_gateway/mix.exs packages/ankusa_gateway/mix.lock ./packages/ankusa_gateway/
+COPY packages/ankusa_gateway_server/mix.exs packages/ankusa_gateway_server/mix.lock ./packages/ankusa_gateway_server/
 COPY packages/ankusa_server/mix.exs packages/ankusa_server/mix.lock ./packages/ankusa_server/
 
 WORKDIR /repo/packages/ankusa_server

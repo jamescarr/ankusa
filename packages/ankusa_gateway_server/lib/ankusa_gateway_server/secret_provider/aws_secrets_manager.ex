@@ -1,4 +1,4 @@
-defmodule AnkusaServer.SecretProvider.AwsSecretsManager do
+defmodule AnkusaGatewayServer.SecretProvider.AwsSecretsManager do
   @moduledoc """
   `${sm:<name>:<secret>}` against AWS Secrets Manager (`type: aws`).
 

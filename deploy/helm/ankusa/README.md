@@ -21,8 +21,19 @@ Every mode also gets: a Service, a PodDisruptionBudget (`maxUnavailable: 1`), a
 NetworkPolicy (ingest open, 4001-4004 to the operator namespaces), a ServiceAccount
 with no token, spread constraints over zones and nodes, and a
 `terminationGracePeriodSeconds` computed from the drain (`drain.*`, plus
-`backup.final_timeout_ms` when the node backs up). `claimCheck.enabled` adds the
-claim-check gateway as its own Deployment.
+`backup.final_timeout_ms` when the node backs up).
+
+`claimCheck.enabled` adds the claim-check gateway as its own Deployment. It runs
+the gateway image (`claimCheck.image`, `jamescarr/ankusa-gateway`, released on its
+own from `packages/ankusa_gateway_server`), not the server image: a process with no
+core role that reads the claim bucket named by `config.storage` /
+`config.claim_check.store`. The chart derives its `gateway.yml` (a ConfigMap of its
+own: `node.data_dir`, JSON logs, the drain, `gateway.port: 4001`, and the `storage`
+and `claim_check` blocks of `config`), with `claimCheck.config` merged over it; a
+`claim_check:` block a values file still carries is migrated as a version-1
+document. Like the admin listener, the gateway refuses to bind the pod address
+without `claimCheck.tokenSecret.name` unless `claimCheck.allowInsecure: true`.
+Readiness is `GET /ready`; startup and liveness stay `GET /health`.
 
 The pod runs as uid 100 / gid 101 (the image's `ankusa` user), with a read-only root
 file system (writable: the data volume and a 256 MiB `/tmp`), `allowPrivilegeEscalation:
