@@ -10,6 +10,11 @@ defmodule Ankusa.Principal do
     * `scopes` — operation scopes, e.g. `"dlq:read"`.
     * `tenants` — `:all` (the `tenant:*` scope) or the list of tenant ids the
       principal may act on (one `tenant:<id>` scope each).
+    * `claims` — the claims of the credential that authenticated it (a JWT's
+      payload, an introspection response), `%{}` when it had none. Core's
+      authenticators leave it empty; `ankusa_gateway` fills it.
+    * `groups` — group names from the identity provider or an enricher, `[]`
+      by default. Core's authenticators leave it empty.
 
   ## Scopes
 
@@ -38,12 +43,14 @@ defmodule Ankusa.Principal do
   """
 
   @enforce_keys [:id]
-  defstruct id: nil, scopes: [], tenants: []
+  defstruct id: nil, scopes: [], tenants: [], claims: %{}, groups: []
 
   @type t :: %__MODULE__{
           id: String.t(),
           scopes: [String.t()],
-          tenants: :all | [String.t()]
+          tenants: :all | [String.t()],
+          claims: %{optional(String.t()) => term()},
+          groups: [String.t()]
         }
 
   @scopes ~w(

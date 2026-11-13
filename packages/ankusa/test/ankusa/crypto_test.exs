@@ -420,4 +420,36 @@ defmodule Ankusa.CryptoTest do
       assert Redact.config(provided)["secrets"]["kek_provider"] == "Ankusa.CryptoTest.provider/1"
     end
   end
+
+  describe "closed_view/2" do
+    test "shows an extra key, hides an unknown string, and renders a callback as Mod.fun/arity" do
+      term = %{
+        port: 4001,
+        auth: %{
+          authenticators: [
+            %{type: :token, name: "ops", tokens: [%{id: "ci", sha256: "abc123"}]}
+          ]
+        },
+        issuer: "https://idp.test/",
+        hook: {__MODULE__, :provider, [:secret_arg]},
+        password: "hunter2"
+      }
+
+      shown = Redact.closed_view(term, ["name", "issuer"])
+
+      assert shown["port"] == 4001
+      assert shown["issuer"] == "https://idp.test/"
+      assert shown["hook"] == "Ankusa.CryptoTest.provider/1"
+      assert shown["password"] == "[REDACTED]"
+
+      assert [%{"type" => "token", "name" => "ops", "tokens" => [token]}] =
+               shown["auth"]["authenticators"]
+
+      assert token == %{"id" => "ci", "sha256" => "[REDACTED]"}
+
+      # The extra keys hold for that call only.
+      assert Redact.closed_view(term, [])["issuer"] == "[REDACTED]"
+      refute JSON.encode!(shown) =~ "hunter2"
+    end
+  end
 end

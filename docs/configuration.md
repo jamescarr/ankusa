@@ -977,6 +977,7 @@ config :ankusa,
 | `metrics.tls` | `nil` | A TLS block for the metrics listener. |
 | `metrics.detail` | `:tenant` | Which identity labels the per-hook series carry: `:tenant` (`tenant_id`), `:source` (`tenant_id` and `source_id`) or `:none`. See [Metric cardinality](#metric-cardinality). |
 | `metrics.max_series_per_metric` | `5000` | The most label sets one metric keeps; later tenants/sources are folded into an `"other"` series (one slot is reserved for it). A positive integer. |
+| `metrics.extra` | `[]` | Modules exporting `metrics/1` (`instance -> [Telemetry.Metrics.t()]`) whose definitions join this node's scrape, under the same cardinality policy. How a library outside core (`ankusa_gateway`) adds its series; `Ankusa.Metrics.scope/2` keeps a definition to this instance's events. Elixir config only. |
 | `claim_check.tls`, `routes.admin.tls` | `nil` | A TLS block for the claim-check gateway and the route-management API. |
 | `routes.admin.auth`, `claim_check.auth` | `%{mode: :none}` | The same block for the route-management API and the claim-check gateway. |
 | `routes.enabled` | `false` | Enforce route management. Off captures every `POST`, as before; on is **deny by default** — see [Route management](#route-management). |

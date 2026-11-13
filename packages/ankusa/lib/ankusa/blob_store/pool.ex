@@ -37,9 +37,18 @@ defmodule Ankusa.BlobStore.Pool do
 
   @doc "Child specs of the pools `config`'s stores need, one per distinct endpoint."
   @spec child_specs(Config.t()) :: [Supervisor.child_spec()]
-  def child_specs(%Config{instance: instance} = config) do
-    config
-    |> stores()
+  def child_specs(%Config{instance: instance} = config),
+    do: child_specs_for(instance, stores(config))
+
+  @doc """
+  Child specs of the pools `stores` need on `instance`, one per distinct
+  endpoint, skipping an endpoint whose pool is already running (the instance
+  started it for a store of its own config). How something outside the
+  instance (`ankusa_gateway`'s spaces) pools stores the instance does not know.
+  """
+  @spec child_specs_for(atom(), [{module(), keyword()}]) :: [Supervisor.child_spec()]
+  def child_specs_for(instance, stores) when is_atom(instance) and is_list(stores) do
+    stores
     |> Enum.flat_map(fn {mod, opts} ->
       req = Keyword.get(opts, :req_options, [])
 
@@ -49,6 +58,7 @@ defmodule Ankusa.BlobStore.Pool do
          else: []
     end)
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.reject(fn {endpoint, _all_opts} -> Process.whereis(name(instance, endpoint)) end)
     |> Enum.map(fn {endpoint, all_opts} -> child_spec(instance, endpoint, all_opts) end)
   end
 

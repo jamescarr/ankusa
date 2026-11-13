@@ -44,14 +44,37 @@ defmodule Ankusa.Admin.Auth.JWT do
   @impl true
   def authenticate(conn, %{instance: instance, section: section, config: %{jwt: jwt}}) do
     with {:ok, token} <- Auth.bearer(conn),
-         {:ok, kid} <- key_id(token),
-         {:ok, claims} <-
-           verify(token, Keys.candidates(instance, section, kid), instance, section, kid),
-         :ok <- check_claims(claims, jwt, System.os_time(:second)),
+         {:ok, claims} <- verify(token, jwt, instance, section),
          {:ok, principal} <- principal(claims, jwt) do
       {:ok, principal}
     else
       _ -> {:error, :unauthenticated}
+    end
+  end
+
+  @doc """
+  The claims of `token` when it passes every rule above: a signature by one of
+  the keys `server` holds for `realm` (`Ankusa.Admin.Auth.JWT.Keys`), and the
+  issuer, audience, expiry, not-before and subject checks against `jwt`.
+  `:error` otherwise. A `kid` the server has no key for asks it for a refresh
+  (rate limited) and refuses this token.
+  """
+  @spec verify(binary(), map(), atom(), term(), atom()) :: {:ok, map()} | :error
+  def verify(token, jwt, instance, realm, server \\ :auth_keys) do
+    with {:ok, kid} <- key_id(token),
+         {:ok, claims} <-
+           verify_signature(
+             token,
+             Keys.candidates(instance, realm, kid, server),
+             instance,
+             realm,
+             kid,
+             server
+           ),
+         :ok <- check_claims(claims, jwt, System.os_time(:second)) do
+      {:ok, claims}
+    else
+      _ -> :error
     end
   end
 
@@ -69,14 +92,14 @@ defmodule Ankusa.Admin.Auth.JWT do
     _, _ -> :error
   end
 
-  defp verify(_token, [], instance, section, kid) do
+  defp verify_signature(_token, [], instance, realm, kid, server) do
     # A kid we have no key for may be a rotation: ask for a refresh (rate
     # limited by the cache) and refuse this request.
-    if kid, do: Keys.refresh(instance, section)
+    if kid, do: Keys.refresh(instance, realm, server)
     :error
   end
 
-  defp verify(token, keys, _instance, _section, _kid) do
+  defp verify_signature(token, keys, _instance, _realm, _kid, _server) do
     Enum.find_value(keys, :error, fn jwk ->
       case JOSE.JWT.verify_strict(jwk, @algorithms, token) do
         {true, %JOSE.JWT{fields: claims}, _jws} -> {:ok, claims}
@@ -112,7 +135,13 @@ defmodule Ankusa.Admin.Auth.JWT do
     Enum.any?(List.wrap(wanted), &(&1 in presented))
   end
 
-  defp principal(claims, jwt) do
+  @doc """
+  The principal of verified `claims`: `sub` as its id, scopes from
+  `jwt.scope_claim`, tenants from `jwt.tenants_claim` and the `tenant:`
+  scopes. `claims` and `groups` stay at their defaults.
+  """
+  @spec principal(map(), map()) :: {:ok, Principal.t()}
+  def principal(claims, jwt) do
     scopes = words(claims[jwt.scope_claim])
     tenants = words(claims[jwt.tenants_claim])
     {:ok, Principal.new(claims["sub"], scopes, tenants)}
