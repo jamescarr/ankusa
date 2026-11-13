@@ -212,24 +212,37 @@ defmodule Ankusa.Gateway.Objects do
   defp get(conn, gateway, space, key, attempt) do
     parsed = Range.parse(conn)
 
-    with {:ok, start, cap} <- start_of(conn, gateway, space, key, parsed),
+    with {:ok, start, cap, held} <- start_of(conn, gateway, space, key, parsed),
          :ok <- reserve(gateway, space.read_first_bytes),
-         {:ok, meta, first} <- first_read(conn, gateway, space, key, parsed, start, cap) do
+         {:ok, meta, first} <-
+           first_read(conn, gateway, space, key, parsed, {start, cap, held}) do
       case Range.resolve(parsed, meta.size) do
         :unsatisfiable -> unsatisfiable(conn, meta.size)
         resolved -> respond(conn, {gateway, space, key}, {meta, first, start}, resolved, attempt)
       end
     else
-      {:error, :shed} -> overloaded(conn)
-      {:error, %Plug.Conn{} = conn} -> conn
+      {:error, :shed} ->
+        overloaded(conn)
+
+      # A suffix's size came from a `HEAD` the object no longer matches.
+      {:error, :version_mismatch} when attempt == 1 ->
+        Budget.release(gateway.instance)
+        get(conn, gateway, space, key, 2)
+
+      {:error, :version_mismatch} ->
+        Ankusa.Gateway.Http.store_error(conn, :version_mismatch)
+
+      {:error, %Plug.Conn{} = conn} ->
+        conn
     end
   end
 
-  # The first byte the first read asks for, and the last it may (`nil`: the
-  # object's end). A suffix range needs the size first.
-  defp start_of(_conn, _gateway, _space, _key, :all), do: {:ok, 0, nil}
-  defp start_of(_conn, _gateway, _space, _key, {:span, first, last}), do: {:ok, first, last}
-  defp start_of(_conn, _gateway, _space, _key, {:from, first}), do: {:ok, first, nil}
+  # The first byte the first read asks for, the last it may (`nil`: the
+  # object's end), and the condition it is held to. A suffix range needs the
+  # size first, so its first read is held to the version that size belongs to.
+  defp start_of(_conn, _gateway, _space, _key, :all), do: {:ok, 0, nil, []}
+  defp start_of(_conn, _gateway, _space, _key, {:span, first, last}), do: {:ok, first, last, []}
+  defp start_of(_conn, _gateway, _space, _key, {:from, first}), do: {:ok, first, nil, []}
 
   defp start_of(conn, gateway, space, key, {:suffix, _n} = parsed) do
     {module, _opts} = space.store
@@ -238,7 +251,7 @@ defmodule Ankusa.Gateway.Objects do
     case module.head_object(gateway.instance, Spaces.object_key(space, key), opts) do
       {:ok, meta} ->
         case Range.resolve(parsed, meta.size) do
-          {first, last} -> {:ok, first, last}
+          {first, last} -> {:ok, first, last, [if: {:version, meta.version}]}
           :unsatisfiable -> {:error, unsatisfiable(conn, meta.size)}
         end
 
@@ -247,7 +260,7 @@ defmodule Ankusa.Gateway.Objects do
     end
   end
 
-  defp first_read(conn, gateway, space, key, parsed, start, cap) do
+  defp first_read(conn, gateway, space, key, parsed, {start, cap, held}) do
     {module, _opts} = space.store
     last = start + space.read_first_bytes - 1
     last = if cap, do: min(cap, last), else: last
@@ -255,11 +268,14 @@ defmodule Ankusa.Gateway.Objects do
 
     opts =
       Config.store_opts(gateway, space) ++
-        [range: {start, last}, max_bytes: last - start + 1]
+        [range: {start, last}, max_bytes: last - start + 1] ++ held
 
     case module.get_object(gateway.instance, object_key, opts) do
       {:ok, meta, bin} ->
         {:ok, meta, bin}
+
+      {:error, :version_mismatch} ->
+        {:error, :version_mismatch}
 
       {:error, :range_not_satisfiable} ->
         {:error, empty_or_unsatisfiable(conn, gateway, space, key, parsed)}

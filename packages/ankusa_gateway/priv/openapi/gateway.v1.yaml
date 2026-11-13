@@ -828,8 +828,8 @@ components:
         a value over 1024 bytes or not printable ASCII); or
         `invalid_content_length` (a `PUT` whose `content-length` is not a
         non-negative integer, or does not match the body it sent). A malformed
-        percent-escape never reaches the handler: the router answers its own
-        bare `400` with no body.
+        percent-escape (a `%` not followed by two hex digits) in the key is
+        `invalid_key`.
       content:
         application/json:
           schema:

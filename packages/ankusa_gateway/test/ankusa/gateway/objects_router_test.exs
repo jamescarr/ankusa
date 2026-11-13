@@ -25,10 +25,26 @@ defmodule Ankusa.Gateway.ObjectsRouterTest do
   defmodule RacyStore do
     @moduledoc false
 
-    defdelegate head_object(instance, key, opts), to: LocalFS
     defdelegate put_object(instance, key, data, opts), to: LocalFS
     defdelegate delete_object(instance, key, opts), to: LocalFS
     defdelegate list_page(instance, prefix, opts), to: LocalFS
+
+    # Armed with `{:head, data}`, rewrites the object right after a HEAD: a
+    # suffix range's size is then stale by its first read.
+    def head_object(instance, key, opts) do
+      result = LocalFS.head_object(instance, key, opts)
+
+      case opts[:race] && :persistent_term.get({__MODULE__, opts[:race]}, nil) do
+        {:head, data} ->
+          :persistent_term.put({__MODULE__, opts[:race]}, :done)
+          {:ok, _} = LocalFS.put_object(instance, key, data, opts)
+
+        _ ->
+          :ok
+      end
+
+      result
+    end
 
     def get_object(instance, key, opts) do
       if test = opts[:test], do: send(test, {:get_object, opts[:range], opts[:if]})
@@ -294,6 +310,18 @@ defmodule Ankusa.Gateway.ObjectsRouterTest do
       assert_received {:get_object, {1024, 2999}, {:version, _}}
       assert_received {:get_object, {0, 1023}, nil}
       assert_received {:get_object, {1024, 2499}, {:version, _}}
+    end
+
+    test "a suffix range whose object changes after its HEAD restarts on the new size", %{
+      inst: inst,
+      race: race
+    } do
+      put(inst, "/v1/objects/docs/s.txt", "0123456789")
+      :persistent_term.put({RacyStore, race}, {:head, "abcdefghijklmnop"})
+
+      conn = call(inst, :get, "/v1/objects/docs/s.txt", headers: [{"range", "bytes=-3"}])
+      assert {conn.status, conn.resp_body} == {206, "nop"}
+      assert header(conn, "content-range") == "bytes 13-15/16"
     end
 
     @tag max_object_bytes: 2048
