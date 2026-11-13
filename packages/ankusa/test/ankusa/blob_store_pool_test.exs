@@ -106,6 +106,26 @@ defmodule Ankusa.BlobStore.PoolTest do
     end
   end
 
+  describe "child_specs_for/2" do
+    test "one spec per new endpoint, none for an endpoint already pooled" do
+      config = config(s3("http://pool-for-a.test"), [])
+      Enum.each(Pool.child_specs(config), &start_supervised!/1)
+
+      stores = [
+        s3("http://pool-for-a.test", pool_size: 3),
+        {GCS, bucket: "b", endpoint: "http://pool-for-b.test"},
+        {GCS, bucket: "c", endpoint: "http://pool-for-b.test"},
+        {LocalFS, root: "/tmp/x"}
+      ]
+
+      assert [spec] = Pool.child_specs_for(config.instance, stores)
+      assert spec.id == {Pool, config.instance, "http://pool-for-b.test"}
+
+      start_supervised!(spec)
+      assert Pool.child_specs_for(config.instance, stores) == []
+    end
+  end
+
   describe "req_options/3" do
     test "adds the pool and its checkout timeout once it is running" do
       config = config(s3("http://pool-req.test", pool_timeout: 123), [])

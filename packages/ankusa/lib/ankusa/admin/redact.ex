@@ -185,6 +185,17 @@ defmodule Ankusa.Admin.Redact do
     mapped
   end
 
+  @doc """
+  Closed-mode redaction (rules 1-9 above) of any term, with `extra` added to
+  the shown-key allowlist for this call. For a library's own config that has
+  no place in `%Ankusa.Config{}` (`ankusa_gateway`'s): every string it is not
+  told to show is hidden, and a `{module, fun, args}` renders as
+  `"Module.fun/arity"`.
+  """
+  @spec closed_view(term(), [String.t()]) :: term()
+  def closed_view(term, extra) when is_list(extra),
+    do: closed("", term, Enum.uniq(@shown_keys ++ extra))
+
   defp hide_map(map, acc, fun) do
     {pairs, acc} =
       Enum.map_reduce(map, acc, fn {key, value}, acc ->
@@ -281,55 +292,61 @@ defmodule Ankusa.Admin.Redact do
 
   # -- closed mode ----------------------------------------------------------
 
-  defp closed_map(map), do: Map.new(map, fn {k, v} -> {key_string(k), closed_entry(k, v)} end)
+  # `shown` is the shown-key allowlist of rule 8: `@shown_keys`, plus the
+  # caller's own keys for `closed_view/2`.
+  defp closed(key, value), do: closed(key, value, @shown_keys)
 
-  defp closed_entry(key, value), do: closed(key_string(key), value)
+  defp closed_map(map, shown),
+    do: Map.new(map, fn {k, v} -> {key_string(k), closed(key_string(k), v, shown)} end)
 
-  defp closed("headers", value), do: redact_headers(value)
+  defp closed("headers", value, _shown), do: redact_headers(value)
 
-  defp closed("filter", value) when is_map(value), do: open(value)
+  defp closed("filter", value, _shown) when is_map(value), do: open(value)
 
-  defp closed(key, value) do
-    case structural(value) do
+  defp closed(key, value, shown) do
+    case structural(value, shown) do
       {:ok, converted} -> converted
-      :error -> leaf(key, value)
+      :error -> leaf(key, value, shown)
     end
   end
 
   # Rules 2-6: shapes whose contents are walked in closed mode.
-  defp structural({module, _opts} = pair) when is_atom(module) do
-    if module_atom?(module), do: {:ok, closed_pair(pair)}, else: :error
+  defp structural({module, _opts} = pair, shown) when is_atom(module) do
+    if module_atom?(module), do: {:ok, closed_pair(pair, shown)}, else: :error
   end
 
-  defp structural({module, fun, args}) when is_atom(module) and is_atom(fun) and is_list(args) do
+  defp structural({module, fun, args}, _shown)
+       when is_atom(module) and is_atom(fun) and is_list(args) do
     {:ok, Exception.format_mfa(module, fun, length(args))}
   end
 
-  defp structural(value)
+  defp structural(value, _shown)
        when is_number(value) or is_boolean(value) or is_nil(value) or is_atom(value) or
               is_function(value),
        do: {:ok, open(value)}
 
-  defp structural(%_{} = struct), do: {:ok, struct |> Map.from_struct() |> closed_map()}
-  defp structural(map) when is_map(map), do: {:ok, closed_map(map)}
+  defp structural(%_{} = struct, shown),
+    do: {:ok, struct |> Map.from_struct() |> closed_map(shown)}
 
-  defp structural(list) when is_list(list) do
+  defp structural(map, shown) when is_map(map), do: {:ok, closed_map(map, shown)}
+
+  defp structural(list, shown) when is_list(list) do
     cond do
       module_pairs?(list) ->
-        {:ok, Enum.map(list, &closed_pair/1)}
+        {:ok, Enum.map(list, &closed_pair(&1, shown))}
 
       list != [] and Keyword.keyword?(list) ->
-        {:ok, list |> Map.new() |> closed_map()}
+        {:ok, list |> Map.new() |> closed_map(shown)}
 
       Enum.all?(list, &structured?/1) ->
-        {:ok, Enum.map(list, &closed("", &1))}
+        {:ok, Enum.map(list, &closed("", &1, shown))}
 
       true ->
         :error
     end
   end
 
-  defp structural(_other), do: :error
+  defp structural(_other, _shown), do: :error
 
   defp structured?(%_{}), do: true
   defp structured?(map) when is_map(map), do: true
@@ -340,18 +357,22 @@ defmodule Ankusa.Admin.Redact do
   defp structured?(_other), do: false
 
   # Rules 7-9.
-  defp leaf(key, value) when key in @url_keys and is_binary(value), do: redact_url(value)
-  defp leaf(key, value) when key in @shown_keys, do: open(value)
-  defp leaf(_key, _value), do: @redacted
+  defp leaf(key, value, _shown) when key in @url_keys and is_binary(value), do: redact_url(value)
 
-  defp closed_pair({module, opts}) do
-    %{"module" => inspect(module), "opts" => closed_opts(opts)}
+  defp leaf(key, value, shown) do
+    if key in shown, do: open(value), else: @redacted
   end
 
-  defp closed_opts([]), do: %{}
-  defp closed_opts(opts) when is_list(opts), do: closed("opts", opts)
-  defp closed_opts(opts) when is_map(opts), do: closed_map(opts)
-  defp closed_opts(opts), do: closed("opts", opts)
+  defp closed_pair(pair), do: closed_pair(pair, @shown_keys)
+
+  defp closed_pair({module, opts}, shown) do
+    %{"module" => inspect(module), "opts" => closed_opts(opts, shown)}
+  end
+
+  defp closed_opts([], _shown), do: %{}
+  defp closed_opts(opts, shown) when is_list(opts), do: closed("opts", opts, shown)
+  defp closed_opts(opts, shown) when is_map(opts), do: closed_map(opts, shown)
+  defp closed_opts(opts, shown), do: closed("opts", opts, shown)
 
   # Header names are kept, so an operator can see a sink sends `authorization`
   # without seeing the credential. Anything that isn't name/value pairs is

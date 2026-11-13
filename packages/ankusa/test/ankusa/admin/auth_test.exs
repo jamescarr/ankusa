@@ -449,6 +449,64 @@ defmodule Ankusa.Admin.AuthTest do
         end
       end
     end
+
+    test "verify/5 returns the claims of a valid token and :error for a bad one" do
+      {jwk, public} = keypair()
+      {other, _other_public} = keypair()
+      inst = jwt_instance([public])
+      jwt = Ankusa.config(inst).admin.auth.jwt
+
+      good = claims()
+      assert {:ok, ^good} = Ankusa.Admin.Auth.JWT.verify(sign(jwk, good), jwt, inst, :admin)
+
+      for token <- [
+            sign(other, claims()),
+            sign(jwk, claims(%{"iss" => "https://other.test/"})),
+            sign(jwk, claims(%{"exp" => System.os_time(:second) - 10}))
+          ] do
+        assert :error = Ankusa.Admin.Auth.JWT.verify(token, jwt, inst, :admin)
+      end
+    end
+
+    test "a second keys server serves its own realms beside the default one" do
+      {jwk, public} = keypair()
+      {_other, admin_public} = keypair("k-admin")
+      inst = jwt_instance([admin_public])
+
+      realm_jwt = %{
+        issuer: "https://second.test/",
+        audience: "gw",
+        keys: [public],
+        leeway_s: 0,
+        label: "gateway.auth.authenticators[0]"
+      }
+
+      start_supervised!({Keys, instance: inst, server: :other_keys, realms: %{r: realm_jwt}})
+
+      assert [%JOSE.JWK{}] = Keys.candidates(inst, :r, "k1", :other_keys)
+      assert Keys.candidates(inst, :admin, "k1", :other_keys) == []
+      assert Keys.candidates(inst, :r, "k1") == []
+      assert [%JOSE.JWK{}] = Keys.candidates(inst, :admin, "k-admin")
+
+      token = sign(jwk, claims(%{"iss" => "https://second.test/", "aud" => "gw"}))
+
+      assert {:ok, %{"sub" => "alice@example.com"}} =
+               Ankusa.Admin.Auth.JWT.verify(token, realm_jwt, inst, :r, :other_keys)
+
+      assert :error = Ankusa.Admin.Auth.JWT.verify(token, realm_jwt, inst, :r)
+    end
+
+    test "an explicit realm's bad static key is named by its label" do
+      config = start_instance_config(%{mode: :none})
+      realm = %{keys: ["not a key"], label: "gateway.auth.authenticators[3]"}
+
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _}} =
+               Keys.start_link(instance: config.instance, server: :bad_keys, realms: %{x: realm})
+
+      assert message =~ "gateway.auth.authenticators[3].keys[0]"
+    end
   end
 
   # ── the JWKS URL ───────────────────────────────────────────────────────────
