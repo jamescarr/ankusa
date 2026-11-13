@@ -68,37 +68,14 @@ defmodule Ankusa.Gateway.Authz.Table.Source.Http do
   end
 
   defp url!(url, key) when is_binary(url) do
-    uri = URI.parse(url)
+    if String.contains?(url, "{{"),
+      do: raise(ArgumentError, "#{key} must be a literal URL (its origin cannot be templated)")
 
-    cond do
-      String.contains?(url, "{{") ->
-        raise ArgumentError, "#{key} must be a literal URL (its origin cannot be templated)"
-
-      uri.scheme not in ["https", "http"] or uri.host in [nil, ""] ->
-        raise ArgumentError,
-              "#{key} must be an https:// (or loopback http://) URL, got #{inspect(url)}"
-
-      uri.scheme == "http" and not loopback?(uri.host) ->
-        raise ArgumentError,
-              "#{key} is http:// to #{uri.host}, which is not loopback: use https, or run the " <>
-                "permission endpoint on this host"
-
-      true ->
-        url
-    end
+    Ankusa.Gateway.Url.https!(url, key)
   end
 
   defp url!(other, key),
     do: raise(ArgumentError, "#{key} must be a URL string, got #{inspect(other)}")
-
-  defp loopback?(host) when host in ["localhost", "::1", "[::1]"], do: true
-
-  defp loopback?(host) do
-    case :inet.parse_address(String.to_charlist(host)) do
-      {:ok, {127, _, _, _}} -> true
-      _other -> false
-    end
-  end
 
   defp headers!(headers, key) when is_map(headers) do
     if map_size(headers) > @max_headers do

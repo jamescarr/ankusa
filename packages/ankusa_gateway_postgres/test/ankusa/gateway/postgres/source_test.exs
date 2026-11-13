@@ -133,7 +133,8 @@ defmodule Ankusa.Gateway.Postgres.SourceTest do
     SELECT principal, action, space, prefix, effect
     FROM gateway_permissions
     WHERE principal = ANY($1) AND action IN ($2, '*') AND space IN ($3, '*')
-      AND (prefix = '' OR $4 = prefix OR $4 LIKE prefix || '%')
+      AND (prefix = '' OR $4 = prefix
+           OR (right(prefix, 1) = '/' AND starts_with($4, prefix)))
     """
   end
 
@@ -384,6 +385,40 @@ defmodule Ankusa.Gateway.Postgres.SourceTest do
 
       assert {:ok, :allow, _} = decide(instance, state, alice())
       assert {:ok, :abstain, _} = decide(instance, state, bob())
+    end
+
+    test "a prefix holding _ or % names those characters, not any", %{conn: conn} do
+      for statement <- [
+            "INSERT INTO folders (path) VALUES ('team_a/')",
+            "INSERT INTO roles (id, action, prefix) VALUES ('team-a', 'read', 'team_a/')",
+            "INSERT INTO role_bindings (principal, role_id, space) VALUES ('user:bob', 'team-a', 'docs')"
+          ],
+          do: Postgrex.query!(conn, statement, [])
+
+      state = table_state(:lookup, lookup_query: lookup_query())
+      instance = unique_instance()
+      start_pool(instance, state)
+      ctx = %{instance: instance, name: "team", deadline: 0}
+
+      assert {:ok, [_row]} =
+               Source.lookup(
+                 state.source.state,
+                 ctx,
+                 ["user:bob"],
+                 "read",
+                 "docs",
+                 "team_a/q3.pdf"
+               )
+
+      assert {:ok, []} =
+               Source.lookup(
+                 state.source.state,
+                 ctx,
+                 ["user:bob"],
+                 "read",
+                 "docs",
+                 "teamXa/q3.pdf"
+               )
     end
 
     test "an identity is a bound parameter, never SQL", %{conn: conn} do

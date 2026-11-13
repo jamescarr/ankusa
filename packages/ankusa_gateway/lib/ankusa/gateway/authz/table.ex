@@ -341,11 +341,32 @@ defmodule Ankusa.Gateway.Authz.Table do
     action = to_string(request.action)
 
     case state.source.module.lookup(state.source.state, ctx, identities, action, space, key) do
-      {:ok, rows} when is_list(rows) -> rows_verdict(rows, state)
-      {:ok, other} -> {:error, {:unavailable, {:bad_response, other}}}
-      {:error, reason} -> {:error, {:unavailable, reason}}
+      {:ok, rows} when is_list(rows) ->
+        # The source's query is the operator's: a row it returns counts only
+        # when it matches as a snapshot row would (a `LIKE` whose pattern
+        # holds `_` or `%`, or a prefix that is not a directory, returns
+        # rows that do not).
+        matching =
+          Enum.filter(rows, &row_matches?(&1, state.columns, {identities, action, space, key}))
+
+        rows_verdict(matching, state)
+
+      {:ok, other} ->
+        {:error, {:unavailable, {:bad_response, other}}}
+
+      {:error, reason} ->
+        {:error, {:unavailable, reason}}
     end
   end
+
+  defp row_matches?(row, columns, {identities, action, space, key}) when is_map(row) do
+    row_field(row, columns.principal) in identities and
+      row_field(row, columns.action) in [action, "*"] and
+      row_field(row, columns.space) in [space, "*"] and
+      row_field(row, columns.prefix) in prefixes(key)
+  end
+
+  defp row_matches?(_row, _columns, _request), do: false
 
   defp rows_verdict(rows, state) do
     effects = rows |> Enum.map(&effect(row_field(&1, state.columns.effect))) |> Enum.uniq()

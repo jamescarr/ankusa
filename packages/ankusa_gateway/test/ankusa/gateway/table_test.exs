@@ -249,6 +249,35 @@ defmodule Ankusa.Gateway.Authz.TableTest do
     end
   end
 
+  describe "lookup mode" do
+    test "a row the source returns counts only when it matches as a snapshot row would" do
+      alice = Principal.new("alice", [])
+
+      ctx = %{
+        instance: :default,
+        name: "team",
+        deadline: System.monotonic_time(:millisecond) + 2_000
+      }
+
+      # What a sloppy query returns for teams/eng/report.pdf: a partial name, a
+      # LIKE wildcard, another action, another space, and a deny under a
+      # sibling directory.
+      near_misses = [
+        row("user:alice", "read", "docs", "teams/en"),
+        row("user:alice", "read", "docs", "team_/eng/"),
+        row("user:alice", "write", "docs", "teams/eng/"),
+        row("user:alice", "read", "other", "teams/eng/"),
+        row("user:alice", "read", "docs", "teams/eng/x/", "deny")
+      ]
+
+      table = state(agent(near_misses), :lookup)
+      assert Table.decide(request(alice), table, ctx) == {:ok, :abstain, %{}}
+
+      table = state(agent(near_misses ++ [row("user:alice", "*", "*", "teams/")]), :lookup)
+      assert Table.decide(request(alice), table, ctx) == {:ok, :allow, %{}}
+    end
+  end
+
   describe "snapshots" do
     test "an unchanged version skips the load" do
       attach([:ankusa, :gateway, :table_refresh])

@@ -60,8 +60,16 @@ SQL text):
               SELECT principal, action, space, prefix, effect
               FROM gateway_permissions
               WHERE principal = ANY($1) AND action IN ($2, '*')
-                AND space IN ($3, '*') AND $4 LIKE prefix || '%'
+                AND space IN ($3, '*')
+                AND (prefix = '' OR $4 = prefix
+                     OR (right(prefix, 1) = '/' AND starts_with($4, prefix)))
 ```
+
+Match prefixes with `starts_with`, not `LIKE prefix || '%'`: a `_` or `%` in
+a stored prefix is a wildcard to `LIKE`. The gateway also re-checks every row
+a lookup returns (its principal, action, space and prefix must match the
+request as a snapshot row would) and ignores the others, so a query that
+returns too much never grants more.
 
 Every statement runs inside a read-only transaction, and every connection is
 TLS by default (off only for a loopback host). `pool_size`, `timeout_ms` and

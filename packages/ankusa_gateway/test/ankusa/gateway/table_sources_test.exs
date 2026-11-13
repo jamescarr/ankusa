@@ -216,7 +216,7 @@ defmodule Ankusa.Gateway.Authz.TableSourcesTest do
         Http.init!(%{url: "https://{{ claims.host }}/rows"}, @key)
       end
 
-      assert_raise ArgumentError, ~r/is not loopback/, fn ->
+      assert_raise ArgumentError, ~r/must be an https URL \(or http to a loopback host\)/, fn ->
         Http.init!(%{url: "http://permissions.test/rows"}, @key)
       end
 

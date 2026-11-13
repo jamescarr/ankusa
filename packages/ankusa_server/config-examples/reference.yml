@@ -975,7 +975,8 @@ gateway:
   #         lookup_query: |
   #           SELECT principal, action, space, prefix, effect FROM gateway_permissions
   #           WHERE principal = ANY($1) AND action IN ($2, '*') AND space IN ($3, '*')
-  #             AND $4 LIKE prefix || '%'
+  #             AND (prefix = '' OR $4 = prefix
+  #                  OR (right(prefix, 1) = '/' AND starts_with($4, prefix)))
   #         pool_size: 4
   #         timeout_ms: 15000
   #   policies:
