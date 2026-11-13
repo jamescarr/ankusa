@@ -25,6 +25,7 @@ WORKDIR /repo
 COPY packages/ankusa/mix.exs packages/ankusa/mix.lock ./packages/ankusa/
 COPY packages/async_api_spex/mix.exs ./packages/async_api_spex/
 COPY packages/ankusa_gateway/mix.exs packages/ankusa_gateway/mix.lock ./packages/ankusa_gateway/
+COPY packages/ankusa_gateway_postgres/mix.exs packages/ankusa_gateway_postgres/mix.lock ./packages/ankusa_gateway_postgres/
 COPY packages/ankusa_gateway_server/mix.exs packages/ankusa_gateway_server/mix.lock ./packages/ankusa_gateway_server/
 
 WORKDIR /repo/packages/ankusa_gateway_server

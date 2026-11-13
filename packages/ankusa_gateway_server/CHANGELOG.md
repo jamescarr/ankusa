@@ -8,6 +8,12 @@ All notable changes to the Ankusa gateway image are documented here. It is the
 
 ### Added
 
+- **`type: table` authorizers in `gateway.authz.authorizers`**, with a
+  `source:` of `type: object` (NDJSON in a blob store), `type: http` (paged
+  JSON) or `type: postgres` (the operator's own query; package
+  `ankusa_gateway_postgres`, now a dependency of this image). The image
+  carries the Postgres source, so a `gateway.yml` that names it loads.
+
 - **The gateway image (ADR 0005).** `jamescarr/ankusa-gateway`: a core
   instance with no role and `Ankusa.Gateway` beside it, configured by
   `/etc/ankusa/gateway.yml` (`config_version: 2`, root keys `config_version

@@ -1,0 +1,24 @@
+name: ankusa_gateway_postgres
+
+# Local Postgres for developing/testing Ankusa.Gateway.Postgres.Source.
+#
+#   docker compose up -d --wait
+#   mix test
+#   docker compose down -v
+#
+# Its own compose file and its own port (5499) so a developer's Postgres on
+# 5432 is never touched, and so `mise run check:package ankusa_gateway_postgres`
+# brings up exactly what this package's suite needs.
+
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065
+    environment:
+      POSTGRES_PASSWORD: ankusa
+    ports:
+      - "127.0.0.1:5499:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

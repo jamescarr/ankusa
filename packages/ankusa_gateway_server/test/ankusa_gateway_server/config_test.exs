@@ -284,6 +284,92 @@ defmodule AnkusaGatewayServer.ConfigTest do
     assert cacertfile == Path.join(@tls_dir, "ca.pem")
   end
 
+  test "a table authorizer: a snapshot over an object store and a lookup over Postgres" do
+    loaded =
+      load!("""
+      node:
+        roles: [claim_check]
+      storage:
+        type: local
+      gateway:
+        authz:
+          authorizers:
+            team:
+              type: table
+              mode: snapshot
+              source:
+                type: object
+                store: {type: local, root: /tmp/perms}
+                key: gateway/permissions.ndjson
+              columns: {principal: who, action: verb, space: bucket, prefix: path, effect: verdict}
+              identities: ["user:{{ principal.id }}", "group:{{ principal.groups }}"]
+              refresh_ms: 5000
+              max_rows: 1000
+            live:
+              type: table
+              mode: lookup
+              source:
+                type: postgres
+                hostname: db.internal
+                database: permissions
+                lookup_query: SELECT * FROM gateway_permissions
+                pool_size: 8
+          policies:
+            documents: {mode: first, steps: [team]}
+      """)
+
+    assert %{
+             module: Ankusa.Gateway.Authz.Table,
+             state: %{
+               mode: :snapshot,
+               columns: %{
+                 principal: "who",
+                 action: "verb",
+                 space: "bucket",
+                 prefix: "path",
+                 effect: "verdict"
+               },
+               refresh_ms: 5000,
+               max_rows: 1000,
+               source: %{
+                 module: Ankusa.Gateway.Authz.Table.Source.Object,
+                 state: %{
+                   store: {Ankusa.BlobStore.LocalFS, [root: "/tmp/perms"]},
+                   key: "gateway/permissions.ndjson"
+                 }
+               }
+             }
+           } = loaded.gateway.authz.authorizers["team"]
+
+    assert %{
+             state: %{
+               mode: :lookup,
+               source: %{
+                 module: Ankusa.Gateway.Postgres.Source,
+                 state: %{lookup_query: "SELECT * FROM gateway_permissions", pool_size: 8}
+               }
+             }
+           } = loaded.gateway.authz.authorizers["live"]
+  end
+
+  test "a table authorizer's source is required and its type is a closed set" do
+    assert error!("""
+           gateway:
+             authz:
+               authorizers:
+                 team: {type: table}
+           """) == "gateway.authz.authorizers.team.source is required"
+
+    assert error!("""
+           gateway:
+             authz:
+               authorizers:
+                 team: {type: table, source: {type: redis}}
+           """) ==
+             ~s(gateway.authz.authorizers.team.source.type: unknown type "redis" ) <>
+               "(known: http, object, postgres)"
+  end
+
   test "metrics land, with a TLS block of their own and the gateway's series in the scrape" do
     loaded =
       load!("""
@@ -920,7 +1006,7 @@ defmodule AnkusaGatewayServer.ConfigTest do
     test "every error names its key" do
       for {yaml, message} <- [
             {"gateway: {authz: {authorizers: {x: {type: opa}}}}",
-             ~s[gateway.authz.authorizers.x.type: unknown type "opa" (known: http, openfga, rules)]},
+             ~s[gateway.authz.authorizers.x.type: unknown type "opa" (known: http, openfga, rules, table)]},
             {"gateway: {authz: {authorizers: {x: {type: rules, rules: [{effect: allow, verbs: [read]}]}}}}",
              "gateway.authz.authorizers.x.rules[0]"},
             {"gateway: {authz: {authorizers: {x: {type: rules, rules: [{effect: maybe, actions: [read]}]}}}}",

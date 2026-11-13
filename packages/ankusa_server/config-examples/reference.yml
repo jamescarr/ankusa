@@ -923,6 +923,61 @@ gateway:
   #       # resources: [{space: docs, match: "teams/{team}/**", object: "folder:{{ vars.team }}"}]
   #       # relations: {read: viewer, write: editor, delete: editor, list: viewer, share: owner}
   #       # contextual_tuples: [{user: "group:{{ principal.groups }}", relation: member, object: "folder:eng"}]
+  #     # Permissions that live in tables somebody else maintains, reduced to
+  #     # rows of principal, action, space, prefix and effect. `snapshot` loads
+  #     # the source into an ETS table at boot and every refresh_ms (a decision
+  #     # is a bounded number of reads); `lookup` asks the source once per cache
+  #     # miss. Rows match the caller's identities (the default: user:<id>, each
+  #     # group, each tenant), the action or "*", the space or "*", and the key
+  #     # or one of its ancestor directories; any deny wins, any allow allows,
+  #     # no match abstains. `stale_after_ms` past its last load a snapshot
+  #     # fails closed (503 authz_unavailable).
+  #     teamie:
+  #       type: table
+  #       mode: snapshot               # snapshot | lookup
+  #       source:
+  #         type: object               # object | http | postgres (the last from
+  #                                    # ankusa_gateway_postgres)
+  #         store: {type: s3, s3: {bucket: "${PERMS_BUCKET}", region: "${S3_REGION}"}}
+  #         key: gateway/permissions.ndjson   # or `prefix:` (≤ 1000 objects)
+  #       columns: {principal: principal, action: action, space: space, prefix: prefix, effect: effect}
+  #       identities:                  # templates; render_many expands the lists
+  #         - "user:{{ principal.id }}"
+  #         - "group:{{ principal.groups }}"
+  #         - "tenant:{{ principal.tenants }}"
+  #       refresh_ms: 30000
+  #       stale_after_ms: 300000
+  #       # max_identities: 256        # more is 503 authz_unavailable (fail closed)
+  #       # max_rows: 1000000          # a larger load is refused, the previous kept
+  #       # max_bytes: 268435456
+  #       # ready_timeout_ms: 60000    # /ready 503 only until the first load
+  #       # Remote options (timeout_ms, max_inflight, queue_max, batch_max, ...) apply to mode: lookup.
+  #     # The same rows over HTTP, paged, fetched once per cache miss:
+  #     webperms:
+  #       type: table
+  #       mode: lookup
+  #       source:
+  #         type: http                 # GET url -> {"rows": [...], "next": <cursor or null>}
+  #         url: https://permissions.internal.example/rows
+  #         headers: {authorization: "Bearer ${PERMS_TOKEN}"}
+  #         rows_path: rows
+  #         next_path: next
+  #         cursor_param: cursor
+  #         max_pages: 10000
+  #     # Or your own tables, joined by a query you write (package
+  #     # ankusa_gateway_postgres), read-only, with request data as $1..$4:
+  #     dbperms:
+  #       type: table
+  #       mode: lookup
+  #       source:
+  #         type: postgres
+  #         url: "postgres://permissions:${DB_PASSWORD}@db.internal:5432/permissions"
+  #         lookup_query: |
+  #           SELECT principal, action, space, prefix, effect FROM gateway_permissions
+  #           WHERE principal = ANY($1) AND action IN ($2, '*') AND space IN ($3, '*')
+  #             AND $4 LIKE prefix || '%'
+  #         pool_size: 4
+  #         timeout_ms: 15000
   #   policies:
   #     claims:
   #       mode: first                  # first | all | any; every step abstaining denies
