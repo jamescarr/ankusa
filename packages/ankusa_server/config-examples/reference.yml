@@ -851,6 +851,47 @@ gateway:
   #             groups_any: ["tenant-{{ vars.tenant }}"]
   #             # groups_all, scopes_any, scopes_all, tenants_any, principals,
   #             # claims: {dotted.claim: "{{ vars.tenant }}"}
+  #     # A policy decision point over HTTP: the OpenID AuthZEN Access Evaluation
+  #     # API (/access/v1/evaluation, batched through /access/v1/evaluations), or
+  #     # your own permissions API with protocol: template. url is literal (a {{
+  #     # is refused): https, or http to a loopback host, or anywhere with
+  #     # allow_insecure_http: true. A non-200 status is authz_unavailable for
+  #     # that step. headers: at most 16, redacted.
+  #     pdp:
+  #       type: http
+  #       url: https://pdp.example
+  #       timeout_ms: 300              # plus max_inflight, queue_max, batch_max,
+  #                                    # batch_window_ms, breaker_failures, breaker_open_ms,
+  #                                    # allow_ttl_ms, deny_ttl_ms, allow_ttl_max_ms
+  #       # headers: {x-api-key: "${PDP_TOKEN}"}
+  #       # actions: {read: can_read}  # read write delete list share; same name by default
+  #       # subject: {type: user, id: "{{ principal.id }}",
+  #       #           properties: {groups: "{{ principal.groups }}"}}
+  #       # resource: {type: "{{ kind }}", id: "{{ space }}/{{ key }}"}
+  #       # forward_authorization: false # send the caller's authorization header to the PDP
+  #     permissions:
+  #       type: http
+  #       protocol: template           # your own permissions API
+  #       url: https://permissions.example/v1/check
+  #       request: {user: "{{ principal.id }}", groups: "{{ principal.groups }}"}
+  #       allow_path: data.allow       # dotted; an all-digit segment indexes an array
+  #       ttl_path: data.ttl           # optional, integer seconds
+  #       # batch: {url: https://permissions.example/v1/bulk, items_key: checks, results_path: rows}
+  #     # OpenFGA: check, batch-check under load; {
+  #     # resources: the first entry whose space and pattern match maps the key to
+  #     # one object, so every key that renders alike shares one decision.
+  #     fga:
+  #       type: openfga
+  #       url: https://fga.example
+  #       store_id: "${FGA_STORE}"
+  #       # authorization_model_id: 01J...
+  #       api_token: "${FGA_TOKEN}"    # authorization: Bearer; redacted
+  #       consistency: minimize_latency # or higher_consistency
+  #       # user: "user:{{ principal.id }}"
+  #       # object: "object:{{ space }}/{{ key }}"
+  #       # resources: [{space: docs, match: "teams/{team}/**", object: "folder:{{ vars.team }}"}]
+  #       # relations: {read: viewer, write: editor, delete: editor, list: viewer, share: owner}
+  #       # contextual_tuples: [{user: "group:{{ principal.groups }}", relation: member, object: "folder:eng"}]
   #   policies:
   #     claims:
   #       mode: first                  # first | all | any; every step abstaining denies

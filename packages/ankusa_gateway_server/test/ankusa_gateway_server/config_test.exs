@@ -931,7 +931,7 @@ defmodule AnkusaGatewayServer.ConfigTest do
     test "every error names its key" do
       for {yaml, message} <- [
             {"gateway: {authz: {authorizers: {x: {type: opa}}}}",
-             ~s[gateway.authz.authorizers.x.type: unknown type "opa" (known: rules)]},
+             ~s[gateway.authz.authorizers.x.type: unknown type "opa" (known: http, openfga, rules)]},
             {"gateway: {authz: {authorizers: {x: {type: rules, rules: [{effect: allow, verbs: [read]}]}}}}",
              "gateway.authz.authorizers.x.rules[0]"},
             {"gateway: {authz: {authorizers: {x: {type: rules, rules: [{effect: maybe, actions: [read]}]}}}}",
@@ -946,6 +946,113 @@ defmodule AnkusaGatewayServer.ConfigTest do
             {"gateway: {authz: {cache: {deny_ttl_ms: -1}}}", "gateway.authz.cache.deny_ttl_ms"},
             {"gateway: {auth: {cache: {negative_ttl_ms: 600000}}}",
              "gateway.auth.cache.negative_ttl_ms"}
+          ] do
+        assert error!("config_version: 2\n" <> yaml <> "\n") =~ message, yaml
+      end
+    end
+  end
+
+  describe "gateway.authz PDP authorizers" do
+    test "an http authorizer's authzen and template blocks load" do
+      loaded =
+        load!("""
+        config_version: 2
+        gateway:
+          authz:
+            authorizers:
+              pdp:
+                type: http
+                url: https://pdp.example
+                timeout_ms: 300
+                headers: {x-api-key: "s3cret"}
+                actions: {read: check_read}
+                subject: {type: user, id: "{{ principal.id }}"}
+                context: {org: acme}
+              permissions:
+                type: http
+                protocol: template
+                url: https://perm.example/v1/check
+                request: {user: "{{ principal.id }}", groups: "{{ principal.groups }}"}
+                allow_path: data.allow
+                ttl_path: data.ttl
+                batch: {url: https://perm.example/v1/bulk, items_key: checks, results_path: rows}
+            policies:
+              docs: {mode: first, steps: [pdp]}
+        """)
+
+      assert %{module: Ankusa.Gateway.Authz.Http, state: authzen} =
+               loaded.gateway.authz.authorizers["pdp"]
+
+      assert authzen.protocol == :authzen
+      assert authzen.url == "https://pdp.example"
+      assert authzen.remote.timeout_ms == 300
+      assert authzen.headers == %{"x-api-key" => "s3cret"}
+      assert authzen.actions[:read] == "check_read"
+      assert authzen.context == %{"org" => "acme"}
+
+      assert %{module: Ankusa.Gateway.Authz.Http, state: template} =
+               loaded.gateway.authz.authorizers["permissions"]
+
+      assert template.protocol == :template
+      assert template.allow_path == ["data", "allow"]
+      assert template.ttl_path == ["data", "ttl"]
+      assert template.batch.items_key == "checks"
+      assert template.batch.results_path == ["rows"]
+    end
+
+    test "an openfga authorizer's relations, consistency, resources and tuples load" do
+      loaded =
+        load!("""
+        config_version: 2
+        gateway:
+          authz:
+            authorizers:
+              fga:
+                type: openfga
+                url: https://fga.example
+                store_id: store-1
+                authorization_model_id: model-1
+                api_token: tok
+                consistency: higher_consistency
+                relations: {read: can_read, share: owner}
+                resources:
+                  - {space: docs, match: "teams/{team}/**", object: "folder:{{ vars.team }}"}
+                contextual_tuples:
+                  - {user: "group:{{ principal.groups }}", relation: member, object: "folder:eng"}
+            policies:
+              docs: {mode: first, steps: [fga]}
+        """)
+
+      assert %{module: Ankusa.Gateway.Authz.OpenFGA, state: state} =
+               loaded.gateway.authz.authorizers["fga"]
+
+      assert state.store_id == "store-1"
+      assert state.model == "model-1"
+      assert state.api_token == "tok"
+      assert state.consistency == "HIGHER_CONSISTENCY"
+      assert state.relations[:read] == "can_read"
+      assert state.relations[:share] == "owner"
+      assert state.relations[:write] == "editor"
+      assert [%{space: "docs"}] = state.resources
+      assert [%{relation: "member"}] = state.contextual
+    end
+
+    test "every PDP error names its key" do
+      for {yaml, message} <- [
+            {"gateway: {authz: {authorizers: {x: {type: http, url: https://pdp.example, opa: 1}}}}",
+             ~s[gateway.authz.authorizers.x: unknown key "opa"]},
+            {"gateway: {authz: {authorizers: {x: {type: http, url: https://pdp.example, actions: {fly: check}}}}}",
+             ~s[gateway.authz.authorizers.x.actions: unknown action "fly"]},
+            {"gateway: {authz: {authorizers: {x: {type: openfga, url: https://f.example, store_id: s, consistency: eventual}}}}",
+             "gateway.authz.authorizers.x.consistency: unknown value \"eventual\"; expected minimize_latency, higher_consistency"},
+            {"gateway: {authz: {authorizers: {x: {type: openfga, url: https://f.example, store_id: s, contextual_tuples: [{user: u, relation: r, object: o, probe: p}]}}}}",
+             "gateway.authz.authorizers.x.contextual_tuples[0]: unknown key \"probe\""},
+            {"gateway: {authz: {authorizers: {x: {type: openfga, url: https://f.example, store_id: s, resources: [{space: a, match: b}]}}}}",
+             "gateway.authz.authorizers.x.resources[0].object"},
+            {"gateway: {authz: {authorizers: {x: {type: http, url: http://pdp.example}}}}",
+             "gateway.authz.authorizers.x.url must be an https URL"},
+            {"gateway: {authz: {authorizers: {x: {type: http, url: https://pdp.example, protocol: opa}}}}",
+             "gateway.authz.authorizers.x.protocol: unknown value \"opa\""}
           ] do
         assert error!("config_version: 2\n" <> yaml <> "\n") =~ message, yaml
       end
