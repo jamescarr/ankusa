@@ -219,6 +219,21 @@ defmodule Ankusa.Gateway.ACLTest do
       assert subjects([grant], %Principal{id: "link:" <> ACL.ulid()}, :link) == []
     end
 
+    test "the anonymous principal matches no grant, though it holds every tenant" do
+      grants = [
+        grant("anyone", [:read]),
+        grant("tenant:acme", [:read]),
+        grant("user:anonymous", [:read]),
+        grant("group:eng", [:read])
+      ]
+
+      operator = %{Principal.operator() | groups: ["eng"]}
+      assert subjects(grants, operator, :anonymous) == []
+      # The same grants for someone who authenticated.
+      assert subjects(grants, %{operator | id: "anonymous"}, :jwt) ==
+               ["anyone", "tenant:acme", "user:anonymous", "group:eng"]
+    end
+
     test "link matches only the share link of that very grant" do
       id = ACL.grant_id({:object, @key})
       grant = grant("link", [:read], id: id)

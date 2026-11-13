@@ -49,7 +49,13 @@ defmodule Ankusa.Gateway.Authz.HttpAuthorizerTest do
           key: "a.txt",
           tenant: nil
         }),
-      conn: Keyword.get(fields, :conn)
+      conn: Keyword.get(fields, :conn),
+      # What `Request.from_conn/3` reads from a connection.
+      authorization:
+        fields
+        |> Keyword.get(:conn, Plug.Test.conn(:get, "/"))
+        |> Plug.Conn.get_req_header("authorization")
+        |> List.first()
     }
   end
 

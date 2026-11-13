@@ -46,10 +46,11 @@ defmodule Ankusa.Gateway.Claims do
   ## Under load
 
   Every claim request answers within `claim_check.read_deadline_ms`. Its reads
-  go through `Ankusa.ClaimCheck.Cache` and `Ankusa.ClaimCheck.Reader`. Each
-  authorized request emits `[:ankusa, :gateway, :request]` with `api:
-  :claims`, its method, status and duration; a `401` or `403` is refused
-  before any of it and emits nothing.
+  go through `Ankusa.ClaimCheck.Cache` and `Ankusa.ClaimCheck.Reader`. Every
+  answer past authentication emits `[:ankusa, :gateway, :request]` with `api:
+  :claims`, its method, status and duration: a policy's `403` and a
+  fail-closed `503 authz_unavailable` are counted beside the reads (a `401`
+  is the authentication plug's, before any of it).
 
   With `gateway.claims.enabled: false` every claim route is `404`.
   """
@@ -64,14 +65,24 @@ defmodule Ankusa.Gateway.Claims do
   @doc "Serve `GET` or `HEAD` of one claim."
   @spec serve(Plug.Conn.t(), String.t(), String.t()) :: Plug.Conn.t()
   def serve(conn, tenant_id, claim_id) do
+    started = System.monotonic_time()
     instance = instance(conn)
     gateway = Ankusa.Gateway.config(instance)
 
-    if gateway.claims.enabled do
-      authorized(conn, instance, gateway, tenant_id, claim_id)
-    else
-      Http.send_json(conn, 404, %{error: "not_found"})
-    end
+    conn =
+      if gateway.claims.enabled do
+        authorized(conn, instance, gateway, tenant_id, claim_id)
+      else
+        Http.send_json(conn, 404, %{error: "not_found"})
+      end
+
+    Telemetry.emit(
+      [:gateway, :request],
+      %{duration: System.monotonic_time() - started},
+      %{instance: instance, api: :claims, method: conn.method, status: conn.status}
+    )
+
+    conn
   end
 
   defp authorized(conn, instance, gateway, tenant_id, claim_id) do
@@ -102,17 +113,8 @@ defmodule Ankusa.Gateway.Claims do
   defp forbidden(_meta), do: %{error: "forbidden"}
 
   defp serve_claim(conn, instance, gateway, tenant_id, claim_id) do
-    started = System.monotonic_time()
     config = Ankusa.config(instance)
-    conn = proven_and_admitted(conn, config, gateway, instance, tenant_id, claim_id)
-
-    Telemetry.emit(
-      [:gateway, :request],
-      %{duration: System.monotonic_time() - started},
-      %{instance: instance, api: :claims, method: conn.method, status: conn.status}
-    )
-
-    conn
+    proven_and_admitted(conn, config, gateway, instance, tenant_id, claim_id)
   end
 
   # The ref's proof first (cheap, and a forged ref must not take a slot), then

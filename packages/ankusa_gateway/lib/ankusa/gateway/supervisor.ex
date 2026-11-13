@@ -185,7 +185,11 @@ defmodule Ankusa.Gateway.Supervisor do
   end
 
   defp warn(config, gateway) do
-    if gateway.auth.authenticators == [] and not match?(%{verify: :verify_peer}, gateway.tls) do
+    # The share-link authenticator alone (sharing on) leaves every other
+    # request anonymous, as an empty chain does.
+    own = Enum.reject(gateway.auth.authenticators, &(&1.type == :link))
+
+    if own == [] and not match?(%{verify: :verify_peer}, gateway.tls) do
       Logger.warning(
         "[ankusa] gateway on #{address(gateway)} has no authentication " <>
           "(gateway.auth.authenticators is empty); add an authenticator before exposing it " <>

@@ -7,10 +7,24 @@ defmodule Ankusa.Gateway.Authz.Request do
   A resource is `%{kind, space, key, tenant}`: a claim is
   `%{kind: :claim, space: "claims", key: "<tenant_id>/<claim_id>", tenant: tenant_id}`
   (the key carries the tenant, so no two tenants' claims share a resource).
+
+  `conn` is for `:inline` authorizers only: a `:remote` one runs in another
+  process and gets the request without it. What a remote one may need from
+  the connection travels as two strings: `authorization` (the caller's own
+  `authorization` header, for `forward_authorization`) and `request_id`.
   """
 
   @enforce_keys [:principal, :via, :subject_key, :action, :resource]
-  defstruct [:principal, :via, :subject_key, :action, :resource, :conn]
+  defstruct [
+    :principal,
+    :via,
+    :subject_key,
+    :action,
+    :resource,
+    :conn,
+    :authorization,
+    :request_id
+  ]
 
   @type action :: :read | :write | :delete | :list | :share
   @type resource :: %{
@@ -25,7 +39,9 @@ defmodule Ankusa.Gateway.Authz.Request do
           subject_key: binary(),
           action: action(),
           resource: resource(),
-          conn: Plug.Conn.t() | nil
+          conn: Plug.Conn.t() | nil,
+          authorization: String.t() | nil,
+          request_id: String.t() | nil
         }
 
   @doc """
@@ -41,7 +57,9 @@ defmodule Ankusa.Gateway.Authz.Request do
       subject_key: Map.fetch!(assigns, :subject_key),
       action: action,
       resource: resource,
-      conn: conn
+      conn: conn,
+      authorization: conn |> Plug.Conn.get_req_header("authorization") |> List.first(),
+      request_id: Ankusa.Audit.Context.from_conn(conn).request_id
     }
   end
 end
