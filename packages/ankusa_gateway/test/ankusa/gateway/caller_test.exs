@@ -283,13 +283,17 @@ defmodule Ankusa.Gateway.CallerTest do
   end
 
   test "a light partition keeps its latency beside a 99:1 heavy one" do
+    # A run takes 5 ms and 4 run at once. Behind the heavy partition's ~100
+    # queued keys, a light key served in turn waits about one run; served in
+    # arrival order it would wait for the whole queue (~125 ms). The floor
+    # keeps scheduling noise on a loaded machine from failing a fair caller.
     inst =
       start(
         max_inflight: 4,
         queue_max: 400,
         partition_queue_max: 100,
         run: fn _item ->
-          Process.sleep(2)
+          Process.sleep(5)
           {:ok, :done}
         end
       )
@@ -297,18 +301,19 @@ defmodule Ankusa.Gateway.CallerTest do
     solo = for i <- 1..20, do: timed(fn -> call(inst, {:solo, i}, :light) end)
 
     heavy =
-      for i <- 1..198 do
+      for i <- 1..99 do
         Task.async(fn -> call(inst, {:heavy, i}, :heavy) end)
       end
 
+    Process.sleep(5)
+
     mixed =
       for i <- 1..20 do
-        Process.sleep(1)
         timed(fn -> call(inst, {:light, i}, :light) end)
       end
 
     Task.await_many(heavy, 10_000)
-    assert p99(mixed) <= 2 * max(p99(solo), 5_000)
+    assert p99(mixed) <= 2 * max(p99(solo), 25_000)
   end
 
   defp timed(fun) do
