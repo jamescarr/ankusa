@@ -264,12 +264,19 @@ defmodule Ankusa.Gateway.Authn do
         deadline = System.monotonic_time(:millisecond) + config.timeout_ms
         item = {principal, ctx.name}
 
-        case Caller.call(ctx.instance, {:enrich, index}, key, :authn, item, deadline) do
+        # Queued per tenant, served in turn: one tenant's burst of logins
+        # does not hold up another's.
+        partition = partition(principal, ctx.name)
+
+        case Caller.call(ctx.instance, {:enrich, index}, key, partition, item, deadline) do
           {:ok, %{groups: groups, claims: claims}} -> {:ok, merge(principal, groups, claims)}
           {:error, reason} -> unavailable(config, reason)
         end
     end
   end
+
+  defp partition(%Principal{tenants: [tenant | _]}, _authenticator), do: {:tenant, tenant}
+  defp partition(_principal, authenticator), do: {:authenticator, authenticator}
 
   defp unavailable(%{on_unavailable: :skip}, _reason), do: :skipped
   defp unavailable(_config, reason), do: {:error, reason}
