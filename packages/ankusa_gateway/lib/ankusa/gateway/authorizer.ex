@@ -16,7 +16,9 @@ defmodule Ankusa.Gateway.Authorizer do
   `decide_many/3`, a breaker). A `:cached` or `:remote` authorizer decides
   from `request.principal`, `request.via`, `request.action` and
   `request.resource` only (plus whatever its `cache_scope/2` adds to the cache
-  key); `request.conn` is for `:inline` ones.
+  key); `request.conn` is for `:inline` ones, and for a `:remote` one that
+  forwards the caller's own credential (its `cache_scope/2` then keys the
+  decision by that credential).
 
   `init!/2` validates the authorizer's options (raising `ArgumentError` naming
   `key`, `"gateway.authz.authorizers.<name>"`) and returns its state.

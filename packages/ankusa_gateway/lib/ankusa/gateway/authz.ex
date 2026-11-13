@@ -249,15 +249,17 @@ defmodule Ankusa.Gateway.Authz do
     case Cache.fetch(instance, :authz, key) do
       {:ok, {result, fresh_until, ttl}} when now < fresh_until ->
         if gateway.authz.cache.refresh_ahead and (fresh_until - now) * 5 < ttl,
-          do: Caller.refresh(instance, {:authz, name}, key, {key, %{request | conn: nil}})
+          do: Caller.refresh(instance, {:authz, name}, key, {key, request})
 
         {result, true}
 
       stale ->
         partition = request.resource[:tenant] || request.resource.space
-        # A remote authorizer decides from the principal and the resource; the
-        # connection stays in the request process.
-        item = {key, %{request | conn: nil}}
+        # The connection travels with the item: a remote authorizer decides from
+        # the principal and the resource, except one that forwards the caller's
+        # own credential (`forward_authorization`), whose cache_scope/2 already
+        # keys the decision by that credential.
+        item = {key, request}
 
         case Caller.call(instance, {:authz, name}, key, partition, item, deadline) do
           {:error, {:unavailable, _}} = error -> serve_stale(stale, error)

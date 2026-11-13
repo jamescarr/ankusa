@@ -250,7 +250,7 @@ gateway:
   authz:
     authorizers:
       teams:
-        type: rules              # the one YAML type for now
+        type: rules              # rules | http | openfga
         rules:                   # 1 to 256 entries; first match wins, no match abstains
           - effect: allow        # allow | deny
             actions: [read]      # read write delete list share, or ["*"]
@@ -338,6 +338,91 @@ flight (coalesced), an adaptive in-flight limit, a bounded per-tenant queue,
 batching through `decide_many/3` when the module exports it, a breaker, and
 the policy deadline. An answer that arrives unavailable is handled by the
 step's `on_unavailable`.
+
+A remote backend's address is validated here too: `url` is a literal (a `{{`
+is refused, so request data never chooses the origin) and must be `https://`,
+or `http://` to a loopback host, or `http://` anywhere with
+`allow_insecure_http: true`; `headers` is a map of at most 16 names to values
+(redacted like every header value); `req_options` (Elixir config, tests) is
+the transport subset `Ankusa.HttpClient` accepts. A non-`200` status is
+`authz_unavailable` for that step, a transport failure too.
+
+Two decision points ship:
+
+**`type: http`** — the [OpenID AuthZEN](https://openid.net/wg/authzen/)
+Access Evaluation API, or a bespoke permissions API through `protocol:
+template`. AuthZEN is one `POST <url>/access/v1/evaluation` per check and
+`/access/v1/evaluations` per batch; only a JSON `true` allows and a JSON
+`false` denies — a missing or differently-typed verdict is unavailable, never
+a default. A `cache-control: max-age=<s>` on the answer names how long the
+allow stays fresh (capped by `allow_ttl_max_ms`). A `404`/`405`/`501` on the
+bulk endpoint memoizes "no batching" for five minutes and the checks go one
+by one.
+
+```yaml
+gateway:
+  authz:
+    authorizers:
+      pdp:
+        type: http
+        url: https://pdp.example
+        timeout_ms: 300
+        actions: {read: can_read, write: can_write}   # read write delete list share
+        subject: {type: user, id: "{{ principal.id }}"}   # defaults: id, groups, tenants
+        resource: {type: "{{ kind }}", id: "{{ space }}/{{ key }}"}
+      permissions:
+        type: http
+        protocol: template                            # your own API
+        url: https://permissions.example/v1/check
+        request: {user: "{{ principal.id }}", groups: "{{ principal.groups }}"}
+        allow_path: data.allow                        # dotted, a digit indexes an array
+        ttl_path: data.ttl                            # optional, integer seconds
+    policies:
+      docs: {mode: first, steps: [pdp]}
+```
+
+`subject` and `resource` are JSON shapes whose string leaves are templates
+(roots `principal`, `claims`, `action`, `kind`, `space`, `key`, `tenant`); a
+leaf that is one list-valued variable renders as a JSON array. A template that
+cannot render — an absent claim, two lists — is `403` without a call. The
+default `resource.id` is `{{ space }}/{{ key }}`, unique per resource (a
+claim's key carries its tenant). `cache_scope/2` keys a decision by the
+rendered resource's type and id, so **an operator who writes a coarser
+`resource` shares decisions between every key that renders alike** — that is
+the way to make one PDP call cover a folder, and it must be a deliberate one.
+`forward_authorization: true` sends the caller's own `authorization` header
+(the one case a remote authorizer reads the request's connection); the
+decision is then also keyed by that credential.
+
+**`type: openfga`** — a check against an [OpenFGA](https://openfga.dev/)
+store:
+
+```yaml
+gateway:
+  authz:
+    authorizers:
+      fga:
+        type: openfga
+        url: https://fga.example
+        store_id: 01J...
+        api_token: "${FGA_TOKEN}"          # sent as authorization: Bearer; redacted
+        consistency: minimize_latency       # or higher_consistency
+        user: "user:{{ principal.id }}"
+        object: "object:{{ space }}/{{ key }}"
+        resources:                          # first entry whose space and pattern match wins
+          - {space: docs, match: "teams/{team}/**", object: "folder:{{ vars.team }}"}
+        relations: {read: viewer, write: editor, delete: editor, list: viewer, share: owner}
+        contextual_tuples:                  # one tuple per group, at most 100 per check
+          - {user: "group:{{ principal.groups }}", relation: member, object: "folder:eng"}
+    policies:
+      docs: {mode: first, steps: [fga]}
+```
+
+`batch: true` (the default) rides `batch-check`; each check reads its own
+correlation id, so one missing entry is unavailable for that request only. A
+value the caller can influence must never be a wildcard (`*`), start a userset
+(`#`) or carry whitespace: such a request denies without a call. Each key that
+maps to one OpenFGA object shares one decision.
 
 #### The file format
 
