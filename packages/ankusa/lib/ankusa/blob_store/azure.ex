@@ -61,8 +61,8 @@ defmodule Ankusa.BlobStore.Azure do
   `Ankusa.BlobStore`'s optional object callbacks map onto blobs directly: the
   version is the blob's `ETag`, without its surrounding quotes; `:if` rides as
   `If-None-Match: *` (`:absent`) or `If-Match: "<version>"`, and a losing
-  condition is Azure's `412` (or its `409 BlobAlreadyExists`), which the shared
-  reply maps (`Ankusa.BlobStore.HTTP.object_reply/2`); metadata is
+  condition is Azure's `412` (or its `409 BlobAlreadyExists`), which the reply
+  mapping the HTTP stores share reads by condition; metadata is
   `x-ms-meta-<name>`. `put_object/4` sends the object's `Content-Type` (on a Put
   Blob as `Content-Type`, on a block list as `x-ms-blob-content-type`); above the
   threshold, the content type, the metadata **and** the condition all ride the

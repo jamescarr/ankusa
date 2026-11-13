@@ -76,8 +76,8 @@ defmodule Ankusa.BlobStore.OCI do
   `Ankusa.BlobStore`'s optional object callbacks map onto objects directly: the
   version is the object's `ETag`, without its surrounding quotes; `:if` rides as
   `if-none-match: *` (`:absent`) or `if-match: "<version>"`, and a losing
-  condition is a `412` (or a `409`), which the shared reply maps
-  (`Ankusa.BlobStore.HTTP.object_reply/2`); metadata is `opc-meta-<name>`, and
+  condition is a `412` (or a `409`), which the reply mapping the HTTP stores
+  share reads by condition; metadata is `opc-meta-<name>`, and
   `put_object/4` sends its content type as the object's `Content-Type`. Above
   the threshold the content type and metadata ride the `CreateMultipartUpload`
   body, the condition rides the `CommitMultipartUpload` — the request that

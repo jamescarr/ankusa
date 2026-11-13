@@ -768,7 +768,7 @@ many claims under `claims/tenant=<t>/dt=<day>/<pack_id>`, or
 ### Object operations
 
 Five optional callbacks serve the gateway's objects API
-([ADR 0005](adr/0005-standalone-gateway.md)): a store that implements them can
+([ADR 0005](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0005-standalone-gateway.md)): a store that implements them can
 back a space. Existing callers never use them.
 
 ```elixir
