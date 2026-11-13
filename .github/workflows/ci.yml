@@ -979,6 +979,9 @@ jobs:
     outputs:
       # The scope decision, for `perf gate` and `bench-tenant`.
       run: ${{ steps.scope.outputs.run }}
+      # The gateway's own: its authorization and authentication budgets
+      # (`bench-gateway`), for a diff to its code or its bench.
+      gateway: ${{ steps.scope.outputs.gateway }}
     env:
       # Ground rule 10's hot-path files, plus the gate's own files. `ci.yml` is
       # not one of them: a workflow file cannot change the measured program, and
@@ -990,6 +993,7 @@ jobs:
         (store|queue|dedupe|envelope|http|route_resolver)\.ex|
         sink/(message|http)\.ex
         )$|^packages/ankusa/bench/|^\.mise/tasks/bench/
+      GATEWAY_PATHS: ^packages/ankusa_gateway/(lib|bench)/|^\.mise/tasks/bench/gateway$
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: scope
@@ -1006,6 +1010,7 @@ jobs:
           set -euo pipefail
           decide() {
             echo "run=$1" >> "$GITHUB_OUTPUT"
+            echo "gateway=$1" >> "$GITHUB_OUTPUT"
             echo "$2"
             exit 0
           }
@@ -1047,6 +1052,15 @@ jobs:
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "no hot-path file touched: perf gate and bench-tenant skipped"
+          fi
+          gateway=$(printf '%s\n' "$files" | grep -E "$GATEWAY_PATHS" || true)
+          if [ -n "$gateway" ]; then
+            echo "gateway=true" >> "$GITHUB_OUTPUT"
+            echo "gateway files touched:"
+            echo "$gateway"
+          else
+            echo "gateway=false" >> "$GITHUB_OUTPUT"
+            echo "no gateway file touched: bench-gateway skipped"
           fi
 
   # The perf regression gate (ground rule 10 of ANKUSA_HARDENING_PLAN.md,
@@ -1166,6 +1180,38 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
       - run: mise run bench:tenants
+
+  # The gateway's self-asserting bench (`packages/ankusa_gateway/bench/
+  # authz_bench.exs`): the p99 of a `rules` decision, of a cached remote
+  # decision and of a warm authentication, and what auth adds to a claim read
+  # through the router. No baseline: each case has its own budget. Runs when
+  # the diff touches the gateway's code or its bench (`bench-scope`).
+  bench-gateway:
+    name: bench-gateway
+    needs: bench-scope
+    if: needs.bench-scope.outputs.gateway == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.12
+          # Mix over core (RocksDB, so cmake), as `bench-tenant`.
+          install_args: elixir erlang cmake
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-hex" # the default key skips .mise/conf.d/
+      - name: cache mix deps
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            packages/ankusa_gateway/deps
+            packages/ankusa_gateway/_build
+          key: mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa_gateway-bench-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa_gateway/mix.lock') }}
+          restore-keys: |
+            mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa_gateway-bench-${{ hashFiles('.mise.toml') }}-
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - run: mix local.hex --force && mix local.rebar --force
+      - run: mise run bench:gateway
 
   # The crash-consistency drill (scripts/drills/crash_drill.sh): ENOSPC on a
   # 192 MiB tmpfs, then kill -9 under load; every acked hook must read back.
@@ -1344,6 +1390,7 @@ jobs:
       - bench-scope
       - bench
       - bench-tenant
+      - bench-gateway
       - crash
       - crash-powerloss
     if: always()

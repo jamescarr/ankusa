@@ -24,17 +24,34 @@ defmodule Ankusa.Gateway.Authn do
   An empty chain hands every request `Ankusa.Principal.operator/0` (every
   scope, every tenant); `Ankusa.Gateway.Config` only accepts it on loopback or
   with `auth.allow_insecure: true`.
+
+  ## The authentication cache
+
+  Each authenticator's result is cached (`Ankusa.Gateway.Cache`, `:authn`)
+  under `{its index, sha256(credential)}`: a hit ends the chain at the first
+  authenticator that reads that credential (no issuer peek, no signature
+  check), restoring the principal, `principal_via` and `subject_key` it had.
+  An entry lives `auth.cache.ttl_ms`, never past the credential's own expiry
+  (`0` turns the cache off); a refusal is cached for `auth.cache.negative_ttl_ms`
+  only by an authenticator whose `cache_negative?/0` says so (one that calls
+  out). A credential over 16 KiB is not one: that authenticator is passed over.
+  Only the hash of a credential is kept.
+
+  Emits `[:ankusa, :gateway, :authn]`: `%{duration}`, `%{instance,
+  authenticator: name | "none", result: :ok | :unauthenticated | :unavailable,
+  cached: boolean}`.
   """
 
   @behaviour Plug
 
   import Plug.Conn
 
-  alias Ankusa.Gateway.Authenticator
-  alias Ankusa.{Http, Principal}
+  alias Ankusa.Gateway.{Authenticator, Cache}
+  alias Ankusa.{Http, Principal, Telemetry}
 
   @exempt [["health"], ["ready"]]
   @challenge ~s(Bearer realm="ankusa")
+  @max_credential_bytes 16_384
 
   @impl true
   def init(opts), do: opts
@@ -44,14 +61,22 @@ defmodule Ankusa.Gateway.Authn do
 
   def call(conn, _opts) do
     instance = Keyword.get(conn.assigns[:ankusa_opts] || [], :instance, :default)
-    authenticators = Ankusa.Gateway.config(instance).auth.authenticators
+    gateway = Ankusa.Gateway.config(instance)
+    started = System.monotonic_time()
+    {result, name, cached} = authenticate(conn, instance, gateway)
 
-    case authenticate(conn, instance, authenticators) do
-      {:ok, principal, via} ->
+    Telemetry.emit(
+      [:gateway, :authn],
+      %{duration: System.monotonic_time() - started},
+      %{instance: instance, authenticator: name, result: result_tag(result), cached: cached}
+    )
+
+    case result do
+      {:ok, principal, via, subject_key} ->
         conn
         |> assign(:principal, principal)
         |> assign(:principal_via, via)
-        |> assign(:subject_key, subject_key(via, principal))
+        |> assign(:subject_key, subject_key)
 
       {:error, :unauthenticated} ->
         conn
@@ -81,33 +106,86 @@ defmodule Ankusa.Gateway.Authn do
     binary_part(:crypto.hash(:sha256, :erlang.term_to_binary(term, [:deterministic])), 0, 16)
   end
 
-  defp authenticate(_conn, _instance, []), do: {:ok, Principal.operator(), :anonymous}
+  defp result_tag({:ok, _principal, _via, _key}), do: :ok
+  defp result_tag({:error, {:unavailable, _}}), do: :unavailable
+  defp result_tag({:error, _}), do: :unauthenticated
 
-  defp authenticate(conn, instance, authenticators) do
+  # `{result, authenticator name, cached?}`.
+  defp authenticate(_conn, _instance, %{auth: %{authenticators: []}}) do
+    principal = Principal.operator()
+    {{:ok, principal, :anonymous, subject_key(:anonymous, principal)}, "none", false}
+  end
+
+  defp authenticate(conn, instance, %{auth: %{authenticators: authenticators, cache: cache}}) do
     authenticators
     |> Enum.with_index()
-    |> Enum.reduce_while({:error, :unauthenticated}, fn {authenticator, index}, acc ->
+    |> Enum.reduce_while({{:error, :unauthenticated}, "none", false}, fn {authenticator, index},
+                                                                         acc ->
       ctx = ctx(instance, index, authenticator)
 
       case authenticator.module.credential(conn, ctx) do
-        :none -> {:cont, acc}
-        {:ok, _credential} -> step(authenticator, conn, ctx, acc)
+        {:ok, credential} when byte_size(credential) <= @max_credential_bytes ->
+          cached_step(authenticator, conn, ctx, credential, cache, acc)
+
+        _none_or_too_long ->
+          {:cont, acc}
       end
     end)
   end
 
-  defp step(authenticator, conn, ctx, acc) do
+  defp cached_step(authenticator, conn, ctx, credential, cache, acc) do
+    key = {ctx.index, :crypto.hash(:sha256, credential)}
+    now = System.os_time(:second)
+
+    case Cache.fetch(ctx.instance, :authn, key) do
+      {:ok, {:ok, principal, via, subject_key, expires_at}}
+      when expires_at == nil or expires_at > now ->
+        {:halt, {{:ok, principal, via, subject_key}, ctx.name, true}}
+
+      {:ok, :negative} ->
+        {:halt, {{:error, :unauthenticated}, ctx.name, true}}
+
+      _miss ->
+        step(authenticator, conn, ctx, key, cache, acc)
+    end
+  end
+
+  defp step(authenticator, conn, ctx, key, cache, acc) do
     case authenticator.module.authenticate(conn, ctx) do
-      {:ok, %Principal{} = principal, _expires_at} ->
-        {:halt, {:ok, principal, authenticator.type}}
+      {:ok, %Principal{} = principal, expires_at} ->
+        via = authenticator.type
+        subject_key = subject_key(via, principal)
+        value = {:ok, principal, via, subject_key, expires_at}
+        remember(ctx.instance, key, value, expires_at, cache)
+        {:halt, {{:ok, principal, via, subject_key}, ctx.name, false}}
 
       :skip ->
         {:cont, acc}
 
+      {:error, :unauthenticated} = error ->
+        if negative?(authenticator.module),
+          do: Cache.put(ctx.instance, :authn, key, :negative, cache.negative_ttl_ms)
+
+        {:halt, {error, ctx.name, false}}
+
       {:error, _} = error ->
-        {:halt, error}
+        {:halt, {error, ctx.name, false}}
     end
   end
+
+  # Never past the credential's own expiry, and not at all with `ttl_ms: 0`.
+  defp remember(_instance, _key, _value, _expires_at, %{ttl_ms: 0}), do: :ok
+
+  defp remember(instance, key, value, nil, %{ttl_ms: ttl}),
+    do: Cache.put(instance, :authn, key, value, ttl)
+
+  defp remember(instance, key, value, expires_at, %{ttl_ms: ttl}) do
+    left_ms = (expires_at - System.os_time(:second)) * 1000
+    Cache.put(instance, :authn, key, value, min(ttl, left_ms))
+  end
+
+  defp negative?(module),
+    do: function_exported?(module, :cache_negative?, 0) and module.cache_negative?()
 
   @spec ctx(atom(), non_neg_integer(), map()) :: Authenticator.ctx()
   defp ctx(instance, index, %{name: name, config: config}),

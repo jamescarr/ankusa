@@ -164,8 +164,12 @@ docker run -p 127.0.0.1:4001:4001 \
 ```
 
 `GET /health` is liveness; `GET /ready` needs no credential and answers `200`
-while the gateway serves, or `503` with `Retry-After: 1` when it does not. A
-file without `config_version` is version 1 and still loads: the loader moves
+while the gateway serves, or `503` with `Retry-After: 1` when it does not. It
+carries `"gateway": "ok"`, plus `"authorizers": {name => "ok" | "not_ready"}`
+for every authorizer that exports `ready?/3`; a `not_ready` one makes the
+answer `503` — only an authorizer that cannot decide anything until it has
+loaded says so, and only for a bounded time. A file without `config_version`
+is version 1 and still loads: the loader moves
 `claim_check.port`/`ip`/`tls`/`auth`/`max_concurrent_reads`/`integrity_check`
 under `gateway` for you (see
 [the gateway section](configuration.md#the-gateway-config_version-2)).
@@ -270,49 +274,74 @@ Answers: `401 unauthenticated` with `www-authenticate: Bearer realm="ankusa"`
 without an accepted credential, `503 auth_unavailable` when an identity provider
 that had to be asked cannot answer.
 
-Authorization is a policy: the claim routes evaluate the `claims` policy, whose
-one step (`scopes`) requires `claims:read` **and** the claim's tenant
-(`tenant:<tenant_id>` or `tenant:*`), and answers
-`403 {"error":"forbidden","scope":"…"}` naming the missing one. To decide
-differently (an ownership table, a policy service, an external PDP), register a
-module implementing `Ankusa.Gateway.Authorizer` and name it in a step. It runs
-after authentication and before anything is read:
+### Authorization
 
-```elixir
-defmodule MyApp.Ownership do
-  @behaviour Ankusa.Gateway.Authorizer
+Authorization is a policy (`gateway.authz.policies`): a mode (`first`, `all`,
+`any`) and steps over named authorizers. `first` takes the first allow or deny;
+`all` allows when at least one step allowed and none denied; `any` takes the
+first allow. Every step abstaining denies. A step that cannot decide is
+`503 authz_unavailable` unless its `on_unavailable` is `abstain` or `deny`, and
+the whole policy has `gateway.authz.deadline_ms` (250 ms).
 
-  @impl true
-  def init!(opts, _key), do: Map.new(opts)
+The claim routes evaluate `gateway.claims.policy` (`claims` by default). Its
+`scopes` step (the built-in, reserved authorizer) requires `claims:read` **and**
+the claim's tenant (`tenant:<tenant_id>` or `tenant:*`), and answers
+`403 {"error":"forbidden","scope":"…"}` naming the missing one.
 
-  @impl true
-  def kind(_state), do: :inline
+The `rules` authorizer decides from the token alone. A claim's key is
+`<tenant_id>/<claim_id>`, so `{tenant}` captures the tenant: this policy lets
+the holders of a tenant's group read that tenant's claims, and nothing else:
 
-  @impl true
-  def decide(%Ankusa.Gateway.Authz.Request{} = req, state, %{deadline: _}) do
-    if MyApp.Owners.holds?(state, req.principal.id, req.resource.tenant, req.resource.key) do
-      {:ok, :allow, %{}}
-    else
-      {:ok, :deny, %{reason: :not_owner}}
-    end
-  end
-end
-
-Ankusa.Gateway.Config.new(
-  instance: :default,
-  authz: %{
-    authorizers: %{"ownership" => {MyApp.Ownership, []}},
-    policies: %{"claims" => %{mode: :first, steps: ["ownership"]}}
-  }
-)
+```yaml
+gateway:
+  authz:
+    authorizers:
+      teams:
+        type: rules
+        rules:
+          - effect: allow
+            actions: [read]
+            spaces: [claims]
+            keys: ["{tenant}/**"]
+            when:
+              groups_any: ["reader-{{ vars.tenant }}"]
+    policies:
+      claims: {mode: first, steps: [teams]}
 ```
 
-`decide/3` returns `{:ok, :allow | :deny | :abstain, meta}` — a `deny` answered
-by the policy is `403 forbidden` (with `meta.scope` in the body when the step
-set one) — or `{:error, {:unavailable, reason}}`, which is `503
-authz_unavailable` under the default `on_unavailable: fail`. A step that raises
-counts as unavailable. `authz.authorizers` and `authz.policies` are Elixir
-config (`Ankusa.Gateway.Config`), not YAML yet.
+A policy that lists only `teams` replaces the scope rule; add `scopes` to the
+steps to keep the tenant rule too (after `teams` in `first` mode it is only
+reached when `teams` abstains; `mode: all` requires both).
+
+Rules run in order and the first match decides; no match abstains, so a
+policy's later steps still get their say. `keys` are patterns (`{name}`
+captures a segment, `*` one, `**` the rest) and every listed `when` predicate
+must hold: `groups_any`/`groups_all`, `scopes_any`/`scopes_all`, `tenants_any`,
+`principals`, and `claims` (a dotted path against a rendered value). Predicate
+values are templates — `{{ vars.team }}`, `{{ space }}`, `{{ tenant }}`,
+`{{ action }}` — and a template that cannot render makes its predicate false.
+Every rule field and predicate: [the gateway
+section](configuration.md#the-gateway-config_version-2).
+
+Neither side re-derives the same answer for every request:
+
+- **Authentication** is cached per credential (`auth.cache.*`): a hit ends the
+  chain at the first authenticator that reads that credential — no signature
+  check, no issuer peek — with the principal and subject key it had. `0` turns
+  it off.
+- **Decisions** are cached per `{authorizer, subject_key, action, scope}`
+  (`authz.cache.*`), so a hit skips the authorizer — and, for one that calls
+  out, the call. `subject_key` fingerprints the whole principal, so a changed
+  group or claim is a miss. An allow lives `allow_ttl_ms` (5 s), a deny or
+  abstain `deny_ttl_ms` (1 s); `refresh_ahead` refreshes a remote decision in
+  its last fifth, and `serve_stale_ms` (0: fail closed) keeps an expired one to
+  answer with while its backend is down.
+
+An authorizer the YAML cannot express — an ownership table, a policy service —
+is a module implementing `Ankusa.Gateway.Authorizer` in `authz.authorizers`
+(Elixir config): `init!/2`, `kind/1` (`:inline`, `:cached` or `:remote`) and
+`decide/3` returning `{:ok, :allow | :deny | :abstain, meta}` or
+`{:error, {:unavailable, reason}}`.
 
 ### Under load
 
@@ -362,8 +391,19 @@ back together. On `/metrics` (the gateway's series join the node's scrape
 through core's `metrics.extra`, which `jamescarr/ankusa` sets when it runs the
 gateway; an embedding application passes `[Ankusa.Gateway.Metrics]`):
 `ankusa_gateway_requests_total{api="claims",status}` and
-`ankusa_gateway_request_duration_seconds{api="claims"}` (the status is the only
-other label: no tenant, claim or method); `ankusa_claim_sweeps_total{deleted}`
+`ankusa_gateway_request_duration_seconds{api="claims"}` (every gateway series
+also carries `instance`; these carry no tenant, claim or method);
+`ankusa_gateway_authn_total{authenticator,result,cached}`,
+`ankusa_gateway_authz_decisions_total{policy,action,decision,cached}` and
+`ankusa_gateway_authz_duration_seconds{policy}`; a remote backend's caller
+(`ankusa_gateway_calls_total{caller,result}`,
+`ankusa_gateway_call_duration_seconds{caller}`, the last-value gauges
+`ankusa_gateway_caller_limit`, `ankusa_gateway_caller_inflight` and
+`ankusa_gateway_caller_queued`, and
+`ankusa_gateway_caller_breaker_transitions_total{caller,state}`); and the
+caches (`ankusa_gateway_cache_entries` and `ankusa_gateway_cache_bytes`,
+labelled `cache`); then the claim-check reader's own:
+`ankusa_claim_sweeps_total{deleted}`
 (one per sweep tick, `deleted="true"` when it removed a partition, a pack or a
 lease row); `ankusa_claim_check_reads_total{kind,source,result}`, where `kind` is
 `index`, `manifest`, `bytes` or `range`, `source` is

@@ -820,6 +820,41 @@ gateway:
     #   subject_map:
     #     "uri:spiffe://prod/ns/billing/sa/worker": [claims:read, "tenant:billing"]
     #     "cn:reports": {scopes: [claims:read, "tenant:*"], groups: [reports]}
+    # Each authenticator's answer is remembered under the sha256 of the
+    # credential (never the credential): a hit skips the signature check.
+    # cache:
+    #   ttl_ms: 60000                  # never past the credential's exp; 0 = off
+    #   negative_ttl_ms: 5000          # refusals, by authenticators that call out
+    #   max_entries: 100000
+    #   max_bytes: 33554432
+  # Who may do what: named authorizers, and policies that run them in order.
+  # The built-in `scopes` authorizer (claims:read and the claim's tenant) is
+  # always defined; the `claims` policy is [scopes] unless defined here.
+  # authz:
+  #   deadline_ms: 250                 # the whole policy's budget per request
+  #   cache:                           # decisions of cached and remote authorizers
+  #     allow_ttl_ms: 5000
+  #     deny_ttl_ms: 1000              # deny and abstain
+  #     refresh_ahead: true            # refresh a remote decision in its last fifth
+  #     serve_stale_ms: 0              # answer with an expired decision while its backend is down
+  #     max_entries: 200000
+  #     max_bytes: 67108864
+  #   authorizers:
+  #     teams:
+  #       type: rules                  # decided from the token alone, in microseconds
+  #       rules:                       # first match wins; no match abstains
+  #         - effect: allow
+  #           actions: [read]          # read write delete list share, or ["*"]
+  #           spaces: [claims]         # claims: keys are <tenant>/<claim_id>
+  #           keys: ["{tenant}/**"]    # {name} captures a segment, * one, ** the rest
+  #           when:                    # every listed predicate must hold
+  #             groups_any: ["tenant-{{ vars.tenant }}"]
+  #             # groups_all, scopes_any, scopes_all, tenants_any, principals,
+  #             # claims: {dotted.claim: "{{ vars.tenant }}"}
+  #   policies:
+  #     claims:
+  #       mode: first                  # first | all | any; every step abstaining denies
+  #       steps: [teams, {use: scopes, on_unavailable: fail}]
   claims:
     # Serve the claims API (else its routes answer 404).
     enabled: true
