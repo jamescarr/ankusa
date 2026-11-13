@@ -6,7 +6,8 @@ defmodule AnkusaServer.LogTest do
   require Logger
 
   alias Ankusa.Edge.Router
-  alias AnkusaServer.{Config, LogFormatter}
+  alias AnkusaGatewayServer.LogFormatter
+  alias AnkusaServer.Config
 
   @moduletag :capture_log
 

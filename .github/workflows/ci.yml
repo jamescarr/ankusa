@@ -234,7 +234,7 @@ jobs:
                 # `check:examples` builds every example's Mix app; these are
                 # the packages those apps path-depend on.
                 case "$path" in
-                  packages/ankusa/* | packages/async_api_spex/* | packages/ankusa_kafka/* | packages/ankusa_rabbitmq/*)
+                  packages/ankusa/* | packages/async_api_spex/* | packages/ankusa_kafka/* | packages/ankusa_rabbitmq/* | packages/ankusa_gateway/*)
                     examples=true ;;
                 esac
                 docs_only=false
@@ -280,6 +280,10 @@ jobs:
               esac
             done
           fi
+
+          # Path dependencies beyond core: the two images embed the gateway library.
+          case " $touched " in *" ankusa_gateway "* | *" ankusa_gateway_postgres "*) touched="$touched ankusa_gateway_server ankusa_server" ;; esac
+          case " $touched " in *" ankusa_gateway_server "*) touched="$touched ankusa_server" ;; esac
 
           # `pkg_names` order, no duplicates.
           ordered=""

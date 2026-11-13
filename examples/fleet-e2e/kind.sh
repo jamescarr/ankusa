@@ -22,6 +22,7 @@ cd "$(git rev-parse --show-toplevel)"
 : "${KEEP:=0}"
 : "${BUILD_ANKUSA:=1}"
 : "${ANKUSA_IMAGE:=ankusa-fleet-e2e:kind}"
+: "${GATEWAY_IMAGE:=ankusa-gateway-fleet-e2e:kind}"
 : "${CONSUMER_IMAGE:=ankusa-fleet-e2e-consumer:kind}"
 : "${OUT_DIR:=examples/fleet-e2e/.e2e-out-kind}"
 
@@ -117,11 +118,14 @@ fi
 if [ "$BUILD_ANKUSA" = "1" ]; then
   echo "==> building $ANKUSA_IMAGE"
   docker build -f packages/ankusa_server/Dockerfile -t "$ANKUSA_IMAGE" .
+  echo "==> building $GATEWAY_IMAGE"
+  docker build -f packages/ankusa_gateway_server/Dockerfile -t "$GATEWAY_IMAGE" .
 fi
 echo "==> building $CONSUMER_IMAGE"
 docker build -f examples/fleet-e2e/consumer/Dockerfile -t "$CONSUMER_IMAGE" .
 echo "==> loading the images into kind"
 kind load docker-image "$ANKUSA_IMAGE" --name "$CLUSTER"
+kind load docker-image "$GATEWAY_IMAGE" --name "$CLUSTER"
 kind load docker-image "$CONSUMER_IMAGE" --name "$CLUSTER"
 
 echo "==> the dependencies (Redis, MinIO, RabbitMQ, Postgres) and the consumer"
@@ -142,6 +146,7 @@ k create namespace "$NS" --dry-run=client -o yaml | k apply -f -
 k label namespace "$NS" pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest --overwrite
 helm upgrade --install ankusa "$CHART" --kube-context "kind-$CLUSTER" -n "$NS" \
   -f "$KIND_DIR/values.yaml" --set "image.tag=${ANKUSA_IMAGE##*:}" --set "image.repository=${ANKUSA_IMAGE%:*}" \
+  --set "claimCheck.image.tag=${GATEWAY_IMAGE##*:}" --set "claimCheck.image.repository=${GATEWAY_IMAGE%:*}" \
   --wait --timeout 5m
 
 echo "==> the pods are hardened"

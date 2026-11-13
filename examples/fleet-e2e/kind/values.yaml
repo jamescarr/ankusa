@@ -18,6 +18,9 @@ service: {type: NodePort, nodePort: 30080}
 claimCheck:
   enabled: true
   replicas: 1
+  # The gateway image kind.sh builds and loads (`GATEWAY_IMAGE`; kind.sh also
+  # passes it with --set, so a custom tag is honoured).
+  image: {repository: ankusa-gateway-fleet-e2e, tag: kind}
   # The NetworkPolicy lets only the consumer's namespace reach 4001.
   allowInsecure: true
   resources:

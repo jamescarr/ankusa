@@ -1,5 +1,6 @@
-# Prometheus scrapes the admin port of every ankusa-image pod (see
-# prometheus-configmap.yaml). It discovers them through the Kubernetes API, so
+# Prometheus scrapes the admin port of every ankusa pod and the metrics port of
+# the claim-check gateway (see prometheus-configmap.yaml). It discovers them
+# through the Kubernetes API, so
 # it needs to list pods: a Role in this namespace, nothing cluster-wide.
 apiVersion: v1
 kind: ServiceAccount
@@ -52,7 +53,8 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/prometheus-configmap.yaml") . | sha256sum }}
         # The scraper stays outside the mesh. mTLS is PERMISSIVE (there is no
         # PeerAuthentication), so each pod's sidecar accepts its plaintext scrape of
-        # :4002, and the panel's chaos AuthorizationPolicies can never catch it.
+        # :4002 (the ankusa pods' admin port) or :4004 (the gateway's metrics port),
+        # and the panel's chaos AuthorizationPolicies can never catch it.
         sidecar.istio.io/inject: "false"
     spec:
       serviceAccountName: prometheus

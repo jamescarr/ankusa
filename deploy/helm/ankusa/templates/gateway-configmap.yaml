@@ -1,0 +1,14 @@
+{{- if .Values.claimCheck.enabled }}
+# The gateway Deployment's own config: the server image refuses `gateway.yml`-only
+# keys' core counterparts (admin, wal, sources, ...), so it never shares the
+# node ConfigMap. See `ankusa.gatewayConfig` in _helpers.tpl.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ankusa.fullname" . }}-claim-check
+  labels:
+    {{- include "ankusa.labels" . | nindent 4 }}
+data:
+  gateway.yml: |
+    {{- include "ankusa.gatewayConfig" . | nindent 4 }}
+{{- end }}

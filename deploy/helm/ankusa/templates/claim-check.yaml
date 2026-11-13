@@ -1,7 +1,8 @@
 {{- if .Values.claimCheck.enabled }}
 {{- $fullname := include "ankusa.fullname" . }}
-# The claim-check gateway: the same image and config, one role. It reads the claim
-# bucket, owns no store, and can scale on its own.
+# The claim-check gateway: the gateway image (`jamescarr/ankusa-gateway`, no core
+# role), reading the claim bucket from its own gateway.yml. It owns no store and
+# can scale on its own.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -27,7 +28,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/config: {{ include (print $.Template.BasePath "/gateway-configmap.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -51,7 +52,7 @@ spec:
       {{- end }}
       containers:
         - name: claim-check
-          image: {{ include "ankusa.image" . | quote }}
+          image: {{ include "ankusa.gatewayImage" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- if gt (int .Values.nofile) 0 }}
           command: ["/bin/sh", "-c", "ulimit -n {{ int .Values.nofile }} && exec /sbin/tini -- /usr/local/bin/docker-entrypoint start"]
@@ -61,12 +62,8 @@ spec:
           ports:
             - {name: claim, containerPort: 4001}
           env:
-            - {name: ANKUSA_ROLES, value: claim_check}
             - {name: RELEASE_TMP, value: /tmp}
             {{- with include "ankusa.tokenEnv" (dict "var" "ANKUSA_CLAIM_CHECK_TOKEN" "ref" .Values.claimCheck.tokenSecret) }}
-            {{- . | trim | nindent 12 }}
-            {{- end }}
-            {{- with include "ankusa.tokenEnv" (dict "var" "ANKUSA_ADMIN_TOKEN" "ref" .Values.admin.tokenSecret) }}
             {{- . | trim | nindent 12 }}
             {{- end }}
             {{- with .Values.extraEnv }}
@@ -76,7 +73,8 @@ spec:
           envFrom:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          # The gateway has no /ready: /health answers while it can read its store.
+          # /health answers while the process does; /ready (503 + Retry-After) while
+          # the gateway cannot serve: a store it cannot reach, a drain.
           startupProbe:
             httpGet: {path: /health, port: claim}
             {{- toYaml .Values.probes.startup | nindent 12 }}
@@ -84,12 +82,12 @@ spec:
             httpGet: {path: /health, port: claim}
             {{- toYaml .Values.probes.liveness | nindent 12 }}
           readinessProbe:
-            httpGet: {path: /health, port: claim}
+            httpGet: {path: /ready, port: claim}
             {{- toYaml .Values.probes.readiness | nindent 12 }}
           resources:
             {{- toYaml .Values.claimCheck.resources | nindent 12 }}
           volumeMounts:
-            - {name: config, mountPath: /etc/ankusa/ankusa.yml, subPath: ankusa.yml, readOnly: true}
+            - {name: config, mountPath: /etc/ankusa/gateway.yml, subPath: gateway.yml, readOnly: true}
             - {name: data, mountPath: /var/lib/ankusa}
             - {name: tmp, mountPath: /tmp}
             {{- with .Values.extraVolumeMounts }}
@@ -97,7 +95,7 @@ spec:
             {{- end }}
       volumes:
         - name: config
-          configMap: {name: {{ $fullname }}}
+          configMap: {name: {{ $fullname }}-claim-check}
         - name: tmp
           emptyDir: {sizeLimit: 256Mi}
         - name: data

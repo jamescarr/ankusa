@@ -15,7 +15,7 @@ defmodule AnkusaServer.Config do
        with no default is a startup failure naming the dotted key, not a
        silently empty secret; `${NAME:-}` is how a file asks for empty.
        `${file:/abs/path}` and `${sm:<provider>:<ref>}` (a secret manager under
-       `secrets.providers`) are resolved by `AnkusaServer.Secrets` once the
+       `secrets.providers`) are resolved by `AnkusaGatewayServer.Secrets` once the
        environment overrides are in, and a source's `secret_file:` is
        `secret:` read from a file; see that module for the outage rule and
        `AnkusaServer.Reload` for what a reload does with them.
@@ -27,7 +27,7 @@ defmodule AnkusaServer.Config do
        enum value, with the dotted path in the message. Then it builds the
        `Ankusa.Config` the framework runs on and runs core's own validation.
 
-  Every failure raises `AnkusaServer.ConfigError`, which `load_or_halt!/0` turns
+  Every failure raises `AnkusaGatewayServer.ConfigError`, which `load_or_halt!/0` turns
   into an exit-78 (`EX_CONFIG`) instead of a crash dump, on boot and in
   `docker run jamescarr/ankusa check-config` alike — the latter prints the same
   message without starting anything.
@@ -83,7 +83,10 @@ defmodule AnkusaServer.Config do
 
   require Logger
 
-  alias AnkusaServer.ConfigError
+  import AnkusaGatewayServer.Schema
+  import AnkusaGatewayServer.Sections
+
+  alias AnkusaGatewayServer.{ConfigError, Document, GatewaySection}
 
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
@@ -92,23 +95,10 @@ defmodule AnkusaServer.Config do
   @root_keys ~w(config_version node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check gateway backup sources source_store secrets lifecycle egress audit tenants queue archive health)
   @health_keys ~w(sink_error_window_ms)
   @log_keys ~w(level banner format)
-  @tracing_keys ~w(enabled otlp_endpoint sample_ratio)
-  @default_otlp_endpoint "http://localhost:4318"
   @http_keys ~w(port max_body_bytes routing prefix store_headers)
   @store_headers_keys ~w(drop hash)
   @store_headers_fields %{"drop" => :drop, "hash" => :hash}
   @admin_keys ~w(enabled port ip gauge_interval_ms tls auth)
-  @listener_keys ~w(tls max_connections num_acceptors read_timeout_ms body_read_timeout_ms request_deadline_ms max_requests_per_connection max_header_count max_header_length http2 drain_delay_ms drain_timeout_ms)
-  @metrics_keys ~w(enabled port ip tls detail max_series_per_metric)
-  @metrics_details ~w(tenant source none)
-  @tls_keys ~w(certfile keyfile cacertfile verify versions ciphers)
-  @auth_keys ~w(mode allow_insecure tokens jwt mtls)
-  @auth_modes ~w(none token jwt mtls)
-  @auth_token_keys ~w(id token sha256 scopes)
-  @auth_jwt_keys ~w(issuer audience jwks_url keys refresh_ms min_refresh_ms leeway_s scope_claim tenants_claim)
-  @auth_mtls_keys ~w(subject_map)
-  @tls_verifies ~w(verify_none verify_peer)
-  @tls_versions %{"tlsv1.2" => :"tlsv1.2", "tlsv1.3" => :"tlsv1.3"}
   @batcher_keys ~w(partitions max_batch max_commits group_commit_max_bytes group_commit_max_records group_commit_delay_ms max_delay_ms max_queue max_queue_bytes)
   @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms sink_concurrency breaker_failures breaker_open_ms breaker_max_open_ms max_retry_after_ms retry tenants)
   @dispatch_tenant_keys ~w(max_inflight max_inflight_bytes concurrency)
@@ -118,45 +108,11 @@ defmodule AnkusaServer.Config do
   @intake_keys ~w(type node_id fleet topic kafka publish_timeout_ms reconcile_deadline_ms breaker_failures probe_ms retry_after_s offset_flush_ms pending max_record_bytes recover_on_boot verify_topic)
   @intake_pending_keys ~w(max_records max_bytes)
   @intake_kafka_keys ~w(brokers ssl sasl)
-  @storage_keys ~w(type roll_bytes roll_ms max_segments_per_tick key_prefix s3 gcs catalogue_retention_days)
   @blob_store_keys ~w(type root s3 gcs)
-  # The transport options of `Ankusa.BlobStore.Options`, in milliseconds or bytes
-  # as named; the core range-checks them when the instance starts.
-  @blob_transport_keys ~w(timeout_ms upload_timeout_ms op_deadline_ms multipart_threshold_bytes
-                          multipart_part_bytes retries breaker_failures breaker_open_ms
-                          breaker_slow_ms pool_size pool_count pool_timeout)
-  @blob_transport_options Map.new(@blob_transport_keys, &{&1, String.to_atom(&1)})
-  @s3_keys ~w(bucket region endpoint access_key_id secret_access_key session_token sse) ++
-             @blob_transport_keys
-  @gcs_keys ~w(bucket endpoint auth token sse) ++ @blob_transport_keys
-  @sse_keys ~w(type key_id)
-  @sse_types %{"aes256" => :aes256, "kms" => :kms}
-  @secrets_keys ~w(kek kek_previous providers cache_ttl_ms)
-  @claim_check_keys ~w(retention_days redeem_grace_ms sweep_max_objects bucket_expiry_days
-                       pack_max_bytes store stores placement key_layout store_cooldown_ms
-                       read_deadline_ms read_timeout_ms read_retries read_max_inflight read_queue_max
-                       read_cache_bytes read_cache_max_entry_bytes
-                       ref_signing_keys ref_ttl_ms accept_unsigned_refs)
-  # The `claim_check` keys `config_version: 2` moved to `gateway:`, and where.
-  @claim_check_moved %{
-    "port" => "gateway.port",
-    "ip" => "gateway.ip",
-    "tls" => "gateway.tls",
-    "auth" => "gateway.auth",
-    "max_concurrent_reads" => "gateway.max_concurrent_requests",
-    "integrity_check" => "gateway.claims.integrity_check"
-  }
-  @gateway_keys ~w(port ip tls auth max_concurrent_requests claims)
-  @gateway_auth_keys ~w(allow_insecure authenticators)
-  @gateway_authenticator_types ~w(token jwt mtls)
-  @gateway_token_keys ~w(id token sha256 scopes groups claims)
-  @gateway_jwt_keys @auth_jwt_keys ++ ~w(groups_claim header subject_prefix)
-  @gateway_claims_keys ~w(enabled policy integrity_check)
   @backup_keys ~w(enabled interval_ms keep store secondary timeout_ms verify_interval_ms
                   signing_key final_timeout_ms max_age_ms require_fresh)
   @source_store_keys ~w(type url namespace tick_ms timeout_ms load_timeout_ms)
   @lifecycle_keys ~w(sinks)
-  @egress_keys ~w(allow_insecure_http deny_cidrs allow_cidrs allow_hosts deny_hosts pools)
   @routes_keys ~w(enabled max_routes memory_budget_bytes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
   @routes_store_keys ~w(type url namespace tick_ms timeout_ms load_timeout_ms)
   # Keys a Redis store owns (`routes.store`, `source_store`); the other store
@@ -178,7 +134,6 @@ defmodule AnkusaServer.Config do
   @rate_limit_sources_keys ~w(default)
   @source_limit_keys ~w(bytes_per_second burst_bytes)
   @quarantine_keys ~w(burst rate max_bytes retention_days)
-  @egress_pools_keys ~w(pool_size pool_count pool_timeout pool_max_idle_ms conn_max_idle_ms max_pools max_pools_per_tenant protocols)
   @audit_keys ~w(retention_days max_rows max_bytes outbox_max_backlog)
   @queue_keys ~w(dlq rocksdb max_oldest_due_ms)
   @dlq_keys ~w(retention_days max_rows max_bytes)
@@ -260,8 +215,6 @@ defmodule AnkusaServer.Config do
   @sink_types ~w(log http rabbitmq kafka nats redis sqs google_pubsub)
   @policies ~w(reject quarantine accept_flag)
   @routings ~w(path tenant_path)
-  @log_levels ~w(debug info warning error)
-  @log_formats ~w(text json)
   @exchange_types ~w(topic direct fanout headers)
 
   # The version of the file format this image reads (`config_version`). A file
@@ -273,11 +226,11 @@ defmodule AnkusaServer.Config do
   # that renames or moves a key adds its step here and bumps `@config_version`;
   # the files of the older version keep loading. A remote capture: a module
   # attribute cannot hold a local one.
-  @migrations %{1 => &__MODULE__.migrate_gateway_keys/1}
+  @migrations %{1 => &AnkusaGatewayServer.Document.migrate_gateway_keys/1}
 
   @typedoc """
   A loaded config plus the log level and banner switch the file asked for, and
-  what its `${file:}` / `${sm:}` references resolved to (`AnkusaServer.Secrets`).
+  what its `${file:}` / `${sm:}` references resolved to (`AnkusaGatewayServer.Secrets`).
   `doc` is the document the config was built from, with every substitution made:
   `AnkusaServer.Reload` compares two of them to find the keys a reload changes.
   """
@@ -287,45 +240,41 @@ defmodule AnkusaServer.Config do
           doc: map(),
           log: %{format: :text | :json, level: Logger.level()},
           banner: boolean(),
-          tracing: tracing(),
-          secrets: AnkusaServer.Secrets.t()
+          tracing: AnkusaGatewayServer.Sections.tracing(),
+          secrets: AnkusaGatewayServer.Secrets.t()
         }
-
-  @typedoc """
-  The `tracing` section: whether the image runs an OpenTelemetry SDK
-  (`AnkusaServer.Tracing`), where it exports to, and the share of root traces
-  it keeps. Not part of `Ankusa.Config`: it configures the image, not an instance.
-  """
-  @type tracing :: %{
-          enabled: boolean(),
-          otlp_endpoint: String.t(),
-          sample_ratio: float()
-        }
-
-  # `${NAME}`, `${NAME:-default}`, `${file:/path}`, `${sm:provider:ref}`. A file
-  # path or a reference holds no `$` or `}`: `${file:${DIR}/key}` is spelled
-  # `secret_file: ${DIR}/key`.
-  @var_re ~r/\$\{(?:file:([^}$]+)|sm:([a-z0-9_-]+):([^}$]+)|([A-Z0-9_]+)(?::-([^}]*))?)\}/
 
   @doc """
   Read, interpolate, validate, and translate the config file.
 
   Options: `:env` (an environment map, default `System.get_env/0`), `:path`
   (overrides `ANKUSA_CONFIG`, used by tests and `--config`-style callers),
-  `:secrets` (the `AnkusaServer.Secrets` of the load this one follows: a
+  `:secrets` (the `AnkusaGatewayServer.Secrets` of the load this one follows: a
   reference that fails keeps its value from there, see `AnkusaServer.Reload`)
   and `refresh: true` (ignore `secrets.cache_ttl_ms`).
   """
   @spec load!(keyword()) :: loaded()
   def load!(opts \\ []) do
     env = Keyword.get(opts, :env, System.get_env())
-    raw = opts |> Keyword.get(:path) |> read!(env) |> migrate!()
+
+    raw =
+      opts
+      |> Keyword.get(:path)
+      |> Document.read!(env,
+        default_path: @default_path,
+        fallback_path: @fallback_path,
+        on_missing: fn ->
+          Logger.warning("[ankusa] no config file found; starting with defaults and no sources")
+          %{}
+        end
+      )
+      |> migrate!()
 
     {doc, secrets} =
       raw
-      |> interpolate(env, [])
+      |> Document.interpolate(env, [], secret_file_site?: &secret_file_site?/1)
       |> apply_env_overrides(env)
-      |> AnkusaServer.Secrets.resolve(
+      |> AnkusaGatewayServer.Secrets.resolve(
         Keyword.get(opts, :secrets),
         Keyword.take(opts, [:refresh])
       )
@@ -343,124 +292,6 @@ defmodule AnkusaServer.Config do
     }
   end
 
-  @doc false
-  # The document at `current`: `config_version` (1 when absent) and every step
-  # of `migrations` from there up. A version this image does not know, in either
-  # direction, is an error: an older image must not guess at a newer file.
-  @spec migrate!(map(), pos_integer(), %{pos_integer() => (map() -> map())}) :: map()
-  def migrate!(doc, current \\ @config_version, migrations \\ @migrations) do
-    path = ["config_version"]
-
-    version =
-      case Map.get(doc, "config_version") do
-        nil -> 1
-        version when is_integer(version) and version >= 1 -> version
-        other -> raise ConfigError, message: type_error(path, "a positive integer", other)
-      end
-
-    if version > current do
-      raise ConfigError,
-        message:
-          "config_version: #{version} is newer than this image reads (up to #{current}); " <>
-            "run an image that reads it, or lower config_version"
-    end
-
-    doc =
-      Enum.reduce(version..current//1, doc, fn
-        ^current, doc ->
-          doc
-
-        from, doc ->
-          case migrations do
-            %{^from => step} ->
-              step.(doc)
-
-            _ ->
-              raise ConfigError,
-                message: "config_version: no migration from version #{from} to #{from + 1}"
-          end
-      end)
-
-    Map.put(doc, "config_version", current)
-  end
-
-  @doc false
-  # Version 1 -> 2 (ADR 0005): the gateway left core, and its keys left
-  # `claim_check:` for `gateway:`. `claim_check.port|ip|tls` become
-  # `gateway.port|ip|tls`, `max_concurrent_reads` becomes
-  # `gateway.max_concurrent_requests`, `integrity_check` becomes
-  # `gateway.claims.integrity_check`, and the `auth` block (one `mode` and its
-  # block) becomes `gateway.auth` with one authenticator of that type (none for
-  # `mode: none`). A target the file already sets is an error, never a silent
-  # winner; so is a `${…}` mode, which cannot be read before substitution.
-  @spec migrate_gateway_keys(map()) :: map()
-  def migrate_gateway_keys(%{"claim_check" => %{} = claim_check} = doc) do
-    moved = Map.take(claim_check, Map.keys(@claim_check_moved))
-
-    if moved == %{} do
-      doc
-    else
-      gateway =
-        case Map.get(doc, "gateway") do
-          nil -> %{}
-          %{} = gateway -> gateway
-          other -> raise ConfigError, message: type_error(["gateway"], "a mapping", other)
-        end
-
-      gateway =
-        Enum.reduce(moved, gateway, fn {key, value}, gateway ->
-          target = gateway_target(key)
-
-          if get_in(gateway, target) != nil do
-            raise ConfigError,
-              message: "claim_check.#{key} and gateway.#{Enum.join(target, ".")} are both set"
-          end
-
-          put_path(gateway, target, migrated_value(key, value))
-        end)
-
-      doc
-      |> Map.put("claim_check", Map.drop(claim_check, Map.keys(moved)))
-      |> Map.put("gateway", gateway)
-    end
-  end
-
-  def migrate_gateway_keys(doc), do: doc
-
-  defp gateway_target("max_concurrent_reads"), do: ["max_concurrent_requests"]
-  defp gateway_target("integrity_check"), do: ["claims", "integrity_check"]
-  defp gateway_target(key), do: [key]
-
-  defp migrated_value("auth", %{} = auth) do
-    mode = Map.get(auth, "mode")
-
-    if is_binary(mode) and String.contains?(mode, "${") do
-      raise ConfigError,
-        message:
-          "claim_check.auth.mode: a templated mode cannot be migrated; write gateway.auth " <>
-            "and set config_version: 2"
-    end
-
-    authenticators =
-      case mode do
-        none when none in [nil, "none"] -> []
-        "token" -> [%{"type" => "token", "tokens" => Map.get(auth, "tokens")}]
-        "jwt" -> [Map.put(Map.get(auth, "jwt") || %{}, "type", "jwt")]
-        "mtls" -> [Map.put(Map.get(auth, "mtls") || %{}, "type", "mtls")]
-        other -> raise ConfigError, message: "claim_check.auth.mode: " <> unknown(other)
-      end
-
-    case Map.fetch(auth, "allow_insecure") do
-      {:ok, allow} -> %{"allow_insecure" => allow, "authenticators" => authenticators}
-      :error -> %{"authenticators" => authenticators}
-    end
-  end
-
-  defp migrated_value(_key, value), do: value
-
-  defp unknown(value),
-    do: "unknown value #{inspect(value)}; expected one of #{Enum.join(@auth_modes, ", ")}"
-
   @doc """
   `load!/0` for the callers that run on the file: boot, and the `check-config`
   and `print-config` commands. A `ConfigError` is printed to stderr as
@@ -476,132 +307,12 @@ defmodule AnkusaServer.Config do
       System.halt(78)
   end
 
-  # ── 1. locate + parse ───────────────────────────────────────────────────────
-
-  defp read!(path_override, env) do
-    case path_override || env["ANKUSA_CONFIG"] do
-      nil -> read_any!(env)
-      path -> read_yaml!(path, env)
-    end
-  end
-
-  defp read_any!(env) do
-    cond do
-      File.exists?(@default_path) ->
-        read_yaml!(@default_path, env)
-
-      File.exists?(@fallback_path) ->
-        read_yaml!(@fallback_path, env)
-
-      true ->
-        Logger.warning("[ankusa] no config file found; starting with defaults and no sources")
-        %{}
-    end
-  end
-
-  defp read_yaml!(path, env) do
-    case YamlElixir.read_from_file(path) do
-      {:ok, nil} ->
-        %{}
-
-      {:ok, doc} when is_map(doc) ->
-        doc
-
-      {:ok, other} ->
-        raise ConfigError,
-          message: "#{path}: expected a YAML mapping at the top level, got #{inspect(other)}"
-
-      {:error, %YamlElixir.FileNotFoundError{}} ->
-        raise ConfigError, message: "config file #{path} not found#{configured_by(env, path)}"
-
-      {:error, error} ->
-        raise ConfigError, message: "#{path}: #{Exception.message(error)}"
-    end
-  end
-
-  defp configured_by(env, path) do
-    if env["ANKUSA_CONFIG"] == path, do: " (ANKUSA_CONFIG)", else: ""
-  end
-
-  # ── 2. interpolate ──────────────────────────────────────────────────────────
-
-  defp interpolate(value, env, path) when is_map(value) do
-    value = Map.new(value, fn {k, v} -> {k, interpolate(v, env, path ++ [k])} end)
-    if secret_file_site?(path), do: expand_secret_file(value, path), else: value
-  end
-
-  defp interpolate(value, env, path) when is_list(value) do
-    value
-    |> Enum.with_index()
-    |> Enum.map(fn {v, i} -> interpolate(v, env, path ++ [i]) end)
-  end
-
-  defp interpolate(value, env, path) when is_binary(value) do
-    # Whatever in the file still reads `${` once the references are taken out
-    # did not match the grammar (`${stripe_secret}`, `${A-B}`): left alone it
-    # would become a literal secret or URL, so it is an error. Only the template
-    # is checked: a substituted value may contain `${` itself.
-    if value |> then(&Regex.replace(@var_re, &1, "")) |> String.contains?("${") do
-      raise ConfigError,
-        message:
-          "#{render_path(path)}: unresolved ${…} (use ${NAME}, ${NAME:-default}, " <>
-            "${file:/abs/path} or ${sm:<provider>:<ref>}; variable names are [A-Z0-9_]+; " <>
-            "use ${NAME:-} for an empty default)"
-    end
-
-    value
-    |> parts()
-    |> Enum.map(&substitute(&1, env, path))
-    |> AnkusaServer.Secrets.template(path)
-  end
-
-  defp interpolate(value, _env, _path), do: value
-
-  # The value as literal text and references, in order. A variable is
-  # substituted here; a file or secret manager reference stays for
-  # `AnkusaServer.Secrets`, so a file that cannot be read fails with the
-  # same dotted key as an unset variable.
-  defp parts(value) do
-    {parts, position} =
-      @var_re
-      |> Regex.scan(value, return: :index)
-      |> Enum.reduce({[], 0}, fn [{start, length} | groups], {parts, position} ->
-        literal = binary_part(value, position, start - position)
-        {[reference(value, groups) | [literal | parts]], start + length}
-      end)
-
-    tail = binary_part(value, position, byte_size(value) - position)
-    Enum.reverse([tail | parts])
-  end
-
-  defp reference(value, groups) do
-    case Enum.map(groups, &group(value, &1)) do
-      [file | _] when is_binary(file) -> {:file, file}
-      [_file, name, ref | _] when is_binary(name) -> {:sm, name, ref}
-      [_file, _name, _ref, var, default] -> {:var, var, default}
-      [_file, _name, _ref, var] -> {:var, var, nil}
-    end
-  end
-
-  # An optional group that did not take part is `{-1, 0}` (or is cut off the end).
-  defp group(_value, {-1, _length}), do: nil
-  defp group(value, {start, length}), do: binary_part(value, start, length)
-
-  defp substitute({:var, name, default}, env, path) do
-    case Map.fetch(env, name) do
-      {:ok, replacement} ->
-        replacement
-
-      # An empty default is still a default: `${NAME:-}` is how a file asks for empty.
-      :error when is_binary(default) ->
-        default
-
-      :error ->
-        raise ConfigError, message: "#{render_path(path)}: ${#{name}} is not set"
-    end
-  end
-
-  defp substitute(part, _env, _path), do: part
+  @doc false
+  # The document at `current` (`AnkusaGatewayServer.Document.migrate!/3`), with
+  # this image's version and migrations by default.
+  @spec migrate!(map(), pos_integer(), %{pos_integer() => (map() -> map())}) :: map()
+  def migrate!(doc, current \\ @config_version, migrations \\ @migrations),
+    do: Document.migrate!(doc, current, migrations)
 
   # `secret_file:` is `secret:` read from a file (one path, or a list for a
   # rotation window). It means something only where a `secret` does: a verifier,
@@ -611,37 +322,6 @@ defmodule AnkusaServer.Config do
   defp secret_file_site?(["sources", _id, "sinks", index]) when is_integer(index), do: true
   defp secret_file_site?(["lifecycle", "sinks", index]) when is_integer(index), do: true
   defp secret_file_site?(_path), do: false
-
-  defp expand_secret_file(%{"secret_file" => files} = map, path) do
-    if Map.has_key?(map, "secret") do
-      raise ConfigError,
-        message: "#{render_path(path)}: secret and secret_file are mutually exclusive"
-    end
-
-    key_path = path ++ ["secret_file"]
-
-    secret =
-      case files do
-        [_ | _] ->
-          files
-          |> Enum.with_index()
-          |> Enum.map(fn {file, i} -> file_ref!(file, key_path ++ [i]) end)
-
-        file ->
-          file_ref!(file, key_path)
-      end
-
-    map |> Map.delete("secret_file") |> Map.put("secret", secret)
-  end
-
-  defp expand_secret_file(map, _path), do: map
-
-  defp file_ref!(file, path) when is_binary(file) and file != "",
-    do: AnkusaServer.Secrets.file_template(file, path)
-
-  defp file_ref!(other, path),
-    do:
-      raise(ConfigError, message: type_error(path, "a file path or a list of file paths", other))
 
   # ── 3. env overrides ────────────────────────────────────────────────────────
 
@@ -682,23 +362,16 @@ defmodule AnkusaServer.Config do
   ]
 
   defp apply_env_overrides(doc, env) do
-    doc = Enum.reduce(@env_overrides, doc, &override(&2, &1, env))
+    doc = Document.apply_overrides(doc, env, @env_overrides)
     doc = Enum.reduce(@token_overrides, doc, &token_override(&2, &1, env))
-    doc = claim_check_token(doc, env)
+    doc = Document.claim_check_token(doc, env)
 
     # `PORT` is the fallback every container platform sets; `ANKUSA_HTTP_PORT`
     # is the explicit one and wins.
     case {env["ANKUSA_HTTP_PORT"], env["PORT"]} do
       {nil, nil} -> doc
-      {nil, port} -> put_path(doc, ["http", "port"], port)
-      {port, _} -> put_path(doc, ["http", "port"], port)
-    end
-  end
-
-  defp override(doc, {var, path}, env) do
-    case Map.fetch(env, var) do
-      {:ok, value} -> put_path(doc, path, value)
-      :error -> doc
+      {nil, port} -> Document.put_path(doc, ["http", "port"], port)
+      {port, _} -> Document.put_path(doc, ["http", "port"], port)
     end
   end
 
@@ -713,120 +386,18 @@ defmodule AnkusaServer.Config do
           "tokens" => [%{"id" => var, "token" => token, "scopes" => scopes}]
         }
 
-        put_path(doc, path ++ ["auth"], auth)
+        Document.put_path(doc, path ++ ["auth"], auth)
 
       :error ->
         doc
     end
   end
-
-  # The gateway's token: its authenticator list becomes one `token`
-  # authenticator holding it, and `gateway.auth`'s other keys
-  # (`allow_insecure`) are kept as the file has them.
-  defp claim_check_token(doc, env) do
-    case Map.fetch(env, "ANKUSA_CLAIM_CHECK_TOKEN") do
-      {:ok, ""} ->
-        raise ConfigError, message: "ANKUSA_CLAIM_CHECK_TOKEN is set but empty"
-
-      {:ok, token} ->
-        authenticators = [
-          %{
-            "type" => "token",
-            "tokens" => [
-              %{
-                "id" => "ANKUSA_CLAIM_CHECK_TOKEN",
-                "token" => token,
-                "scopes" => ["claims:read", "tenant:*"]
-              }
-            ]
-          }
-        ]
-
-        put_path(doc, ["gateway", "auth", "authenticators"], authenticators)
-
-      :error ->
-        doc
-    end
-  end
-
-  # A section that is present but empty (`http:` with every child commented
-  # out) parses as nil and takes the override like a missing one. Any other
-  # non-map is left alone for the walker to reject with its type error.
-  defp put_path(nil, path, value), do: put_path(%{}, path, value)
-  defp put_path(doc, [key], value) when is_map(doc), do: Map.put(doc, key, value)
-
-  defp put_path(doc, [key | rest], value) when is_map(doc),
-    do: Map.put(doc, key, put_path(doc[key], rest, value))
-
-  defp put_path(doc, _path, _value), do: doc
 
   # ── 4. validate + translate ─────────────────────────────────────────────────
-
-  # The log section: the level the node starts at (`Ankusa.LogLevel`, also
-  # changeable at runtime) and the format of every line (`AnkusaServer.LogFormatter`).
-  defp log!(doc) do
-    log = section!(doc, "log", @log_keys, [])
-    level = enum!(log["level"] || "info", @log_levels, ["log", "level"])
-    format = enum!(log["format"] || "text", @log_formats, ["log", "format"])
-
-    %{
-      format: if(format == "json", do: :json, else: :text),
-      level: String.to_existing_atom(level)
-    }
-  end
 
   defp banner?(doc) do
     log = section!(doc, "log", @log_keys, [])
     bool_opt(log, "banner", ["log"]) != false
-  end
-
-  # `tracing:` configures the image's OpenTelemetry SDK, not an instance, so it
-  # is read beside `log:` rather than into `Ankusa.Config`.
-  defp tracing!(doc) do
-    path = ["tracing"]
-    tracing = section!(doc, "tracing", @tracing_keys, [])
-
-    %{
-      enabled: bool_opt(tracing, "enabled", path) == true,
-      otlp_endpoint: otlp_endpoint!(tracing),
-      sample_ratio: sample_ratio!(tracing)
-    }
-  end
-
-  # The value is never echoed: an endpoint may be pasted with credentials in it,
-  # and the collector's own credentials belong in `OTEL_EXPORTER_OTLP_HEADERS`.
-  defp otlp_endpoint!(tracing) do
-    case string_opt(tracing, "otlp_endpoint", ["tracing"]) do
-      nil ->
-        @default_otlp_endpoint
-
-      endpoint ->
-        case URI.parse(endpoint) do
-          %URI{scheme: scheme, host: host, userinfo: nil}
-          when scheme in ["http", "https"] and is_binary(host) and host != "" ->
-            endpoint
-
-          _ ->
-            raise ConfigError,
-              message:
-                "tracing.otlp_endpoint: expected an http:// or https:// URL with a host and " <>
-                  "no user:password (the collector's credentials go in OTEL_EXPORTER_OTLP_HEADERS)"
-        end
-    end
-  end
-
-  defp sample_ratio!(tracing) do
-    case number_opt(tracing, "sample_ratio", ["tracing"]) do
-      nil ->
-        1.0
-
-      ratio when ratio >= 0 and ratio <= 1 ->
-        ratio / 1
-
-      other ->
-        raise ConfigError,
-          message: "tracing.sample_ratio: expected a number from 0 to 1, got #{inspect(other)}"
-    end
   end
 
   defp config!(doc) do
@@ -834,7 +405,7 @@ defmodule AnkusaServer.Config do
 
     egress = egress_policy!(doc)
     gateway? = gateway_role?(doc)
-    gateway = gateway_section(doc, gateway?)
+    gateway = GatewaySection.parse!(doc, check_exposure: gateway?)
 
     opts =
       node_section(doc) ++
@@ -1022,256 +593,6 @@ defmodule AnkusaServer.Config do
         |> put_opt(:tls, tls_opt(admin, ["admin"]))
         |> put_opt(:auth, auth_opt(admin, ["admin"]))
     ]
-  end
-
-  # ── listener / metrics / tls ────────────────────────────────────────────────
-
-  defp listener_section(doc) do
-    listener = section!(doc, "listener", @listener_keys, [])
-    path = ["listener"]
-
-    [
-      listener:
-        []
-        |> put_opt(:tls, tls_opt(listener, path))
-        |> put_opt(:max_connections, int_opt(listener, "max_connections", path))
-        |> put_opt(:num_acceptors, int_opt(listener, "num_acceptors", path))
-        |> put_opt(:read_timeout_ms, int_opt(listener, "read_timeout_ms", path))
-        |> put_opt(:body_read_timeout_ms, int_opt(listener, "body_read_timeout_ms", path))
-        |> put_opt(:request_deadline_ms, int_opt(listener, "request_deadline_ms", path))
-        |> put_opt(
-          :max_requests_per_connection,
-          int_opt(listener, "max_requests_per_connection", path)
-        )
-        |> put_opt(:max_header_count, int_opt(listener, "max_header_count", path))
-        |> put_opt(:max_header_length, int_opt(listener, "max_header_length", path))
-        |> put_opt(:http2, bool_opt(listener, "http2", path))
-        |> put_opt(:drain_delay_ms, int_opt(listener, "drain_delay_ms", path))
-        |> put_opt(:drain_timeout_ms, int_opt(listener, "drain_timeout_ms", path))
-    ]
-  end
-
-  defp metrics_section(doc) do
-    metrics = section!(doc, "metrics", @metrics_keys, [])
-    path = ["metrics"]
-
-    [
-      metrics:
-        []
-        |> put_opt(:enabled, bool_opt(metrics, "enabled", path))
-        |> put_opt(:port, int_opt(metrics, "port", path))
-        |> put_opt(:ip, string_opt(metrics, "ip", path))
-        |> put_opt(:tls, tls_opt(metrics, path))
-        |> put_opt(:detail, atom_enum_opt(metrics, "detail", @metrics_details, path))
-        |> put_opt(:max_series_per_metric, int_opt(metrics, "max_series_per_metric", path))
-    ]
-  end
-
-  # A listener's `tls` block, or nil (plain HTTP). Core checks the files and
-  # the combination (`verify_peer` needs `cacertfile`).
-  defp tls_opt(parent, path) do
-    case parent["tls"] do
-      nil ->
-        nil
-
-      value ->
-        path = path ++ ["tls"]
-        tls = section!(value, @tls_keys, path)
-
-        []
-        |> put_opt(:certfile, string_opt(tls, "certfile", path))
-        |> put_opt(:keyfile, string_opt(tls, "keyfile", path))
-        |> put_opt(:cacertfile, string_opt(tls, "cacertfile", path))
-        |> put_opt(:verify, atom_enum_opt(tls, "verify", @tls_verifies, path))
-        |> put_opt(:versions, tls_versions(tls, path))
-        |> put_opt(:ciphers, tls["ciphers"] && string_list!(tls["ciphers"], path ++ ["ciphers"]))
-    end
-  end
-
-  defp tls_versions(tls, path) do
-    case tls["versions"] do
-      nil ->
-        nil
-
-      value ->
-        path = path ++ ["versions"]
-
-        value
-        |> string_list!(path)
-        |> Enum.map(&Map.fetch!(@tls_versions, enum!(&1, Map.keys(@tls_versions), path)))
-    end
-  end
-
-  # ── control-plane auth ──────────────────────────────────────────────────────
-
-  # A control plane's `auth` block (`Ankusa.Admin.Auth`), or nil. Core checks
-  # what has to go together: a mode needs its own block, and `mode: none` is
-  # only accepted on loopback.
-  defp auth_opt(parent, path) do
-    case parent["auth"] do
-      nil ->
-        nil
-
-      value ->
-        path = path ++ ["auth"]
-        auth = section!(value, @auth_keys, path)
-
-        []
-        |> put_opt(:mode, atom_enum_opt(auth, "mode", @auth_modes, path))
-        |> put_opt(:allow_insecure, bool_opt(auth, "allow_insecure", path))
-        |> put_opt(:tokens, auth_tokens(auth, path))
-        |> put_opt(:jwt, auth_jwt(auth, path))
-        |> put_opt(:mtls, auth_mtls(auth, path))
-    end
-  end
-
-  defp auth_tokens(auth, path) do
-    case auth["tokens"] do
-      nil ->
-        nil
-
-      list when is_list(list) ->
-        list
-        |> Enum.with_index()
-        |> Enum.map(fn {entry, index} -> auth_token!(entry, path ++ ["tokens", index]) end)
-
-      other ->
-        raise ConfigError,
-          message: type_error(path ++ ["tokens"], "a list of token entries", other)
-    end
-  end
-
-  # A token is given as itself (`token: ${CI_TOKEN}`), hashed here, or as the
-  # hash of one (`sha256:`): the plaintext never reaches `Ankusa.Config`.
-  defp auth_token!(entry, path) do
-    token = section!(entry, @auth_token_keys, path)
-    sha256 = token_sha256!(token, path)
-
-    scopes =
-      case token["scopes"] do
-        nil -> raise ConfigError, message: "#{render_path(path)}: missing required key \"scopes\""
-        value -> string_list!(value, path ++ ["scopes"])
-      end
-
-    %{id: required_string!(token, "id", path), sha256: sha256, scopes: scopes}
-  end
-
-  defp token_sha256!(token, path) do
-    case {token["token"], token["sha256"]} do
-      {nil, nil} ->
-        raise ConfigError, message: "#{render_path(path)}: needs token or sha256"
-
-      {plain, nil} ->
-        plain = expect_string(plain, path ++ ["token"])
-
-        if plain == "",
-          do: raise(ConfigError, message: "#{render_path(path ++ ["token"])}: must not be empty")
-
-        Ankusa.Admin.Auth.Token.hash(plain)
-
-      {nil, hex} ->
-        expect_string(hex, path ++ ["sha256"])
-
-      {_plain, _hex} ->
-        raise ConfigError,
-          message: "#{render_path(path)}: token and sha256 are alternatives; give one"
-    end
-  end
-
-  defp auth_jwt(auth, path) do
-    case auth["jwt"] do
-      nil ->
-        nil
-
-      value ->
-        path = path ++ ["jwt"]
-        value |> section!(@auth_jwt_keys, path) |> jwt_opts(path)
-    end
-  end
-
-  # The keys of a `jwt` block, typed; core checks the ranges and what has to
-  # go together.
-  defp jwt_opts(jwt, path) do
-    []
-    |> put_opt(:issuer, string_opt(jwt, "issuer", path))
-    |> put_opt(:audience, jwt_audience(jwt, path))
-    |> put_opt(:jwks_url, string_opt(jwt, "jwks_url", path))
-    |> put_opt(:keys, jwt_keys(jwt, path))
-    |> put_opt(:refresh_ms, int_opt(jwt, "refresh_ms", path))
-    |> put_opt(:min_refresh_ms, int_opt(jwt, "min_refresh_ms", path))
-    |> put_opt(:leeway_s, int_opt(jwt, "leeway_s", path))
-    |> put_opt(:scope_claim, string_opt(jwt, "scope_claim", path))
-    |> put_opt(:tenants_claim, string_opt(jwt, "tenants_claim", path))
-  end
-
-  # One audience, or several (a token carrying any of them is accepted).
-  defp jwt_audience(jwt, path) do
-    case jwt["audience"] do
-      nil ->
-        nil
-
-      audience when is_binary(audience) ->
-        audience
-
-      list when is_list(list) ->
-        string_list!(list, path ++ ["audience"])
-
-      other ->
-        raise ConfigError, message: type_error(path ++ ["audience"], "a string or a list", other)
-    end
-  end
-
-  # Public keys: JWK mappings, or PEM strings. Core checks each one.
-  defp jwt_keys(jwt, path) do
-    case jwt["keys"] do
-      nil ->
-        nil
-
-      list when is_list(list) ->
-        list
-        |> Enum.with_index()
-        |> Enum.map(fn
-          {key, _index} when is_map(key) or is_binary(key) ->
-            key
-
-          {other, index} ->
-            raise ConfigError,
-              message: type_error(path ++ ["keys", index], "a JWK mapping or a PEM string", other)
-        end)
-
-      other ->
-        raise ConfigError, message: type_error(path ++ ["keys"], "a list of keys", other)
-    end
-  end
-
-  # `subject_map` keys name a certificate identity: `cn:<name>`, `dns:<name>`,
-  # `email:<address>`, `uri:<uri>` or `ip:<address>` (quote them in YAML).
-  defp auth_mtls(auth, path) do
-    case auth["mtls"] do
-      nil ->
-        nil
-
-      value ->
-        path = path ++ ["mtls"]
-        mtls = section!(value, @auth_mtls_keys, path)
-
-        case mtls["subject_map"] do
-          nil ->
-            []
-
-          map when is_map(map) ->
-            [
-              subject_map:
-                Map.new(map, fn {subject, scopes} ->
-                  {to_string(subject),
-                   string_list!(scopes, path ++ ["subject_map", to_string(subject)])}
-                end)
-            ]
-
-          other ->
-            raise ConfigError, message: type_error(path ++ ["subject_map"], "a mapping", other)
-        end
-    end
   end
 
   # ── batcher / dispatch ──────────────────────────────────────────────────────
@@ -1483,403 +804,6 @@ defmodule AnkusaServer.Config do
         |> put_opt(:sasl, sasl(kafka["sasl"], path ++ ["sasl"]))
     end
   end
-
-  defp put_map(map, _key, nil), do: map
-  defp put_map(map, key, value), do: Map.put(map, key, value)
-
-  # ── storage ─────────────────────────────────────────────────────────────────
-
-  defp storage_section(doc) do
-    storage = section!(doc, "storage", @storage_keys, [])
-
-    [
-      storage:
-        [blob_store: blob_store!(storage, ["storage"], false)]
-        |> put_opt(:roll_bytes, int_opt(storage, "roll_bytes", ["storage"]))
-        |> put_opt(:roll_ms, int_opt(storage, "roll_ms", ["storage"]))
-        |> put_opt(
-          :max_segments_per_tick,
-          int_opt(storage, "max_segments_per_tick", ["storage"])
-        )
-        |> put_opt(:key_prefix, string_opt(storage, "key_prefix", ["storage"]))
-        |> put_opt(
-          :catalogue_retention_days,
-          int_opt(storage, "catalogue_retention_days", ["storage"])
-        )
-    ]
-  end
-
-  # `{module, opts}` from a `type: local|s3|gcs` section with its `s3:`/`gcs:`
-  # children: `storage` itself, `claim_check.store` and each entry of
-  # `claim_check.stores`. `root?` allows a LocalFS `root` (only a dedicated
-  # claim store has one; segments live under `data_dir`).
-  defp blob_store!(section, path, root?) do
-    s3 = section!(section, "s3", @s3_keys, path)
-    gcs = section!(section, "gcs", @gcs_keys, path)
-
-    case enum!(section["type"] || "local", ~w(local s3 gcs), path ++ ["type"]) do
-      "local" ->
-        case root? && string_opt(section, "root", path) do
-          root when is_binary(root) -> {Ankusa.BlobStore.LocalFS, [root: root]}
-          _ -> {Ankusa.BlobStore.LocalFS, []}
-        end
-
-      "s3" ->
-        {Ankusa.BlobStore.S3, s3_opts!(s3, path ++ ["s3"])}
-
-      "gcs" ->
-        {Ankusa.BlobStore.GCS, gcs_opts!(gcs, path ++ ["gcs"])}
-    end
-  end
-
-  defp s3_opts!(s3, path) do
-    [
-      bucket: required_string!(s3, "bucket", path),
-      region: required_string!(s3, "region", path)
-    ]
-    |> put_opt(:endpoint, string_opt(s3, "endpoint", path))
-    |> put_opt(:access_key_id, string_opt(s3, "access_key_id", path))
-    |> put_opt(:secret_access_key, string_opt(s3, "secret_access_key", path))
-    |> put_opt(:session_token, string_opt(s3, "session_token", path))
-    |> put_opt(:sse, sse_opt(s3, path))
-    |> Kernel.++(blob_transport_opts(s3, path))
-  end
-
-  defp gcs_opts!(gcs, path) do
-    bucket = required_string!(gcs, "bucket", path)
-
-    ([bucket: bucket]
-     |> put_opt(:endpoint, string_opt(gcs, "endpoint", path))
-     |> put_opt(:sse, sse_opt(gcs, path))
-     |> Kernel.++(blob_transport_opts(gcs, path))) ++
-      gcp_auth!(gcs, path)
-  end
-
-  # `timeout_ms`, `op_deadline_ms`, `multipart_*`, `breaker_*`, `pool_*` … of an
-  # `s3` or `gcs` section, as the adapter options of the same names.
-  defp blob_transport_opts(section, path) do
-    for {key, option} <- @blob_transport_options, value = int_opt(section, key, path) do
-      {option, value}
-    end
-  end
-
-  # `sse: {type: aes256 | kms, key_id: …}` on an `s3` or `gcs` section: the
-  # object store encrypts every object this store writes
-  # (`Ankusa.BlobStore.SSE` says what each provider does with it).
-  defp sse_opt(section, path) do
-    if section["sse"] == nil do
-      nil
-    else
-      sse_path = path ++ ["sse"]
-      sse = section!(section, "sse", @sse_keys, path)
-      type = required_string!(sse, "type", sse_path)
-      type = enum!(type, Map.keys(@sse_types), sse_path ++ ["type"])
-
-      [type: Map.fetch!(@sse_types, type)]
-      |> put_opt(:key_id, string_opt(sse, "key_id", sse_path))
-      |> Map.new()
-    end
-  end
-
-  # The key-encryption keys for secrets at rest (`Ankusa.Crypto.Envelope`).
-  # Both are operator-supplied through `${VAR}`: the file holds the reference,
-  # never the key. `kek_previous` is a list, or one comma-separated string, and
-  # may be empty (`${PREVIOUS_KEKS:-}`).
-  defp secrets_section(doc) do
-    path = ["secrets"]
-    secrets = section!(doc, "secrets", @secrets_keys, [])
-
-    previous =
-      case secrets["kek_previous"] do
-        empty when empty in [nil, [], ""] -> nil
-        keys -> string_list!(keys, path ++ ["kek_previous"])
-      end
-
-    [
-      secrets:
-        []
-        |> put_opt(:kek, string_opt(secrets, "kek", path))
-        |> put_opt(:kek_previous, previous)
-    ]
-  end
-
-  # `auth: metadata | token | none` (default metadata) on any GCP section.
-  defp gcp_auth!(section, path) do
-    case enum!(section["auth"] || "metadata", ~w(metadata token none), path ++ ["auth"]) do
-      "none" ->
-        []
-
-      "metadata" ->
-        [token_provider: {AnkusaServer.GcpToken, :metadata, []}]
-
-      "token" ->
-        [
-          token_provider:
-            {AnkusaServer.GcpToken, :static, [required_string!(section, "token", path)]}
-        ]
-    end
-  end
-
-  # ── claim check ─────────────────────────────────────────────────────────────
-
-  defp claim_check_section(doc) do
-    moved!(doc["claim_check"])
-    claim_check = section!(doc, "claim_check", @claim_check_keys, [])
-    path = ["claim_check"]
-
-    [
-      claim_check:
-        []
-        |> put_opt(:pack_max_bytes, int_opt(claim_check, "pack_max_bytes", path))
-        |> put_opt(:retention_days, int_opt(claim_check, "retention_days", path))
-        |> put_opt(:redeem_grace_ms, int_opt(claim_check, "redeem_grace_ms", path))
-        |> put_opt(:sweep_max_objects, int_opt(claim_check, "sweep_max_objects", path))
-        |> put_opt(:bucket_expiry_days, int_opt(claim_check, "bucket_expiry_days", path))
-        |> put_opt(:blob_stores, claim_stores!(claim_check))
-        |> put_opt(:placement, atom_enum_opt(claim_check, "placement", ~w(ordered hash), path))
-        |> put_opt(:key_layout, atom_enum_opt(claim_check, "key_layout", ~w(flat sharded), path))
-        |> put_opt(:store_cooldown_ms, int_opt(claim_check, "store_cooldown_ms", path))
-        |> put_opt(:read_deadline_ms, int_opt(claim_check, "read_deadline_ms", path))
-        |> put_opt(:read_timeout_ms, int_opt(claim_check, "read_timeout_ms", path))
-        |> put_opt(:read_retries, int_opt(claim_check, "read_retries", path))
-        |> put_opt(:read_max_inflight, int_opt(claim_check, "read_max_inflight", path))
-        |> put_opt(:read_queue_max, int_opt(claim_check, "read_queue_max", path))
-        |> put_opt(:read_cache_bytes, int_opt(claim_check, "read_cache_bytes", path))
-        |> put_opt(
-          :read_cache_max_entry_bytes,
-          int_opt(claim_check, "read_cache_max_entry_bytes", path)
-        )
-        |> put_opt(:ref_signing_keys, ref_signing_keys(claim_check, path))
-        |> put_opt(:ref_ttl_ms, int_opt(claim_check, "ref_ttl_ms", path))
-        |> put_opt(
-          :accept_unsigned_refs,
-          nullable_bool_opt(claim_check, "accept_unsigned_refs", path)
-        )
-    ]
-  end
-
-  # A version-2 file (a version-1 one was migrated) that still names a key the
-  # gateway took: say where it went.
-  defp moved!(%{} = claim_check) do
-    case Enum.find(Map.keys(claim_check), &Map.has_key?(@claim_check_moved, &1)) do
-      nil ->
-        :ok
-
-      key ->
-        raise ConfigError,
-          message: "claim_check.#{key}: moved to #{@claim_check_moved[key]} (config_version 2)"
-    end
-  end
-
-  defp moved!(_other), do: :ok
-
-  # ── gateway ─────────────────────────────────────────────────────────────────
-
-  # The `gateway:` section, as `Ankusa.Gateway.Config` (which checks every
-  # range and cross-key rule; its messages name the dotted key). Validated
-  # whether or not this node runs the gateway, so `check-config` catches a bad
-  # one; an empty chain off loopback is only refused when it does (`gateway?`).
-  defp gateway_section(doc, gateway?) do
-    gateway = section!(doc, "gateway", @gateway_keys, [])
-    path = ["gateway"]
-
-    opts =
-      []
-      |> put_opt(:port, int_opt(gateway, "port", path))
-      |> put_opt(:ip, string_opt(gateway, "ip", path))
-      |> put_opt(:tls, tls_opt(gateway, path))
-      |> put_opt(:max_concurrent_requests, int_opt(gateway, "max_concurrent_requests", path))
-      |> put_opt(:auth, gateway_auth(gateway, path))
-      |> put_opt(:claims, gateway_claims(gateway, path))
-
-    try do
-      Ankusa.Gateway.Config.new(opts, check_exposure: gateway?)
-    rescue
-      error in ArgumentError ->
-        reraise ConfigError, [message: error.message], __STACKTRACE__
-    end
-  end
-
-  defp gateway_auth(gateway, path) do
-    case gateway["auth"] do
-      nil ->
-        nil
-
-      value ->
-        path = path ++ ["auth"]
-        auth = section!(value, @gateway_auth_keys, path)
-
-        []
-        |> put_opt(:allow_insecure, bool_opt(auth, "allow_insecure", path))
-        |> put_opt(:authenticators, gateway_authenticators(auth, path))
-    end
-  end
-
-  defp gateway_authenticators(auth, path) do
-    case auth["authenticators"] do
-      nil ->
-        nil
-
-      list when is_list(list) ->
-        list
-        |> Enum.with_index()
-        |> Enum.map(fn {entry, index} ->
-          authenticator!(entry, path ++ ["authenticators", index])
-        end)
-
-      other ->
-        raise ConfigError,
-          message: type_error(path ++ ["authenticators"], "a list of authenticators", other)
-    end
-  end
-
-  # One authenticator: its `type` picks the keys it may have. The atoms are a
-  # closed set (`enum!/3` first).
-  # sobelow_skip ["DOS.StringToAtom"]
-  defp authenticator!(entry, path) do
-    map = expect_map(entry, path)
-    type = enum!(map["type"], @gateway_authenticator_types, path ++ ["type"])
-    entry = section!(map, ~w(type name) ++ authenticator_keys(type), path)
-
-    [type: String.to_atom(type)]
-    |> put_opt(:name, string_opt(entry, "name", path))
-    |> Kernel.++(authenticator_opts(type, entry, path))
-  end
-
-  defp authenticator_keys("token"), do: ~w(tokens)
-  defp authenticator_keys("jwt"), do: @gateway_jwt_keys
-  defp authenticator_keys("mtls"), do: @auth_mtls_keys
-
-  defp authenticator_opts("token", entry, path) do
-    case entry["tokens"] do
-      list when is_list(list) ->
-        tokens =
-          list
-          |> Enum.with_index()
-          |> Enum.map(fn {token, index} -> gateway_token!(token, path ++ ["tokens", index]) end)
-
-        [tokens: tokens]
-
-      other ->
-        raise ConfigError,
-          message: type_error(path ++ ["tokens"], "a list of token entries", other)
-    end
-  end
-
-  defp authenticator_opts("jwt", entry, path) do
-    entry
-    |> jwt_opts(path)
-    |> put_opt(:groups_claim, string_opt(entry, "groups_claim", path))
-    |> put_opt(:header, string_opt(entry, "header", path))
-    |> put_opt(:subject_prefix, string_opt(entry, "subject_prefix", path))
-  end
-
-  defp authenticator_opts("mtls", entry, path) do
-    case entry["subject_map"] do
-      map when is_map(map) ->
-        [
-          subject_map:
-            Map.new(map, fn {identity, value} ->
-              identity = to_string(identity)
-              {identity, subject_entry(value, path ++ ["subject_map", identity])}
-            end)
-        ]
-
-      other ->
-        raise ConfigError, message: type_error(path ++ ["subject_map"], "a mapping", other)
-    end
-  end
-
-  defp subject_entry(%{} = map, path) do
-    entry = section!(map, ~w(scopes groups), path)
-
-    %{}
-    |> put_map(:scopes, entry["scopes"] && string_list!(entry["scopes"], path ++ ["scopes"]))
-    |> put_map(:groups, entry["groups"] && string_list!(entry["groups"], path ++ ["groups"]))
-  end
-
-  defp subject_entry(scopes, path), do: string_list!(scopes, path)
-
-  # As a control plane's token (`auth_token!/2`): the plaintext is hashed here.
-  defp gateway_token!(entry, path) do
-    token = section!(entry, @gateway_token_keys, path)
-
-    %{id: required_string!(token, "id", path), sha256: token_sha256!(token, path)}
-    |> put_map(:scopes, token["scopes"] && string_list!(token["scopes"], path ++ ["scopes"]))
-    |> put_map(:groups, token["groups"] && string_list!(token["groups"], path ++ ["groups"]))
-    |> put_map(:claims, token["claims"] && expect_map(token["claims"], path ++ ["claims"]))
-  end
-
-  defp gateway_claims(gateway, path) do
-    case gateway["claims"] do
-      nil ->
-        nil
-
-      value ->
-        path = path ++ ["claims"]
-        claims = section!(value, @gateway_claims_keys, path)
-
-        []
-        |> put_opt(:enabled, bool_opt(claims, "enabled", path))
-        |> put_opt(:policy, string_opt(claims, "policy", path))
-        |> put_opt(
-          :integrity_check,
-          atom_enum_opt(claims, "integrity_check", ~w(off manifest), path)
-        )
-    end
-  end
-
-  # `[current, previous...]`: a list, or one comma-separated string (`${VAR}`).
-  # Empty or null leaves the key unset, which means no signing.
-  defp ref_signing_keys(claim_check, path) do
-    case claim_check["ref_signing_keys"] do
-      empty when empty in [nil, [], ""] -> nil
-      keys -> string_list!(keys, path ++ ["ref_signing_keys"])
-    end
-  end
-
-  defp nullable_bool_opt(map, key, path) do
-    if map[key] == nil, do: nil, else: bool_opt(map, key, path)
-  end
-
-  # `store` (one mapping) and `stores` (a list of them, in failover order) both
-  # become `claim_check.blob_stores`; neither (or null) = nil, the storage
-  # bucket.
-  defp claim_stores!(claim_check) do
-    case {claim_check["store"], claim_check["stores"]} do
-      {nil, nil} ->
-        nil
-
-      {_store, nil} ->
-        store = section!(claim_check, "store", @blob_store_keys, ["claim_check"])
-        [blob_store!(store, ["claim_check", "store"], true)]
-
-      {nil, [_ | _] = stores} ->
-        stores
-        |> Enum.with_index()
-        |> Enum.map(fn {entry, index} ->
-          claim_store!(entry, ["claim_check", "stores", index])
-        end)
-
-      {nil, []} ->
-        raise ConfigError, message: "claim_check.stores: must not be empty"
-
-      {nil, other} ->
-        raise ConfigError,
-          message: type_error(["claim_check", "stores"], "a list of stores", other)
-
-      {_store, _stores} ->
-        raise ConfigError,
-          message: "claim_check: store and stores are exclusive; list every store under stores"
-    end
-  end
-
-  defp claim_store!(entry, path) when is_map(entry) do
-    entry |> section!(@blob_store_keys, path) |> blob_store!(path, true)
-  end
-
-  defp claim_store!(entry, path),
-    do: raise(ConfigError, message: type_error(path, "a mapping", entry))
 
   # ── backup ──────────────────────────────────────────────────────────────────
 
@@ -2264,39 +1188,6 @@ defmodule AnkusaServer.Config do
     ]
   end
 
-  # ── egress.pools ────────────────────────────────────────────────────────────
-
-  # Types only; the ranges are core's (`Ankusa.Config`), so `check-config` and an
-  # embedded boot fail with the same message.
-  defp egress_pools(egress) do
-    path = ["egress", "pools"]
-    pools = section!(egress, "pools", @egress_pools_keys, ["egress"])
-
-    []
-    |> put_opt(:pool_size, int_opt(pools, "pool_size", path))
-    |> put_opt(:pool_count, int_opt(pools, "pool_count", path))
-    |> put_opt(:pool_timeout, int_opt(pools, "pool_timeout", path))
-    |> put_opt(:pool_max_idle_ms, int_opt(pools, "pool_max_idle_ms", path))
-    |> put_opt(:conn_max_idle_ms, int_opt(pools, "conn_max_idle_ms", path))
-    |> put_opt(:max_pools, int_opt(pools, "max_pools", path))
-    |> put_opt(:max_pools_per_tenant, int_opt(pools, "max_pools_per_tenant", path))
-    |> put_opt(:protocols, protocols_opt(pools, path))
-  end
-
-  # `http1` and `http2`, a list or one comma-separated string; the closed list is
-  # checked before any atom is made.
-  defp protocols_opt(pools, path) do
-    case pools["protocols"] do
-      nil ->
-        nil
-
-      value ->
-        value
-        |> string_list!(path ++ ["protocols"])
-        |> Enum.map(&String.to_existing_atom(enum!(&1, ~w(http1 http2), path ++ ["protocols"])))
-    end
-  end
-
   # ── audit ───────────────────────────────────────────────────────────────────
 
   # Types only; the range is core's (`Ankusa.Config`), so `check-config` and an
@@ -2373,46 +1264,6 @@ defmodule AnkusaServer.Config do
     tenants = section!(doc, "tenants", @tenants_keys, [])
 
     [tenants: [] |> put_opt(:max, int_opt(tenants, "max", path))]
-  end
-
-  # ── egress ──────────────────────────────────────────────────────────────────
-
-  # The keys the file sets; `Ankusa.Config.new/1` merges them over the defaults.
-  defp egress_given(doc) do
-    egress = section!(doc, "egress", @egress_keys, [])
-    path = ["egress"]
-
-    []
-    |> put_opt(:allow_insecure_http, bool_opt(egress, "allow_insecure_http", path))
-    |> put_opt(:deny_cidrs, egress_list(egress, "deny_cidrs", path))
-    |> put_opt(:allow_cidrs, egress_list(egress, "allow_cidrs", path))
-    |> put_opt(:allow_hosts, egress_list(egress, "allow_hosts", path))
-    |> put_opt(:deny_hosts, egress_list(egress, "deny_hosts", path))
-  end
-
-  # Unlike `string_list!/2`, an empty list is meaningful here (`allow_cidrs: []`,
-  # or `deny_cidrs: []` to take the deny list away).
-  defp egress_list(egress, key, path) do
-    case egress[key] do
-      nil -> nil
-      [] -> []
-      value -> string_list!(value, path ++ [key])
-    end
-  end
-
-  # `egress.pools` is core's, not part of the policy the sinks' URLs are judged
-  # by: it goes to `Ankusa.Config` only, which merges it over its defaults.
-  defp egress_section(doc) do
-    given = Map.new(egress_given(doc))
-
-    case egress_pools(section!(doc, "egress", @egress_keys, [])) do
-      [] -> [egress: given]
-      pools -> [egress: Map.put(given, :pools, Map.new(pools))]
-    end
-  end
-
-  defp egress_policy!(doc) do
-    Map.merge(Ankusa.HttpClient.Egress.default_policy(), Map.new(egress_given(doc)))
   end
 
   # `https` only, unless `egress.allow_insecure_http`. Judged on the URL's shape,
@@ -2566,7 +1417,7 @@ defmodule AnkusaServer.Config do
   as a YAML `sources.<id>` entry — into `Ankusa.Source.new/2` options.
 
   This is the decoder `Ankusa.SourceStore.Persistent` runs over every write, so
-  validation is identical to the file's: a bad spec raises `AnkusaServer.ConfigError`
+  validation is identical to the file's: a bad spec raises `AnkusaGatewayServer.ConfigError`
   with the same dotted-path message the YAML walker produces.
   """
   @spec source_from_map!(String.t(), map()) :: keyword()
@@ -3531,199 +2382,4 @@ defmodule AnkusaServer.Config do
         :ok
     end
   end
-
-  # ── schema helpers ──────────────────────────────────────────────────────────
-
-  # A nested mapping of known keys. nil — absent, or present with every child
-  # commented out — is an empty section.
-  defp section!(parent, key, allowed, path), do: section!(parent[key], allowed, path ++ [key])
-
-  defp section!(value, allowed, path) do
-    section = expect_map(value, path)
-    check_keys!(section, allowed, path)
-    section
-  end
-
-  defp check_keys!(map, allowed, path) do
-    Enum.each(map, fn {key, _value} ->
-      unless key in allowed do
-        raise ConfigError, message: "#{render_path(path)}: unknown key \"#{key}\""
-      end
-    end)
-  end
-
-  defp expect_map(nil, _path), do: %{}
-  defp expect_map(value, _path) when is_map(value), do: value
-
-  defp expect_map(value, path),
-    do: raise(ConfigError, message: type_error(path, "a mapping", value))
-
-  defp expect_string(value, _path) when is_binary(value), do: value
-
-  defp expect_string(value, path),
-    do: raise(ConfigError, message: type_error(path, "a string", value))
-
-  defp required_string!(map, key, path) do
-    case Map.fetch(map, key) do
-      {:ok, value} ->
-        expect_string(value, path ++ [key])
-
-      :error ->
-        raise ConfigError, message: "#{render_path(path)}: missing required key \"#{key}\""
-    end
-  end
-
-  defp string_opt(map, key, path) do
-    case map[key] do
-      nil -> nil
-      value -> expect_string(value, path ++ [key])
-    end
-  end
-
-  defp int_opt(map, key, path) do
-    case map[key] do
-      nil -> nil
-      # Env overrides and YAML quoted values both arrive as strings; a digit
-      # string is an integer as far as an operator is concerned.
-      value when is_integer(value) -> value
-      value when is_binary(value) -> parse_int!(value, path ++ [key])
-      value -> raise ConfigError, message: type_error(path ++ [key], "an integer", value)
-    end
-  end
-
-  # Like `int_opt/3`, for keys that take fractions (`quarantine.rate`).
-  defp number_opt(map, key, path) do
-    case map[key] do
-      nil -> nil
-      value when is_number(value) -> value
-      value when is_binary(value) -> parse_number!(value, path ++ [key])
-      value -> raise ConfigError, message: type_error(path ++ [key], "a number", value)
-    end
-  end
-
-  defp parse_int!(value, path) do
-    case Integer.parse(value) do
-      {int, ""} -> int
-      _ -> raise ConfigError, message: type_error(path, "an integer", value)
-    end
-  end
-
-  # A required integer, where absent and explicit-nil are both "you didn't say".
-  defp required_int!(map, key, path) do
-    case map[key] do
-      nil -> raise ConfigError, message: "#{render_path(path)}: missing required key \"#{key}\""
-      _value -> int_opt(map, key, path)
-    end
-  end
-
-  defp required_number!(map, key, path) do
-    case map[key] do
-      nil ->
-        raise ConfigError, message: "#{render_path(path)}: missing required key \"#{key}\""
-
-      value when is_number(value) ->
-        value
-
-      # Quoted YAML and `${VAR}` interpolation both arrive as strings.
-      value when is_binary(value) ->
-        parse_number!(value, path ++ [key])
-
-      value ->
-        raise ConfigError, message: type_error(path ++ [key], "a number", value)
-    end
-  end
-
-  # Integer first, so `"100"` stays an integer; then float, so `"12.5"` does
-  # not come back as `12` with a trailing ".5" nobody checked.
-  defp parse_number!(value, path) do
-    case Integer.parse(value) do
-      {int, ""} ->
-        int
-
-      _ ->
-        case Float.parse(value) do
-          {float, ""} -> float
-          _ -> raise ConfigError, message: type_error(path, "a number", value)
-        end
-    end
-  end
-
-  defp bool_opt(map, key, path) do
-    case Map.fetch(map, key) do
-      :error -> nil
-      {:ok, value} -> bool!(value, path ++ [key])
-    end
-  end
-
-  defp bool!(value, _path) when is_boolean(value), do: value
-
-  defp bool!(value, path) when is_binary(value) do
-    case String.downcase(value) do
-      "true" -> true
-      "false" -> false
-      _ -> raise ConfigError, message: type_error(path, "a boolean", value)
-    end
-  end
-
-  defp bool!(value, path), do: raise(ConfigError, message: type_error(path, "a boolean", value))
-
-  defp enum!(value, allowed, path) do
-    if value in allowed do
-      value
-    else
-      raise ConfigError,
-        message:
-          "#{render_path(path)}: unknown value #{inspect(value)}; " <>
-            "expected one of #{Enum.join(allowed, ", ")}"
-    end
-  end
-
-  # The string is checked against a closed list first (`enum!/3`), so the atoms are a fixed set.
-  # sobelow_skip ["DOS.StringToAtom"]
-  defp atom_enum_opt(map, key, allowed, path) do
-    case map[key] do
-      nil -> nil
-      value -> String.to_atom(enum!(value, allowed, path ++ [key]))
-    end
-  end
-
-  # A list of strings, or one comma-separated string: the form a single env var
-  # (`ANKUSA_ROLES`, `"${KAFKA_BROKERS}"`) can carry.
-  defp string_list!(value, path) do
-    strings =
-      case value do
-        list when is_list(list) ->
-          Enum.map(list, &expect_string(&1, path))
-
-        string when is_binary(string) ->
-          string |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
-
-        other ->
-          raise ConfigError,
-            message: type_error(path, "a list or a comma-separated string", other)
-      end
-
-    if strings == [], do: raise(ConfigError, message: "#{render_path(path)}: must not be empty")
-    strings
-  end
-
-  defp type_error(path, expected, value) do
-    "#{render_path(path)}: expected #{expected}, got #{inspect(value)}"
-  end
-
-  @doc false
-  @spec render_path([term()]) :: String.t()
-  def render_path([]), do: "config"
-
-  def render_path(segments) do
-    Enum.reduce(segments, "", fn
-      index, "" when is_integer(index) -> "[#{index}]"
-      index, acc when is_integer(index) -> acc <> "[#{index}]"
-      segment, "" -> to_string(segment)
-      segment, acc -> acc <> "." <> to_string(segment)
-    end)
-  end
-
-  defp put_opt(kw, _key, nil), do: kw
-  defp put_opt(kw, key, value), do: kw ++ [{key, value}]
 end

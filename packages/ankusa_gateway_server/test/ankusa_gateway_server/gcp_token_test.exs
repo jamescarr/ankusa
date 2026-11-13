@@ -1,12 +1,12 @@
-defmodule AnkusaServer.GcpTokenTest do
+defmodule AnkusaGatewayServer.GcpTokenTest do
   @moduledoc """
-  `AnkusaServer.GcpToken.metadata/0` against a `Req.Test` stand-in for the GCE
+  `AnkusaGatewayServer.GcpToken.metadata/0` against a `Req.Test` stand-in for the GCE
   metadata server: the cache, single-flight refresh, and no retries.
   """
 
   use ExUnit.Case, async: false
 
-  alias AnkusaServer.GcpToken
+  alias AnkusaGatewayServer.GcpToken
 
   @moduletag capture_log: true
 

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-#MISE description="Build the jamescarr/ankusa:dev image (context is the repo root)"
+#MISE description="Build a package's image (:dev tag; context is the repo root)"
+#USAGE arg "[pkg]" help="directory name under packages/ (default: ankusa_server)"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT"
 
-docker build -f packages/ankusa_server/Dockerfile -t "$DOCKER_IMAGE:dev" .
+pkg="${usage_pkg:-ankusa_server}"
+
+docker build -f "packages/$pkg/Dockerfile" -t "$(pkg_docker_image "$pkg"):dev" .

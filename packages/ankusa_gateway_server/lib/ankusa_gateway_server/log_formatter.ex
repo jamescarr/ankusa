@@ -1,4 +1,4 @@
-defmodule AnkusaServer.LogFormatter do
+defmodule AnkusaGatewayServer.LogFormatter do
   @moduledoc """
   A `:logger` formatter that writes one JSON object per line: `log.format: json`.
 

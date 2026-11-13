@@ -1,4 +1,4 @@
-defmodule AnkusaServer.Tracing do
+defmodule AnkusaGatewayServer.Tracing do
   @moduledoc """
   Starts the OpenTelemetry SDK and the OTLP exporter when the config file says
   `tracing.enabled: true`.
@@ -24,18 +24,22 @@ defmodule AnkusaServer.Tracing do
   resource is `service.name = "ankusa"` and `service.version` the image's.
   """
 
-  @doc """
-  Start tracing for a loaded `tracing` section (`t:AnkusaServer.Config.tracing/0`).
-  A failure to start is returned, and `AnkusaServer.Application` logs it and
-  carries on untraced: tracing is observability, and must never keep the ingest
-  tier from booting.
-  """
-  @spec start(AnkusaServer.Config.tracing()) :: :ok | {:error, term()}
-  def start(%{enabled: false}), do: :ok
+  @typedoc "The traced service: `%{name: \"ankusa\", version: \"0.8.0\"}`."
+  @type service :: %{name: String.t(), version: String.t()}
 
-  def start(%{enabled: true} = tracing) do
+  @doc """
+  Start tracing for a loaded `tracing` section (`t:AnkusaGatewayServer.Sections.tracing/0`),
+  as `service` (the resource's `service.name` and `service.version`: each image
+  names itself). A failure to start is returned, and the image's application
+  logs it and carries on untraced: tracing is observability, and must never
+  keep a node from booting.
+  """
+  @spec start(AnkusaGatewayServer.Sections.tracing(), service()) :: :ok | {:error, term()}
+  def start(%{enabled: false}, _service), do: :ok
+
+  def start(%{enabled: true} = tracing, service) do
     put_env(:opentelemetry_exporter, exporter_env(tracing))
-    put_env(:opentelemetry, sdk_env(tracing))
+    put_env(:opentelemetry, sdk_env(tracing, service))
 
     # The exporter first: the SDK's processor initializes it as it starts.
     with {:ok, _} <- Application.ensure_all_started(:opentelemetry_exporter),
@@ -47,20 +51,20 @@ defmodule AnkusaServer.Tracing do
   @doc """
   The `:opentelemetry` application environment for a `tracing` section.
   """
-  @spec sdk_env(AnkusaServer.Config.tracing()) :: keyword()
-  def sdk_env(%{sample_ratio: ratio}) do
+  @spec sdk_env(AnkusaGatewayServer.Sections.tracing(), service()) :: keyword()
+  def sdk_env(%{sample_ratio: ratio}, %{name: name, version: version}) do
     [
       sampler: {:parent_based, %{root: {:trace_id_ratio_based, ratio}}},
       processors: [{:otel_batch_processor, %{}}],
       traces_exporter: {:opentelemetry_exporter, %{}},
-      resource: %{service: %{name: "ankusa", version: AnkusaServer.Application.version()}}
+      resource: %{service: %{name: name, version: version}}
     ]
   end
 
   @doc """
   The `:opentelemetry_exporter` application environment for a `tracing` section.
   """
-  @spec exporter_env(AnkusaServer.Config.tracing()) :: keyword()
+  @spec exporter_env(AnkusaGatewayServer.Sections.tracing()) :: keyword()
   def exporter_env(%{otlp_endpoint: endpoint}) do
     [otlp_protocol: :http_protobuf, otlp_endpoint: endpoint]
   end

@@ -4,8 +4,8 @@ defmodule Ankusa.SecretProvider do
 
   `ankusa_server` resolves `${sm:<provider>:<ref>}` in its config by calling
   `c:fetch/2` on the module registered under `<provider>` (see
-  `AnkusaServer.SecretProvider.AwsSecretsManager` and
-  `AnkusaServer.SecretProvider.Vault`). The behaviour lives in core so an
+  `AnkusaGatewayServer.SecretProvider.AwsSecretsManager` and
+  `AnkusaGatewayServer.SecretProvider.Vault`). The behaviour lives in core so an
   embedding application can write its own provider and hand it the same way.
 
   `ref` is whatever follows the provider name in the reference, opaque to the

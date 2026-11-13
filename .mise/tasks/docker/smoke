@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
-#MISE description="Build and smoke-test the image (starts a container on 4000/4002)"
-#MISE depends=["docker:build"]
+#MISE description="Build a package's image and smoke-test it (starts a container on its ports)"
+#USAGE arg "[pkg]" help="directory name under packages/ (default: ankusa_server)"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT"
 
-exec packages/ankusa_server/scripts/smoke.sh "$DOCKER_IMAGE:dev"
+pkg="${usage_pkg:-ankusa_server}"
+image=$(pkg_docker_image "$pkg")
+
+# Built here rather than by a `depends=["docker:build"]` entry: a dependency
+# runs without this task's argument, so it would build the default package's
+# image and this task would smoke a tag that does not exist.
+docker build -f "packages/$pkg/Dockerfile" -t "$image:dev" .
+
+exec "packages/$pkg/scripts/smoke.sh" "$image:dev"

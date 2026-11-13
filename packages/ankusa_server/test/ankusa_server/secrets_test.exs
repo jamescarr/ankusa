@@ -13,7 +13,8 @@ defmodule AnkusaServer.SecretsTest do
 
   import ExUnit.CaptureLog
 
-  alias AnkusaServer.{Config, ConfigError, Reload}
+  alias AnkusaGatewayServer.ConfigError
+  alias AnkusaServer.{Config, Reload}
 
   @moduletag capture_log: true
 
