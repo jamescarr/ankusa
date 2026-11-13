@@ -244,7 +244,7 @@ defmodule Ankusa.Reload do
 
   # ── audit ───────────────────────────────────────────────────────────────────
 
-  # A node with no store has no trail (a `claim_check`-only node with no admin
+  # A node with no store has no trail (a gateway-only node, `roles: []`, with no admin
   # API): the reload is made and logged.
   defp audited(instance, context, attrs, fun) do
     if Ankusa.whereis(instance, :audit) do

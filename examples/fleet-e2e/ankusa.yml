@@ -16,6 +16,8 @@
 # Route definitions and API-managed sources live in Redis, so every edge node
 # enforces the same ones. See ../README.md.
 
+config_version: 2
+
 node:
   data_dir: /var/lib/ankusa
 
@@ -75,11 +77,12 @@ storage:
     access_key_id: "${S3_ACCESS_KEY_ID}"
     secret_access_key: "${S3_SECRET_ACCESS_KEY}"
 
-claim_check:
+gateway:
   port: 4001
   ip: 0.0.0.0
-  # Demo: the compose network is the boundary. Real deployments set auth.mode.
-  auth: {mode: none, allow_insecure: true}
+  # Demo: the compose network is the boundary. Real deployments list
+  # authenticators under auth.authenticators.
+  auth: {allow_insecure: true}
 
 # Deny-by-default routing, shared by every edge node through Redis. The Redis
 # store seeds a namespace once, on its first boot.

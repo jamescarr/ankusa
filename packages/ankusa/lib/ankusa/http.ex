@@ -1,8 +1,9 @@
 defmodule Ankusa.Http do
   @moduledoc """
   Small `Plug.Conn` helpers shared by every Bandit-fronted router in the
-  framework (`Ankusa.Edge.Router`, `Ankusa.ClaimCheck.Router`). Kept here
-  instead of duplicated so both surfaces enforce request bodies identically.
+  framework (`Ankusa.Edge.Router`, and `Ankusa.Gateway.Router` in the
+  `ankusa_gateway` package). Kept here instead of duplicated so every surface
+  enforces request bodies identically.
   """
 
   # One socket read asks the transport for at most this many bytes. It is also

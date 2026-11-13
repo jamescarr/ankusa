@@ -112,18 +112,18 @@ reconfigured without a new file. Env wins over the file.
 
 | Variable | Field |
 | --- | --- |
-| `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`) |
+| `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`; the last one also starts the gateway on this node) |
 | `ANKUSA_DATA_DIR` | `node.data_dir` |
 | `ANKUSA_LOG_LEVEL` | `log.level` |
 | `ANKUSA_LOG_FORMAT` | `log.format` (`text` or `json`: one JSON object per line) |
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
-| `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
+| `ANKUSA_CLAIM_CHECK_PORT` | `gateway.port` |
 | `ANKUSA_ADMIN_IP` | `admin.ip` |
-| `ANKUSA_CLAIM_CHECK_IP` | `claim_check.ip` |
+| `ANKUSA_CLAIM_CHECK_IP` | `gateway.ip` |
 | `ANKUSA_ADMIN_TOKEN` | `admin.auth`: one bearer token holding every scope and `tenant:*` (replaces the file's block; only its SHA-256 is kept) |
 | `ANKUSA_ROUTES_ADMIN_TOKEN` | `routes.admin.auth`: one token holding `routes:read`, `routes:write`, `tenant:*` |
-| `ANKUSA_CLAIM_CHECK_TOKEN` | `claim_check.auth`: one token holding `claims:read`, `tenant:*` |
+| `ANKUSA_CLAIM_CHECK_TOKEN` | `gateway.auth.authenticators`: one token authenticator holding `claims:read`, `tenant:*` (the rest of `gateway.auth` is kept) |
 | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` (`true`/`false`) |
 | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
 | `ANKUSA_SOURCE_STORE_URL` | `source_store.url` (a URL with no `type` means `redis`) |
@@ -199,12 +199,12 @@ walked through in
 | Port | What | Who can reach it |
 | --- | --- | --- |
 | 4000 | ingest | publish it: providers post here |
-| 4001 | claim check gateway (`claim_check` role) | your own proxy or network policy |
+| 4001 | claim check gateway (`claim_check` role, or the `jamescarr/ankusa-gateway` image) | your own proxy or network policy |
 | 4002 | admin API + `/metrics` | your own proxy or network policy |
 | 4003 | route management API (`routes.enabled` on an `edge` node) | your own proxy or network policy |
 | 4004 | metrics listener: only `/metrics`, `/health`, `/ready` (`metrics.enabled`, default off) | your Prometheus / kubelet network rule |
 
-Every surface is on its own port so it can be firewalled on its own. 4001/4002/4003/4004 listen on `127.0.0.1` by default; inside a container set `ANKUSA_ADMIN_IP` / `ANKUSA_CLAIM_CHECK_IP` / `ANKUSA_METRICS_IP` (or `admin.ip` / `claim_check.ip` / `metrics.ip`, and `routes.admin.ip` for 4003) to `0.0.0.0` before a published port can reach them. 4003 only
+Every surface is on its own port so it can be firewalled on its own. 4001/4002/4003/4004 listen on `127.0.0.1` by default; inside a container set `ANKUSA_ADMIN_IP` / `ANKUSA_CLAIM_CHECK_IP` / `ANKUSA_METRICS_IP` (or `admin.ip` / `gateway.ip` / `metrics.ip`, and `routes.admin.ip` for 4003) to `0.0.0.0` before a published port can reach them. 4003 only
 listens when `routes.enabled` is set and the node runs the `edge` role; without
 both, nothing binds it.
 
@@ -264,7 +264,7 @@ The HTTP contracts are in
 [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml),
 [`priv/openapi/ingest.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/ingest.v1.yaml),
 and
-[`priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/claim_check.v1.yaml).
+[`ankusa_gateway/priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway/priv/openapi/claim_check.v1.yaml).
 
 ## Security
 
@@ -286,9 +286,10 @@ So:
   (`dlq:read`, `replays:write`, ...); `401` without a credential, `403` without
   the scope. `GET /v1/config` is redacted anyway. See
   [Control-plane authentication](../../docs/configuration.md#control-plane-authentication).
-- **Authenticate 4001 (claim check) the same way** (`claim_check.auth`, or
-  `ANKUSA_CLAIM_CHECK_TOKEN`): reading a claim needs `claims:read` and the
-  claim's tenant. Consumers send the token as `Authorization: Bearer`. Keep it
+- **Authenticate 4001 (claim check) with the gateway's own chain**
+  (`gateway.auth.authenticators`, or `ANKUSA_CLAIM_CHECK_TOKEN` for a single
+  token): reading a claim needs `claims:read` and the claim's tenant.
+  Consumers send the token as `Authorization: Bearer`. Keep it
   on your internal network regardless.
 - **Authenticate 4003 (route management)** with `routes.admin.auth` (or
   `ANKUSA_ROUTES_ADMIN_TOKEN`). It edits the route definitions the edge
@@ -297,7 +298,7 @@ So:
 
 Every listener but ingest binds `127.0.0.1` by default. A proxy or a Prometheus in
 another container, pod or host reaches them only after `admin.ip`,
-`claim_check.ip` or `routes.admin.ip` is set to an address it can route to
+`gateway.ip` or `routes.admin.ip` is set to an address it can route to
 (`0.0.0.0` inside a container); the bind decides who can connect, and the
 proxy in front still decides who may.
 

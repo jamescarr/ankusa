@@ -10,7 +10,7 @@ Elixir, no cloud SDK, no object-store credentials.
 ![Dispatch writes any body over 64 KiB once into a pack in the first available claim store and publishes a claim reference plus sha256 instead of the body; the worker redeems it through your auth layer at the read-only gateway on 4001 and checks the sha256 itself.](diagrams/claim-check.png)
 
 The machine-readable contract is
-[`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/claim_check.v1.yaml)
+[`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway/priv/openapi/claim_check.v1.yaml)
 (OpenAPI 3.1). Generate your client from it; this page explains how to use it.
 
 ## The reference
@@ -94,11 +94,27 @@ With no keys, nothing changes: references stay v1 and are served.
 
 ## Run the gateway
 
-The gateway is the `claim_check` role of the same image, and it is read-only:
-no writes, no listing, no delete. It reads the same `storage` block as the
-nodes that write claims, and needs no store:
+The gateway is `Ankusa.Gateway`, from the `ankusa_gateway` library
+([README](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway/README.md)),
+and it is read-only: no writes, no listing, no delete. It reads the same
+`storage` block as the nodes that write claims, and needs no store of its own.
+Two ways to run it:
+
+- **In `jamescarr/ankusa`**, with `node.roles: [claim_check]`: the node runs the
+  gateway beside its instance, and core gets the other roles. A node with only
+  that role is a gateway-only node: core runs with `roles: []`, which is a legal
+  instance with no queue and no store.
+- **As `jamescarr/ankusa-gateway`**, the gateway's own image: nothing but the
+  gateway runs.
+- **Embedded** in your own Elixir application: add `ankusa_gateway` and start
+  `{Ankusa.Gateway, Ankusa.Gateway.Config.new(instance: ..., ...)}` after
+  `{Ankusa.Instance, config}` under a `:one_for_one` supervisor — the gateway
+  refuses to start without it. See
+  [`ankusa_gateway/README.md`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway/README.md).
 
 ```yaml
+config_version: 2
+
 node:
   roles: [claim_check]
 
@@ -108,9 +124,16 @@ storage:
     bucket: "${S3_BUCKET}"
     region: "${S3_REGION}"
 
-claim_check:
+gateway:
   port: 4001            # [env ANKUSA_CLAIM_CHECK_PORT]
   ip: 0.0.0.0           # [env ANKUSA_CLAIM_CHECK_IP] default 127.0.0.1; consumers on other hosts need 0.0.0.0
+  auth:
+    authenticators:
+      - type: token
+        tokens:
+          - {id: worker, token: "${CLAIM_TOKEN}", scopes: [claims:read, "tenant:*"]}
+
+claim_check:
   pack_max_bytes: 16777216
 ```
 
@@ -120,7 +143,15 @@ docker run -p 127.0.0.1:4001:4001 \
   -e S3_BUCKET -e S3_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
   jamescarr/ankusa:edge
 curl localhost:4001/health    # {"status":"ok"}
+curl localhost:4001/ready     # {"status":"ready","instance":"default",…,"gateway":"ok"}
 ```
+
+`GET /health` is liveness; `GET /ready` needs no credential and answers `200`
+while the gateway serves, or `503` with `Retry-After: 1` when it does not. A
+file without `config_version` is version 1 and still loads: the loader moves
+`claim_check.port`/`ip`/`tls`/`auth`/`max_concurrent_reads`/`integrity_check`
+under `gateway` for you (see
+[the gateway section](configuration.md#the-gateway-config_version-2)).
 
 A single container can run it next to the other roles
 (`roles: [edge, dispatch, storage, claim_check]`), as
@@ -197,16 +228,74 @@ older ones are still found. **Removing a store makes the claims in it
 unreadable**; remove one only once its packs are past retention. Each store
 needs its own lifecycle rule (see [Retention](#retention)).
 
-**The gateway authenticates and authorizes every read** (`claim_check.auth`, see
-[Control-plane authentication](configuration.md#control-plane-authentication)):
-`401` without an accepted credential (bearer token, OIDC access token or client
-certificate), `403` unless the caller holds `claims:read` and the claim's
-tenant (`tenant:<tenant_id>` or `tenant:*`). `mode: none` is accepted on
-loopback only, or with `allow_insecure: true` when a service mesh, Envoy or an
-API gateway in front authenticates every caller; the node logs a warning at
-startup when it has no authentication of its own. Readers send the credential
-as `Authorization: Bearer` (the TypeScript client's `headers` option, the Elixir
-SDK's `:headers`).
+**The gateway authenticates and authorizes every read.** `gateway.auth.authenticators`
+is a chain, tried in order: an authenticator that finds no credential of its
+form steps aside, and one whose form it is accepts or refuses (`401`). A bearer
+that matches no `token` entry falls through to the next entry. The types:
+
+- `token` — static bearer tokens by SHA-256 (`tokens`: `id`, `sha256` or a
+  plaintext `token` hashed at load, `scopes`, `groups`, `claims`).
+- `jwt` — an issuer's OIDC access tokens: `issuer`, `audience`, `jwks_url` or
+  static `keys`, plus `groups_claim`, `header` and `subject_prefix`. Several
+  `jwt` authenticators may share one chain, one per issuer; a token is routed
+  to its issuer by the unverified `iss` before the signature is checked.
+- `mtls` — client certificates on a listener with `tls.verify: verify_peer`,
+  mapped by `subject_map` from a certificate identity (`cn:…`, `dns:…`,
+  `email:…`, `uri:…`, `ip:…`) to scopes and groups.
+
+An empty chain is the anonymous operator principal, and is accepted on loopback
+only, or with `auth.allow_insecure: true` when a service mesh, Envoy or an API
+gateway in front authenticates every caller; the gateway logs a warning at start
+when it has no authentication of its own. Readers send the credential as
+`Authorization: Bearer` (the TypeScript client's `headers` option, the Elixir
+SDK's `:headers`), or in the header a `jwt` authenticator names with `header`.
+Answers: `401 unauthenticated` with `www-authenticate: Bearer realm="ankusa"`
+without an accepted credential, `503 auth_unavailable` when an identity provider
+that had to be asked cannot answer.
+
+Authorization is a policy: the claim routes evaluate the `claims` policy, whose
+one step (`scopes`) requires `claims:read` **and** the claim's tenant
+(`tenant:<tenant_id>` or `tenant:*`), and answers
+`403 {"error":"forbidden","scope":"…"}` naming the missing one. To decide
+differently (an ownership table, a policy service, an external PDP), register a
+module implementing `Ankusa.Gateway.Authorizer` and name it in a step. It runs
+after authentication and before anything is read:
+
+```elixir
+defmodule MyApp.Ownership do
+  @behaviour Ankusa.Gateway.Authorizer
+
+  @impl true
+  def init!(opts, _key), do: Map.new(opts)
+
+  @impl true
+  def kind(_state), do: :inline
+
+  @impl true
+  def decide(%Ankusa.Gateway.Authz.Request{} = req, state, %{deadline: _}) do
+    if MyApp.Owners.holds?(state, req.principal.id, req.resource.tenant, req.resource.key) do
+      {:ok, :allow, %{}}
+    else
+      {:ok, :deny, %{reason: :not_owner}}
+    end
+  end
+end
+
+Ankusa.Gateway.Config.new(
+  instance: :default,
+  authz: %{
+    authorizers: %{"ownership" => {MyApp.Ownership, []}},
+    policies: %{"claims" => %{mode: :first, steps: ["ownership"]}}
+  }
+)
+```
+
+`decide/3` returns `{:ok, :allow | :deny | :abstain, meta}` — a `deny` answered
+by the policy is `403 forbidden` (with `meta.scope` in the body when the step
+set one) — or `{:error, {:unavailable, reason}}`, which is `503
+authz_unavailable` under the default `on_unavailable: fail`. A step that raises
+counts as unavailable. `authz.authorizers` and `authz.policies` are Elixir
+config (`Ankusa.Gateway.Config`), not YAML yet.
 
 ### Under load
 
@@ -233,10 +322,10 @@ The gateway keeps answering fast while an object store throttles or hangs:
   `read_timeout_ms` and `read_retries`, not the store's write timeouts, and a
   store that couldn't answer isn't asked again at the other key layout within
   the same read.
-- **A cap on the node.** Past `max_concurrent_reads` (1024) requests in flight
-  on one gateway, the next is `503 overloaded` with the same `Retry-After`, before
-  it locates anything: cache hits count, so a flood of cheap reads can't
-  starve the node. `0` is no cap.
+- **A cap on the node.** Past `gateway.max_concurrent_requests` (1024)
+  requests in flight on one gateway, the next is `503 overloaded` with the same
+  `Retry-After`, before it locates anything: cache hits count, so a flood of
+  cheap reads can't starve the node. `0` is no cap.
 
 ```yaml
 claim_check:
@@ -252,19 +341,23 @@ claim_check:
 A throttling store never opens its breaker: it answered, and the limit is what
 backs off. Every `503 store_unavailable` carries a `Retry-After` of 1 to 3
 seconds, picked at random, so the clients one throttle turned away don't come
-back together. On `/metrics`:
-`ankusa_claim_gateway_requests_total{status}` and
-`ankusa_claim_gateway_duration_seconds` (the status is the only label: no
-tenant, claim or method); `ankusa_claim_sweeps_total{deleted}` (one per sweep
-tick, `deleted="true"` when it removed a partition, a pack or a lease row);
-`ankusa_claim_check_reads_total{kind,source,result}`, where `kind` is `index`,
-`manifest`, `bytes` or `range`, `source` is
+back together. On `/metrics` (the gateway's series join the node's scrape
+through core's `metrics.extra`, which `jamescarr/ankusa` sets when it runs the
+gateway; an embedding application passes `[Ankusa.Gateway.Metrics]`):
+`ankusa_gateway_requests_total{api="claims",status}` and
+`ankusa_gateway_request_duration_seconds{api="claims"}` (the status is the only
+other label: no tenant, claim or method); `ankusa_claim_sweeps_total{deleted}`
+(one per sweep tick, `deleted="true"` when it removed a partition, a pack or a
+lease row); `ankusa_claim_check_reads_total{kind,source,result}`, where `kind` is
+`index`, `manifest`, `bytes` or `range`, `source` is
 `cache`, `store`, `coalesced`, `shed` or `direct` (a node reading without
 the gateway's reader) and `result` tells `throttled`, `unavailable`,
 `overloaded` (shed by the queue), `deadline` (shed at the deadline) and
 `integrity_mismatch` apart; and
 `ankusa_claim_check_read_limit`, `_read_inflight` and `_read_queued` per
-store.
+store. The pre-carve names `ankusa_claim_gateway_requests_total` and
+`ankusa_claim_gateway_duration_seconds` are gone; update dashboards and alerts
+that name them.
 
 ## Redeem a claim
 
@@ -292,7 +385,7 @@ whole, which a claim's `max_body_bytes` bound keeps finite.
 ### Integrity
 
 Every pack carries a manifest with each claim's sha256, and the gateway
-(`claim_check.integrity_check: manifest`, the default) holds what it serves
+(`gateway.claims.integrity_check: manifest`, the default) holds what it serves
 to it. A whole-claim `GET` whose bytes don't match is `502 integrity_mismatch`
 and sends none of them; so is any `GET` from a pack whose manifest doesn't
 parse or doesn't list exactly the pack's claims. `200` and `206` carry the
@@ -306,7 +399,7 @@ requested (one ranged read, a second for a manifest larger than the first
 read guessed), shared by every concurrent request, and kept in the pack's
 cache entry: 32 bytes a claim, inside `read_cache_bytes`, aging out with the
 pack's index. With `read_cache_bytes: 0` there is nowhere to keep it, so
-every `GET` reads it again; set `integrity_check: off` there, which serves
+every `GET` reads it again; set `gateway.claims.integrity_check: off` there, which serves
 the store's bytes unchecked and sends no digest.
 
 The manifest is the store's own record of the bytes, so this catches
@@ -331,14 +424,16 @@ Errors are JSON: `{"error": "not_found"}`.
 | `400` | `invalid_tenant`, `invalid_id` | tenant outside `[A-Za-z0-9_-]{1,64}`; claim id not a canonical ULID | No, a bug |
 | `400` | `bad_signature` | a [v2 reference](#signed-expiring-references-v2) whose `exp`/`sig` is missing one, out of grammar, or not what any `ref_signing_keys` entry signed for this tenant, claim and expiry | No, dead-letter |
 | `400` | `unsigned_ref` | a v1 reference (no `exp`/`sig`) while the gateway refuses unsigned references | No: re-deliver the hook for a v2 one |
-| `401` | `unauthenticated` | no credential, or one that is wrong or expired | After fixing the reader's credential |
-| `403` | `forbidden` | the credential lacks `claims:read` or the path's tenant (`scope` names it), or `claim_check.authorize` refused | After fixing the reader's credential |
+| `401` | `unauthenticated` | no credential, or one that is wrong or expired; `www-authenticate: Bearer realm="ankusa"` | After fixing the reader's credential |
+| `403` | `forbidden` | the credential lacks `claims:read` or the path's tenant (`scope` names it), or a policy step refused it | After fixing the reader's credential or the policy |
+| `503` | `auth_unavailable` | an identity provider the chain had to ask (an introspection or JWKS endpoint) did not answer; `Retry-After` 1–3, random | Yes |
+| `503` | `authz_unavailable` | an authorizer of the claim policy did not answer (an external PDP, a breaker open, a deadline); `Retry-After` 1–3, random | Yes |
 | `404` | `not_found` | no such claim: expired by retention, or never written | No, dead-letter |
 | `410` | `ref_expired` | a v2 reference with a good signature, past its `exp` | No, dead-letter: re-deliver the hook for a fresh one |
 | `416` |  | the `Range` starts past the claim's end; `content-range: bytes */<length>` | No, fix the range |
 | `408`, `429` |  | a front layer (proxy, API gateway) timing out or throttling | Yes, retry |
 | `503` | `store_unavailable` | the object store is unreachable, throttling, or slower than the gateway's deadline, or the gateway is shedding load; `Retry-After` 1–3, random | Yes |
-| `503` | `overloaded` | this node already serves `claim_check.max_concurrent_reads` requests; `Retry-After` 1–3, random | Yes |
+| `503` | `overloaded` | this node already serves `gateway.max_concurrent_requests` requests; `Retry-After` 1–3, random | Yes |
 | `503` | `store_forbidden` | the object store refused the gateway's credential; `Retry-After: 60` | Yes, after fixing the policy |
 | `502` | `integrity_mismatch` | the bytes the store returned (or the pack's manifest) don't match the sha256 the pack's manifest records for this claim; see [Integrity](#integrity) | No, dead-letter: the claim is damaged in the store (the SDKs retry any `5xx` a few times before they give up) |
 |  |  | bytes don't match the message's sha256 (your check) | No, dead-letter |
@@ -352,19 +447,23 @@ bound to a fanout exchange, say, and claims go away only through
 
 ### Who may redeem
 
-Reading a claim needs a credential (`claim_check.auth`, see
-[Control-plane authentication](configuration.md#control-plane-authentication))
-holding `claims:read` **and** the tenant of the path as `tenant:<tenant_id>`
-(or `tenant:*`): a tenant-A credential on a tenant-B path is `403`, before
-anything is read. To decide differently (an ownership table, a policy
-service), set `claim_check.authorize` to a `{module, fun, args}`: the gateway
-calls `apply(module, fun, [context | args])` after authenticating the caller
-and before it locates the claim, with
-`context = %{principal: %Ankusa.Principal{}, tenant_id: ..., claim_id: ..., conn: %Plug.Conn{}}`
-(the two path segments as sent, not yet validated). Return `:ok` to serve it;
-anything else is `403 forbidden`. The hook replaces the built-in check, so it
-must also decide what a missing scope means. It runs in the request process
-and on every request: keep it fast and free of side effects.
+Reading a claim needs a credential of the gateway's chain (`gateway.auth`, see
+[above](#run-the-gateway)) and an authorization decision. The default policy —
+`claims` → the `scopes` step — holds `claims:read` **and** the tenant of the
+path as `tenant:<tenant_id>` (or `tenant:*`): a tenant-A credential on a
+tenant-B path is `403`, before anything is read. To decide differently (an
+ownership table, a policy service), register a module implementing
+`Ankusa.Gateway.Authorizer` in `authz.authorizers` and name it in the `claims`
+policy's steps — that is Elixir config (`Ankusa.Gateway.Config`), replacing
+the scope rule only when the policy lists only your step. The authorizer runs
+after authentication and before the claim is located, with an
+`Ankusa.Gateway.Authz.Request` carrying the principal, the action, and the
+resource (`%{kind: :claim, space: "claims", key: "<tenant>/<claim_id>",
+tenant: tenant_id}`). Keep it fast: an `:inline` authorizer runs in the request
+process on every request, and a cached or remote one (`kind/1` returns
+`:cached` or `:remote`) is consulted once per principal, action and resource
+until its entry expires. A `:remote` authorizer that raises or does not answer
+is `503 authz_unavailable` (or its step's `on_unavailable`).
 
 ### What a front layer needs
 
@@ -612,7 +711,7 @@ redirect, or an unreachable gateway.
 
 Any OpenAPI generator, `openapi-generator`, `openapi-python-client`, works
 against the same
-[`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/claim_check.v1.yaml).
+[`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway/priv/openapi/claim_check.v1.yaml).
 
 ## Write cost
 

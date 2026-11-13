@@ -1,6 +1,6 @@
 defmodule Ankusa.ClaimCheck.Reader do
   @moduledoc """
-  The one process every store read of a `:claim_check` node passes through,
+  The one process every store read of a gateway node passes through,
   so the gateway stays fast while an object store throttles or hangs:
 
     * **Coalescing** — concurrent reads of one key (a pack's index, a claim's
@@ -21,7 +21,7 @@ defmodule Ankusa.ClaimCheck.Reader do
       request. A store request that outlives its callers still runs to the
       end and fills `Ankusa.ClaimCheck.Cache`, so the client's retry finds it.
     * **A node-wide request gate** — `admit/2` and `release/1` bound how many
-      gateway requests the node serves at once (`claim_check.max_concurrent_reads`),
+      gateway requests the node serves at once (`gateway.max_concurrent_requests`),
       cache hits included, so a flood of cheap reads can't starve the node.
       The gateway answers `503` + `Retry-After` past it, before it locates
       anything.
@@ -33,9 +33,10 @@ defmodule Ankusa.ClaimCheck.Reader do
   searches every store (`Ankusa.ClaimCheck.Stores.read_range/6`) but is
   charged to the pack's home (`Ankusa.ClaimCheck.Stores.home/2`).
 
-  Only a `:claim_check` node runs it, beside the gateway. A read anywhere
-  else — a dispatch node calling `Ankusa.ClaimCheck.redeem/3` — goes straight
-  to the store, bounded only by the store's read timeout.
+  Only a gateway node runs it (`Ankusa.Gateway` starts it, package
+  `ankusa_gateway`). A read anywhere else — a dispatch node calling
+  `Ankusa.ClaimCheck.redeem/3` — goes straight to the store, bounded only by
+  the store's read timeout.
 
   Emits `[:ankusa, :claim_check, :read]` once per caller (see `fetch/5`),
   `[:ankusa, :claim_check, :read_limit]` on every change of a store's limit,
@@ -134,7 +135,7 @@ defmodule Ankusa.ClaimCheck.Reader do
   @doc """
   Count the calling process as one of the gateway's requests in flight, unless
   `max` already are (`:shed`; the caller answers `503` and does not `release/1`).
-  `max` is `claim_check.max_concurrent_reads`; `0` admits everything, and so
+  `max` is the gateway's `max_concurrent_requests`; `0` admits everything, and so
   does a node whose reader is not running, which has no gate to count at.
 
   The gate is a set of request processes, not a counter, so a request process

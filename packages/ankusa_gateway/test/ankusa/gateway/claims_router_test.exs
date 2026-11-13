@@ -1,15 +1,18 @@
-defmodule Ankusa.ClaimCheck.RouterTest do
+defmodule Ankusa.Gateway.ClaimsRouterTest do
   @moduledoc """
-  Exercises `Ankusa.ClaimCheck.Router`'s HTTP semantics directly via
-  `Plug.Test`/`Router.call`, the same pattern `Ankusa.EdgeTest` uses for
-  `Ankusa.Edge.Router` — no real socket needed to prove request handling and
-  status-code mapping.
+  The claims API's HTTP semantics, driven through `Ankusa.Gateway.Router`
+  directly via `Plug.Test` — no real socket needed to prove request handling
+  and status-code mapping. Every case of the router this API had while it was
+  part of core (`Ankusa.ClaimCheck.Router`) keeps its assertion; the
+  `claim_check.authorize` hook's cases are a custom authorizer's now.
   """
 
   use ExUnit.Case, async: false
 
   alias Ankusa.{ClaimCheck, Config, UUIDv7}
-  alias Ankusa.ClaimCheck.{Cache, Reader, Ref, Router, Stores}
+  alias Ankusa.ClaimCheck.{Cache, Reader, Ref, Stores}
+  alias Ankusa.Gateway.Config, as: GatewayConfig
+  alias Ankusa.Gateway.Router
   alias Ankusa.Test.CountingBlobStore
 
   setup do
@@ -17,9 +20,24 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     dir = Ankusa.TestHelpers.unique_data_dir(inst)
     on_exit(fn -> File.rm_rf(dir) end)
 
-    config = Config.new(instance: inst, data_dir: dir, roles: [:claim_check])
+    config = Config.new(instance: inst, data_dir: dir, roles: [])
     Ankusa.put_config(config)
+    Ankusa.Gateway.put_config(GatewayConfig.new(instance: inst))
     %{inst: inst, config: config}
+  end
+
+  # Change the stored gateway config of `inst`.
+  defp put_gateway(inst, fun),
+    do: Ankusa.Gateway.put_config(fun.(Ankusa.Gateway.config(inst)))
+
+  defp token(id, scopes), do: %{id: id, sha256: Ankusa.Admin.Auth.Token.hash(id), scopes: scopes}
+
+  defp with_tokens(inst, tokens, opts \\ []) do
+    Ankusa.Gateway.put_config(
+      GatewayConfig.new(
+        [instance: inst, auth: %{authenticators: [%{type: :token, tokens: tokens}]}] ++ opts
+      )
+    )
   end
 
   defp call(inst, method, path, body \\ "") do
@@ -37,8 +55,8 @@ defmodule Ankusa.ClaimCheck.RouterTest do
 
   defp error(conn), do: JSON.decode!(conn.resp_body)["error"]
 
-  # What a `:claim_check` node runs beside the listener, under the test's
-  # config with `claim_check` merged in.
+  # What a gateway runs beside the listener, under the test's config with
+  # `claim_check` merged in.
   defp start_reader(inst, claim_check) do
     config = Ankusa.config(inst)
     Ankusa.put_config(%{config | claim_check: Map.merge(config.claim_check, claim_check)})
@@ -281,7 +299,7 @@ defmodule Ankusa.ClaimCheck.RouterTest do
 
     :telemetry.attach(
       handler,
-      [:ankusa, :claim_check, :gateway],
+      [:ankusa, :gateway, :request],
       fn _event, measurements, meta, _ ->
         if meta.instance == inst, do: send(test, {:gateway, measurements, meta})
       end,
@@ -292,7 +310,9 @@ defmodule Ankusa.ClaimCheck.RouterTest do
 
     path = Ref.path(check_in(inst, "found"))
     call(inst, :get, path)
-    assert_received {:gateway, %{duration: d}, %{method: "GET", status: 200}} when d > 0
+
+    assert_received {:gateway, %{duration: d}, %{api: :claims, method: "GET", status: 200}}
+                    when d > 0
 
     call(inst, :head, path)
     assert_received {:gateway, _measurements, %{method: "HEAD", status: 200}}
@@ -369,10 +389,6 @@ defmodule Ankusa.ClaimCheck.RouterTest do
   end
 
   describe "authentication and tenant scope" do
-    alias Ankusa.Admin.Auth.Token
-
-    defp token(id, scopes), do: %{id: id, sha256: Token.hash(id), scopes: scopes}
-
     defp authed_call(inst, method, path, token) do
       conn = Plug.Test.conn(method, path, "")
 
@@ -395,15 +411,9 @@ defmodule Ankusa.ClaimCheck.RouterTest do
         token("acme-writer", ["sources:write", "tenant:acme"])
       ]
 
-      config =
-        Config.new(
-          instance: inst,
-          data_dir: dir,
-          roles: [:claim_check],
-          claim_check: %{auth: %{mode: :token, tokens: tokens}}
-        )
-
+      config = Config.new(instance: inst, data_dir: dir, roles: [])
       Ankusa.put_config(config)
+      with_tokens(inst, tokens)
 
       {:ok, acme} = ClaimCheck.check_in(inst, "acme", [%{id: "a", body: "acme bytes"}])
       {:ok, globex} = ClaimCheck.check_in(inst, "globex", [%{id: "g", body: "globex bytes"}])
@@ -491,14 +501,12 @@ defmodule Ankusa.ClaimCheck.RouterTest do
         Config.new(
           instance: inst,
           data_dir: dir,
-          roles: [:claim_check],
-          claim_check: %{
-            ref_signing_keys: [@key, @previous],
-            auth: %{mode: :token, tokens: tokens}
-          }
+          roles: [],
+          claim_check: %{ref_signing_keys: [@key, @previous]}
         )
 
       Ankusa.put_config(config)
+      with_tokens(inst, tokens)
 
       {:ok, acme} = ClaimCheck.check_in(inst, "acme", [%{id: "a", body: "acme bytes"}])
       {:ok, globex} = ClaimCheck.check_in(inst, "globex", [%{id: "g", body: "globex bytes"}])
@@ -622,7 +630,7 @@ defmodule Ankusa.ClaimCheck.RouterTest do
 
       :telemetry.attach(
         handler,
-        [:ankusa, :claim_check, :gateway],
+        [:ankusa, :gateway, :request],
         fn _event, _measurements, meta, _ ->
           if meta.instance == inst, do: send(test, {:gateway, meta.status})
         end,
@@ -638,33 +646,52 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     end
   end
 
-  describe "claim_check.authorize" do
+  describe "a custom authorizer" do
     defmodule Gate do
-      def allow(%{principal: principal, tenant_id: tenant, claim_id: claim_id, conn: conn}, only) do
-        send(self(), {:asked, principal.id, tenant, claim_id, conn.method})
-        if tenant == only, do: :ok, else: {:error, :forbidden}
+      @behaviour Ankusa.Gateway.Authorizer
+
+      @impl true
+      def init!(opts, _key), do: opts
+
+      @impl true
+      def kind(_state), do: :inline
+
+      # The router calls in the test's own process: `self()` is the test.
+      @impl true
+      def decide(%{principal: principal, resource: resource, conn: conn}, %{only: only}, _ctx) do
+        send(self(), {:asked, principal.id, resource.tenant, resource.key, conn.method})
+        if resource.tenant == only, do: {:ok, :allow, %{}}, else: {:ok, :deny, %{}}
       end
     end
 
-    setup %{config: config, inst: inst} do
+    defp gated(inst, opts \\ []) do
+      Ankusa.Gateway.put_config(
+        GatewayConfig.new(
+          [
+            instance: inst,
+            authz: %{
+              authorizers: %{"gate" => {Gate, %{only: "acme"}}},
+              policies: %{"claims" => %{mode: :first, steps: ["gate"]}}
+            }
+          ] ++ opts
+        )
+      )
+    end
+
+    setup %{inst: inst} do
       {:ok, acme} = ClaimCheck.check_in(inst, "acme", [%{id: "a", body: "acme bytes"}])
       {:ok, globex} = ClaimCheck.check_in(inst, "globex", [%{id: "g", body: "globex bytes"}])
-
-      Ankusa.put_config(%{
-        config
-        | claim_check: %{config.claim_check | authorize: {Gate, :allow, ["acme"]}}
-      })
-
+      gated(inst)
       %{acme: Ref.path(acme["a"].ref), globex: Ref.path(globex["g"].ref)}
     end
 
-    test "is asked before anything is read, with the principal, tenant, claim and conn", %{
+    test "is asked before anything is read, with the principal and the tenant and claim", %{
       inst: inst,
       acme: acme
     } do
       conn = call(inst, :get, acme)
       assert {conn.status, conn.resp_body} == {200, "acme bytes"}
-      assert_received {:asked, "anonymous", "acme", claim_id, "GET"}
+      assert_received {:asked, "anonymous", "acme", "acme/" <> claim_id, "GET"}
       assert acme == "/v1/claims/acme/#{claim_id}"
     end
 
@@ -681,23 +708,11 @@ defmodule Ankusa.ClaimCheck.RouterTest do
       assert JSON.decode!(call(inst, :get, globex).resp_body) == %{"error" => "forbidden"}
     end
 
-    test "replaces the built-in scope check: a token without claims:read is up to the hook", %{
-      config: config,
-      inst: inst,
-      acme: acme
-    } do
-      tokens = [
-        %{id: "writer", sha256: Ankusa.Admin.Auth.Token.hash("writer"), scopes: ["sources:write"]}
-      ]
-
-      Ankusa.put_config(%{
-        config
-        | claim_check: %{
-            config.claim_check
-            | authorize: {Gate, :allow, ["acme"]},
-              auth: %{config.claim_check.auth | mode: :token, tokens: tokens}
-          }
-      })
+    test "replaces the scope rule when the policy lists only it: a token without claims:read is up to it",
+         %{inst: inst, acme: acme} do
+      gated(inst,
+        auth: %{authenticators: [%{type: :token, tokens: [token("writer", ["sources:write"])]}]}
+      )
 
       conn =
         :get
@@ -706,13 +721,14 @@ defmodule Ankusa.ClaimCheck.RouterTest do
         |> Router.call(Router.init(instance: inst))
 
       assert conn.status == 200
-      assert_received {:asked, "writer", "acme", _claim_id, "GET"}
+      assert_received {:asked, "writer", "acme", _key, "GET"}
     end
   end
 
-  describe "claim_check.max_concurrent_reads" do
+  describe "gateway.max_concurrent_requests" do
     setup %{inst: inst} do
-      start_reader(inst, %{max_concurrent_reads: 1})
+      start_reader(inst, %{})
+      put_gateway(inst, &%{&1 | max_concurrent_requests: 1})
       %{path: Ref.path(check_in(inst, "found"))}
     end
 
@@ -774,8 +790,7 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     end
 
     test "0 means no limit", %{inst: inst, path: path} do
-      config = Ankusa.config(inst)
-      Ankusa.put_config(%{config | claim_check: %{config.claim_check | max_concurrent_reads: 0}})
+      put_gateway(inst, &%{&1 | max_concurrent_requests: 0})
       hold_slot(inst)
       assert call(inst, :get, path).status == 200
     end
@@ -863,8 +878,7 @@ defmodule Ankusa.ClaimCheck.RouterTest do
       ref = check_in(inst, body)
       flip_byte_of(pack_file(root), body)
 
-      config = Ankusa.config(inst)
-      Ankusa.put_config(%{config | claim_check: %{config.claim_check | integrity_check: :off}})
+      put_gateway(inst, &%{&1 | claims: %{&1.claims | integrity_check: :off}})
 
       conn = call(inst, :get, Ref.path(ref))
       assert conn.status == 200

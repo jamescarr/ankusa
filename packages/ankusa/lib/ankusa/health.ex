@@ -37,7 +37,8 @@ defmodule Ankusa.Health do
   `disk` always, `backup` with `backup.require_fresh`. `backlog` never does: it
   is a label, so a node that is behind stays in the load balancer and the
   alert, not the probe, says so. A node with none of these checks (one that
-  runs only the claim check gateway, so no store) is ready while it runs.
+  runs only the claim-check gateway, `roles: []`, so no store) is ready while it
+  runs.
   """
 
   alias Ankusa.Health.Check

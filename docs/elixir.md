@@ -145,8 +145,8 @@ quarantine, is `admin.enabled: true`; see the admin API section in
 
 ## Roles from code
 
-`Ankusa.Instance`'s `init/1` starts children conditionally on `config.roles`.
-The store and the queue writer, for example:
+`Ankusa.Instance`'s `init/1` starts children conditionally on `config.roles`
+(`edge`, `dispatch`, `storage`). The store and the queue writer, for example:
 
 ```elixir
 defp store_children(config, opts) do
@@ -162,22 +162,39 @@ defp writer_children(%Config{wal: wal}, opts) when wal in [:disk, :dual],
   do: [{Ankusa.Queue.Writer, opts}]
 
 defp writer_children(_config, _opts), do: []
-
-defp claim_check_children(config) do
-  if Config.role?(config, :claim_check) do
-    # ...
-    isolated(config, :claim_check, [bandit_child(Ankusa.ClaimCheck.Router, ...)])
-  else
-    []
-  end
-end
 ```
 
 The writer is not role-checked itself: it lives in the `:edge` subtree, which
 only starts when the `edge` role is on, and only under `wal: :disk` or
-`wal: :dual`. The
-`edge`, `dispatch`, `storage` and `claim_check` children follow the same
+`wal: :dual`. The `edge`, `dispatch` and `storage` children follow the same
 `if Config.role?(config, role)` shape.
+
+**The gateway is not a role of `Ankusa.Instance`.** It is the `ankusa_gateway`
+package's `Ankusa.Gateway`, one more child started after the instance under the
+same `:one_for_one` supervisor:
+
+```elixir
+children = [
+  {Ankusa.Instance, Ankusa.Config.new(instance: :default, roles: [])},
+  {Ankusa.Gateway,
+   Ankusa.Gateway.Config.new(
+     instance: :default,
+     port: 4001,
+     auth: %{authenticators: [%{type: :token, tokens: [%{id: "worker", token: token}]}]}
+   )}
+]
+
+Supervisor.start_link(children, strategy: :one_for_one)
+```
+
+The order matters: `Ankusa.Gateway` refuses to start unless the instance's
+config is published and its `:instance` process is registered. It runs in its
+own failure domain (`:gateway`), so a gateway crash leaves the instance's
+domains alone and theirs do not restart it. A gateway-only node passes
+`roles: []` — a legal instance with no queue and no store, under any `wal`
+(`wal: :none` included) — and keeps the claim stores in the instance's
+`claim_check` section, which the gateway reads. The full embedding guide is
+[`ankusa_gateway/README.md`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway/README.md).
 
 One Mix release, many deployments: the same compiled artifact runs
 all-in-one on a laptop or as a node in a fleet, because *which* children
@@ -186,11 +203,12 @@ start is a runtime config decision, never a build-time one.
 `edge`, `dispatch`, and `storage` share the one local RocksDB store at
 `<data_dir>/<instance>/store`, and RocksDB is single-process, so every
 store-backed role has to run in the **same BEAM node**: you can't split them
-across processes or hosts. `claim_check` is stateless and can run anywhere:
+across processes or hosts. `claim_check` (in the image) is stateless and can
+run anywhere:
 
 ```sh
 ANKUSA_ROLES=edge,dispatch,storage mix run --no-halt   # the store-backed shape
-ANKUSA_ROLES=claim_check mix run --no-halt             # claim-check gateway, any node
+ANKUSA_ROLES=claim_check mix run --no-halt             # the gateway, beside an empty instance
 ```
 
 Ankusa.Application reads `ANKUSA_ROLES` (comma-separated) and `PORT` on top of

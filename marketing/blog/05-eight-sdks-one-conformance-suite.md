@@ -172,11 +172,11 @@ The suite pins behaviour, not API shape, so each SDK is free to be idiomatic. He
 - **PHP** speaks PSR-18. Guzzle is installed by default, and any other PSR-18 client can be injected instead.
 - **Go** is stdlib only. `go.mod` has no `require` line.
 - **Ruby** is stdlib only too; the gemspec declares no runtime dependency.
-- **TypeScript** has types generated from `packages/ankusa/priv/openapi/claim_check.v1.yaml`, targets Node 20 or newer, and is ESM only. `parseHeaders` takes Express's `req.headers` directly.
+- **TypeScript** has types generated from `packages/ankusa_gateway/priv/openapi/claim_check.v1.yaml`, targets Node 20 or newer, and is ESM only. `parseHeaders` takes Express's `req.headers` directly.
 - **Python** needs 3.11 or newer. `ClaimCheckClient` owns an `httpx.Client` and is a context manager.
 - **Java** targets 17 and newer, uses `java.net.http.HttpClient`, and depends on Jackson 3.
 
-The claim-check contract is an OpenAPI document, [`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/claim_check.v1.yaml), and the TypeScript types come from it. But the queue-message decode rules, the idempotency-key rules and the error mapping are behaviour, and a schema does not express behaviour. The vectors do.
+The claim-check contract is an OpenAPI document, [`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway/priv/openapi/claim_check.v1.yaml), and the TypeScript types come from it. But the queue-message decode rules, the idempotency-key rules and the error mapping are behaviour, and a schema does not express behaviour. The vectors do.
 
 ## Running it
 

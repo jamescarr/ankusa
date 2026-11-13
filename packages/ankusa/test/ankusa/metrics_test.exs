@@ -953,17 +953,9 @@ defmodule Ankusa.MetricsTest do
       assert scrape =~ ~r/^ankusa_claim_check_leases_pruned_total\{instance="#{inst}"\} 6(\.0)?$/m
     end
 
-    test "gateway metrics: requests by status alone, a duration histogram, sweeps by whether they deleted" do
+    test "sweeps are counted by whether they deleted" do
       config = start_instance()
       inst = config.instance
-
-      for {method, status} <- [{"GET", 200}, {"HEAD", 200}, {"GET", 502}] do
-        :telemetry.execute(
-          [:ankusa, :claim_check, :gateway],
-          %{duration: 2_000_000},
-          %{instance: inst, method: method, status: status}
-        )
-      end
 
       for deleted <- [true, false, false] do
         :telemetry.execute(
@@ -984,22 +976,6 @@ defmodule Ankusa.MetricsTest do
       end
 
       scrape = Ankusa.Metrics.scrape(inst)
-
-      assert scrape =~
-               ~r/^ankusa_claim_gateway_requests_total\{[^}]*status="200"[^}]*\} 2(\.0)?$/m
-
-      assert scrape =~
-               ~r/^ankusa_claim_gateway_requests_total\{[^}]*status="502"[^}]*\} 1(\.0)?$/m
-
-      # Status is the only label a caller's request can shape; no method, no tenant, no claim.
-      for line <- series(scrape, "ankusa_claim_gateway_requests_total") do
-        refute line =~ ~r/method=|tenant|claim=/
-      end
-
-      assert scrape =~
-               ~r/^ankusa_claim_gateway_duration_seconds_count\{instance="#{inst}"\} 3(\.0)?$/m
-
-      assert scrape =~ "ankusa_claim_gateway_duration_seconds_bucket{"
       assert scrape =~ ~r/^ankusa_claim_sweeps_total\{[^}]*deleted="true"[^}]*\} 1(\.0)?$/m
       assert scrape =~ ~r/^ankusa_claim_sweeps_total\{[^}]*deleted="false"[^}]*\} 2(\.0)?$/m
     end
