@@ -37,6 +37,11 @@ defmodule Ankusa.Gateway.Config do
   | `claims.enabled` | `true` | serve the claims API (else its routes are `404`) |
   | `claims.policy` | `"claims"` | the policy a claim read is authorized by |
   | `claims.integrity_check` | `:manifest` | `:off` or `:manifest` |
+  | `spaces` | `%{}` | the objects API's spaces (`Ankusa.Gateway.Spaces`) |
+  | `objects.max_inflight_bytes` | `536870912` | object bytes held in memory at once across requests; at least every space's `max_object_bytes` |
+  | `objects.op_deadline_ms` | `30000` | 1000..600000: one store operation's deadline, every attempt included |
+  | `objects.timeout_ms` | `10000` | 1..600000: one store request |
+  | `objects.retries` | `1` | 0..10: extra attempts after a transient store failure |
 
   An authenticator is `%{type: :token | :jwt | :mtls | MyModule, name: "..."}`
   plus its own keys (see `Ankusa.Gateway.Authn.Token`, `Ankusa.Gateway.Authn.JWT`
@@ -80,7 +85,14 @@ defmodule Ankusa.Gateway.Config do
                 serve_stale_ms: 0
               }
             },
-            claims: %{enabled: true, policy: "claims", integrity_check: :manifest}
+            claims: %{enabled: true, policy: "claims", integrity_check: :manifest},
+            spaces: %{},
+            objects: %{
+              max_inflight_bytes: 536_870_912,
+              op_deadline_ms: 30_000,
+              timeout_ms: 10_000,
+              retries: 1
+            }
 
   @type authenticator :: %{type: atom(), name: String.t(), module: module(), config: map()}
   @type authorizer :: %{module: module(), state: map()}
@@ -100,10 +112,34 @@ defmodule Ankusa.Gateway.Config do
             deadline_ms: pos_integer(),
             cache: map()
           },
-          claims: %{enabled: boolean(), policy: String.t(), integrity_check: :off | :manifest}
+          claims: %{enabled: boolean(), policy: String.t(), integrity_check: :off | :manifest},
+          spaces: %{String.t() => Ankusa.Gateway.Spaces.space()},
+          objects: %{
+            max_inflight_bytes: pos_integer(),
+            op_deadline_ms: pos_integer(),
+            timeout_ms: pos_integer(),
+            retries: non_neg_integer()
+          }
         }
 
-  @top_keys [:instance, :port, :ip, :tls, :max_concurrent_requests, :auth, :authz, :claims]
+  @top_keys [
+    :instance,
+    :port,
+    :ip,
+    :tls,
+    :max_concurrent_requests,
+    :auth,
+    :authz,
+    :claims,
+    :spaces,
+    :objects
+  ]
+  @objects %{
+    max_inflight_bytes: 1..1_099_511_627_776,
+    op_deadline_ms: 1_000..600_000,
+    timeout_ms: 1..600_000,
+    retries: 0..10
+  }
   @auth_keys [:allow_insecure, :authenticators, :cache]
   @authz_keys [:authorizers, :policies, :deadline_ms, :cache]
   @auth_cache %{
@@ -128,7 +164,8 @@ defmodule Ankusa.Gateway.Config do
   @reserved_authorizers %{"scopes" => Authz.Scopes}
 
   @shown ~w(instance ip name type issuer audience jwks_url header scope_claim tenants_claim
-            groups_claim subject_prefix id scopes groups policy mode use on_unavailable steps)
+            groups_claim subject_prefix id scopes groups policy mode use on_unavailable steps
+            prefix)
 
   @doc "Validate `opts` into a config. Raises `ArgumentError` naming the key."
   @spec new(keyword() | map(), keyword()) :: t()
@@ -179,6 +216,35 @@ defmodule Ankusa.Gateway.Config do
       },
       claims: claims!(Map.get(given, :claims, %{}), policies)
     }
+    |> objects!(Map.get(given, :spaces, %{}), Map.get(given, :objects, %{}))
+  end
+
+  defp objects!(config, spaces, objects) do
+    spaces = Ankusa.Gateway.Spaces.config!(spaces, config.authz.policies)
+    objects = ranged!(objects, "gateway.objects", @objects, %__MODULE__{}.objects)
+
+    case Enum.find(Map.values(spaces), &(&1.max_object_bytes > objects.max_inflight_bytes)) do
+      nil ->
+        %{config | spaces: spaces, objects: objects}
+
+      space ->
+        raise ArgumentError,
+              "gateway.objects.max_inflight_bytes (#{objects.max_inflight_bytes}) must be at " <>
+                "least gateway.spaces.#{space.name}.max_object_bytes (#{space.max_object_bytes})"
+    end
+  end
+
+  @doc """
+  The store options of one call to `space`'s store: its own, with
+  `objects.op_deadline_ms`, `timeout_ms` and `retries` over them.
+  """
+  @spec store_opts(t(), Ankusa.Gateway.Spaces.space()) :: keyword()
+  def store_opts(%__MODULE__{objects: objects}, %{store: {_module, opts}}) do
+    Keyword.merge(opts,
+      op_deadline_ms: objects.op_deadline_ms,
+      timeout_ms: objects.timeout_ms,
+      retries: objects.retries
+    )
   end
 
   @doc """

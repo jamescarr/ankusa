@@ -940,4 +940,99 @@ defmodule AnkusaGatewayServer.ConfigTest do
       end
     end
   end
+
+  describe "gateway.spaces and gateway.objects" do
+    test "a space with a local store and a policy loads, and the objects keys land" do
+      root = Path.join(System.tmp_dir!(), "gw_space_#{System.unique_integer([:positive])}")
+
+      loaded =
+        load!("""
+        config_version: 2
+        gateway:
+          authz:
+            policies:
+              docs: {mode: first, steps: [scopes]}
+          spaces:
+            docs:
+              store: {type: local, root: #{root}}
+              prefix: docs/
+              policy: docs
+              max_object_bytes: 1024
+              read_first_bytes: 1024
+              read_only: true
+          objects:
+            max_inflight_bytes: 65536
+            op_deadline_ms: 60000
+            timeout_ms: 5000
+            retries: 3
+        """)
+
+      assert %{
+               name: "docs",
+               store: {Ankusa.BlobStore.LocalFS, [root: ^root]},
+               prefix: "docs/",
+               policy: "docs",
+               max_object_bytes: 1024,
+               read_first_bytes: 1024,
+               read_only: true
+             } = loaded.gateway.spaces["docs"]
+
+      assert loaded.gateway.objects == %{
+               max_inflight_bytes: 65_536,
+               op_deadline_ms: 60_000,
+               timeout_ms: 5000,
+               retries: 3
+             }
+    end
+
+    test "spaces and objects take their defaults when the file leaves them out" do
+      loaded = load!("gateway: {port: 4100}\n")
+
+      assert loaded.gateway.spaces == %{}
+
+      assert loaded.gateway.objects == %{
+               max_inflight_bytes: 536_870_912,
+               op_deadline_ms: 30_000,
+               timeout_ms: 10_000,
+               retries: 1
+             }
+    end
+
+    test "two spaces on one store load when their prefixes do not overlap" do
+      loaded =
+        load!("""
+        gateway:
+          spaces:
+            a: {store: {type: local, root: /tmp/gw-a}, policy: claims, prefix: a/}
+            b: {store: {type: local, root: /tmp/gw-a}, policy: claims, prefix: b/}
+        """)
+
+      assert loaded.gateway.spaces |> Map.keys() |> Enum.sort() == ["a", "b"]
+      assert loaded.gateway.spaces["b"].prefix == "b/"
+      assert loaded.gateway.spaces["b"].policy == "claims"
+    end
+
+    test "every error names its key" do
+      for {yaml, message} <- [
+            {"spaces: {docs: {store: {type: local, root: /tmp/gw}, policy: claims, nope: 1}}",
+             ~s(gateway.spaces.docs: unknown key "nope")},
+            {"spaces: {docs: {store: {type: local, root: /tmp/gw}, policy: claims, prefix: docs/.ankusa/}}",
+             "gateway.spaces.docs.prefix"},
+            {"spaces: {a: {store: {type: local, root: /tmp/gw}, policy: claims}, b: {store: {type: local, root: /tmp/gw}, policy: claims, prefix: a/}}",
+             "gateway.spaces.a and gateway.spaces.b share a store"},
+            {"spaces: {docs: {policy: claims}}", "gateway.spaces.docs.store"},
+            {"spaces: {docs: {store: {type: local, root: /tmp/gw}, policy: nope}}",
+             "gateway.spaces.docs.policy must name a policy"},
+            {"spaces: {claims: {store: {type: local, root: /tmp/gw}, policy: claims}}",
+             "gateway.spaces.claims"},
+            {"spaces: {docs: {store: {type: local, root: /tmp/gw}, policy: claims, max_object_bytes: 4096}}, objects: {max_inflight_bytes: 1024}",
+             "gateway.objects.max_inflight_bytes"},
+            {"objects: {retries: 11}", "gateway.objects.retries"},
+            {"objects: {nope: 1}", ~s(gateway.objects: unknown key "nope")},
+            {"spaces: 5", "gateway.spaces: expected a mapping of spaces"}
+          ] do
+        assert error!("config_version: 2\ngateway: {#{yaml}}\n") =~ message, yaml
+      end
+    end
+  end
 end

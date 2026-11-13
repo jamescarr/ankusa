@@ -40,6 +40,12 @@ own ([`docs/releasing.md`](../../docs/releasing.md)).
   gateway's new `gateway.auth.cache` and `gateway.authz` (`deadline_ms`,
   `cache`, `authorizers` with `type: rules`, `policies`) when it runs the
   gateway; `config-examples/reference.yml` documents them.
+- **The objects API's `gateway.spaces` and `gateway.objects`.** A space (an
+  object store, a prefix in it and a policy) is `gateway.spaces.<name>`:
+  `store` in the `claim_check.store` shape (`local` with `root`, `s3`, `gcs`),
+  `prefix`, `policy`, `max_object_bytes`, `read_first_bytes`, `read_only`;
+  `gateway.objects` sets `max_inflight_bytes`, `op_deadline_ms`, `timeout_ms`
+  and `retries`. `config-examples/reference.yml` documents both, commented.
 - **`{{ var }}` templates on sink addresses (CR-3).** Any sink of a source (YAML
   or the admin API) may template its per-hook address keys: `kafka` `topic` /
   `key`, `rabbitmq` `routing_key`, `nats` `subject`, `redis` `channel`, `sqs`

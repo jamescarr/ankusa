@@ -8,13 +8,15 @@ defmodule AnkusaGatewayServer.GatewaySection do
   """
 
   import AnkusaGatewayServer.Schema
-  import AnkusaGatewayServer.Sections, only: [jwt_opts: 2, tls_opt: 2, token_sha256!: 2]
+
+  import AnkusaGatewayServer.Sections,
+    only: [claim_store!: 2, jwt_opts: 2, tls_opt: 2, token_sha256!: 2]
 
   alias AnkusaGatewayServer.ConfigError
 
   @auth_jwt_keys ~w(issuer audience jwks_url keys refresh_ms min_refresh_ms leeway_s scope_claim tenants_claim)
   @auth_mtls_keys ~w(subject_map)
-  @gateway_keys ~w(port ip tls auth authz max_concurrent_requests claims)
+  @gateway_keys ~w(port ip tls auth authz max_concurrent_requests claims spaces objects)
   @gateway_auth_keys ~w(allow_insecure authenticators cache)
   @gateway_auth_cache_keys ~w(ttl_ms negative_ttl_ms max_entries max_bytes)a
   @gateway_authz_keys ~w(deadline_ms cache authorizers policies)
@@ -33,6 +35,8 @@ defmodule AnkusaGatewayServer.GatewaySection do
   @gateway_token_keys ~w(id token sha256 scopes groups claims)
   @gateway_jwt_keys @auth_jwt_keys ++ ~w(groups_claim header subject_prefix)
   @gateway_claims_keys ~w(enabled policy integrity_check)
+  @gateway_space_keys ~w(store prefix policy max_object_bytes read_first_bytes read_only)
+  @gateway_objects_keys ~w(max_inflight_bytes op_deadline_ms timeout_ms retries)
 
   @doc """
   The gateway's config from `doc`. `check_exposure: false` accepts an empty
@@ -61,6 +65,8 @@ defmodule AnkusaGatewayServer.GatewaySection do
       |> put_opt(:auth, gateway_auth(gateway, path))
       |> put_opt(:authz, gateway_authz(gateway, path))
       |> put_opt(:claims, gateway_claims(gateway, path))
+      |> put_opt(:spaces, gateway_spaces(gateway, path))
+      |> put_opt(:objects, gateway_objects(gateway, path))
 
     try do
       Ankusa.Gateway.Config.new(opts, check_exposure: gateway?)
@@ -365,6 +371,60 @@ defmodule AnkusaGatewayServer.GatewaySection do
           :integrity_check,
           atom_enum_opt(claims, "integrity_check", ~w(off manifest), path)
         )
+    end
+  end
+
+  # ── spaces and objects ──────────────────────────────────────────────────────
+
+  # A space's `store` keeps the `claim_check.store` shape, so YAML reaches the
+  # stores that parser knows (`local` with a `root`, `s3`, `gcs`). Every range
+  # and cross-space rule is `Ankusa.Gateway.Spaces`'s, which names the same
+  # dotted key; a missing `store` is left to it, so the message names it too.
+  defp gateway_spaces(gateway, path) do
+    case gateway["spaces"] do
+      nil ->
+        nil
+
+      %{} = spaces ->
+        path = path ++ ["spaces"]
+
+        Map.new(spaces, fn {name, space} ->
+          name = to_string(name)
+          {name, gateway_space!(space, path ++ [name])}
+        end)
+
+      other ->
+        raise ConfigError,
+          message: type_error(path ++ ["spaces"], "a mapping of spaces", other)
+    end
+  end
+
+  defp gateway_space!(entry, path) do
+    space = section!(entry, @gateway_space_keys, path)
+
+    %{}
+    |> put_map(:store, space["store"] && claim_store!(space["store"], path ++ ["store"]))
+    |> put_map(:prefix, string_opt(space, "prefix", path))
+    |> put_map(:policy, string_opt(space, "policy", path))
+    |> put_map(:max_object_bytes, int_opt(space, "max_object_bytes", path))
+    |> put_map(:read_first_bytes, int_opt(space, "read_first_bytes", path))
+    |> put_map(:read_only, bool_opt(space, "read_only", path))
+  end
+
+  defp gateway_objects(gateway, path) do
+    case gateway["objects"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["objects"]
+        objects = section!(value, @gateway_objects_keys, path)
+
+        []
+        |> put_opt(:max_inflight_bytes, int_opt(objects, "max_inflight_bytes", path))
+        |> put_opt(:op_deadline_ms, int_opt(objects, "op_deadline_ms", path))
+        |> put_opt(:timeout_ms, int_opt(objects, "timeout_ms", path))
+        |> put_opt(:retries, int_opt(objects, "retries", path))
     end
   end
 end

@@ -1,0 +1,974 @@
+openapi: 3.1.0
+info:
+  title: Ankusa Gateway
+  version: 1.0.0
+  summary: A permissioned facade in front of an object store.
+  description: |
+    The objects API of the gateway (`Ankusa.Gateway`, package
+    `ankusa_gateway`: the `jamescarr/ankusa-gateway` image, or
+    `jamescarr/ankusa` with the `claim_check` role): buffered
+    `GET`/`HEAD`/`PUT`/`DELETE` of one object and one page of a listing, in a
+    space (`gateway.spaces.<name>`) that names an object store, a key prefix
+    in it, the policy every request is decided by, and its size bounds. This
+    document is the cross-language contract. The Elixir code conforms to it,
+    not the reverse.
+
+    The claims API served by the same listener is documented separately, in
+    `claim_check.v1.yaml`. The Sharing API v1 (native grants, share links and
+    the audit records they write) will be added to this document when it
+    ships; until then the only way to change who may read an object is the
+    space's policy.
+
+    Every operation except `GET /health` and `GET /ready` needs a credential
+    accepted by one of the gateway's authenticators (`gateway.auth`): a static
+    bearer token (`type: token`), an OIDC access token (`type: jwt`, `okta`,
+    `introspection`) or a client certificate (`type: mtls`). `401` without an
+    accepted credential; `403` when the space's policy refuses the request
+    (`gateway.spaces.<name>.policy`; a policy that does not list an authorizer
+    for the action answers deny). An empty authenticator chain is accepted on
+    a loopback address only, or with `allow_insecure: true` when a mesh or
+    proxy in front of the port authenticates every caller. A shared cache must
+    sit behind that layer, never in front of it.
+
+    ## The order of every request
+
+    The credential (`401`), the space (`404 not_found`, whether or not the
+    space exists is not a secret this API tries to keep), the key
+    (`400 invalid_key`), the policy (`403`, `503 authz_unavailable`), a slot
+    among `gateway.max_concurrent_requests` (`503 overloaded`), then the
+    store. Object bytes held in memory count against
+    `gateway.objects.max_inflight_bytes` (`503 overloaded` past it).
+
+    ## Keys
+
+    One canonical key, however it arrives. In a path the key is the rest of
+    the path after the space: every segment is percent-decoded exactly once
+    (a decoded `/` or `\` is refused, so `%2F` never becomes a boundary, and a
+    malformed escape is `400`), the segments are joined with `/` and the
+    result is checked. From a query parameter it is the decoded string,
+    checked the same way.
+
+    A key is valid UTF-8, 1 to 1024 bytes, at most 32 segments, no empty
+    segment (so no leading, trailing or doubled `/`), no `.` or `..` segment,
+    no `\`, no byte below `0x20` and no `0x7F`, and no segment starting with
+    `.ankusa` at any depth: the ACL and audit trees live there, and so do
+    LocalFS's sidecars. A prefix (the list route's `prefix`) is the same
+    minus the non-empty rule, with at most one trailing `/`.
+
+    ## Objects are served, never executed
+
+    Whatever the stored content type, a browser does not run an object: every
+    read is `content-disposition: attachment`, `x-content-type-options:
+    nosniff` and `content-security-policy: default-src 'none'; sandbox`.
+    Responses are `cache-control: private, no-cache` — a shared cache in front
+    of this API must not answer for it — with an `etag` (the object's version)
+    and, when the store knows it, a `last-modified`.
+servers:
+  - url: http://localhost:4001
+    description: Local development listener (default `gateway.port`).
+security:
+  - bearerAuth: []
+  - mutualTLS: []
+tags:
+  - name: objects
+    description: Read, write and list objects in a space.
+  - name: operations
+    description: Health and readiness.
+paths:
+  /v1/objects/{space}:
+    parameters:
+      - $ref: '#/components/parameters/Space'
+    get:
+      operationId: listObjects
+      tags: [objects]
+      summary: List one page of a space
+      description: |
+        One page of the listing of `space`, under `prefix` (which the space's
+        own prefix is joined to). Keys and prefixes are returned as the caller
+        wrote them: the space's prefix is stripped, and an entry with a
+        segment starting with `.ankusa` is dropped (the ACL and audit trees
+        never show).
+
+        With `delimiter=/` the listing is one level: keys directly under
+        `prefix` in `objects`, and the sub-prefixes of deeper keys in
+        `prefixes`. Without it every key under `prefix` is listed, however
+        deep.
+
+        `cursor` is the store's own continuation token, opaque to the caller:
+        echo the `next_cursor` of the previous page, and stop when it is
+        `null`. Every adapter applies the prefix on every page, so a cursor
+        can only move the start inside that prefix.
+
+        This operation authorizes `list` on the *prefix*: it shows every key
+        under it, whatever `read` says about each one. A space that needs
+        per-object secrecy grants `list` only on the prefixes it intends to
+        expose.
+      parameters:
+        - name: prefix
+          in: query
+          required: false
+          description: The prefix to list, relative to the space's own prefix. Defaults to `""`, the whole space.
+          schema:
+            $ref: '#/components/schemas/Prefix'
+        - name: delimiter
+          in: query
+          required: false
+          description: |
+            Absent (or empty) to list every key under the prefix, however
+            deep; `/` for one level, with the deeper keys' common prefixes in
+            `prefixes`. Any other value is `400 invalid_delimiter`.
+          schema:
+            type: string
+            enum: ['/']
+        - name: cursor
+          in: query
+          required: false
+          description: |
+            The `next_cursor` of the previous page, passed through to the
+            store as it came. At most 2048 bytes; longer is `400
+            invalid_cursor`.
+          schema:
+            type: string
+            maxLength: 2048
+        - name: limit
+          in: query
+          required: false
+          description: The page size. Defaults to `100`; outside 1 to 1000 is `400 invalid_limit`.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: One page of the listing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObjectPage'
+              example:
+                objects:
+                  - {key: teams/eng/a.txt, size: 6}
+                  - {key: teams/eng/b.txt, size: 12}
+                prefixes: []
+                next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadListRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          $ref: '#/components/responses/IntegrityMismatch'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/objects/{space}/{key}:
+    parameters:
+      - $ref: '#/components/parameters/Space'
+      - $ref: '#/components/parameters/Key'
+    get:
+      operationId: readObject
+      tags: [objects]
+      summary: Read one object
+      description: |
+        Returns the object's bytes. A whole read is `200`; one `bytes` range is
+        `206` with `content-range`. Several ranges, another unit, a malformed
+        `Range` or any `If-Range` (an object carries no `If-Range` validator
+        here) are ignored and the whole object is sent `200`.
+
+        The response's `content-type` is the object's stored type (the `PUT`
+        that wrote it, or `application/octet-stream`), never one derived from
+        the bytes: the body below is every one of them.
+
+        `If-None-Match` with the object's current version (the `etag`, quoted
+        or not) is `304` without a body; anything else is read afresh.
+
+        The gateway reads at most `read_first_bytes` (per space) in its first
+        store call, which also yields the size and the version; the rest, when
+        the range asks for more, is a second call held to that version. An
+        object overwritten between the two is re-read from the start once,
+        then `503 store_unavailable`: a response never mixes two versions.
+
+        An object larger than the space's `max_object_bytes` is not sent at
+        all: `422 object_too_large` names the bound. An empty object is an
+        empty `200`; a range that starts at or past its end is `416` with
+        `content-range: bytes */0`.
+      parameters:
+        - name: Range
+          in: header
+          required: false
+          description: |
+            One byte range: `bytes=first-last`, `bytes=first-` or
+            `bytes=-suffix_length` (RFC 9110 §14.1.2). `last` past the
+            object's end is clamped to it.
+          schema:
+            type: string
+            pattern: '^bytes=(\d+-\d*|-\d+)$'
+          examples:
+            span:
+              value: bytes=0-1023
+            suffix:
+              value: bytes=-1024
+        - name: If-None-Match
+          in: header
+          required: false
+          description: |
+            The object's version (`etag`), quoted or not; several values may
+            be comma-separated. A match is `304`.
+          schema:
+            type: string
+          examples:
+            current:
+              value: '"01JD0Z2B7M3N4P5Q6R7S8T9V0W"'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The object's bytes.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Last-Modified:
+              $ref: '#/components/headers/LastModified'
+            Accept-Ranges:
+              $ref: '#/components/headers/AcceptRanges'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            X-Content-Type-Options:
+              $ref: '#/components/headers/NoSniff'
+            Content-Disposition:
+              $ref: '#/components/headers/ContentDisposition'
+            Content-Security-Policy:
+              $ref: '#/components/headers/ContentSecurityPolicy'
+            x-ankusa-meta-<name>:
+              $ref: '#/components/headers/ObjectMetadata'
+          content:
+            application/octet-stream:
+              schema:
+                $ref: '#/components/schemas/ObjectBytes'
+        '206':
+          description: The requested range of the object's bytes.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Last-Modified:
+              $ref: '#/components/headers/LastModified'
+            Accept-Ranges:
+              $ref: '#/components/headers/AcceptRanges'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            X-Content-Type-Options:
+              $ref: '#/components/headers/NoSniff'
+            Content-Disposition:
+              $ref: '#/components/headers/ContentDisposition'
+            Content-Security-Policy:
+              $ref: '#/components/headers/ContentSecurityPolicy'
+            Content-Range:
+              description: '`bytes first-last/size`, `size` the whole object''s size.'
+              schema:
+                type: string
+                pattern: '^bytes \d+-\d+/\d+$'
+            x-ankusa-meta-<name>:
+              $ref: '#/components/headers/ObjectMetadata'
+          content:
+            application/octet-stream:
+              schema:
+                $ref: '#/components/schemas/ObjectBytes'
+        '304':
+          description: |
+            The object is still the version the caller holds. No body: the
+            caller answers from its own copy. Empty body, with the current
+            `etag`.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+        '400':
+          $ref: '#/components/responses/BadObjectRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '416':
+          description: |
+            The range starts at or past the object's end (or is `bytes=-0`).
+            Empty body.
+          headers:
+            Accept-Ranges:
+              $ref: '#/components/headers/AcceptRanges'
+            Content-Range:
+              description: '`bytes */size`, `size` the whole object''s size.'
+              schema:
+                type: string
+                pattern: '^bytes \*/\d+$'
+        '422':
+          $ref: '#/components/responses/ObjectTooLarge'
+        '502':
+          $ref: '#/components/responses/IntegrityMismatch'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    head:
+      operationId: headObject
+      tags: [objects]
+      summary: The headers of one object, without its bytes
+      description: |
+        One store call that returns the object's size, version, content type,
+        last modification and metadata, and no bytes. The headers are the ones
+        `GET` sends, with `content-length`. An `If-None-Match` is not
+        consulted here: `HEAD` answers `200` for the object that is there.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The object's headers. Empty body.
+          headers:
+            Content-Length:
+              description: The whole object's size, in bytes.
+              schema:
+                type: integer
+                minimum: 0
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Last-Modified:
+              $ref: '#/components/headers/LastModified'
+            Accept-Ranges:
+              $ref: '#/components/headers/AcceptRanges'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            X-Content-Type-Options:
+              $ref: '#/components/headers/NoSniff'
+            Content-Disposition:
+              $ref: '#/components/headers/ContentDisposition'
+            Content-Security-Policy:
+              $ref: '#/components/headers/ContentSecurityPolicy'
+            x-ankusa-meta-<name>:
+              $ref: '#/components/headers/ObjectMetadata'
+        '400':
+          $ref: '#/components/responses/BadObjectRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          $ref: '#/components/responses/IntegrityMismatch'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    put:
+      operationId: writeObject
+      tags: [objects]
+      summary: Write one object
+      description: |
+        Buffered: the gateway reads the whole body into memory (its size is
+        reserved against `gateway.objects.max_inflight_bytes`) and writes it
+        to the space's store in one call. `content-length` is required — the
+        gateway will not stream a body it cannot size first — and at most the
+        space's `max_object_bytes`.
+
+        `content-type` is stored with the object (default
+        `application/octet-stream`) and returned by `GET` and `HEAD`. The body
+        is never interpreted: `content-type` is recorded as given and the
+        bytes are kept as sent.
+
+        `x-ankusa-meta-<name>` headers are the object's metadata: at most 16
+        pairs, a name of up to 64 lowercase letters, digits and `-` not
+        starting with `ankusa-` (those are the gateway's own), a value of up
+        to 1024 printable ASCII bytes. A pair that breaks those rules is `400
+        invalid_metadata`.
+
+        Conditions: `if-none-match: *` writes only if no object exists at the
+        key; `if-match: "<version>"` writes only if the version is the current
+        one. A condition that does not hold is `412 precondition_failed` and
+        the object is unchanged.
+
+        `200` names the object, its size and its new version, and carries that
+        version as the `etag`. A space with `read_only: true` answers `405`:
+        its objects are written out of band.
+      parameters:
+        - name: Content-Length
+          in: header
+          required: true
+          description: |
+            The body's size in bytes. Required (`411 length_required` when
+            missing, `400 invalid_content_length` when it is not a
+            non-negative integer or does not match the body it sent) and at
+            most the space's `max_object_bytes` (`413 too_large`).
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 4294967295
+        - name: Content-Type
+          in: header
+          required: false
+          description: Stored with the object and returned on every read. Defaults to `application/octet-stream`.
+          schema:
+            type: string
+          examples:
+            text:
+              value: text/csv
+        - name: If-None-Match
+          in: header
+          required: false
+          description: '`*` writes only if no object exists at the key; anything else is ignored.'
+          schema:
+            type: string
+            const: '*'
+        - name: If-Match
+          in: header
+          required: false
+          description: |
+            The version the caller holds (`etag`, quoted or not): the write
+            happens only if that is still the object's version.
+          schema:
+            type: string
+          examples:
+            current:
+              value: '"01JD0Z2B7M3N4P5Q6R7S8T9V0W"'
+        - name: x-ankusa-meta-<name>
+          in: header
+          required: false
+          description: |
+            One metadata pair per header (at most 16). The name is the part
+            after `x-ankusa-meta-`: `[a-z0-9-]{1,64}`, not starting with
+            `ankusa-`; the value is at most 1024 printable ASCII bytes.
+          schema:
+            type: string
+          examples:
+            owner:
+              value: 'alice'
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              $ref: '#/components/schemas/ObjectBytes'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The object was written.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObjectWrite'
+              example: {space: docs, key: teams/eng/a.txt, size: 6, version: '01JD0Z2B7M3N4P5Q6R7S8T9V0W'}
+        '400':
+          $ref: '#/components/responses/BadObjectRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '411':
+          $ref: '#/components/responses/LengthRequired'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '502':
+          $ref: '#/components/responses/IntegrityMismatch'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    delete:
+      operationId: deleteObject
+      tags: [objects]
+      summary: Delete one object
+      description: |
+        Deletes the object and answers `204`. Deleting an object that is not
+        there is `204` as well: the call states what the caller wants to be
+        true, not what was true. A space with `read_only: true` answers `405`.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '204':
+          description: The object is not there any more. No body.
+        '400':
+          $ref: '#/components/responses/BadObjectRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '502':
+          $ref: '#/components/responses/IntegrityMismatch'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /health:
+    get:
+      operationId: getHealth
+      security: []
+      tags: [operations]
+      summary: Liveness probe
+      responses:
+        '200':
+          description: The listener is up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example: {status: ok}
+  /ready:
+    get:
+      operationId: getReady
+      security: []
+      tags: [operations]
+      summary: Readiness probe
+      description: |
+        The node's readiness checks (its store, sinks and disk when it has
+        them; none on a gateway-only node) with `"gateway": "ok"`. `503` while
+        the node drains on its way down, or while an authorizer that must load
+        before serving has not.
+      responses:
+        '200':
+          description: Ready to serve.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ready'
+              example: {status: ok, gateway: ok}
+        '503':
+          description: Not ready; `Retry-After` is always `1`.
+          headers:
+            Retry-After:
+              description: Always `1`.
+              schema:
+                type: integer
+                const: 1
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ready'
+              example: {status: draining, gateway: ok}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        `Authorization: Bearer <token>`: an OIDC/OAuth2 access token
+        (`type: jwt`, `okta`, `introspection`) or a static token
+        (`type: token`).
+    mutualTLS:
+      type: mutualTLS
+      description: |
+        A client certificate presented to a listener with `tls.verify:
+        verify_peer` (`type: mtls`), mapped to a principal by
+        `auth.mtls.subject_map`.
+  parameters:
+    Space:
+      name: space
+      in: path
+      required: true
+      description: |
+        The space (`gateway.spaces.<name>`): `[a-z0-9][a-z0-9_-]{0,62}`.
+        `claims` is reserved for the claims API, so it is never a space.
+      schema:
+        $ref: '#/components/schemas/Space'
+    Key:
+      name: key
+      in: path
+      required: true
+      description: |
+        The object's key: the rest of the path after the space, which may
+        contain `/`. Each segment is percent-decoded exactly once and joined
+        with `/`; a decoded `/` or `\` inside a segment is refused. The rules
+        are in the document's description; a key that breaks them is `400
+        invalid_key`.
+      schema:
+        $ref: '#/components/schemas/Key'
+  schemas:
+    Space:
+      type: string
+      pattern: '^[a-z0-9][a-z0-9_-]{0,62}$'
+      examples: ['docs']
+    Key:
+      type: string
+      description: |
+        At most 1024 bytes of valid UTF-8, 1 to 32 segments, no empty
+        segment, no `.` or `..` segment, no `\`, no control byte, and no
+        segment starting with `.ankusa`. The `pattern` checks the shape alone;
+        the length bounds and the reserved `.ankusa` segments are the
+        server's to enforce.
+      pattern: '^[^/\\\x00-\x1f\x7f]+(/[^/\\\x00-\x1f\x7f]+){0,31}$'
+      examples: ['teams/eng/q3.pdf']
+    Prefix:
+      type: string
+      description: |
+        `""` (the space's whole tree) or one or more segments joined with `/`
+        with at most one trailing `/`; the same segment rules as a key. The
+        `pattern` checks the shape alone.
+      pattern: '^([^/\\\x00-\x1f\x7f]+(/[^/\\\x00-\x1f\x7f]+)*(/)?)?$'
+      examples: ['', 'teams/', 'teams/eng/']
+    ObjectBytes:
+      type: string
+      contentMediaType: application/octet-stream
+    ObjectSummary:
+      type: object
+      required: [key, size]
+      properties:
+        key:
+          type: string
+          description: The object's key, the space's prefix stripped.
+        size:
+          type: integer
+          minimum: 0
+          description: The whole object's size in bytes.
+      examples:
+        - {key: teams/eng/a.txt, size: 6}
+    ObjectPage:
+      type: object
+      required: [objects, prefixes, next_cursor]
+      properties:
+        objects:
+          type: array
+          description: Keys under the prefix, at most `limit` of them.
+          items:
+            $ref: '#/components/schemas/ObjectSummary'
+        prefixes:
+          type: array
+          description: |
+            The common prefixes of the deeper keys, relative to the space's
+            prefix and ending in `/`. Empty without `delimiter=/`.
+          items:
+            type: string
+        next_cursor:
+          type: [string, 'null']
+          description: |
+            The continuation token of the next page, or `null` on the last
+            page. Pass it back as `cursor`, unchanged.
+      examples:
+        - objects: [{key: a.txt, size: 6}]
+          prefixes: []
+          next_cursor: null
+    ObjectWrite:
+      type: object
+      required: [space, key, size, version]
+      properties:
+        space:
+          type: string
+        key:
+          type: string
+          description: The object's key, as it was canonicalized from the path.
+        size:
+          type: integer
+          minimum: 0
+        version:
+          type: string
+          description: |
+            The object's new version, the store's own opaque string: the
+            `etag` a `GET` or `HEAD` reports, and the value `If-Match` takes.
+      examples:
+        - {space: docs, key: teams/eng/a.txt, size: 6, version: '01JD0Z2B7M3N4P5Q6R7S8T9V0W'}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum:
+            - invalid_key
+            - invalid_delimiter
+            - invalid_limit
+            - invalid_cursor
+            - invalid_metadata
+            - invalid_content_length
+            - method_not_allowed
+            - length_required
+            - request_timeout
+            - precondition_failed
+            - too_large
+            - object_too_large
+            - not_found
+            - store_forbidden
+            - store_unavailable
+            - integrity_mismatch
+            - overloaded
+            - unauthenticated
+            - forbidden
+            - auth_unavailable
+            - authz_unavailable
+        max_bytes:
+          type: integer
+          description: |
+            The bound that was exceeded: the space's `max_object_bytes`, on
+            `too_large` (the write) and `object_too_large` (the read).
+        scope:
+          type: string
+          description: |
+            Present on a `forbidden` only when the deciding authorizer names
+            one. The built-in `scopes` authorizer speaks about claims alone,
+            so an objects request normally carries none.
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          const: ok
+    Ready:
+      type: object
+      required: [status]
+      description: |
+        `status` is `ok` or `draining` (and `failing` when one of the node's
+        own checks fails); `gateway` is `ok` while the gateway runs. Other
+        keys are the node's readiness checks, as its admin API's `/ready`
+        reports them.
+      properties:
+        status:
+          type: string
+        gateway:
+          const: ok
+        authorizers:
+          type: object
+          description: '`ok` or `not_ready` per authorizer that reports readiness.'
+          additionalProperties:
+            type: string
+            enum: [ok, not_ready]
+  headers:
+    ETag:
+      description: |
+        The object's version, quoted: `"<version>"`. Compare it, do not parse
+        it. Send it back as `If-Match` to write only over this version, or as
+        `If-None-Match` to read only if it changed.
+      schema:
+        type: string
+        pattern: '^"[^"]+"$'
+    LastModified:
+      description: |
+        When the store recorded the object's last write (RFC 9110 HTTP-date).
+        Absent when the store does not know it.
+      schema:
+        type: string
+    AcceptRanges:
+      description: Always `bytes`.
+      schema:
+        type: string
+        const: bytes
+    CacheControl:
+      description: |
+        Always `private, no-cache`: the bytes may be cached by the caller
+        alone, and a cache must revalidate them (with `If-None-Match`) before
+        serving them again.
+      schema:
+        type: string
+        const: 'private, no-cache'
+    NoSniff:
+      description: 'Always `nosniff`: the stored content type is final.'
+      schema:
+        type: string
+        const: nosniff
+    ContentDisposition:
+      description: 'Always `attachment`: never rendered in place.'
+      schema:
+        type: string
+        const: attachment
+    ContentSecurityPolicy:
+      description: 'Always `default-src ''none''; sandbox`.'
+      schema:
+        type: string
+        const: "default-src 'none'; sandbox"
+    ObjectMetadata:
+      description: |
+        One response header per stored metadata pair whose name does not start
+        with `ankusa-` (the gateway's own reserved names never leave it).
+      schema:
+        type: string
+    RetryAfter:
+      description: |
+        Seconds to wait before retrying: 1 to 3 for a transient failure (a
+        store slower than the deadline, throttling, the node shedding load, an
+        authorizer's backend down), 60 when the store refused this node's
+        credential.
+      schema:
+        type: integer
+        minimum: 1
+  responses:
+    Unauthorized:
+      description: |
+        `401`. `unauthenticated`: no credential, or one that is wrong, expired
+        or unknown. A fault in the caller's configuration: fix the credential
+        and retry.
+      headers:
+        WWW-Authenticate:
+          description: Always `Bearer realm="ankusa"`.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: unauthenticated}
+    Forbidden:
+      description: |
+        `403`. `forbidden`: the credential is good, but the space's policy
+        refuses this action on this resource. With the built-in `scopes`
+        authorizer an objects request abstains and the policy's other steps
+        decide; `scope` is present only when the deciding authorizer names
+        one.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: forbidden}
+    BadObjectRequest:
+      description: |
+        `400`, on one object: `invalid_key` (the key breaks the rules in the
+        document's description, including a percent-escape that decodes to `/`
+        or `\`); `invalid_metadata` (a `PUT`'s `x-ankusa-meta-` pairs: more
+        than 16, a name outside `[a-z0-9-]{1,64}` or starting with `ankusa-`,
+        a value over 1024 bytes or not printable ASCII); or
+        `invalid_content_length` (a `PUT` whose `content-length` is not a
+        non-negative integer, or does not match the body it sent). A malformed
+        percent-escape never reaches the handler: the router answers its own
+        bare `400` with no body.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalidKey:
+              value: {error: invalid_key}
+            invalidMetadata:
+              value: {error: invalid_metadata}
+            invalidContentLength:
+              value: {error: invalid_content_length}
+    BadListRequest:
+      description: |
+        `400`, on a listing: `invalid_key` (the prefix breaks the rules);
+        `invalid_delimiter` (`delimiter` is neither absent nor `/`);
+        `invalid_limit` (`limit` is not an integer in 1 to 1000); or
+        `invalid_cursor` (`cursor` is over 2048 bytes).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalidPrefix:
+              value: {error: invalid_key}
+            invalidDelimiter:
+              value: {error: invalid_delimiter}
+            invalidLimit:
+              value: {error: invalid_limit}
+            invalidCursor:
+              value: {error: invalid_cursor}
+    MethodNotAllowed:
+      description: |
+        `405`. `method_not_allowed`: a `PUT` or `DELETE` on a space with
+        `read_only: true` (its objects are written out of band), or any
+        method other than `GET`, `HEAD`, `PUT` and `DELETE` on an object.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: method_not_allowed}
+    LengthRequired:
+      description: |
+        `411`. `length_required`: a `PUT` without `content-length`. The
+        gateway buffers a write, so it needs the size up front.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: length_required}
+    RequestTimeout:
+      description: |
+        `408`. `request_timeout`: the body did not arrive within the
+        listener's read limits (`listener.*`). Retry.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: request_timeout}
+    PreconditionFailed:
+      description: |
+        `412`. `precondition_failed`: the `if-none-match: *` or `if-match`
+        condition did not hold — the object already exists, or its version is
+        not the one the caller holds. The object is unchanged. Read it and
+        decide again.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: precondition_failed}
+    TooLarge:
+      description: '`413`. `too_large`: the write''s `content-length` is over the space''s `max_object_bytes`. Permanent for this body.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: too_large, max_bytes: 67108864}
+    ObjectTooLarge:
+      description: |
+        `422`. `object_too_large`: the read would send more than the space's
+        `max_object_bytes`, so none of it is sent. Permanent: fetch it out of
+        band, or raise the space's bound.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: object_too_large, max_bytes: 67108864}
+    NotFound:
+      description: |
+        `404`. `not_found`: no such space (a reserved or misspelled name), no
+        such object, or no such route. Permanent: do not retry the same path.
+        Whether a space exists is not a secret this API tries to keep; a space
+        whose policy denies the caller is `403`, not `404`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: not_found}
+    IntegrityMismatch:
+      description: |
+        `502`. `integrity_mismatch`: the bytes the store returned are not what
+        was recorded for them. The object is damaged in the store, so a retry
+        reads the same bytes: dead-letter, do not requeue. None of the bytes
+        are sent.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: integrity_mismatch}
+    ServiceUnavailable:
+      description: |
+        `503`, always with `Retry-After`, always transient unless the
+        credential is the fault. Four bodies:
+
+          * `store_unavailable` — the store is unreachable, throttling, or
+            slower than the gateway's deadline (`gateway.objects.op_deadline_ms`,
+            `timeout_ms`); retry after 1 to 3 seconds.
+          * `store_forbidden` — the store refused *this node's* credential. A
+            deployment fault, not the caller's; `Retry-After` is 60.
+          * `overloaded` — the node is at `gateway.max_concurrent_requests`, or
+            the object bytes being handled are at
+            `gateway.objects.max_inflight_bytes`; retry after 1 to 3 seconds.
+          * `authz_unavailable` / `auth_unavailable` — an authorizer's backend
+            or an authenticator's identity provider did not answer and its
+            policy fails closed; retry after 1 to 3 seconds.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            storeUnavailable:
+              value: {error: store_unavailable}
+            storeForbidden:
+              value: {error: store_forbidden}
+            overloaded:
+              value: {error: overloaded}
+            authzUnavailable:
+              value: {error: authz_unavailable}
+            authUnavailable:
+              value: {error: auth_unavailable}

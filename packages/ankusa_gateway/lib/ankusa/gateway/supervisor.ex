@@ -10,7 +10,8 @@ defmodule Ankusa.Gateway.Supervisor do
        the keys server of the chain's `jwt` authenticators, the three caches
        (`Ankusa.Gateway.Cache`: `:authn`, `:authz`, `:acl`), every
        authenticator's own children, one `Ankusa.Gateway.Caller` per
-       `:remote` authorizer and every authorizer's own children, the claim
+       `:remote` authorizer and every authorizer's own children, the
+       connection pools of the spaces' stores, the claim
        read cache (`Ankusa.ClaimCheck.Cache`, when the claims API is on and
        `claim_check.read_cache_bytes > 0`), the reader
        (`Ankusa.ClaimCheck.Reader`, always: it owns the request gate),
@@ -58,6 +59,7 @@ defmodule Ankusa.Gateway.Supervisor do
   # Tables that live as long as this supervisor: it owns them.
   defp tables!(instance) do
     :ets.new(Authz.log_table(instance), [:named_table, :public, :set])
+    Ankusa.Gateway.Objects.Budget.setup(instance)
   end
 
   defp domain_children(config, %Config{instance: instance} = gateway) do
@@ -66,6 +68,7 @@ defmodule Ankusa.Gateway.Supervisor do
       authenticator_children(gateway) ++
       Authz.caller_specs(gateway) ++
       authorizer_children(gateway) ++
+      space_pools(gateway) ++
       claim_children(config, gateway) ++
       [
         {Ankusa.ClaimCheck.Reader, instance: instance},
@@ -91,6 +94,12 @@ defmodule Ankusa.Gateway.Supervisor do
         {Ankusa.Admin.Auth.JWT.Keys,
          instance: instance, server: Authn.JWT.keys_server(), realms: realms}
       ]
+  end
+
+  # The connection pools of the spaces' stores, those core has not started.
+  defp space_pools(%Config{instance: instance, spaces: spaces}) do
+    stores = for {_name, %{store: store}} <- Enum.sort(spaces), uniq: true, do: store
+    Ankusa.BlobStore.Pool.child_specs_for(instance, stores)
   end
 
   defp cache_children(%Config{instance: instance, auth: auth, authz: authz}) do

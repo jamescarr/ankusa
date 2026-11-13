@@ -2,12 +2,16 @@ defmodule Ankusa.Gateway.Gauges do
   @moduledoc """
   Samples the gateway's state every 5 seconds for `/metrics`:
   `[:ankusa, :gateway, :cache_state]` `%{entries, bytes}` `%{instance, cache}`
-  for each of its caches (`Ankusa.Gateway.Cache`).
+  for each of its caches (`Ankusa.Gateway.Cache`), and
+  `[:ankusa, :gateway, :objects_state]` `%{inflight_bytes}` `%{instance}`, the
+  objects API's byte budget, after releasing what requests that died still
+  held (`Ankusa.Gateway.Objects.Budget.sweep/1`).
   """
 
   use GenServer
 
   alias Ankusa.Gateway.Cache
+  alias Ankusa.Gateway.Objects.Budget
   alias Ankusa.Telemetry
 
   @interval_ms 5_000
@@ -50,6 +54,10 @@ defmodule Ankusa.Gateway.Gauges do
         cache: cache
       })
     end
+
+    Telemetry.emit([:gateway, :objects_state], %{inflight_bytes: Budget.sweep(instance)}, %{
+      instance: instance
+    })
 
     :ok
   end
