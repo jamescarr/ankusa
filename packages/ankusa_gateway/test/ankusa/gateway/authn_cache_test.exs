@@ -136,13 +136,15 @@ defmodule Ankusa.Gateway.AuthnCacheTest do
     {jwk, public} = keypair()
     chain(inst, [jwt_authenticator(public)])
 
-    token = sign(jwk, %{"iss" => "https://i.test/", "exp" => System.os_time(:second) + 1})
+    # Two seconds: a second boundary between signing and the first request
+    # must not leave the token expired, or its cache entry no time to live.
+    token = sign(jwk, %{"iss" => "https://i.test/", "exp" => System.os_time(:second) + 2})
     assert run(inst, token).assigns.principal.id == "alice"
     assert run(inst, token).assigns.principal.id == "alice"
     assert_received {:authn, %{cached: false}}
     assert_received {:authn, %{cached: true}}
 
-    Process.sleep(2_100)
+    Process.sleep(3_100)
     conn = run(inst, token)
     assert conn.status == 401
     assert_received {:authn, %{result: :unauthenticated, cached: false}}

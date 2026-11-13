@@ -74,6 +74,17 @@ defmodule AnkusaGatewayServer.ConfigTest do
     assert error!("config_version: 2\nnope: {}\n") == ~s(config: unknown key "nope")
   end
 
+  test "a full image's file is refused by its section, before its unset variables" do
+    yaml = """
+    config_version: 2
+    sources:
+      stripe: {verify: {type: hmac, secret: "${STRIPE_WHSEC}"}}
+    """
+
+    assert error!(yaml) ==
+             "sources: not available in the gateway image (jamescarr/ankusa-gateway); use jamescarr/ankusa"
+  end
+
   test "node.roles is [claim_check] or absent" do
     assert load!("node: {roles: [claim_check]}\n").config.roles == []
 
