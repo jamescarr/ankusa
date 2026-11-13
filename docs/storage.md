@@ -765,6 +765,45 @@ many claims under `claims/tenant=<t>/dt=<day>/<pack_id>`, or
 | `BlobStore.Azure` | `req` | Azure Blob REST. Carries **no credential dependency**, the same stance as GCS: a pre-generated `:sas_token` (Shared Access Signature), or a `:token_provider` MFA, including the built-in `Ankusa.BlobStore.Azure.ManagedIdentity`, the best credential for a service running on Azure (no secret, short-lived Entra ID tokens from IMDS). No Shared-Key signing of its own. Unauthenticated against the `floci-az` emulator. |
 | `BlobStore.OCI` | none | OCI Object Storage. The one adapter that signs its own requests, OCI has no bearer/SAS shortcut covering arbitrary `put`/`get`/`list`, using OTP's `:public_key` (RSA-SHA256 *Signature version 1*), no dependency. Two credential shapes: a static API key (`:tenancy_ocid`/`:user_ocid`/`:key_fingerprint`/`:private_key`), or an instance principal: `key_provider: {Ankusa.BlobStore.OCI.InstancePrincipal, :credentials, [[region: "us-ashburn-1"]]}` runs the certificate federation (IMDS leaf cert, `auth.<region>.oraclecloud.com/v1/x509`, a short-lived `ST$` session token and key), caches it and refreshes it before it expires. A session token from the OCI SDK still works as `:key_id: "ST$<token>"` + `:private_key`, renewed by the caller. Signing is pinned against OCI's reference vectors in `test/ankusa/blob_store_oci_signing_test.exs`; `floci-oci` parses but never verifies the signature, so any locally generated key works there. |
 
+### Object operations
+
+Five optional callbacks serve the gateway's objects API
+([ADR 0005](adr/0005-standalone-gateway.md)): a store that implements them can
+back a space. Existing callers never use them.
+
+```elixir
+@callback head_object(instance, key, opts) :: {:ok, object_meta()} | {:error, :not_found | term()}
+@callback get_object(instance, key, opts) :: {:ok, object_meta(), binary()} | {:error, term()}
+@callback put_object(instance, key, data, opts) :: {:ok, version} | {:error, :already_exists | :version_mismatch | term()}
+@callback delete_object(instance, key, opts) :: :ok | {:error, term()}
+@callback list_page(instance, prefix, opts) :: {:ok, %{objects: [%{key, size}], prefixes: [String.t()], next: String.t() | nil}} | {:error, term()}
+```
+
+`object_meta` is `%{size, version, content_type, last_modified, metadata}`.
+`size` is always the whole object's, also on a ranged read, and `version` is
+opaque. Per-call options ride beside the store's own: `get_object` takes
+`range: {first, last}` (inclusive), `if: {:version, v}` (`:version_mismatch`
+when it moved) and `max_bytes` (`:too_large` past it); `put_object` takes
+`content_type`, `metadata` (lowercase names) and `if: :absent | {:version, v}`;
+`list_page` takes `cursor`, `limit` (1..1000) and `delimiter` (`"/"`).
+
+| Store | Version | Conditions | Metadata |
+| --- | --- | --- | --- |
+| S3 | ETag | `If-None-Match: *`, `If-Match` | `x-amz-meta-*` |
+| GCS | generation | `ifGenerationMatch=0` / `=<generation>` | the object resource's `metadata` |
+| Azure | ETag | `If-None-Match: *`, `If-Match` | `x-ms-meta-*` |
+| OCI | ETag | `if-none-match: *`, `if-match` | `opc-meta-*` |
+| LocalFS | a ULID per write, in a sidecar under `<root>/.ankusa-meta/` | under a per-key `:global` lock | the sidecar |
+
+A `put_object` large enough for the multipart path sends its content type
+and metadata on the request that starts the upload and its condition on the
+one that completes it, and reads the version from that response: no second
+request. LocalFS is a development and single-node store. Its conditions are
+not crash-atomic, and they are not exclusive across nodes that mount one
+directory without being clustered. An object rewritten behind its back (no
+sidecar, or a sidecar whose size no longer matches) is versioned by the
+SHA-256 of its bytes.
+
 ### Conditional writes, retries, checksums, multipart, pools
 
 **`put_if_absent/4` is how claim packs are written.** It is `put/4` that refuses

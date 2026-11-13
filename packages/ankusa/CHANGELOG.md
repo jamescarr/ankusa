@@ -34,6 +34,22 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 - `jwt_block!/2` in `Ankusa.Admin.Auth` (`@doc false`): the rules of one `jwt`
   block, for a verifier outside core.
+- **Object operations on every blob store (ADR 0005).** Five optional
+  `Ankusa.BlobStore` callbacks, what the gateway's objects API runs on:
+  `head_object/3` (size, version, content type, last modified, metadata),
+  `get_object/3` (a `:range`, held to a version with `if: {:version, v}`,
+  capped by `:max_bytes`), `put_object/4` (content type, string metadata,
+  `if: :absent | {:version, v}`; returns the new version), `delete_object/3`
+  (a missing key is `:ok`) and `list_page/3` (`:cursor`, `:limit`,
+  `:delimiter`). S3 and Azure version by ETag, GCS by generation, OCI by ETag,
+  LocalFS by a sidecar under `.ankusa-meta/` (or a SHA-256 of the bytes when
+  there is none). A large write keeps the adapter's multipart path: content
+  type and metadata ride the request that starts it, the condition the one that
+  completes it, and the version comes from that response. Existing callbacks
+  and their callers are unchanged.
+
+- `Ankusa.Admin.Auth.jwt_block!/2` (`@doc false`): the rules of one `jwt` block,
+  for a verifier outside core.
 
 - **Seams for a gateway outside core (ADR 0005).** `Ankusa.Principal` gains
   `claims` (the claims of the credential that authenticated it) and `groups`,
