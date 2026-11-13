@@ -109,6 +109,11 @@ defmodule AnkusaGatewayServer.Config do
       )
       |> Document.migrate!(@config_version, @migrations)
 
+    # Before interpolation and secrets: a full image's file mounted here names
+    # its `sources:` (whose `${VAR}`s are not set for the gateway), not a
+    # missing variable.
+    root_keys!(raw)
+
     {doc, secrets} =
       raw
       |> Document.interpolate(env, [])
@@ -141,8 +146,6 @@ defmodule AnkusaGatewayServer.Config do
   end
 
   defp config!(doc) do
-    root_keys!(doc)
-
     opts =
       [instance: :default, roles: [], source_store: {Ankusa.SourceStore.Static, sources: %{}}] ++
         node_section(doc) ++
