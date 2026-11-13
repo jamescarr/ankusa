@@ -32,8 +32,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
-- `Ankusa.Admin.Auth.jwt_block!/2` (`@doc false`): the rules of one `jwt` block,
-  for a verifier outside core.
+- `jwt_block!/2` in `Ankusa.Admin.Auth` (`@doc false`): the rules of one `jwt`
+  block, for a verifier outside core.
 
 - **Seams for a gateway outside core (ADR 0005).** `Ankusa.Principal` gains
   `claims` (the claims of the credential that authenticated it) and `groups`,
