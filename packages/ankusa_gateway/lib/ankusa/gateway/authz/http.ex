@@ -74,8 +74,8 @@ defmodule Ankusa.Gateway.Authz.Http do
 
   With `forward_authorization: true` the caller's own `authorization` header is
   sent to the PDP, which may decide on it (finer than the principal the
-  gateway authenticated). This is the one case where a `:remote` authorizer
-  reads `request.conn`: a request without that header is `{:ok, :deny,
+  gateway authenticated). The header is `request.authorization` (a remote
+  authorizer never sees the connection): a request without it is `{:ok, :deny,
   %{reason: :unmappable}}` without a call, and `cache_scope/2` appends the
   header's SHA-256, so two tokens of one subject never share a decision.
 
@@ -777,13 +777,7 @@ defmodule Ankusa.Gateway.Authz.Http do
 
   defp forward_scope(base, _request, _state), do: base
 
-  defp authorization(%Request{conn: %Plug.Conn{} = conn}) do
-    case Plug.Conn.get_req_header(conn, "authorization") do
-      [value | _rest] -> value
-      [] -> nil
-    end
-  end
-
+  defp authorization(%Request{authorization: value}) when is_binary(value), do: value
   defp authorization(_request), do: nil
 
   # ── the request itself ──────────────────────────────────────────────────────
@@ -803,13 +797,7 @@ defmodule Ankusa.Gateway.Authz.Http do
     )
   end
 
-  defp request_id(%Request{conn: %Plug.Conn{} = conn}) do
-    case Ankusa.Audit.Context.from_conn(conn).request_id do
-      nil -> fresh_request_id()
-      id -> id
-    end
-  end
-
+  defp request_id(%Request{request_id: id}) when is_binary(id), do: id
   defp request_id(_request), do: fresh_request_id()
 
   defp fresh_request_id do

@@ -238,13 +238,15 @@ defmodule Ankusa.Gateway.SharingRouterTest do
       assert call(inst, :get, "/v1/objects/docs/teams/eng/r.txt", as: "bob").status == 200
 
       # Through the API: the document goes with the object.
+      doc_key = ACL.doc_key(%{prefix: "docs/"}, {:object, "teams/eng/r.txt"})
+      assert {:ok, _, _} = LocalFS.get_object(:x, doc_key, root: root)
       assert call(inst, :delete, "/v1/objects/docs/teams/eng/r.txt").status == 204
+      assert LocalFS.get_object(:x, doc_key, root: root) == {:error, :not_found}
       put(inst, "teams/eng/r.txt", "two")
       assert call(inst, :get, "/v1/objects/docs/teams/eng/r.txt", as: "bob").status == 403
 
       # Out of band, the old document left in the store: dead by its incarnation.
       grant(inst, %{key: "teams/eng/r.txt"}, "user:bob", ["read"])
-      doc_key = ACL.doc_key(%{prefix: "docs/"}, {:object, "teams/eng/r.txt"})
       assert {:ok, _, _} = LocalFS.get_object(:x, doc_key, root: root)
       :ok = LocalFS.delete_object(:x, "docs/teams/eng/r.txt", root: root)
       put(inst, "teams/eng/r.txt", "three")
