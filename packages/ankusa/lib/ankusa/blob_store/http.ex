@@ -89,7 +89,9 @@ defmodule Ankusa.BlobStore.HTTP do
   An object operation's response (`Ankusa.BlobStore`'s optional callbacks):
   a 2xx as it came, `{:ok, status, headers, body}`; `404` `:not_found`; `412`
   `:already_exists` when the request carried the `:absent` condition, else
-  `:version_mismatch`; `409` on a conditional request `:version_mismatch`;
+  `:version_mismatch`; `409` on a conditional request likewise (Azure and S3
+  answer an `If-None-Match: *` that lost with `409`, as `put_if_absent/4`
+  already reads it);
   `416` `:range_not_satisfiable`; anything else as `reply/1`.
   """
   @spec object_reply(
@@ -104,7 +106,9 @@ defmodule Ankusa.BlobStore.HTTP do
   def object_reply({:ok, 412, _headers, _body}, :absent), do: {:error, :already_exists}
   def object_reply({:ok, 412, _headers, _body}, _condition), do: {:error, :version_mismatch}
 
-  def object_reply({:ok, 409, _headers, _body}, condition) when condition != nil,
+  def object_reply({:ok, 409, _headers, _body}, :absent), do: {:error, :already_exists}
+
+  def object_reply({:ok, 409, _headers, _body}, {:version, _version}),
     do: {:error, :version_mismatch}
 
   def object_reply({:ok, 416, _headers, _body}, _condition), do: {:error, :range_not_satisfiable}

@@ -86,4 +86,86 @@ defmodule Ankusa.BlobStore.OCIIntegrationTest do
     assert {:ok, slice} = OCI.get_range(:i, key, 8 * 1_048_576 - 2, 4, opts())
     assert slice == binary_part(body, 8 * 1_048_576 - 2, 4)
   end
+
+  describe "objects" do
+    test "put_object, head_object and get_object round-trip an object with its type" do
+      key = key("roundtrip")
+      body = "hello objects"
+
+      assert {:ok, version} =
+               OCI.put_object(:i, key, body, opts() ++ [content_type: "text/plain"])
+
+      assert is_binary(version)
+
+      assert {:ok, meta} = OCI.head_object(:i, key, opts())
+      assert meta.size == byte_size(body)
+      assert meta.version == version
+      assert meta.content_type == "text/plain"
+
+      assert {:ok, %{version: ^version}, ^body} = OCI.get_object(:i, key, opts())
+    end
+
+    test "get_object returns the requested range and reports the whole size" do
+      key = key("range")
+      body = for i <- 0..255, into: <<>>, do: <<i>>
+
+      assert {:ok, _version} = OCI.put_object(:i, key, body, opts())
+
+      assert {:ok, meta, <<10, 11, 12, 13>>} =
+               OCI.get_object(:i, key, opts() ++ [range: {10, 13}])
+
+      assert meta.size == 256
+    end
+
+    test "a version condition: a stale :if is :version_mismatch, the current one writes" do
+      key = key("cas")
+      assert {:ok, v1} = OCI.put_object(:i, key, "first", opts())
+
+      assert {:error, :version_mismatch} =
+               OCI.put_object(:i, key, "second", opts() ++ [if: {:version, "stale"}])
+
+      assert {:ok, v2} = OCI.put_object(:i, key, "second", opts() ++ [if: {:version, v1}])
+      refute v2 == v1
+
+      assert {:ok, %{version: ^v2}, "second"} = OCI.get_object(:i, key, opts())
+
+      assert {:error, :already_exists} = OCI.put_object(:i, key, "third", opts() ++ [if: :absent])
+    end
+
+    test "list_page pages under a prefix, and delete_object removes the object" do
+      prefix = key("list") <> "/"
+      first = prefix <> "a.txt"
+      second = prefix <> "b.txt"
+
+      assert {:ok, _version} = OCI.put_object(:i, first, "a", opts())
+      assert {:ok, _version} = OCI.put_object(:i, second, "b", opts())
+
+      assert {:ok, page} = OCI.list_page(:i, prefix, opts() ++ [limit: 1])
+      assert [%{key: ^first, size: 1}] = page.objects
+      assert is_binary(page.next)
+
+      assert {:ok, rest} = OCI.list_page(:i, prefix, opts() ++ [cursor: page.next])
+      assert [%{key: ^second, size: 1}] = rest.objects
+
+      assert :ok = OCI.delete_object(:i, first, opts())
+      assert {:error, :not_found} = OCI.head_object(:i, first, opts())
+      assert :ok = OCI.delete_object(:i, first, opts())
+    end
+
+    test "put_object stores the content type and the metadata" do
+      key = key("metadata")
+
+      assert {:ok, _version} =
+               OCI.put_object(
+                 :i,
+                 key,
+                 "meta",
+                 opts() ++ [content_type: "text/plain", metadata: %{"owner" => "alice"}]
+               )
+
+      assert {:ok, meta} = OCI.head_object(:i, key, opts())
+      assert meta.content_type == "text/plain"
+      assert meta.metadata == %{"owner" => "alice"}
+    end
+  end
 end
