@@ -1208,4 +1208,177 @@ defmodule AnkusaGatewayServer.ConfigTest do
       end
     end
   end
+
+  describe "okta, introspection and enrichers" do
+    test "an okta entry for the org authorization server loads as an introspection authenticator, redacted" do
+      loaded =
+        load!("""
+        config_version: 2
+        node: {data_dir: /tmp/gw-data}
+        gateway:
+          auth:
+            authenticators:
+              - type: jwt
+                issuer: "https://login.example.com/"
+                audience: ankusa
+                jwks_url: "https://login.example.com/.well-known/jwks.json"
+              - type: okta
+                domain: acme.okta.com
+                authorization_server: org
+                client_id: 0oa1
+                client_secret: super-secret-value
+        """)
+
+      assert [
+               %{type: :jwt},
+               %{
+                 type: :introspection,
+                 name: "okta",
+                 module: Ankusa.Gateway.Authn.Introspection,
+                 config: config
+               }
+             ] = loaded.gateway.auth.authenticators
+
+      assert config.url == "https://acme.okta.com/oauth2/v1/introspect"
+      assert config.issuer == "https://acme.okta.com"
+      assert config.client_secret == "super-secret-value"
+
+      # The view `print-config` prints: the type and the endpoint are visible,
+      # the secret is not.
+      view = loaded.gateway |> Ankusa.Gateway.Config.redact() |> JSON.encode!()
+      refute view =~ "super-secret-value"
+
+      [%{"type" => "introspection", "config" => shown}] =
+        loaded.gateway
+        |> Ankusa.Gateway.Config.redact()
+        |> Map.fetch!("auth")
+        |> Map.fetch!("authenticators")
+        |> Enum.reject(&(&1["type"] == "jwt"))
+
+      assert shown["url"] == "https://acme.okta.com/oauth2/v1/introspect"
+      assert shown["client_id"] == "0oa1"
+      assert shown["client_secret"] == "[REDACTED]"
+    end
+
+    test "an introspection authenticator and both enrichers load; every secret is redacted" do
+      loaded =
+        load!("""
+        config_version: 2
+        node: {data_dir: /tmp/gw-data}
+        gateway:
+          auth:
+            authenticators:
+              - type: introspection
+                name: idp
+                url: "https://idp.example/oauth2/v1/introspect"
+                client_id: cid
+                client_secret: another-secret
+                issuer: "https://idp.example"
+                audience: [api://one, api://two]
+            enrichers:
+              - type: okta_groups
+                domain: acme.okta.com
+                api_token: 00-api-token
+                only: [idp]
+              - type: http
+                url: "https://directory.internal/users/{{ claims.uid }}"
+                headers: {authorization: "Bearer enricher-token"}
+                groups_path: data.groups
+                claims_path: data.profile
+                on_unavailable: skip
+                ttl_ms: 30000
+        """)
+
+      assert [
+               %{
+                 type: :introspection,
+                 name: "idp",
+                 config: %{
+                   url: url,
+                   issuer: "https://idp.example",
+                   audience: ["api://one", "api://two"]
+                 }
+               }
+             ] = loaded.gateway.auth.authenticators
+
+      assert url == "https://idp.example/oauth2/v1/introspect"
+
+      assert [
+               %{type: :okta_groups, name: "okta_groups-0", config: groups},
+               %{type: :http, name: "http-1", config: directory}
+             ] = loaded.gateway.auth.enrichers
+
+      assert groups.only == ["idp"]
+      assert groups.api_token == "00-api-token"
+      assert directory.groups_path == ["data", "groups"]
+      assert directory.claims_path == ["data", "profile"]
+      assert directory.on_unavailable == :skip
+      assert directory.ttl_ms == 30_000
+
+      view = loaded.gateway |> Ankusa.Gateway.Config.redact() |> JSON.encode!()
+
+      for secret <- ["another-secret", "00-api-token", "enricher-token"] do
+        refute view =~ secret, secret
+      end
+
+      assert view =~ "okta_groups"
+      assert view =~ "groups_path"
+    end
+
+    test "a bad type, key or option names the key" do
+      for {yaml, message} <- [
+            {"auth: {authenticators: [{type: nope}]}",
+             ~s(gateway.auth.authenticators[0].type: unknown value "nope"; expected one of token, jwt, mtls, okta, introspection)},
+            {"auth: {authenticators: [{type: okta, domain: Acme.Okta.com}]}",
+             "gateway.auth.authenticators[0].domain must be a lowercase host name"},
+            {"auth: {authenticators: [{type: okta, domain: acme.okta.com, authorization_server: org}]}",
+             "gateway.auth.authenticators[0].client_id must be set"},
+            {"auth: {authenticators: [{type: introspection, client_id: c, client_secret: s}]}",
+             "gateway.auth.authenticators[0].url must be set"},
+            {"auth: {authenticators: [{type: introspection, url: http://idp.example/i, client_id: c, client_secret: s}]}",
+             "gateway.auth.authenticators[0].url must be an https URL"},
+            {"auth: {enrichers: [{type: nope}]}",
+             ~s(gateway.auth.enrichers[0].type: unknown value "nope"; expected one of okta_groups, http)},
+            {"auth: {enrichers: [{type: http, url: https://d.test/g, groups_path: g, nope: 1}]}",
+             ~s(gateway.auth.enrichers[0]: unknown key "nope")},
+            {"auth: {enrichers: [{type: http, url: https://d.test/g}]}",
+             "gateway.auth.enrichers[0] needs groups_path or claims_path"},
+            {"auth: {enrichers: [{type: http, url: https://d.test/g, groups_path: g, on_unavailable: abstain}]}",
+             ~s(gateway.auth.enrichers[0].on_unavailable: unknown value "abstain"; expected one of fail, skip)},
+            {"auth: {enrichers: [{type: okta_groups, domain: acme.okta.com}]}",
+             "gateway.auth.enrichers[0].api_token must be a non-empty Okta API token"},
+            {"auth: {enrichers: 5}", "gateway.auth.enrichers: expected a list of enrichers"},
+            {"auth: {enrichers: [{type: http, url: https://d.test/g, groups_path: g, only: [nobody]}]}",
+             "gateway.auth.enrichers[0].only names nobody"}
+          ] do
+        assert error!("config_version: 2\ngateway: {#{yaml}}\n") =~ message, yaml
+      end
+    end
+
+    test "an enricher's url origin cannot be templated" do
+      assert error!("""
+             config_version: 2
+             gateway:
+               auth:
+                 enrichers:
+                   - type: http
+                     url: "https://{{ claims.host }}/groups"
+                     groups_path: groups
+             """) =~ "the scheme, host and port of a URL cannot be templated"
+    end
+
+    test "more than four enrichers is refused by name" do
+      assert error!("""
+             config_version: 2
+             gateway:
+               auth:
+                 enrichers:
+                   - {type: okta_groups, domain: a.okta.com, api_token: t}
+                   - {type: okta_groups, domain: b.okta.com, api_token: t}
+                   - {type: okta_groups, domain: c.okta.com, api_token: t}
+                   - {type: okta_groups, domain: d.okta.com, api_token: t}
+                   - {type: okta_groups, domain: e.okta.com, api_token: t}
+             """) == "gateway.auth.enrichers has 5 entries; at most 4"
+    end
+  end
 end

@@ -109,6 +109,17 @@ defmodule Ankusa.Gateway.Options do
   def loopback?({0, 0, 0, 0, 0, 0xFFFF, high, _low}), do: Bitwise.bsr(high, 8) == 127
   def loopback?(_ip), do: false
 
+  @doc "A keyword list (the transport options of a call that goes out)."
+  @spec keyword_list!(term(), String.t()) :: keyword()
+  def keyword_list!(value, key) when is_list(value) do
+    if Keyword.keyword?(value),
+      do: value,
+      else: raise(ArgumentError, "#{key} must be a keyword list, got #{inspect(value)}")
+  end
+
+  def keyword_list!(other, key),
+    do: raise(ArgumentError, "#{key} must be a keyword list, got #{inspect(other)}")
+
   @doc "A module that is loaded and exports every function of `functions`."
   @spec implements?(term(), [{atom(), arity()}]) :: boolean()
   def implements?(module, functions) when is_atom(module) do

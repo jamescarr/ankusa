@@ -820,6 +820,19 @@ gateway:
     #   subject_map:
     #     "uri:spiffe://prod/ns/billing/sa/worker": [claims:read, "tenant:billing"]
     #     "cn:reports": {scopes: [claims:read, "tenant:*"], groups: [reports]}
+    # - type: okta                     # Okta's issuer layout, expanded at boot
+    #   domain: acme.okta.com
+    #   authorization_server: default  # an authorization server name, or "org"
+    #   audience: api://default        # the jwt form's aud
+    #   # "org" issues opaque access tokens: that form becomes an introspection
+    #   # authenticator and needs client_id and client_secret. Any jwt or
+    #   # introspection option here overrides what the expansion derives.
+    # - type: introspection            # RFC 7662; at most one, and no bearer
+    #   url: https://idp.example/oauth2/v1/introspect   # reader after it
+    #   client_id: "${IDP_CLIENT_ID}"
+    #   client_secret: "${IDP_CLIENT_SECRET}"
+    #   issuer: https://idp.example    # optional checks of the response's iss/aud
+    #   audience: api://ankusa
     # Each authenticator's answer is remembered under the sha256 of the
     # credential (never the credential): a hit skips the signature check.
     # cache:
@@ -827,6 +840,24 @@ gateway:
     #   negative_ttl_ms: 5000          # refusals, by authenticators that call out
     #   max_entries: 100000
     #   max_bytes: 33554432
+    # Enrichers add groups and claims to a freshly authenticated principal,
+    # before it is fingerprinted and remembered, so a `rules` predicate can read
+    # groups the token does not carry. At most 4, in order; each has its own
+    # result cache and one call process.
+    # enrichers:
+    #   - type: okta_groups            # Okta's Users API
+    #     domain: acme.okta.com
+    #     api_token: "${OKTA_API_TOKEN}"
+    #     user_id: "{{ claims.uid }}"  # a template; one that cannot render leaves the principal as it was
+    #     max_groups: 500
+    #     only: [okta]                 # default: after every authenticator
+    #     on_unavailable: fail         # fail = 503 auth_unavailable; skip = use the unenriched principal
+    #     ttl_ms: 60000                # how long a group removed at the source can still be seen
+    #   - type: http                   # a JSON API of your own; the origin is literal
+    #     url: "https://directory.internal/users/{{ claims.uid }}"
+    #     headers: {authorization: "Bearer ${DIRECTORY_TOKEN}"}
+    #     groups_path: data.groups     # a string, or a list of strings
+    #     claims_path: data.profile    # merged under the token's claims
   # Who may do what: named authorizers, and policies that run them in order.
   # The built-in `scopes` authorizer (claims:read and the claim's tenant) is
   # always defined; the `claims` policy is [scopes] unless defined here.

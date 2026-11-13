@@ -74,10 +74,39 @@ credential of its form steps aside; one whose form it is accepts or refuses
   `subject_prefix` differs: the principal id is what authorizers see.
 * `mtls` — client certificates, mapped by identity to scopes and groups
   (needs `tls` with `verify: :verify_peer`).
+* `okta` — Okta's layout: `domain` plus an `authorization_server`, expanded at
+  boot into a `jwt` authenticator for it, or (`authorization_server: org`) an
+  `introspection` one, since org-server access tokens are opaque.
+* `introspection` — RFC 7662 introspection: `url`, `client_id`,
+  `client_secret`, optional `issuer`/`audience`. One call process per
+  authenticator, and an inactive token's refusal is cached.
 
 An empty chain is accepted on loopback only, or with
 `auth.allow_insecure: true` when something in front of the listener
 authenticates every caller.
+
+`auth.enrichers` (at most 4, in order) adds groups and claims to a freshly
+authenticated principal, before it is fingerprinted and cached — so a `rules`
+predicate decides on the groups the identity provider's API knows, not only
+those in the token:
+
+```elixir
+auth: %{
+  authenticators: [%{type: :okta, domain: "acme.okta.com", audience: "api://default"}],
+  enrichers: [
+    %{type: :okta_groups, domain: "acme.okta.com", api_token: System.fetch_env!("OKTA_API_TOKEN")},
+    %{type: :http, url: "https://directory.internal/users/{{ claims.uid }}",
+      headers: %{"authorization" => "Bearer ..."}, groups_path: "data.groups"}
+  ]
+}
+```
+
+`Ankusa.Gateway.Enricher.OktaGroups` pages Okta's Users API through its `link`
+header; `Ankusa.Gateway.Enricher.Http` reads a JSON API of your own (a URL is
+templated after a literal origin, and every substituted value is
+percent-encoded). Each result is cached `ttl_ms` through its own
+`Ankusa.Gateway.Caller`; `on_unavailable: :skip` uses the unenriched principal
+instead of answering `503`.
 
 ## Authorization
 
