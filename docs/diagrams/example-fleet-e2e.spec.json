@@ -5,18 +5,18 @@
     {"id": "rmq", "label": "RabbitMQ", "kind": "broker"}
   ],
   "nodes": [
-    {"id": "loadgen", "kind": "actor", "label": "tools/loadgen", "sub": "steady · fat hooks · chaos · burst", "col": 0, "row": 0},
-    {"id": "nginx", "kind": "service", "label": "nginx :18080", "sub": "round robin · retries a refused connection", "col": 1, "row": 0},
-    {"id": "node-a", "kind": "service", "label": "ankusa-a", "sub": "own store · key prefix node-a/", "badges": ["retry"], "col": 2, "row": 0},
-    {"id": "node-b", "kind": "service", "label": "ankusa-b", "sub": "own store · key prefix node-b/", "badges": ["retry"], "col": 2, "row": 2},
-    {"id": "redis", "kind": "datastore", "label": "Redis", "sub": "routes · sources · fleet dedupe", "col": 3, "row": 1},
-    {"id": "exchange", "kind": "content-based-router", "label": "ankusa.events", "sub": "topic exchange", "group": "rmq", "col": 4, "row": 0},
-    {"id": "queue", "kind": "p2p-channel", "label": "ankusa-fleet-consumer", "sub": "no DLX: replay redrives from the nodes", "tags": ["durable", "bind ankusa.#", "prefetch 32"], "group": "rmq", "col": 5, "row": 0},
-    {"id": "consumer", "kind": "service", "label": "Consumer (TypeScript)", "sub": "upserts · no bucket credentials", "badges": ["idempotent"], "col": 6, "row": 0},
-    {"id": "postgres", "kind": "datastore", "label": "Postgres", "sub": "processed_webhooks (PK idempotency key)", "col": 7, "row": 0},
-    {"id": "minio", "kind": "message-store", "label": "MinIO bucket", "sub": "segments per node prefix · claims shared", "col": 5, "row": 2},
-    {"id": "gateway", "kind": "service", "label": "Claim check node :4001", "badges": ["gateway"], "col": 6, "row": 2},
-    {"id": "chaos-note", "kind": "note", "label": "Chaos: kill ankusa-a, retry one event on the other node, kill the consumer, restart RabbitMQ. --wal dual adds a Kafka intake log.", "attach": "loadgen"}
+    {"id": "loadgen", "kind": "actor", "label": "tools/loadgen", "sub": "steady · fat hooks · chaos · burst", "col": 0, "row": 3},
+    {"id": "nginx", "kind": "service", "label": "nginx :18080", "sub": "round robin · retries a refused connection", "col": 0, "row": 1},
+    {"id": "node-a", "kind": "service", "label": "ankusa-a", "sub": "own store · key prefix node-a/", "badges": ["retry"], "col": 1, "row": 0},
+    {"id": "node-b", "kind": "service", "label": "ankusa-b", "sub": "own store · key prefix node-b/", "badges": ["retry"], "col": 1, "row": 2},
+    {"id": "redis", "kind": "datastore", "label": "Redis", "sub": "routes · sources · fleet dedupe", "col": 1, "row": 1},
+    {"id": "exchange", "kind": "content-based-router", "label": "ankusa.events", "sub": "topic exchange", "group": "rmq", "col": 2, "row": 0},
+    {"id": "queue", "kind": "p2p-channel", "label": "ankusa-fleet-consumer", "sub": "no DLX: replay redrives from the nodes", "tags": ["durable", "bind ankusa.#", "prefetch 32"], "group": "rmq", "col": 3, "row": 0},
+    {"id": "consumer", "kind": "service", "label": "Consumer (TypeScript)", "sub": "upserts · no bucket credentials", "badges": ["idempotent"], "col": 3, "row": 1},
+    {"id": "postgres", "kind": "datastore", "label": "Postgres", "sub": "processed_webhooks (PK idempotency key)", "col": 3, "row": 2},
+    {"id": "minio", "kind": "message-store", "label": "MinIO bucket", "sub": "segments per node prefix · claims shared", "col": 2, "row": 2},
+    {"id": "gateway", "kind": "service", "label": "Claim check node :4001", "badges": ["gateway"], "col": 2, "row": 1},
+    {"id": "chaos-note", "kind": "note", "label": "Chaos: kill ankusa-a, retry one event on the other node, kill the consumer, restart RabbitMQ. --wal dual adds a Kafka intake log.", "attach": "minio"}
   ],
   "edges": [
     {"from": "loadgen", "to": "nginx", "kind": "rpc", "message": "POST /webhooks/demo", "seq": 1},
@@ -27,12 +27,12 @@
     {"from": "node-a", "to": "exchange", "type": "event", "message": "Sink.Message v1", "label": "routing key ankusa.demo", "seq": 3},
     {"from": "node-b", "to": "exchange", "type": "event", "message": "Sink.Message v1", "seq": 3},
     {"from": "exchange", "to": "queue", "type": "event", "message": "Sink.Message v1", "label": "ankusa.#", "seq": 4},
-    {"from": "queue", "to": "consumer", "type": "event", "message": "Sink.Message v1", "label": "ack after upsert", "seq": 5, "route": "above"},
+    {"from": "queue", "to": "consumer", "type": "event", "message": "Sink.Message v1", "label": "ack after upsert", "seq": 5, "route": "ortho"},
     {"from": "consumer", "to": "postgres", "kind": "data", "label": "upsert"},
     {"from": "consumer", "to": "gateway", "kind": "rpc", "message": "GET /v1/claims/…", "label": "body > 8 KiB"},
     {"from": "gateway", "to": "minio", "kind": "data", "label": "read pack"},
     {"from": "node-a", "to": "minio", "kind": "data", "label": "segments + claims"},
     {"from": "node-b", "to": "minio", "kind": "data", "label": "segments + claims"},
-    {"from": "loadgen", "to": "postgres", "kind": "data", "label": "loadgen.verify", "route": "above"}
+    {"from": "loadgen", "to": "postgres", "kind": "data", "label": "loadgen.verify", "route": "below"}
   ]
 }

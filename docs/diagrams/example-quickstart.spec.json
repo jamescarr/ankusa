@@ -7,17 +7,17 @@
     {"id": "floci", "label": "floci (SQS)", "kind": "broker"}
   ],
   "nodes": [
-    {"id": "curl", "kind": "actor", "label": "Provider / curl", "lane": "Clients"},
-    {"id": "you", "kind": "actor", "label": "You", "sub": "operator with curl", "lane": "Clients"},
-    {"id": "ankusa", "kind": "service", "label": "ankusa :4000", "sub": "edge · dispatch · storage · claim_check", "badges": ["retry"], "lane": "Ankusa"},
-    {"id": "store", "kind": "message-store", "label": "Local store", "sub": "fsync before 201", "lane": "Ankusa"},
-    {"id": "admin", "kind": "control-bus", "label": "Admin :4002", "sub": "loopback only", "tags": ["/health /metrics", "/v1/dlq /v1/replays"], "lane": "Ankusa"},
-    {"id": "claim", "kind": "service", "label": "Claim check :4001", "sub": "same node · compose network only", "badges": ["gateway"], "lane": "Ankusa"},
-    {"id": "topic", "kind": "pubsub-channel", "label": "ankusa.events", "sub": "no topic DLQ: 6 attempts → /v1/dlq", "tags": ["6 partitions", "key=tenant/source", "acks=all"], "group": "redpanda", "lane": "Redpanda"},
-    {"id": "bridge", "kind": "messaging-bridge", "label": "Redpanda Connect", "sub": "group ankusa-sqs-bridge · offset after send", "group": "redpanda", "lane": "Redpanda"},
-    {"id": "sqs", "kind": "p2p-channel", "label": "ankusa-worker.fifo", "sub": "redrive after 5 receives", "tags": ["group = Kafka key", "dedup = ankusa_id", "visibility 30 s"], "group": "floci", "lane": "SQS (floci)"},
+    {"id": "curl", "kind": "actor", "label": "Provider / curl", "lane": "Clients", "col": 0},
+    {"id": "you", "kind": "actor", "label": "You", "sub": "operator with curl", "lane": "Clients", "col": 2},
+    {"id": "ankusa", "kind": "service", "label": "ankusa :4000", "sub": "edge · dispatch · storage · claim_check", "badges": ["retry"], "lane": "Ankusa", "col": 0},
+    {"id": "store", "kind": "message-store", "label": "Local store", "sub": "fsync before 201", "lane": "Ankusa", "col": 0},
+    {"id": "admin", "kind": "control-bus", "label": "Admin :4002", "sub": "loopback only", "tags": ["/health /metrics", "/v1/dlq /v1/replays"], "lane": "Ankusa", "col": 2},
+    {"id": "claim", "kind": "service", "label": "Claim check :4001", "sub": "same node · compose network only", "badges": ["gateway"], "lane": "Ankusa", "col": 2},
+    {"id": "topic", "kind": "pubsub-channel", "label": "ankusa.events", "sub": "no topic DLQ: 6 attempts → /v1/dlq", "tags": ["6 partitions", "key=tenant/source", "acks=all"], "group": "redpanda", "lane": "Redpanda", "col": 1},
+    {"id": "bridge", "kind": "messaging-bridge", "label": "Redpanda Connect", "sub": "group ankusa-sqs-bridge · offset after send", "group": "redpanda", "lane": "Redpanda", "col": 1},
+    {"id": "sqs", "kind": "p2p-channel", "label": "ankusa-worker.fifo", "sub": "redrive after 5 receives", "tags": ["group = Kafka key", "dedup = ankusa_id", "visibility 30 s"], "group": "floci", "lane": "SQS (floci)", "col": 1},
     {"id": "sqs-dlq", "kind": "dead-letter-channel", "label": "ankusa-worker-dlq.fifo", "sub": "maxReceiveCount 5 · also sent by the worker", "tags": ["FIFO"], "shadow": "sqs", "group": "floci"},
-    {"id": "worker", "kind": "service", "label": "worker.py", "sub": "batch 10 · 20 s long poll · deletes after handling", "badges": ["idempotent", "polling"], "lane": "Worker"}
+    {"id": "worker", "kind": "service", "label": "worker.py", "sub": "batch 10 · 20 s long poll · deletes after handling", "badges": ["idempotent", "polling"], "lane": "Worker", "col": 1}
   ],
   "edges": [
     {"from": "curl", "to": "ankusa", "kind": "rpc", "message": "POST /webhooks/demo", "label": "201 after fsync", "seq": 1},
@@ -25,7 +25,7 @@
     {"from": "ankusa", "to": "topic", "type": "event", "message": "Sink.Message v1", "label": "acks=all · key tenant/source", "seq": 2},
     {"from": "topic", "to": "bridge", "type": "event", "message": "record", "label": "consumer group", "seq": 3},
     {"from": "bridge", "to": "sqs", "type": "event", "message": "SendMessage", "label": "group = key · dedup = ankusa_id", "seq": 4},
-    {"from": "sqs", "to": "worker", "type": "event", "message": "Sink.Message v1", "label": "long poll", "seq": 5},
+    {"from": "sqs", "to": "worker", "type": "event", "message": "Sink.Message v1", "label": "long poll", "seq": 5, "route": "below"},
     {"from": "worker", "to": "claim", "kind": "rpc", "message": "GET /v1/claims/…", "label": "body > 8 KiB"},
     {"from": "worker", "to": "sqs-dlq", "kind": "dlq", "label": "permanent failure"},
     {"from": "you", "to": "admin", "kind": "control", "message": "GET /v1/dlq · POST /v1/replays"}

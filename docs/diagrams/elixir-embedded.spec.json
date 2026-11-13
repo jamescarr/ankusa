@@ -3,18 +3,18 @@
   "legend": true,
   "lanes": ["Clients", "Your app", "Ankusa library", "Jobs"],
   "nodes": [
-    {"id": "provider", "kind": "external-system", "label": "Provider", "lane": "Clients"},
-    {"id": "app", "kind": "service", "label": "MyApp.Application", "sub": "supervises the instance · drains on stop", "lane": "Your app"},
-    {"id": "obansink", "kind": "channel-adapter", "label": "MyApp.ObanSink", "sub": "@behaviour Ankusa.Sink · deliver/3", "lane": "Your app"},
-    {"id": "instance", "kind": "service", "label": "Ankusa.Instance", "sub": "Config.new/1 · children by roles", "lane": "Ankusa library"},
-    {"id": "listener", "kind": "service", "label": "Ingest listener", "sub": "POST /webhooks/:source_id · /health", "badges": ["gateway"], "lane": "Ankusa library"},
-    {"id": "batcher", "kind": "service", "label": "Edge.Batcher", "sub": "one synced batch per commit", "lane": "Ankusa library"},
-    {"id": "store", "kind": "message-store", "label": "RocksDB store", "sub": "hooks · delivery rows · DLQ", "lane": "Ankusa library"},
-    {"id": "dispatch", "kind": "service", "label": "Dispatch", "sub": "retries, then dead-letters", "badges": ["retry"], "lane": "Ankusa library"},
-    {"id": "queue-api", "kind": "service", "label": "Ankusa.Queue · Replay", "sub": "enqueue/2 · dead/2 · Replay.start/2", "lane": "Ankusa library"},
-    {"id": "oban", "kind": "p2p-channel", "label": "Oban queue :webhooks", "sub": "after :ok Oban owns retries", "tags": ["unique: idempotency_key"], "lane": "Jobs"},
-    {"id": "worker", "kind": "service", "label": "MyApp.WebhookWorker", "sub": "max_attempts 10", "badges": ["idempotent", "activator"], "lane": "Jobs"},
-    {"id": "postgres", "kind": "datastore", "label": "Postgres", "sub": "oban_jobs + your rows", "lane": "Jobs"},
+    {"id": "provider", "kind": "external-system", "label": "Provider", "lane": "Clients", "col": 1},
+    {"id": "app", "kind": "service", "label": "MyApp.Application", "sub": "supervises the instance · drains on stop", "lane": "Your app", "col": 0},
+    {"id": "obansink", "kind": "channel-adapter", "label": "MyApp.ObanSink", "sub": "@behaviour Ankusa.Sink · deliver/3", "lane": "Your app", "col": 2},
+    {"id": "instance", "kind": "service", "label": "Ankusa.Instance", "sub": "Config.new/1 · children by roles", "lane": "Ankusa library", "col": 0},
+    {"id": "listener", "kind": "service", "label": "Ingest listener", "sub": "POST /webhooks/:source_id · /health", "badges": ["gateway"], "lane": "Ankusa library", "col": 1},
+    {"id": "batcher", "kind": "service", "label": "Edge.Batcher", "sub": "one synced batch per commit", "lane": "Ankusa library", "col": 0},
+    {"id": "store", "kind": "message-store", "label": "RocksDB store", "sub": "hooks · delivery rows · DLQ", "lane": "Ankusa library", "col": 0},
+    {"id": "dispatch", "kind": "service", "label": "Dispatch", "sub": "retries, then dead-letters", "badges": ["retry"], "lane": "Ankusa library", "col": 0},
+    {"id": "queue-api", "kind": "service", "label": "Ankusa.Queue · Replay", "sub": "enqueue/2 · dead/2 · Replay.start/2", "lane": "Ankusa library", "col": 1},
+    {"id": "oban", "kind": "p2p-channel", "label": "Oban queue :webhooks", "sub": "after :ok Oban owns retries", "tags": ["unique: idempotency_key"], "lane": "Jobs", "col": 2},
+    {"id": "worker", "kind": "service", "label": "MyApp.WebhookWorker", "sub": "max_attempts 10", "badges": ["idempotent", "activator"], "lane": "Jobs", "col": 2},
+    {"id": "postgres", "kind": "datastore", "label": "Postgres", "sub": "oban_jobs + your rows", "lane": "Jobs", "col": 2},
     {"id": "roles-note", "kind": "note", "label": "edge, dispatch and storage share one RocksDB, so they run in the same BEAM node; claim_check is stateless and can run anywhere.", "attach": "instance"}
   ],
   "edges": [
@@ -27,6 +27,6 @@
     {"from": "obansink", "to": "oban", "type": "command", "message": "Oban.insert", "label": "unique on idempotency_key", "seq": 6},
     {"from": "oban", "to": "worker", "type": "command", "message": "perform/1", "seq": 7},
     {"from": "worker", "to": "postgres", "kind": "data", "label": "effect + processed_at"},
-    {"from": "queue-api", "to": "store", "kind": "data", "label": "enqueue · dead · replay", "route": "below"}
+    {"from": "queue-api", "to": "store", "kind": "data", "label": "enqueue · dead · replay", "route": "ortho"}
   ]
 }

@@ -5,29 +5,29 @@
     {"id": "buckets", "label": "Object stores", "kind": "deployment"}
   ],
   "nodes": [
-    {"id": "store", "kind": "message-store", "label": "Store (RocksDB)", "sub": "hooks · deliveries · audit", "col": 1, "row": 0},
-    {"id": "checkpoint", "kind": "service", "label": "Checkpoint", "sub": "every backup.interval_ms (60 s)", "badges": ["polling"]},
-    {"id": "uploader", "kind": "service", "label": "Backup uploader", "sub": "files → signed manifest → LATEST", "badges": ["retry"]},
-    {"id": "primary", "kind": "message-store", "label": "Primary bucket", "sub": "backup/sst/ shared · backup/<id>/", "group": "buckets"},
-    {"id": "secondary", "kind": "message-store", "label": "Secondary bucket", "sub": "backup.secondary · after the primary", "group": "buckets", "col": 5, "row": 1},
-    {"id": "verify", "kind": "service", "label": "Verify", "sub": "size + sha256 of every file · writes nothing", "badges": ["polling"]},
-    {"id": "restore", "kind": "service", "label": "Boot restore", "sub": "no database → LATEST · CURRENT written last"},
-    {"id": "reconcile", "kind": "service", "label": "Archive reconcile", "sub": "catalogue segments · advance seq"},
-    {"id": "stop", "kind": "service", "label": "Drain + stop", "sub": "final backup ≤ 20 s"},
-    {"id": "rpo-note", "kind": "note", "label": "Recovery point = the last backup (keep 3). Hooks acked after it are lost unless the archive has them. A restore needs backup.signing_key and secrets.kek, which are not in the bucket.", "attach": "uploader"}
+    {"id": "store", "kind": "message-store", "label": "Store (RocksDB)", "sub": "hooks · deliveries · audit", "col": 0, "row": 6},
+    {"id": "checkpoint", "kind": "service", "label": "Checkpoint", "sub": "every backup.interval_ms (60 s)", "badges": ["polling"], "col": 0, "row": 5},
+    {"id": "uploader", "kind": "service", "label": "Backup uploader", "sub": "files → signed manifest → LATEST", "badges": ["retry"], "col": 0, "row": 4},
+    {"id": "primary", "kind": "message-store", "label": "Primary bucket", "sub": "backup/sst/ shared · backup/<id>/", "group": "buckets", "col": 0, "row": 3},
+    {"id": "secondary", "kind": "message-store", "label": "Secondary bucket", "sub": "backup.secondary · after the primary", "group": "buckets", "col": 1, "row": 3},
+    {"id": "verify", "kind": "service", "label": "Verify", "sub": "size + sha256 of every file · writes nothing", "badges": ["polling"], "col": 1, "row": 1},
+    {"id": "restore", "kind": "service", "label": "Boot restore", "sub": "no database → LATEST · CURRENT written last", "col": 1, "row": 4},
+    {"id": "reconcile", "kind": "service", "label": "Archive reconcile", "sub": "catalogue segments · advance seq", "col": 1, "row": 5},
+    {"id": "stop", "kind": "service", "label": "Drain + stop", "sub": "final backup ≤ 20 s", "col": 1, "row": 0},
+    {"id": "rpo-note", "kind": "note", "label": "Recovery point = the last backup (keep 3). Hooks acked after it are lost unless the archive has them. A restore needs backup.signing_key and secrets.kek, which are not in the bucket.", "attach": "reconcile"}
   ],
   "edges": [
-    {"from": "store", "to": "checkpoint", "kind": "data", "label": "flush + hard-link files", "seq": 1},
-    {"from": "checkpoint", "to": "uploader", "kind": "data", "label": "checkpoint files", "seq": 2},
-    {"from": "uploader", "to": "primary", "kind": "data", "label": "files, manifest, then LATEST", "seq": 3},
-    {"from": "uploader", "to": "secondary", "kind": "data", "label": "same keys, after the primary", "seq": 4},
-    {"from": "stop", "to": "uploader", "kind": "control", "label": "one last backup", "route": "above"},
-    {"from": "verify", "to": "primary", "kind": "data", "label": "LATEST, signature, every file", "route": "below"},
-    {"from": "verify", "to": "secondary", "kind": "data", "label": "every target"},
-    {"from": "primary", "to": "restore", "kind": "data", "label": "LATEST at boot", "seq": 5},
-    {"from": "secondary", "to": "restore", "kind": "data", "label": "primary unreachable or invalid", "seq": 5},
-    {"from": "restore", "to": "store", "kind": "data", "label": "open the restored DB", "seq": 6, "route": "above"},
-    {"from": "restore", "to": "reconcile", "kind": "control", "label": "before the writer starts", "seq": 7},
-    {"from": "reconcile", "to": "store", "kind": "data", "label": "catalogue rows + next seq", "route": "above"}
+    {"from": "store", "to": "checkpoint", "kind": "data", "label": "flush + hard-link files", "seq": 1, "route": "straight"},
+    {"from": "checkpoint", "to": "uploader", "kind": "data", "label": "checkpoint files", "seq": 2, "route": "straight"},
+    {"from": "uploader", "to": "primary", "kind": "data", "label": "files, manifest, then LATEST", "seq": 3, "route": "straight"},
+    {"from": "uploader", "to": "secondary", "kind": "data", "label": "same keys, after the primary", "seq": 4, "route": "ortho"},
+    {"from": "stop", "to": "uploader", "kind": "control", "label": "one last backup", "route": "ortho"},
+    {"from": "verify", "to": "primary", "kind": "data", "label": "LATEST, signature, every file", "route": "ortho"},
+    {"from": "verify", "to": "secondary", "kind": "data", "label": "every target", "route": "straight"},
+    {"from": "primary", "to": "restore", "kind": "data", "label": "LATEST at boot", "seq": 5, "route": "ortho"},
+    {"from": "secondary", "to": "restore", "kind": "data", "label": "primary unreachable or invalid", "seq": 5, "route": "straight"},
+    {"from": "restore", "to": "store", "kind": "data", "label": "open the restored DB", "seq": 6, "route": "ortho"},
+    {"from": "restore", "to": "reconcile", "kind": "control", "label": "before the writer starts", "seq": 7, "route": "straight"},
+    {"from": "reconcile", "to": "store", "kind": "data", "label": "catalogue rows + next seq", "route": "ortho"}
   ]
 }
