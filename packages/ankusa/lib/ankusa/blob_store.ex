@@ -87,6 +87,73 @@ defmodule Ankusa.BlobStore do
   @callback list(instance :: atom(), prefix :: String.t(), opts :: keyword()) ::
               {:ok, [String.t()]} | {:error, term()}
 
+  # ── object operations (optional) ───────────────────────────────────────────
+  #
+  # What the gateway's objects API needs beyond immutable packs and segments:
+  # metadata, versions, conditions, one page of a listing. Per-call keys ride
+  # in `opts` beside the store's own options:
+  #
+  #   * `get_object/3`: `:range` (`{first, last}`, inclusive), `:if`
+  #     (`{:version, v}`), `:max_bytes` (a body past it is `{:error, :too_large}`);
+  #   * `put_object/4`: `:content_type` (default `"application/octet-stream"`),
+  #     `:metadata` (a string map), `:if` (`:absent | {:version, v}`);
+  #   * `list_page/3`: `:cursor`, `:limit` (1..1000, default 1000), `:delimiter`
+  #     (`nil | "/"`).
+  #
+  # `meta.size` is always the whole object's size (from `content-range` on a
+  # ranged read); `version` is opaque, its surrounding double quotes stripped;
+  # metadata names are lowercase. A missing key on `delete_object/3` is `:ok`.
+
+  @typedoc "What `head_object/3` and `get_object/3` report about an object."
+  @type object_meta :: %{
+          size: non_neg_integer(),
+          version: String.t(),
+          content_type: String.t() | nil,
+          last_modified: integer() | nil,
+          metadata: %{String.t() => String.t()}
+        }
+
+  @typedoc "One page of `list_page/3`: keys with sizes, common prefixes, the next cursor."
+  @type page :: %{
+          objects: [%{key: String.t(), size: non_neg_integer()}],
+          prefixes: [String.t()],
+          next: String.t() | nil
+        }
+
+  @doc "The object's metadata, without its bytes."
+  @callback head_object(instance :: atom(), key :: String.t(), opts :: keyword()) ::
+              {:ok, object_meta()} | {:error, :not_found | term()}
+
+  @doc "The object's metadata and bytes (or the `:range` of them)."
+  @callback get_object(instance :: atom(), key :: String.t(), opts :: keyword()) ::
+              {:ok, object_meta(), binary()}
+              | {:error,
+                 :not_found | :range_not_satisfiable | :version_mismatch | :too_large | term()}
+
+  @doc "Write the object, under the `:if` condition when given; returns the new version."
+  @callback put_object(
+              instance :: atom(),
+              key :: String.t(),
+              data :: iodata(),
+              opts :: keyword()
+            ) ::
+              {:ok, version :: String.t()}
+              | {:error, :already_exists | :version_mismatch | term()}
+
+  @doc "Delete the object; a missing one is `:ok`."
+  @callback delete_object(instance :: atom(), key :: String.t(), opts :: keyword()) ::
+              :ok | {:error, term()}
+
+  @doc "One page of the keys under `prefix`, in key order."
+  @callback list_page(instance :: atom(), prefix :: String.t(), opts :: keyword()) ::
+              {:ok, page()} | {:error, term()}
+
+  @optional_callbacks head_object: 3,
+                      get_object: 3,
+                      put_object: 4,
+                      delete_object: 3,
+                      list_page: 3
+
   @doc "The `{module, opts}` a scope resolves to on `instance`."
   @spec store(atom(), scope()) :: {module(), keyword()}
   def store(instance, scope) do
