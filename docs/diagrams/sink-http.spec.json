@@ -2,16 +2,16 @@
   "title": "Sink.Http — a signed delivery to your receiver",
   "legend": true,
   "nodes": [
-    {"id": "dispatch", "kind": "service", "label": "Dispatch attempt", "sub": "24 h horizon · 30 s attempt", "badges": ["retry", "circuit-breaker"]},
-    {"id": "resolve", "kind": "dynamic-router", "label": "Destination", "sub": "url · headers · secret per tenant"},
-    {"id": "headers", "kind": "envelope-wrapper", "label": "x-ankusa-* headers", "sub": "id · idempotency-key · body-sha256 · …"},
-    {"id": "sign", "kind": "envelope-wrapper", "label": "Standard Webhooks signature", "sub": "webhook-id · -timestamp · -signature"},
-    {"id": "egress", "kind": "message-filter", "label": "Egress policy", "sub": "private and loopback addresses denied"},
-    {"id": "pools", "kind": "service", "label": "Connection pools", "sub": "one per address + TLS · 32 connections", "badges": ["bulkhead"]},
-    {"id": "recv", "kind": "external-system", "label": "Your receiver", "sub": "2xx only after a durable enqueue"},
-    {"id": "classify", "kind": "content-based-router", "label": "Status classifier", "sub": "2xx ok · retry · permanent"},
-    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead delivery rows", "sub": "fix, then POST /v1/replays", "tags": ["node-local"]},
-    {"id": "tpl-note", "kind": "note", "label": "{{ tenant }} may template the URL path and query only; the host stays literal so pools key on it. A missing template variable is permanent.", "attach": "resolve"}
+    {"id": "dispatch", "kind": "service", "col": 0, "row": 0, "label": "Dispatch attempt", "sub": "24 h horizon · 30 s attempt", "badges": ["retry", "circuit-breaker"]},
+    {"id": "resolve", "kind": "dynamic-router", "col": 1, "row": 0, "label": "Destination", "sub": "url · headers · secret per tenant"},
+    {"id": "headers", "kind": "envelope-wrapper", "col": 1, "row": 1, "label": "x-ankusa-* headers", "sub": "id · idempotency-key · body-sha256 · …"},
+    {"id": "sign", "kind": "envelope-wrapper", "col": 1, "row": 2, "label": "Standard Webhooks signature", "sub": "webhook-id · -timestamp · -signature"},
+    {"id": "egress", "kind": "message-filter", "col": 1, "row": 3, "label": "Egress policy", "sub": "private and loopback addresses denied"},
+    {"id": "pools", "kind": "service", "col": 1, "row": 4, "label": "Connection pools", "sub": "one per address + TLS · 32 connections", "badges": ["bulkhead"]},
+    {"id": "recv", "kind": "external-system", "col": 1, "row": 5, "label": "Your receiver", "sub": "2xx only after a durable enqueue"},
+    {"id": "classify", "kind": "content-based-router", "col": 0, "row": 5, "label": "Status classifier", "sub": "2xx ok · retry · permanent"},
+    {"id": "dlq", "kind": "dead-letter-channel", "col": 0, "row": 6, "label": "Dead delivery rows", "sub": "fix, then POST /v1/replays", "tags": ["node-local"]},
+    {"id": "tpl-note", "kind": "note", "label": "{{ tenant }} may template the URL path and query only; the host stays literal so pools key on it. A missing template variable is permanent.", "attach": "dlq"}
   ],
   "edges": [
     {"from": "dispatch", "to": "resolve", "type": "command", "message": "deliver/3", "seq": 1},
