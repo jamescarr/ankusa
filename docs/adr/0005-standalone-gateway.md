@@ -1,6 +1,6 @@
 # ADR 0005: The standalone gateway
 
-- Status: accepted, 2026-11-13
+- Status: accepted, 2026-11-15
 - New wire format: Objects API v1, Sharing API v1, ACL document v1, share link v1, audit record v1, config_version 2
 - Builds on: (none)
 

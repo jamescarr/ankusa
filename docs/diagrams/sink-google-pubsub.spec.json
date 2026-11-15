@@ -5,16 +5,16 @@
     {"id": "pubsub", "label": "Google Cloud Pub/Sub", "kind": "broker"}
   ],
   "nodes": [
-    {"id": "dispatch", "kind": "service", "label": "Dispatch attempt", "sub": "retry policy → DLQ", "badges": ["retry", "circuit-breaker"]},
-    {"id": "encode", "kind": "envelope-wrapper", "label": "Sink.Message v1", "sub": "data + attributes (+ orderingKey)"},
-    {"id": "batcher", "kind": "service", "label": "Sink.Batcher", "sub": "1000 msgs · 7.5 MB · 20 ms linger", "badges": ["bulkhead"]},
-    {"id": "token", "kind": "service", "label": "token_provider", "sub": "{mod, fun, args} → bearer token"},
-    {"id": "bisect", "kind": "splitter", "label": "Bisect on INVALID_ARGUMENT", "sub": "isolates the one bad message"},
-    {"id": "topic", "kind": "pubsub-channel", "label": "Topic", "sub": "never created · no subscription = dropped", "tags": ["attributes ankusa_*", "orderingKey optional"], "group": "pubsub"},
-    {"id": "subscription", "kind": "p2p-channel", "label": "Subscription", "sub": "ack deadline · ordering set by ops", "tags": ["at-least-once"], "group": "pubsub"},
-    {"id": "consumer", "kind": "service", "label": "Pull / push worker", "sub": "dedupes on idempotency_key", "badges": ["idempotent"]},
-    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead delivery rows", "sub": "NOT_FOUND · PERMISSION_DENIED · invalid", "tags": ["node-local"]},
-    {"id": "dedupe-note", "kind": "note", "label": "No publish-side dedupe: consumers dedupe on ankusa_idempotency_key. An orderingKey orders only on a subscription with ordering enabled.", "attach": "encode"}
+    {"id": "dispatch", "kind": "service", "label": "Dispatch attempt", "sub": "retry policy → DLQ", "badges": ["retry", "circuit-breaker"], "col": 1, "row": 0},
+    {"id": "encode", "kind": "envelope-wrapper", "label": "Sink.Message v1", "sub": "data + attributes (+ orderingKey)", "col": 1, "row": 1},
+    {"id": "batcher", "kind": "service", "label": "Sink.Batcher", "sub": "1000 msgs · 7.5 MB · 20 ms linger", "badges": ["bulkhead"], "col": 1, "row": 2},
+    {"id": "token", "kind": "service", "label": "token_provider", "sub": "{mod, fun, args} → bearer token", "col": 0, "row": 2},
+    {"id": "bisect", "kind": "splitter", "label": "Bisect on INVALID_ARGUMENT", "sub": "isolates the one bad message", "col": 1, "row": 3},
+    {"id": "topic", "kind": "pubsub-channel", "label": "Topic", "sub": "never created · no subscription = dropped", "tags": ["attributes ankusa_*", "orderingKey optional"], "group": "pubsub", "col": 1, "row": 4},
+    {"id": "subscription", "kind": "p2p-channel", "label": "Subscription", "sub": "ack deadline · ordering set by ops", "tags": ["at-least-once"], "group": "pubsub", "col": 1, "row": 5},
+    {"id": "consumer", "kind": "service", "label": "Pull / push worker", "sub": "dedupes on idempotency_key", "badges": ["idempotent"], "col": 1, "row": 6},
+    {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead delivery rows", "sub": "NOT_FOUND · PERMISSION_DENIED · invalid", "tags": ["node-local"], "col": 0, "row": 3},
+    {"id": "dedupe-note", "kind": "note", "label": "No publish-side dedupe: consumers dedupe on ankusa_idempotency_key. An orderingKey orders only on a subscription with ordering enabled.", "attach": "consumer"}
   ],
   "edges": [
     {"from": "dispatch", "to": "encode", "type": "event", "message": "hook", "seq": 1},
@@ -24,7 +24,7 @@
     {"from": "bisect", "to": "topic", "kind": "rpc", "message": "POST :publish", "label": "200 + one id per message", "seq": 5},
     {"from": "topic", "to": "subscription", "type": "event", "message": "Sink.Message v1", "seq": 6},
     {"from": "subscription", "to": "consumer", "type": "event", "message": "Sink.Message v1", "label": "redelivered after the deadline", "seq": 7},
-    {"from": "batcher", "to": "dlq", "kind": "dlq", "label": "config errors", "route": "above"},
+    {"from": "batcher", "to": "dlq", "kind": "dlq", "label": "config errors"},
     {"from": "bisect", "to": "dlq", "kind": "dlq", "label": "the invalid message alone"}
   ]
 }
