@@ -170,6 +170,56 @@ Wire format: `priv/openapi/gateway.v1.yaml`. The operator's view, with the
 statuses and headers: the
 [objects API section](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md#the-objects-api).
 
+## Sharing
+
+`sharing.enabled` turns on native grants, ownership and share links for the
+spaces. It defines the `grants` authorizer (a policy must list it), appends the
+`link` authenticator, and makes `PUT` record `ankusa-owner` and
+`ankusa-incarnation` on a new object:
+
+```elixir
+Ankusa.Gateway.Config.new(
+  instance: :default,
+  authz: %{
+    authorizers: %{
+      "team" =>
+        {Ankusa.Gateway.Authz.Rules,
+         %{
+           rules: [
+             %{effect: :allow, actions: [:read, :write, :share], spaces: ["docs"],
+               keys: ["teams/{team}/**"], when: %{groups_any: ["{{ vars.team }}"]}}
+           ]
+         }}
+    },
+    policies: %{"docs" => %{mode: :first, steps: ["grants", "team"]}}
+  },
+  spaces: %{
+    "docs" => %{store: {Ankusa.BlobStore.S3, bucket: "reports", region: "us-east-1"},
+                prefix: "docs/", policy: "docs"}
+  },
+  sharing: %{
+    # [current | previous…], each at least 16 bytes; the first signs a link,
+    # any verifies one (rotation = put the new key first).
+    signing_keys: [System.get_env("LINK_SIGNING_KEY")],
+    link_max_ttl_s: 604_800,
+    acl_cache_ttl_ms: 2_000,
+    max_grants_per_resource: 256
+  }
+)
+```
+
+Then, over `/v1/spaces/{space}`: `GET …/acl?key=` (`?prefix=`), `POST …/grants`,
+`DELETE …/grants/{id}?key=`, `POST …/links` (a `link` grant plus a signed URL).
+Every route authorizes `share` on the resource, and a new grant needs each of
+its own actions on it too. Each mutation writes an audit record v1 under
+`.ankusa/audit/v1/` first.
+
+A share link is a credential for `GET` and `HEAD` of that one object and
+nothing else, and only the `grants` step ever sees it. Its grant's revocation
+is bounded by `acl_cache_ttl_ms` on other nodes. On a LocalFS space grant
+updates are only safe from one gateway node (the compare-and-swap lock is
+`:global`, not the filesystem's); use an object store whose conditions are.
+
 ## Metrics
 
 Add `Ankusa.Gateway.Metrics` to core's `metrics.extra`:
@@ -179,4 +229,5 @@ decisions (`ankusa_gateway_authn_total`, `ankusa_gateway_authz_decisions_total`,
 `ankusa_gateway_authz_duration_seconds`), each remote backend's caller
 (`ankusa_gateway_calls_total`, `ankusa_gateway_caller_{limit,inflight,queued}`,
 `ankusa_gateway_caller_breaker_transitions_total`) and the caches
-(`ankusa_gateway_cache_{entries,bytes}`).
+(`ankusa_gateway_cache_{entries,bytes}`); with sharing on,
+`ankusa_gateway_shares_total{action,result}`.

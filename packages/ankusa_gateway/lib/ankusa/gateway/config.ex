@@ -42,6 +42,12 @@ defmodule Ankusa.Gateway.Config do
   | `objects.op_deadline_ms` | `30000` | 1000..600000: one store operation's deadline, every attempt included |
   | `objects.timeout_ms` | `10000` | 1..600000: one store request |
   | `objects.retries` | `1` | 0..10: extra attempts after a transient store failure |
+  | `sharing.enabled` | `false` | native grants and share links: defines the `grants` authorizer, adds the `link` authenticator, records ownership on `PUT` |
+  | `sharing.signing_keys` | `[]` | `[current \\| previous]`, each at least 16 bytes; required when enabled |
+  | `sharing.link_max_ttl_s` | `604800` | 1..31536000: the longest a share link may live |
+  | `sharing.acl_cache_ttl_ms` | `2000` | 0..60000: how long an ACL document or an object's owner is reused; the cross-node bound of a revocation |
+  | `sharing.acl_cache_max_entries`, `sharing.acl_cache_max_bytes` | `100000`, `67108864` | the ACL cache's bounds |
+  | `sharing.max_grants_per_resource` | `256` | 1..1024 |
 
   An authenticator is `%{type: :token | :jwt | :mtls | MyModule, name: "..."}`
   plus its own keys (see `Ankusa.Gateway.Authn.Token`, `Ankusa.Gateway.Authn.JWT`
@@ -92,6 +98,15 @@ defmodule Ankusa.Gateway.Config do
               op_deadline_ms: 30_000,
               timeout_ms: 10_000,
               retries: 1
+            },
+            sharing: %{
+              enabled: false,
+              signing_keys: [],
+              link_max_ttl_s: 604_800,
+              acl_cache_ttl_ms: 2_000,
+              acl_cache_max_entries: 100_000,
+              acl_cache_max_bytes: 67_108_864,
+              max_grants_per_resource: 256
             }
 
   @type authenticator :: %{type: atom(), name: String.t(), module: module(), config: map()}
@@ -119,6 +134,15 @@ defmodule Ankusa.Gateway.Config do
             op_deadline_ms: pos_integer(),
             timeout_ms: pos_integer(),
             retries: non_neg_integer()
+          },
+          sharing: %{
+            enabled: boolean(),
+            signing_keys: [String.t()],
+            link_max_ttl_s: pos_integer(),
+            acl_cache_ttl_ms: non_neg_integer(),
+            acl_cache_max_entries: pos_integer(),
+            acl_cache_max_bytes: pos_integer(),
+            max_grants_per_resource: pos_integer()
           }
         }
 
@@ -132,8 +156,16 @@ defmodule Ankusa.Gateway.Config do
     :authz,
     :claims,
     :spaces,
-    :objects
+    :objects,
+    :sharing
   ]
+  @sharing %{
+    link_max_ttl_s: 1..31_536_000,
+    acl_cache_ttl_ms: 0..60_000,
+    acl_cache_max_entries: 1_000..5_000_000,
+    acl_cache_max_bytes: 1_048_576..1_073_741_824,
+    max_grants_per_resource: 1..1024
+  }
   @objects %{
     max_inflight_bytes: 1..1_099_511_627_776,
     op_deadline_ms: 1_000..600_000,
@@ -162,6 +194,8 @@ defmodule Ankusa.Gateway.Config do
   @authenticators %{token: Authn.Token, jwt: Authn.JWT, mtls: Authn.MTLS}
   @max_authenticators 8
   @reserved_authorizers %{"scopes" => Authz.Scopes}
+  # Defined only with `sharing.enabled`, but never a name of your own.
+  @sharing_authorizers %{"grants" => Authz.Grants}
 
   @shown ~w(instance ip name type issuer audience jwks_url header scope_claim tenants_claim
             groups_claim subject_prefix id scopes groups policy mode use on_unavailable steps
@@ -186,11 +220,13 @@ defmodule Ankusa.Gateway.Config do
     tls = Ankusa.Listener.normalize_tls!(Map.get(given, :tls), "gateway.tls")
 
     authz = given |> Map.get(:authz, %{}) |> section!("gateway.authz", @authz_keys)
-    authorizers = authorizers!(authz)
+    sharing = sharing!(Map.get(given, :sharing, %{}))
+    authorizers = authorizers!(authz, sharing)
     policies = policies!(authz, authorizers)
     auth = auth!(Map.get(given, :auth, %{}), tls)
 
     if check_exposure?, do: exposure!(auth, address)
+    auth = with_link(auth, sharing)
 
     %__MODULE__{
       instance: instance,
@@ -214,7 +250,8 @@ defmodule Ankusa.Gateway.Config do
           ),
         cache: authz_cache!(Map.get(authz, :cache, %{}))
       },
-      claims: claims!(Map.get(given, :claims, %{}), policies)
+      claims: claims!(Map.get(given, :claims, %{}), policies),
+      sharing: sharing
     }
     |> objects!(Map.get(given, :spaces, %{}), Map.get(given, :objects, %{}))
   end
@@ -376,7 +413,7 @@ defmodule Ankusa.Gateway.Config do
 
   # ── authz ───────────────────────────────────────────────────────────────────
 
-  defp authorizers!(%{} = authz) do
+  defp authorizers!(%{} = authz, sharing) do
     given =
       authz
       |> Map.get(:authorizers, %{})
@@ -387,19 +424,74 @@ defmodule Ankusa.Gateway.Config do
         name = Options.name!(name, "gateway.authz.authorizers")
         key = "gateway.authz.authorizers.#{name}"
 
-        if Map.has_key?(@reserved_authorizers, name) do
+        if Map.has_key?(@reserved_authorizers, name) or Map.has_key?(@sharing_authorizers, name) do
           raise ArgumentError, "#{key}: the name #{name} is reserved for the built-in authorizer"
         end
 
         {name, authorizer!(spec, key)}
       end)
 
+    built_in =
+      if sharing.enabled,
+        do: Map.merge(@reserved_authorizers, @sharing_authorizers),
+        else: @reserved_authorizers
+
     Map.merge(
       defined,
-      Map.new(@reserved_authorizers, fn {name, module} ->
+      Map.new(built_in, fn {name, module} ->
         {name, %{module: module, state: module.init!(%{}, "gateway.authz.authorizers.#{name}")}}
       end)
     )
+  end
+
+  # ── sharing ─────────────────────────────────────────────────────────────────
+
+  defp sharing!(value) do
+    key = "gateway.sharing"
+    defaults = %__MODULE__{}.sharing
+    given = section!(value, key, Map.keys(defaults))
+
+    sharing =
+      ranged!(
+        Map.drop(given, [:enabled, :signing_keys]),
+        key,
+        @sharing,
+        Map.drop(defaults, [:enabled, :signing_keys])
+      )
+
+    enabled = Options.boolean!(Map.get(given, :enabled, false), "#{key}.enabled")
+    keys = signing_keys!(Map.get(given, :signing_keys, []), "#{key}.signing_keys")
+
+    if enabled and keys == [] do
+      raise ArgumentError,
+            "#{key}.signing_keys must hold at least one key when gateway.sharing.enabled is true"
+    end
+
+    Map.merge(sharing, %{enabled: enabled, signing_keys: keys})
+  end
+
+  defp signing_keys!(keys, key) when is_list(keys) do
+    Enum.map(keys, fn
+      value when is_binary(value) and byte_size(value) >= 16 -> value
+      _other -> raise ArgumentError, "#{key}: every key must be a string of at least 16 bytes"
+    end)
+  end
+
+  defp signing_keys!(_other, key),
+    do: raise(ArgumentError, "#{key} must be a list of strings of at least 16 bytes")
+
+  # With sharing on, the share-link authenticator closes the chain.
+  defp with_link(auth, %{enabled: false}), do: auth
+
+  defp with_link(auth, sharing) do
+    link = %{
+      type: :link,
+      name: "link",
+      module: Authn.Link,
+      config: Authn.Link.init!(sharing, "gateway.sharing")
+    }
+
+    %{auth | authenticators: auth.authenticators ++ [link]}
   end
 
   defp authorizer!({module, opts}, key) when is_atom(module) do

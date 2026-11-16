@@ -16,7 +16,9 @@ defmodule AnkusaGatewayServer.GatewaySection do
 
   @auth_jwt_keys ~w(issuer audience jwks_url keys refresh_ms min_refresh_ms leeway_s scope_claim tenants_claim)
   @auth_mtls_keys ~w(subject_map)
-  @gateway_keys ~w(port ip tls auth authz max_concurrent_requests claims spaces objects)
+  @gateway_keys ~w(port ip tls auth authz max_concurrent_requests claims spaces objects sharing)
+  @gateway_sharing_ints ~w(link_max_ttl_s acl_cache_ttl_ms acl_cache_max_entries acl_cache_max_bytes
+                           max_grants_per_resource)a
   @gateway_auth_keys ~w(allow_insecure authenticators cache)
   @gateway_auth_cache_keys ~w(ttl_ms negative_ttl_ms max_entries max_bytes)a
   @gateway_authz_keys ~w(deadline_ms cache authorizers policies)
@@ -67,6 +69,7 @@ defmodule AnkusaGatewayServer.GatewaySection do
       |> put_opt(:claims, gateway_claims(gateway, path))
       |> put_opt(:spaces, gateway_spaces(gateway, path))
       |> put_opt(:objects, gateway_objects(gateway, path))
+      |> put_opt(:sharing, gateway_sharing(gateway, path))
 
     try do
       Ankusa.Gateway.Config.new(opts, check_exposure: gateway?)
@@ -427,4 +430,26 @@ defmodule AnkusaGatewayServer.GatewaySection do
         |> put_opt(:retries, int_opt(objects, "retries", path))
     end
   end
+
+  # `signing_keys` is a list or one comma-separated string (`${VAR}`), as
+  # `claim_check.ref_signing_keys`; empty or null leaves it unset.
+  defp gateway_sharing(gateway, path) do
+    case gateway["sharing"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["sharing"]
+        keys = ~w(enabled signing_keys) ++ Enum.map(@gateway_sharing_ints, &Atom.to_string/1)
+        sharing = section!(value, keys, path)
+
+        @gateway_sharing_ints
+        |> Enum.reduce([], &put_opt(&2, &1, int_opt(sharing, Atom.to_string(&1), path)))
+        |> put_opt(:enabled, bool_opt(sharing, "enabled", path))
+        |> put_opt(:signing_keys, signing_keys(sharing["signing_keys"], path ++ ["signing_keys"]))
+    end
+  end
+
+  defp signing_keys(empty, _path) when empty in [nil, [], ""], do: nil
+  defp signing_keys(keys, path), do: string_list!(keys, path)
 end

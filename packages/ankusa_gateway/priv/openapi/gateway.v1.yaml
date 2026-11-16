@@ -14,10 +14,36 @@ info:
     not the reverse.
 
     The claims API served by the same listener is documented separately, in
-    `claim_check.v1.yaml`. The Sharing API v1 (native grants, share links and
-    the audit records they write) will be added to this document when it
-    ships; until then the only way to change who may read an object is the
-    space's policy.
+    `claim_check.v1.yaml`.
+
+    ## Sharing
+
+    With `gateway.sharing.enabled` the same listener also serves the Sharing
+    API v1 (`/v1/spaces/…`): the native grants on one object or one prefix of a
+    space, stored in the space's own store as an ACL document v1 under
+    `.ankusa/acl/v1/`, and share links v1 — a signed URL that reads one object
+    until it expires or its grant is revoked. Every sharing route names its
+    resource and authorizes `share` on it against the space's policy; a
+    policy takes the grants into account only when it lists the `grants`
+    authorizer. Each mutation writes an audit record v1 under
+    `.ankusa/audit/v1/` before it changes anything.
+
+    A share link is a credential for `GET` and `HEAD` of one object and
+    nothing else: it never authenticates a listing, a write, a delete or a
+    sharing route, and within a policy it can only pass the `grants` step.
+    Disabled (`gateway.sharing.enabled: false`, the default), every
+    `/v1/spaces/…` route is `404`, and the only way to change who may read an
+    object is the space's policy.
+
+    ## Ownership
+
+    With sharing on, a `PUT` that creates an object records
+    `ankusa-incarnation` (a fresh ULID) and, unless the caller is anonymous,
+    `ankusa-owner` (the principal id) in its metadata. An overwrite carries
+    both over unchanged, and an object written before sharing was on has
+    neither: overwriting never makes anyone an owner. Both names are the
+    gateway's own — `x-ankusa-meta-ankusa-owner` is `400 invalid_metadata`,
+    and neither is ever returned as an `x-ankusa-meta-<name>` header.
 
     Every operation except `GET /health` and `GET /ready` needs a credential
     accepted by one of the gateway's authenticators (`gateway.auth`): a static
@@ -72,6 +98,11 @@ security:
 tags:
   - name: objects
     description: Read, write and list objects in a space.
+  - name: sharing
+    description: |
+      Native grants, ownership and share links (`gateway.sharing`). Every
+      route is `404` unless `gateway.sharing.enabled`. An object has an owner
+      only if it was created while sharing was on.
   - name: operations
     description: Health and readiness.
 paths:
@@ -195,6 +226,18 @@ paths:
         all: `422 object_too_large` names the bound. An empty object is an
         empty `200`; a range that starts at or past its end is `416` with
         `content-range: bytes */0`.
+
+        **A share link is a credential here.** With `gateway.sharing.enabled`,
+        a request carrying `link`, `exp` and `sig` (the `path` a `POST
+        /v1/spaces/{space}/links` returned) authenticates as the principal
+        `link:<grant id>` instead of by a bearer token or certificate, and is
+        decided by the `grants` authorizer alone. A link authenticates `GET`
+        and `HEAD` of one object and nothing else: the same parameters on a
+        listing, a `PUT`, a `DELETE` or any `/v1/spaces/…` route are no
+        credential at all (`401`). A link whose `exp` has passed is `410
+        link_expired`; a link whose grant was revoked still authenticates, and
+        `403` is the answer once the gateway's ACL cache has aged out
+        (`gateway.sharing.acl_cache_ttl_ms`).
       parameters:
         - name: Range
           in: header
@@ -222,6 +265,42 @@ paths:
           examples:
             current:
               value: '"01JD0Z2B7M3N4P5Q6R7S8T9V0W"'
+        - name: link
+          in: query
+          required: false
+          description: |
+            A share link's grant id (`POST /v1/spaces/{space}/links`): the
+            credential of a `GET` or `HEAD` of this one object. Only a
+            credential when `exp` and `sig` come with it.
+          schema:
+            type: string
+          examples:
+            grant:
+              value: 'oaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.01JD0Z3K9Q4W8X2Y7V6T5S4R3P'
+        - name: exp
+          in: query
+          required: false
+          description: |
+            The share link's expiry, Unix seconds (`[1-9][0-9]{0,11}`). Past
+            it, a valid link is `410 link_expired`.
+          schema:
+            type: string
+            pattern: '^[1-9][0-9]{0,11}$'
+          examples:
+            expiry:
+              value: '1790000000'
+        - name: sig
+          in: query
+          required: false
+          description: |
+            The share link's signature: unpadded base64url HMAC-SHA256, 43
+            characters, over `urn:ankusa:link:v1:<space>:<link>:<exp>`.
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9_-]{43}$'
+          examples:
+            signature:
+              value: 'gy5k1_VDyCcIJxpqGbNyXGo-mmhU61PTPzssO5rhrYQ'
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -306,6 +385,8 @@ paths:
                 pattern: '^bytes \*/\d+$'
         '422':
           $ref: '#/components/responses/ObjectTooLarge'
+        '410':
+          $ref: '#/components/responses/LinkExpired'
         '502':
           $ref: '#/components/responses/IntegrityMismatch'
         '503':
@@ -319,6 +400,30 @@ paths:
         last modification and metadata, and no bytes. The headers are the ones
         `GET` sends, with `content-length`. An `If-None-Match` is not
         consulted here: `HEAD` answers `200` for the object that is there.
+
+        A share link authenticates `HEAD` exactly as it authenticates `GET`
+        (`link`, `exp` and `sig` in the query; `410 link_expired` past `exp`).
+      parameters:
+        - name: link
+          in: query
+          required: false
+          description: A share link's grant id, as on `GET`.
+          schema:
+            type: string
+        - name: exp
+          in: query
+          required: false
+          description: A share link's expiry, Unix seconds, as on `GET`.
+          schema:
+            type: string
+            pattern: '^[1-9][0-9]{0,11}$'
+        - name: sig
+          in: query
+          required: false
+          description: A share link's signature, as on `GET`.
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9_-]{43}$'
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -352,6 +457,8 @@ paths:
           $ref: '#/components/responses/BadObjectRequest'
         '404':
           $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/LinkExpired'
         '502':
           $ref: '#/components/responses/IntegrityMismatch'
         '503':
@@ -382,6 +489,17 @@ paths:
         key; `if-match: "<version>"` writes only if the version is the current
         one. A condition that does not hold is `412 precondition_failed` and
         the object is unchanged.
+
+        With `gateway.sharing.enabled` the write is also what makes an object
+        ownable. A new object is created with an `ankusa-incarnation` (a fresh
+        ULID) and, unless the caller is anonymous, an `ankusa-owner` (the
+        principal id) in its metadata; an existing object keeps both, and an
+        object that has neither keeps neither — an overwrite never makes the
+        writer its owner. The write is then held to the version the gateway
+        just read when the caller sent no condition of its own; a race the
+        gateway's own condition loses is tried once more, then `409 conflict`.
+        Both names are reserved: `x-ankusa-meta-ankusa-owner` is `400
+        invalid_metadata`, and neither is returned by `GET` or `HEAD`.
 
         `200` names the object, its size and its new version, and carries that
         version as the `etag`. A space with `read_only: true` answers `405`:
@@ -473,6 +591,8 @@ paths:
           $ref: '#/components/responses/PreconditionFailed'
         '413':
           $ref: '#/components/responses/TooLarge'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '502':
           $ref: '#/components/responses/IntegrityMismatch'
         '503':
@@ -485,6 +605,11 @@ paths:
         Deletes the object and answers `204`. Deleting an object that is not
         there is `204` as well: the call states what the caller wants to be
         true, not what was true. A space with `read_only: true` answers `405`.
+
+        With `gateway.sharing.enabled` the object's ACL document is deleted
+        too, best effort: a failure is logged and counted, and the leftover
+        document is dead by its incarnation, so an object re-created under the
+        same key carries none of the old grants either way.
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -498,6 +623,278 @@ paths:
           $ref: '#/components/responses/NotFound'
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
+        '502':
+          $ref: '#/components/responses/IntegrityMismatch'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/spaces/{space}/acl:
+    parameters:
+      - $ref: '#/components/parameters/Space'
+    get:
+      operationId: getAcl
+      tags: [sharing]
+      summary: The grants on one object or one prefix
+      description: |
+        Exactly one of `key` and `prefix` names the resource. `owner` is the
+        object's `ankusa-owner` metadata (always `null` for a prefix); `grants`
+        is the ACL document v1, or `[]` when there is none or when it is dead
+        — a document made on an earlier object of the same key (an
+        `incarnation` other than the object's current one) grants nothing, and
+        neither does one whose `v` this gateway does not know.
+
+        An object must exist (`404`). The caller needs `share` on the
+        resource: what an ACL shows is who may read it.
+
+        Requires `gateway.sharing.enabled`; otherwise `404`, like every
+        `/v1/spaces/…` route.
+      parameters:
+        - name: key
+          in: query
+          required: false
+          description: The object's key. Exactly one of `key` and `prefix`, else `400 invalid_key`.
+          schema:
+            $ref: '#/components/schemas/Key'
+        - name: prefix
+          in: query
+          required: false
+          description: |
+            A prefix: `""`, or one or more segments with a trailing `/`. The
+            prefix document's grants apply to every key under it. Exactly one
+            of `key` and `prefix`, else `400 invalid_key`.
+          schema:
+            $ref: '#/components/schemas/Prefix'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The resource's owner and its live grants.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Acl'
+              example:
+                owner: alice
+                grants:
+                  - id: oaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.01JD0Z3K9Q4W8X2Y7V6T5S4R3P
+                    subject: group:eng
+                    actions: [read]
+                    created_by: alice
+                    created_at: 1790000000
+                    expires_at: null
+        '400':
+          $ref: '#/components/responses/BadSharingRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          $ref: '#/components/responses/IntegrityMismatch'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/spaces/{space}/grants:
+    parameters:
+      - $ref: '#/components/parameters/Space'
+    post:
+      operationId: createGrant
+      tags: [sharing]
+      summary: Grant a subject an action on one object or one prefix
+      description: |
+        Adds one grant to the resource's ACL document v1 and answers it as
+        stored: `201`, with its `id`, `subject`, `actions`, `created_by`,
+        `created_at` and `expires_at`. The caller needs `share` on the
+        resource **and** every action the grant carries on that same resource:
+        nobody hands out what they do not hold. The first action the caller
+        lacks is named in the `403` (`"action": "<action>"`).
+
+        An object must exist (`404`). The document is compare-and-swap written
+        (up to five rounds against the store's version), so concurrent
+        `POST`s all land or answer `409 conflict`; a resource past
+        `gateway.sharing.max_grants_per_resource` live grants answers `409
+        too_many_grants` and is unchanged. Before anything changes, one audit
+        record v1 is written to `<space prefix>.ankusa/audit/v1/dt=<UTC
+        date>/<ULID>.json`; when that write fails, nothing changes and the
+        answer is `503 audit_unavailable`.
+
+        A subject is `user:<principal id>`, `group:<name>`, `tenant:<id>` or
+        `anyone` (any authenticated principal that is not anonymous and not a
+        share link), at most 512 bytes; `link` is created by `POST
+        /v1/spaces/{space}/links` alone. Requires `gateway.sharing.enabled`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrantRequest'
+            examples:
+              groupReadOnObject:
+                value:
+                  resource: {key: teams/eng/q3.pdf}
+                  subject: group:eng
+                  actions: [read]
+                  expires_in_s: 86400
+              anyoneListOnPrefix:
+                value:
+                  resource: {prefix: teams/eng/}
+                  subject: anyone
+                  actions: [read, list]
+                  expires_in_s: null
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '201':
+          description: The grant, as stored in the ACL document.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Grant'
+              example:
+                id: oaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.01JD0Z3K9Q4W8X2Y7V6T5S4R3P
+                subject: group:eng
+                actions: [read]
+                created_by: alice
+                created_at: 1790000000
+                expires_at: 1790086400
+        '400':
+          $ref: '#/components/responses/BadSharingRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '409':
+          $ref: '#/components/responses/SharingConflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '502':
+          $ref: '#/components/responses/IntegrityMismatch'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/spaces/{space}/grants/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Space'
+      - $ref: '#/components/parameters/GrantId'
+      - name: key
+        in: query
+        required: false
+        description: The object's key. Exactly one of `key` and `prefix`, else `400 invalid_grant`.
+        schema:
+          $ref: '#/components/schemas/Key'
+      - name: prefix
+        in: query
+        required: false
+        description: The prefix. Exactly one of `key` and `prefix`, else `400 invalid_grant`.
+        schema:
+          $ref: '#/components/schemas/Prefix'
+    delete:
+      operationId: revokeGrant
+      tags: [sharing]
+      summary: Revoke one grant
+      description: |
+        Removes the grant with this `id` from the resource's ACL document and
+        answers `204`. Idempotent: an id the document does not hold is still
+        `204`, and so is a revocation on a dead document.
+
+        An id is never trusted alone: the request also names the resource
+        (`key` or `prefix`), and the id's kind letter and sha256 must be that
+        resource's, else `400 invalid_grant` — an id taken from one object
+        never revokes a grant on another. The caller needs `share` on the
+        resource.
+
+        A mutation writes its audit record v1 first (`503 audit_unavailable`
+        and nothing changes when that fails). The store's compare-and-swap
+        makes a lost race `409 conflict`, and it is retried; five rounds of
+        losses are the `409`.
+
+        **Revocation is bounded, not instant.** Another gateway node keeps
+        deciding from its ACL cache for up to
+        `gateway.sharing.acl_cache_ttl_ms` (2 s by default); a share link
+        revoked here keeps working for that long elsewhere. The node that
+        revoked drops its own entries at once.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '204':
+          description: The grant is not there any more (or never was). No body.
+        '400':
+          $ref: '#/components/responses/BadSharingRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '502':
+          $ref: '#/components/responses/IntegrityMismatch'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/spaces/{space}/links:
+    parameters:
+      - $ref: '#/components/parameters/Space'
+    post:
+      operationId: createLink
+      tags: [sharing]
+      summary: Mint a share link for one object
+      description: |
+        Creates a `link` grant (`actions: ["read"]`, `expires_at` =
+        now + `expires_in_s`) on one object and answers `201` with the grant's
+        `id`, its `expires_at`, and the `path` to give out:
+
+        ```
+        /v1/objects/<space>/<key>?link=<id>&exp=<expires_at>&sig=<signature>
+        ```
+
+        The signature is the unpadded base64url HMAC-SHA256, under the first
+        of `gateway.sharing.signing_keys`, of the canonical string
+        `urn:ankusa:link:v1:<space>:<grant id>:<exp>` (43 characters). Any
+        configured key verifies one, so rotating in a new first key keeps the
+        links already out there working. `expires_in_s` is 1 to
+        `gateway.sharing.link_max_ttl_s` (7 days by default).
+
+        Redeeming it is a `GET` or `HEAD` of that `path` with no other
+        credential: the link authenticates as the principal `link:<grant id>`
+        and only the `grants` step decides it. Past `exp` the answer is `410
+        link_expired`; tampered with, `401`. Revoking the grant (`DELETE
+        /v1/spaces/{space}/grants/{id}?key=…`) ends it within
+        `gateway.sharing.acl_cache_ttl_ms` on every node.
+
+        The caller needs `share` and `read` on the object (the `403` names
+        `"action": "read"` when it lacks the latter), and the object must
+        exist (`404`). The audit record v1 comes first, as on any mutation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LinkRequest'
+            example:
+              key: teams/eng/q3.pdf
+              expires_in_s: 3600
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '201':
+          description: The link grant and the URL that redeems it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Link'
+              example:
+                id: oaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.01JD0Z3K9Q4W8X2Y7V6T5S4R3P
+                expires_at: 1790003600
+                path: /v1/objects/docs/teams/eng/q3.pdf?link=oaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.01JD0Z3K9Q4W8X2Y7V6T5S4R3P&exp=1790003600&sig=gy5k1_VDyCcIJxpqGbNyXGo-mmhU61PTPzssO5rhrYQ
+        '400':
+          $ref: '#/components/responses/BadSharingRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '409':
+          $ref: '#/components/responses/SharingConflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
         '502':
           $ref: '#/components/responses/IntegrityMismatch'
         '503':
@@ -586,6 +983,17 @@ components:
         invalid_key`.
       schema:
         $ref: '#/components/schemas/Key'
+    GrantId:
+      name: id
+      in: path
+      required: true
+      description: |
+        A grant's id: `<o|p><64 lowercase hex>.<26-character ULID>`, the kind
+        letter and the sha256 of the resource key or prefix it was made on.
+        Never trusted alone — the request also names the resource, and an id
+        of another resource is `400 invalid_grant`.
+      schema:
+        $ref: '#/components/schemas/GrantId'
   schemas:
     Space:
       type: string
@@ -669,6 +1077,156 @@ components:
             `etag` a `GET` or `HEAD` reports, and the value `If-Match` takes.
       examples:
         - {space: docs, key: teams/eng/a.txt, size: 6, version: '01JD0Z2B7M3N4P5Q6R7S8T9V0W'}
+    GrantId:
+      type: string
+      description: |
+        `<o|p><64 lowercase hex sha256 of the resource key or prefix>.<ULID>`:
+        `o` for an object, `p` for a prefix. Opaque; the server checks the
+        kind and the hash against the resource every request names.
+      pattern: '^[op][0-9a-f]{64}\.[0-9A-HJKMNP-TV-Z]{26}$'
+      examples:
+        - oaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.01JD0Z3K9Q4W8X2Y7V6T5S4R3P
+    Grant:
+      type: object
+      required: [id, subject, actions, created_by, created_at, expires_at]
+      description: |
+        One entry of an ACL document v1. A grant has no effect of its own: it
+        is read by the `grants` authorizer, which a policy must list.
+      properties:
+        id:
+          $ref: '#/components/schemas/GrantId'
+        subject:
+          type: string
+          description: |
+            `user:<principal id>`, `group:<name>`, `tenant:<id>`, `anyone`
+            (any authenticated principal that is not anonymous and not a share
+            link) or `link` (the one share link whose principal is `link:<this
+            grant's id>`).
+          examples: ['group:eng']
+        actions:
+          type: array
+          description: The actions this grant carries.
+          items:
+            type: string
+            enum: [read, write, delete, list, share]
+          examples:
+            - [read]
+        created_by:
+          type: [string, 'null']
+          description: The principal that created it; it grants nothing by itself.
+        created_at:
+          type: integer
+          description: Unix seconds.
+        expires_at:
+          type: [integer, 'null']
+          description: Unix seconds, or `null` for a grant that never expires.
+    Acl:
+      type: object
+      required: [owner, grants]
+      description: |
+        The Sharing API's view of one object or one prefix. A share link is
+        not shown (`GET` needs a bearer token or certificate).
+      properties:
+        owner:
+          type: [string, 'null']
+          description: |
+            The object's `ankusa-owner` metadata — the principal that created
+            it while sharing was on — or `null` (always `null` for a prefix,
+            and for an object written before sharing was on or out of band).
+        grants:
+          type: array
+          description: |
+            The live grants of the resource's ACL document v1: `[]` when there
+            is no document, and `[]` for a dead one (made on another
+            incarnation of the same key).
+          items:
+            $ref: '#/components/schemas/Grant'
+    GrantResource:
+      oneOf:
+        - type: object
+          required: [key]
+          additionalProperties: false
+          properties:
+            key:
+              $ref: '#/components/schemas/Key'
+        - type: object
+          required: [prefix]
+          additionalProperties: false
+          properties:
+            prefix:
+              $ref: '#/components/schemas/Prefix'
+      description: |
+        Exactly one of `key` and `prefix`. An object must exist; a prefix
+        always does (`""` is the whole space).
+    GrantRequest:
+      type: object
+      required: [resource, subject, actions, expires_in_s]
+      additionalProperties: false
+      properties:
+        resource:
+          $ref: '#/components/schemas/GrantResource'
+        subject:
+          type: string
+          description: |
+            `user:<principal id>`, `group:<name>`, `tenant:<id>` (each
+            followed by a non-empty value) or `anyone`; at most 512 bytes.
+            `link` is refused here — `POST /v1/spaces/{space}/links` is the
+            only way to make one.
+          examples: ['group:eng']
+        actions:
+          type: array
+          description: |
+            One or more of `read write delete list share`; duplicates are
+            dropped. The caller needs each of them on the same resource.
+          items:
+            type: string
+            enum: [read, write, delete, list, share]
+          minItems: 1
+          examples:
+            - [read]
+        expires_in_s:
+          type: [integer, 'null']
+          description: |
+            Seconds from now, 1 to 31536000, or `null` for a grant that does
+            not expire. Any other value is `400 invalid_grant`.
+    LinkRequest:
+      type: object
+      required: [key, expires_in_s]
+      additionalProperties: false
+      properties:
+        key:
+          $ref: '#/components/schemas/Key'
+        expires_in_s:
+          type: integer
+          description: |
+            How long the link lives: 1 to `gateway.sharing.link_max_ttl_s`
+            (604800, 7 days, by default). Outside it is `400 invalid_link`.
+          minimum: 1
+          maximum: 31536000
+          examples:
+            - 3600
+    Link:
+      type: object
+      required: [id, expires_at, path]
+      description: |
+        A share link v1: the grant it authenticates, and the single URL that
+        redeems it. A share link authenticates `GET` and `HEAD` of that one
+        object and nothing else.
+      properties:
+        id:
+          $ref: '#/components/schemas/GrantId'
+        expires_at:
+          type: integer
+          description: Unix seconds. Past it, the URL answers `410 link_expired`.
+        path:
+          type: string
+          description: |
+            `/v1/objects/<space>/<key>?link=<id>&exp=<expires_at>&sig=<signature>`,
+            each key segment percent-encoded. Hand this out as is: the
+            signature covers the space, the id and `exp` — not the key, which
+            the id itself commits to.
+          examples:
+            - /v1/objects/docs/teams/eng/q3.pdf?link=oaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.01JD0Z3K9Q4W8X2Y7V6T5S4R3P&exp=1790003600&sig=gy5k1_VDyCcIJxpqGbNyXGo-mmhU61PTPzssO5rhrYQ
     Error:
       type: object
       required: [error]
@@ -697,6 +1255,13 @@ components:
             - forbidden
             - auth_unavailable
             - authz_unavailable
+            - invalid_grant
+            - invalid_link
+            - invalid_json
+            - too_many_grants
+            - conflict
+            - audit_unavailable
+            - link_expired
         max_bytes:
           type: integer
           description: |
@@ -708,6 +1273,13 @@ components:
             Present on a `forbidden` only when the deciding authorizer names
             one. The built-in `scopes` authorizer speaks about claims alone,
             so an objects request normally carries none.
+        action:
+          type: string
+          enum: [read, write, delete, list, share]
+          description: |
+            Present on a `forbidden` from a sharing route when the caller
+            asked to hand out an action it does not itself hold: the first
+            action of the grant the caller lacks.
     Health:
       type: object
       required: [status]
@@ -814,11 +1386,20 @@ components:
         authorizer an objects request abstains and the policy's other steps
         decide; `scope` is present only when the deciding authorizer names
         one.
+
+        On a sharing route that hands out access (`POST …/grants`, `POST
+        …/links`), `action` names the first action of the new grant the caller
+        does not itself hold on the same resource: nobody hands out what they
+        do not hold.
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
-          example: {error: forbidden}
+          examples:
+            forbidden:
+              value: {error: forbidden}
+            missingAction:
+              value: {error: forbidden, action: write}
     BadObjectRequest:
       description: |
         `400`, on one object: `invalid_key` (the key breaks the rules in the
@@ -860,6 +1441,32 @@ components:
               value: {error: invalid_limit}
             invalidCursor:
               value: {error: invalid_cursor}
+    BadSharingRequest:
+      description: |
+        `400`, on a sharing route: `invalid_key` (the `key` or `prefix` a
+        request names breaks the rules, or `GET …/acl` carried neither or
+        both); `invalid_grant` (a grant body is not what `GrantRequest`
+        describes — an unknown action, a `subject` that is neither `anyone`
+        nor `user:`/`group:`/`tenant:` with a value, an `expires_in_s` out of
+        range, `link` as a subject, a `key` and a `prefix` together, an extra
+        field; or a `DELETE` whose `id` is not a grant id, or is one of
+        another resource); `invalid_link` (a link body is not what
+        `LinkRequest` describes, or `expires_in_s` is past
+        `gateway.sharing.link_max_ttl_s`); or `invalid_json` (the body is not
+        a JSON object). Nothing changed.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalidKey:
+              value: {error: invalid_key}
+            invalidGrant:
+              value: {error: invalid_grant}
+            invalidLink:
+              value: {error: invalid_link}
+            invalidJson:
+              value: {error: invalid_json}
     MethodNotAllowed:
       description: |
         `405`. `method_not_allowed`: a `PUT` or `DELETE` on a space with
@@ -899,8 +1506,53 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
           example: {error: precondition_failed}
+    Conflict:
+      description: |
+        `409`. `conflict`: the compare-and-swap the gateway made on the
+        caller's behalf lost five rounds in a row — on a `PUT`, its own
+        version condition against concurrent writers of the same key; on a
+        revocation, the ACL document against other mutations of the same
+        resource. Nothing was written. Read the current version (or document)
+        and decide again.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: conflict}
+    SharingConflict:
+      description: |
+        `409`, on a grant or a link:
+
+          * `too_many_grants` — the resource already holds
+            `gateway.sharing.max_grants_per_resource` live grants (256 by
+            default); revoke one, or raise the bound. Nothing changed.
+          * `conflict` — the compare-and-swap on the ACL document lost five
+            rounds to concurrent mutations of the same resource. Nothing
+            changed; retry.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            tooManyGrants:
+              value: {error: too_many_grants}
+            conflict:
+              value: {error: conflict}
+    LinkExpired:
+      description: |
+        `410`. `link_expired`: the share link was valid — right grant, right
+        key, right signature — and its `exp` has passed. Permanent for this
+        URL: ask for a new link.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: link_expired}
     TooLarge:
-      description: '`413`. `too_large`: the write''s `content-length` is over the space''s `max_object_bytes`. Permanent for this body.'
+      description: |
+        `413`. `too_large`: the write's `content-length` is over the space's
+        `max_object_bytes` — on a sharing route, the body is over 64 KiB.
+        Permanent for this body.
       content:
         application/json:
           schema:
@@ -941,7 +1593,7 @@ components:
     ServiceUnavailable:
       description: |
         `503`, always with `Retry-After`, always transient unless the
-        credential is the fault. Four bodies:
+        credential is the fault. Five bodies:
 
           * `store_unavailable` — the store is unreachable, throttling, or
             slower than the gateway's deadline (`gateway.objects.op_deadline_ms`,
@@ -954,6 +1606,9 @@ components:
           * `authz_unavailable` / `auth_unavailable` — an authorizer's backend
             or an authenticator's identity provider did not answer and its
             policy fails closed; retry after 1 to 3 seconds.
+          * `audit_unavailable` — a sharing mutation could not write its audit
+            record v1, so nothing changed (the fix is the space's store, not
+            the request); retry after 1 to 3 seconds.
       headers:
         Retry-After:
           $ref: '#/components/headers/RetryAfter'
@@ -972,3 +1627,5 @@ components:
               value: {error: authz_unavailable}
             authUnavailable:
               value: {error: auth_unavailable}
+            auditUnavailable:
+              value: {error: audit_unavailable}

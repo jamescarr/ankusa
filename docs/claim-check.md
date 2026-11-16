@@ -402,7 +402,12 @@ also carries `instance`; these carry no tenant, claim or method);
 `ankusa_gateway_caller_queued`, and
 `ankusa_gateway_caller_breaker_transitions_total{caller,state}`); and the
 caches (`ankusa_gateway_cache_entries` and `ankusa_gateway_cache_bytes`,
-labelled `cache`); then the claim-check reader's own:
+labelled `cache`), and with sharing on the mutations
+(`ankusa_gateway_shares_total{action,result}`, from
+`[:ankusa, :gateway, :share]`: `action` is `grant_create`, `grant_revoke`,
+`link_create`, or `acl_cleanup` when a deleted object's ACL document could not
+be removed; `result` is `ok`, `conflict` or `unavailable`); then the
+claim-check reader's own:
 `ankusa_claim_sweeps_total{deleted}`
 (one per sweep tick, `deleted="true"` when it removed a partition, a pack or a
 lease row); `ankusa_claim_check_reads_total{kind,source,result}`, where `kind` is
@@ -527,6 +532,181 @@ behind. The gauge `ankusa_gateway_objects_inflight_bytes` (from
 `Ankusa.Gateway.Objects` emits `[:ankusa, :gateway, :request]` with
 `api: :objects` for every answer, so `ankusa_gateway_requests_total{api="objects"}`
 counts them beside the claim routes.
+
+### Sharing
+
+With `gateway.sharing.enabled` the gateway keeps **native grants** — who may
+read, write, delete, list or share one object or one prefix — in the space's
+own store, and mints **share links**: a signed URL that reads one object until
+it expires or its grant is revoked. The state lives beside the objects, so a
+space needs no second database, and the `grants` authorizer reads it per
+request instead of asking anyone.
+
+```yaml
+gateway:
+  sharing:
+    enabled: true
+    # [current | previous…]: the first signs a link, any verifies one, so a
+    # rotation is putting the new key first. Each at least 16 bytes.
+    signing_keys: ["${LINK_SIGNING_KEY}"]
+    link_max_ttl_s: 604800     # 7 days
+    acl_cache_ttl_ms: 2000     # the cross-node bound of a revocation
+    max_grants_per_resource: 256
+  authz:
+    authorizers:
+      team:
+        type: rules
+        rules:
+          - effect: allow
+            actions: [read, write, share]   # share is what lets a member hand access on
+            spaces: [docs]
+            keys: ["teams/{team}/**"]
+            when: {groups_any: ["{{ vars.team }}"]}
+    policies:
+      docs: {mode: first, steps: [grants, team]}
+  spaces:
+    docs: {store: {type: s3, s3: {bucket: reports, region: us-east-1}}, prefix: reports/, policy: docs}
+```
+
+**Ownership and incarnation.** With sharing on, a `PUT` that creates an object
+records two reserved metadata pairs: `ankusa-owner` (the principal id; left out
+for an anonymous caller) and `ankusa-incarnation` (a fresh ULID). An overwrite
+carries both over unchanged, and an object written out of band or before
+sharing was on has neither: **overwriting never makes anyone an owner**. Both
+names are reserved — `x-ankusa-meta-ankusa-owner` is `400 invalid_metadata`,
+and neither is ever returned by a `GET` or `HEAD`.
+
+With sharing on, because the gateway holds the write to the version it just
+read, two writers of one new key race on `if: :absent`: one wins, the other is
+retried once and then gets `409 {"error":"conflict"}`. The same `409` answers a
+revocation whose document lost five compare-and-swap rounds.
+
+**The ACL document v1.** One JSON object per resource, in the space's own
+store:
+
+```
+<space prefix>.ankusa/acl/v1/<o|p>/<lowercase hex sha256 of the key or prefix>
+```
+
+`o` is an object, `p` a prefix (`""`, or ending in `/`). The document:
+
+```json
+{"v": 1, "space": "reports", "resource": {"kind": "object", "key": "teams/eng/q3.pdf"},
+ "incarnation": "01JD0Z2B7M3N4P5Q6R7S8T9V0W",
+ "grants": [{"id": "o3f2…<64 hex>.01JD0Z3K9Q4W8X2Y7V6T5S4R3P", "subject": "group:eng",
+             "actions": ["read"], "created_by": "alice",
+             "created_at": 1790000000, "expires_at": null}],
+ "updated_at": 1790000000}
+```
+
+A document has no owner; `created_by` records who made a grant and grants
+nothing. Its `incarnation` is the `ankusa-incarnation` the object had when the
+grants were made, and a document whose incarnation is not the object's current
+one is **dead**: none of its grants apply, and the next update replaces it.
+That is what keeps a deleted object's grants off a later object of the same
+key, whatever the order of the delete and the writes racing it. Prefix
+documents always carry `null`. A `DELETE` of the object deletes its document
+too, best effort (a failure is logged and counted by
+`ankusa_gateway_shares_total{action,result}`); the incarnation rule covers the
+failure. An unknown `v` or malformed JSON is read as *unavailable* — the
+authorizer fails closed, never open.
+
+A grant's `id` is `<o|p><sha256 of the resource>.<ULID>`, and it is never
+trusted alone: every route that takes one also names the resource and checks
+the hash against it, so an id lifted from one object cannot revoke a grant on
+another.
+
+**Grants and subjects.** A grant is one entry: `subject`, `actions` (one or
+more of `read write delete list share`), `expires_at` (`null` never expires).
+A subject is one of:
+
+| Subject | Matches |
+| --- | --- |
+| `user:<principal id>` | exactly that principal |
+| `group:<name>` | a principal whose `groups` hold the name |
+| `tenant:<id>` | a principal whose `tenants` hold the id, or hold every tenant |
+| `anyone` | any authenticated principal — never an anonymous one, never a share link |
+| `link` | the one share link whose principal is `link:<that grant's id>` |
+
+**The `grants` step.** The authorizer `grants` is defined only while sharing is
+on, and a policy has an effect only if it **lists it**: `steps: [grants, team]`.
+For a request on an object or prefix it reads the object's head (an object
+request), the object's document and the document of every ancestor prefix
+(`a/b/`, `a/`, `""`: at most 33), from the ACL cache first and then from the
+store, concurrently. Then, in order: the object's owner (any action on that
+object, unless the request came by share link or anonymously), a live grant
+carrying the action on the object (of its current incarnation) or on an ancestor
+prefix, else abstain. A prefix grant is how a directory is shared once instead
+of object by object. A lookup that fails is `503 authz_unavailable`, never a
+guess.
+
+`mode: first` is the usual shape: a grant widens what the other steps allow,
+and a policy that omits `grants` ignores the native grants entirely.
+
+**Share links v1.** A link is a `link` grant plus a signature over
+`urn:ankusa:link:v1:<space>:<grant id>:<exp>` (unpadded base64url
+HMAC-SHA256, 43 characters) under the first of `sharing.signing_keys` — the
+`path` a `POST /v1/spaces/{space}/links` answers is the whole URL:
+
+```
+/v1/objects/<space>/<key>?link=<grant id>&exp=<unix seconds>&sig=<signature>
+```
+
+A link is a credential for `GET` and `HEAD` **of that one object and nothing
+else**: it never authenticates a listing, a write, a delete or a sharing route,
+and inside a policy only the `grants` step ever sees the principal
+`link:<grant id>` (every other step is skipped, and any other action or
+resource kind is denied before a step runs). Past `exp` a valid link is
+`410 {"error":"link_expired"}`; tampered with, `401`. **A key rotation is
+adding a new first key**: any configured key verifies a link, so the links
+already out there keep working until they expire.
+
+Revocation is a data matter, not an authentication one: a revoked link still
+authenticates and is refused with `403` once the ACL cache ages out. That cache
+lives `sharing.acl_cache_ttl_ms` (2 s by default), so a revocation is bounded
+by that across nodes, and immediate on the node that made it.
+
+**The Sharing API.** Every route names its resource (an object must exist:
+`404`), authorizes `share` on it against the space's policy, and writes its
+audit record before it changes anything. Nobody hands out what they do not
+hold: a new grant or link also needs **every action it carries** on the same
+resource, and the first missing one is named in the `403`
+(`{"error":"forbidden","action":"write"}`). All four answer `404` unless
+`gateway.sharing.enabled`.
+
+| Route | Does |
+| --- | --- |
+| `GET /v1/spaces/{space}/acl?key=<k>` or `?prefix=<p>` | `200 {"owner": <string or null>, "grants": [...]}`; a dead document is `grants: []` |
+| `POST /v1/spaces/{space}/grants` with `{"resource":{"key"\|"prefix"},"subject","actions","expires_in_s"}` | `201` the grant; `409 too_many_grants` past `max_grants_per_resource` live grants; `400 invalid_grant` |
+| `DELETE /v1/spaces/{space}/grants/{id}?key=<k>` or `?prefix=<p>` | `204`, also for an id the document does not hold; `400 invalid_grant` when the id and the resource disagree |
+| `POST /v1/spaces/{space}/links` with `{"key","expires_in_s"}` | `201 {"id","expires_at","path"}`, the grant carrying `["read"]` |
+
+Bodies are at most 64 KiB (`413 too_large`); a body that is not a JSON object
+is `400 invalid_json`. Each mutation answers `409 conflict` when the document's
+compare-and-swap loses five rounds, and `503 audit_unavailable` when the audit
+record cannot be written — in which case nothing changed.
+
+**Audit records v1.** Before every mutation, one JSON object is written to
+
+```
+<space prefix>.ankusa/audit/v1/dt=<UTC date>/<ULID>.json
+```
+
+with `{"v":1,"id","at":<unix ms>,"actor":<principal id>,"remote_ip","request_id",
+"action":"grant.create"|"grant.revoke"|"link.create","space","resource":{...},
+"grant":{...}}`. A failed write is `503 audit_unavailable` and the change does
+not happen; a failure of the change that follows writes a second, best-effort
+record `{"action":"<action>.failed","ref":<first id>,"reason":...}`.
+
+**On LocalFS, one node.** A space on `Ankusa.BlobStore.LocalFS` cannot do a real
+compare-and-swap across nodes: the lock is `:global` within one node (or one
+connected cluster), so two unclustered gateways writing grants for the same
+resource can lose one. Share from one node, or use an S3, GCS, Azure or OCI
+store, whose `if-match`/`if-none-match` is the store's own. The supervisor logs
+a warning at boot for every such space.
+
+`[:ankusa, :gateway, :share]` (with `action` and `result`) and
+`ankusa_gateway_shares_total{action,result}` count every mutation.
 
 ## Redeem a claim
 

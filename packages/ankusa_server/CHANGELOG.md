@@ -46,6 +46,11 @@ own ([`docs/releasing.md`](../../docs/releasing.md)).
   `prefix`, `policy`, `max_object_bytes`, `read_first_bytes`, `read_only`;
   `gateway.objects` sets `max_inflight_bytes`, `op_deadline_ms`, `timeout_ms`
   and `retries`. `config-examples/reference.yml` documents both, commented.
+- **`gateway.sharing`.** The full image takes the gateway's sharing block
+  (`enabled`, `signing_keys`, `link_max_ttl_s`, `acl_cache_ttl_ms`,
+  `acl_cache_max_entries`, `acl_cache_max_bytes`, `max_grants_per_resource`)
+  when it runs the gateway; `config-examples/reference.yml` documents it,
+  commented.
 - **`{{ var }}` templates on sink addresses (CR-3).** Any sink of a source (YAML
   or the admin API) may template its per-hook address keys: `kafka` `topic` /
   `key`, `rabbitmq` `routing_key`, `nats` `subject`, `redis` `channel`, `sqs`

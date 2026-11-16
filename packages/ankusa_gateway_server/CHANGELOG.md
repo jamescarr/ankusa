@@ -42,3 +42,12 @@ All notable changes to the Ankusa gateway image are documented here. It is the
   rule (`prefix` overlap on one store, `max_inflight_bytes` against every
   space's `max_object_bytes`) is `Ankusa.Gateway.Config`'s, and its message
   names the dotted key.
+- **`gateway.sharing` in `gateway.yml`**: `enabled`, `signing_keys` (a list or
+  one comma-separated string, each at least 16 bytes; required when enabled),
+  `link_max_ttl_s`, `acl_cache_ttl_ms`, `acl_cache_max_entries`,
+  `acl_cache_max_bytes` and `max_grants_per_resource`. On, the gateway serves
+  the Sharing API, defines the `grants` authorizer, appends the `link`
+  authenticator and records object ownership. A LocalFS space logs the
+  one-node warning at boot. The key is parsed by
+  `AnkusaGatewayServer.GatewaySection`; the ranges are
+  `Ankusa.Gateway.Config`'s.

@@ -57,7 +57,7 @@ defmodule Ankusa.Gateway.AuthzEngineTest do
     %{answer: answer}
   end
 
-  defp boot(%{answer: answer}, authorizers, steps, authz \\ %{}) do
+  defp boot(%{answer: answer}, authorizers, steps, authz \\ %{}, sharing \\ %{}) do
     config = test_config(roles: [])
     start_supervised!({Ankusa.Instance, config})
 
@@ -74,7 +74,8 @@ defmodule Ankusa.Gateway.AuthzEngineTest do
           Map.merge(
             %{authorizers: authorizers, policies: %{"p" => %{mode: :first, steps: steps}}},
             authz
-          )
+          ),
+        sharing: sharing
       )
 
     start_supervised!({Ankusa.Gateway, gateway})
@@ -255,21 +256,20 @@ defmodule Ankusa.Gateway.AuthzEngineTest do
   end
 
   describe "share links" do
-    test "a link is denied anything but reading an object, before any step runs", ctx do
-      inst =
-        boot(ctx, %{"grants" => {Stub, :inline, %{}}, "x" => {Stub, :inline, %{}}}, [
-          "x",
-          "grants"
-        ])
+    # With sharing on, `grants` is the built-in authorizer; "docs" is no space
+    # here, so it abstains whatever it is asked.
+    defp sharing, do: %{enabled: true, signing_keys: ["0123456789abcdef"]}
 
+    test "a link is denied anything but reading an object, before any step runs", ctx do
+      inst = boot(ctx, %{"x" => {Stub, :inline, %{}}}, ["x", "grants"], %{}, sharing())
       link = Principal.new("link:o123.01ABC", [])
 
-      assert {:deny, _} =
+      assert {:deny, %{reason: :link}} =
                Authz.decide(inst, "p", request(principal: link, via: :link, action: :write))
 
       prefix = %{kind: :prefix, space: "docs", key: "a/", tenant: nil}
 
-      assert {:deny, _} =
+      assert {:deny, %{reason: :link}} =
                Authz.decide(
                  inst,
                  "p",
@@ -280,18 +280,13 @@ defmodule Ankusa.Gateway.AuthzEngineTest do
     end
 
     test "reading an object by link runs only the grants step", ctx do
-      inst =
-        boot(ctx, %{"grants" => {Stub, :inline, %{}}, "x" => {Stub, :inline, %{}}}, [
-          "x",
-          "grants"
-        ])
-
+      inst = boot(ctx, %{"x" => {Stub, :inline, %{}}}, ["x", "grants"], %{}, sharing())
       link = Principal.new("link:o123.01ABC", [])
 
-      assert {:allow, %{authorizer: "grants"}} =
+      # `x` would allow; it never runs, and `grants` abstains.
+      assert {:deny, %{authorizer: nil}} =
                Authz.decide(inst, "p", request(principal: link, via: :link))
 
-      assert_received {:decided, "grants", _}
       refute_received {:decided, "x", _}
     end
   end

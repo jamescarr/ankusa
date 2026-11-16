@@ -10,6 +10,9 @@ defmodule Ankusa.Gateway.Router do
     * `GET /v1/objects/:space` (one page of a listing) and
       `GET|HEAD|PUT|DELETE /v1/objects/:space/*key` — `Ankusa.Gateway.Objects`;
       the key is read from the raw `conn.request_path`, never from the glob.
+    * `GET /v1/spaces/:space/acl`, `POST /v1/spaces/:space/grants`,
+      `DELETE /v1/spaces/:space/grants/:id`, `POST /v1/spaces/:space/links` —
+      `Ankusa.Gateway.Sharing` (`404` unless `gateway.sharing.enabled`).
     * anything else — `404 {"error":"not_found"}`.
 
   Mount it with the instance it serves: `plug: {Ankusa.Gateway.Router,
@@ -22,6 +25,7 @@ defmodule Ankusa.Gateway.Router do
   alias Ankusa.Http
 
   plug(Ankusa.Gateway.Authn)
+  plug(Ankusa.Audit.Context)
   plug(:match)
   plug(:dispatch)
 
@@ -55,6 +59,22 @@ defmodule Ankusa.Gateway.Router do
 
   match "/v1/objects/:space/*_key" do
     Ankusa.Gateway.Objects.object(conn, space)
+  end
+
+  get "/v1/spaces/:space/acl" do
+    Ankusa.Gateway.Sharing.acl(conn, space)
+  end
+
+  post "/v1/spaces/:space/grants" do
+    Ankusa.Gateway.Sharing.create_grant(conn, space)
+  end
+
+  delete "/v1/spaces/:space/grants/:id" do
+    Ankusa.Gateway.Sharing.revoke_grant(conn, space, id)
+  end
+
+  post "/v1/spaces/:space/links" do
+    Ankusa.Gateway.Sharing.create_link(conn, space)
   end
 
   match _ do
