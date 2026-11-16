@@ -106,6 +106,13 @@ services:
 
   rabbitmq:
     image: rabbitmq:4-management-alpine
+    # As the image's own `rabbitmq` user from the start: the healthcheck `exec`s
+    # the CLI, which as root (HOME=/var/lib/rabbitmq) creates `.erlang.cookie`
+    # owned by root when it runs before the server has, and the server, which
+    # drops to `rabbitmq`, then exits 1 (`eacces`) reading it. A loaded runner
+    # starting the `dual` profile's brokers opens that window. The kind fleet
+    # does the same (`kind/infra.yaml`).
+    user: rabbitmq
     # `ping` is green before the AMQP listener is up; the port check is what
     # says a client can connect.
     healthcheck:

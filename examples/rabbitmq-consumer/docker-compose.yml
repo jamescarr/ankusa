@@ -14,6 +14,10 @@ name: ankusa-rabbitmq-example
 services:
   rabbitmq:
     image: rabbitmq:4-management-alpine
+    # As the image's own `rabbitmq` user: a root healthcheck run before the
+    # server has written `.erlang.cookie` writes it owned by root, and the
+    # server then exits 1 (`eacces`) reading it.
+    user: rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"   # management UI: http://localhost:15672 (guest/guest)
