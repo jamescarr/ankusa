@@ -1131,7 +1131,8 @@ defmodule Ankusa.ConfigTest do
                ip: "127.0.0.1",
                tls: nil,
                detail: :tenant,
-               max_series_per_metric: 5_000
+               max_series_per_metric: 5_000,
+               extra: []
              }
 
       for section <- [config.admin, config.claim_check, config.routes.admin] do

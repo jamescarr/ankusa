@@ -408,13 +408,19 @@ defmodule Ankusa.Config do
             # omits the per-tenant gauges). `max_series_per_metric` caps how
             # many distinct identity label sets one metric keeps; the rest are
             # folded into `"other"` (`Ankusa.Metrics.Cardinality`).
+            #
+            # `extra` is a list of modules exporting `metrics/1` (`instance ->
+            # [Telemetry.Metrics.t()]`) whose definitions join the scrape, under
+            # the same cardinality policy: how a library outside core
+            # (`ankusa_gateway`) adds its series to the node's `/metrics`.
             metrics: %{
               enabled: false,
               port: 4004,
               ip: "127.0.0.1",
               tls: nil,
               detail: :tenant,
-              max_series_per_metric: 5_000
+              max_series_per_metric: 5_000,
+              extra: []
             },
             # route management: the allowlist guard plus its admin API. Off by
             # default, and off means "capture every POST", as it always has. On
@@ -1137,8 +1143,24 @@ defmodule Ankusa.Config do
       &(&1 in [:tenant, :source, :none])
     )
 
+    check!(
+      config,
+      [:metrics, :extra],
+      "metrics.extra",
+      "a list of modules that export metrics/1",
+      &metrics_modules?/1
+    )
+
     config
   end
+
+  defp metrics_modules?(modules) when is_list(modules) do
+    Enum.all?(modules, fn module ->
+      is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :metrics, 1)
+    end)
+  end
+
+  defp metrics_modules?(_other), do: false
 
   # The backup block's cross-key rules; the plain ranges are in `@positive`.
   defp validate_backup!(config) do

@@ -637,9 +637,20 @@ defmodule Ankusa.Metrics do
 
     (definitions ++
        gauges(own) ++
-       intake_metrics(own) ++ read_gauges(own) ++ tenant_gauges(own, policy.detail))
+       intake_metrics(own) ++
+       read_gauges(own) ++
+       tenant_gauges(own, policy.detail) ++
+       Enum.flat_map(policy.extra, & &1.metrics(instance)))
     |> Enum.map(&police(&1, instance, policy))
   end
+
+  @doc """
+  The options every definition of `instance` shares, for a `metrics.extra`
+  module: only events whose `:instance` metadata is `instance` (ANDed with
+  `opts[:keep]`), and label values normalized as core's are.
+  """
+  @spec scope(atom(), keyword()) :: keyword()
+  def scope(instance, opts), do: scoped(&(&1[:instance] == instance), opts)
 
   # `wal: :dual` (ADR 0002): publish latency by outcome, failures by class, what
   # the reconciler completed and refused, replay, and the state gauges
@@ -896,7 +907,8 @@ defmodule Ankusa.Metrics do
   defp attempt_seconds(%{attempt_ms: ms}), do: ms / 1000
   defp attempt_seconds(_measurements), do: nil
 
-  defp duration_seconds(%{duration: native}) when is_integer(native) do
+  @doc false
+  def duration_seconds(%{duration: native}) when is_integer(native) do
     System.convert_time_unit(native, :native, :microsecond) / 1_000_000
   end
 end

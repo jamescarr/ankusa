@@ -58,6 +58,49 @@ defmodule Ankusa.MetricsTest do
     refute scrape =~ "source_id="
   end
 
+  defmodule ExtraMetrics do
+    @moduledoc false
+    import Telemetry.Metrics
+
+    def metrics(instance) do
+      [
+        counter(
+          "ankusa.extra_test.events.total",
+          Ankusa.Metrics.scope(instance,
+            event_name: [:ankusa, :extra_test],
+            tags: [:instance, :kind]
+          )
+        )
+      ]
+    end
+  end
+
+  describe "metrics.extra" do
+    test "a module's definitions join the scrape, scoped to the instance" do
+      config = start_instance(metrics: %{extra: [ExtraMetrics]})
+
+      :telemetry.execute([:ankusa, :extra_test], %{}, %{instance: config.instance, kind: :a})
+      :telemetry.execute([:ankusa, :extra_test], %{}, %{instance: :someone_else, kind: :a})
+
+      scrape = Ankusa.Metrics.scrape(config.instance)
+
+      assert scrape =~
+               ~s(ankusa_extra_test_events_total{instance="#{config.instance}",kind="a"} 1)
+
+      refute scrape =~ ~s(instance="someone_else")
+    end
+
+    test "a module without metrics/1 is refused" do
+      for extra <- [[Enum], [:no_such_module], ExtraMetrics] do
+        assert_raise ArgumentError,
+                     ~r/metrics.extra must be a list of modules that export metrics\/1/,
+                     fn ->
+                       Ankusa.Config.new(metrics: %{extra: extra})
+                     end
+      end
+    end
+  end
+
   test "unknown sources never mint a source_id series" do
     config = start_instance()
     ids = for _ <- 1..50, do: Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)

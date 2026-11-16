@@ -1,10 +1,13 @@
 defmodule Ankusa.Admin.Auth.JWT.Keys do
   @moduledoc """
-  The signing keys `Ankusa.Admin.Auth.JWT` verifies against, for every control
-  plane of an instance that runs `mode: :jwt`. Started with the instance (only
-  when some listener needs it).
+  The signing keys `Ankusa.Admin.Auth.JWT` verifies against. One server holds
+  the keys of several *realms*, each a `jwt` block of its own. The instance
+  starts one (`server: :auth_keys`, the default) for every control plane that
+  runs `mode: :jwt`, each section a realm; a library that verifies tokens of
+  its own issuers (`ankusa_gateway`) starts another under its own `server`
+  name with explicit `realms:`.
 
-  Each listener's keys are the `jwt.keys` it was configured with, loaded at
+  Each realm's keys are the `jwt.keys` it was configured with, loaded at
   start, plus the keys of its `jwt.jwks_url`:
 
     * fetched right after start, without delaying it, and again every
@@ -19,6 +22,16 @@ defmodule Ankusa.Admin.Auth.JWT.Keys do
   Only public RSA, EC and OKP keys are kept; a JWKS entry for encryption
   (`use: "enc"`), a shared key or a private key is skipped. The set is read from
   an ETS table by the request, never through this process.
+
+  Options of `start_link/1`:
+
+    * `:instance` (required).
+    * `:server` — the name it registers under (`Ankusa.via(instance, server)`)
+      and the name of its table; default `:auth_keys`.
+    * `:realms` — `%{realm => jwt}`; default: every control-plane section in
+      `mode: :jwt` in the instance's config. A static key of an explicit realm
+      is labelled `"<jwt.label>.keys[<i>]"` in errors (`jwt.label` defaults to
+      `inspect(realm)`).
   """
 
   use GenServer
@@ -40,16 +53,21 @@ defmodule Ankusa.Admin.Auth.JWT.Keys do
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    GenServer.start_link(__MODULE__, instance, name: Ankusa.via(instance, :auth_keys))
+    server = Keyword.get(opts, :server, :auth_keys)
+    args = {instance, server, Keyword.get(opts, :realms)}
+    GenServer.start_link(__MODULE__, args, name: Ankusa.via(instance, server))
   end
 
   def child_spec(opts) do
-    %{id: {__MODULE__, Keyword.fetch!(opts, :instance)}, start: {__MODULE__, :start_link, [opts]}}
+    instance = Keyword.fetch!(opts, :instance)
+    server = Keyword.get(opts, :server, :auth_keys)
+    %{id: {__MODULE__, instance, server}, start: {__MODULE__, :start_link, [opts]}}
   end
 
-  # The instance name is operator config: one atom per instance, never request input.
+  # The instance and server names are operator config (one atom each, never
+  # request input).
   # sobelow_skip ["DOS.BinToAtom"]
-  defp table(instance), do: :"ankusa_auth_keys_#{instance}"
+  defp table(instance, server), do: :"ankusa_#{server}_#{instance}"
 
   # ── reads (the request path) ──────────────────────────────────────────────
 
@@ -58,9 +76,10 @@ defmodule Ankusa.Admin.Auth.JWT.Keys do
   none): the keys with that id and the keys with no id. `[]` while nothing is
   loaded.
   """
-  @spec candidates(atom(), Auth.section(), String.t() | nil) :: [JOSE.JWK.t()]
-  def candidates(instance, section, kid) do
-    keys = rows(instance, {section, :static}) ++ rows(instance, {section, :remote})
+  @spec candidates(atom(), term(), String.t() | nil, atom()) :: [JOSE.JWK.t()]
+  def candidates(instance, realm, kid, server \\ :auth_keys) do
+    table = table(instance, server)
+    keys = rows(table, {realm, :static}) ++ rows(table, {realm, :remote})
 
     case kid do
       nil -> keys
@@ -68,8 +87,8 @@ defmodule Ankusa.Admin.Auth.JWT.Keys do
     end
   end
 
-  defp rows(instance, key) do
-    case :ets.lookup(table(instance), key) do
+  defp rows(table, key) do
+    case :ets.lookup(table, key) do
       [{^key, keys}] -> keys
       [] -> []
     end
@@ -81,44 +100,55 @@ defmodule Ankusa.Admin.Auth.JWT.Keys do
   defp key_id(%JOSE.JWK{fields: fields}), do: Map.get(fields, "kid")
 
   @doc """
-  Ask for the JWKS of `section` to be fetched again, unless it was fetched less
+  Ask for the JWKS of `realm` to be fetched again, unless it was fetched less
   than `jwt.min_refresh_ms` ago. Never blocks.
   """
-  @spec refresh(atom(), Auth.section()) :: :ok
-  def refresh(instance, section),
-    do: GenServer.cast(Ankusa.via(instance, :auth_keys), {:refresh, section})
+  @spec refresh(atom(), term(), atom()) :: :ok
+  def refresh(instance, realm, server \\ :auth_keys),
+    do: GenServer.cast(Ankusa.via(instance, server), {:refresh, realm})
 
-  @doc "Fetch the JWKS of `section` now, whatever `jwt.min_refresh_ms` says."
-  @spec reload(atom(), Auth.section()) :: :ok | {:error, term()}
-  def reload(instance, section),
-    do: GenServer.call(Ankusa.via(instance, :auth_keys), {:reload, section}, 15_000)
+  @doc "Fetch the JWKS of `realm` now, whatever `jwt.min_refresh_ms` says."
+  @spec reload(atom(), term(), atom()) :: :ok | {:error, term()}
+  def reload(instance, realm, server \\ :auth_keys),
+    do: GenServer.call(Ankusa.via(instance, server), {:reload, realm}, 15_000)
 
   # ── server ────────────────────────────────────────────────────────────────
 
   @impl true
-  def init(instance) do
-    config = Ankusa.config(instance)
+  def init({instance, server, realms}) do
+    realms = realms || config_realms(instance)
 
-    sections =
-      for section <- @sections,
-          %{mode: :jwt, jwt: jwt} <- [Auth.auth_config(config, section)],
-          into: %{},
-          do: {section, jwt}
+    table =
+      :ets.new(table(instance, server), [:named_table, :protected, :set, read_concurrency: true])
 
-    table = :ets.new(table(instance), [:named_table, :protected, :set, read_concurrency: true])
-    state = %{table: table, sections: sections, last_fetch: %{}, timers: %{}}
+    state = %{table: table, sections: realms, last_fetch: %{}, timers: %{}}
 
-    for {section, jwt} <- sections do
+    for {realm, jwt} <- realms do
       keys =
         jwt.keys
         |> Enum.with_index()
-        |> Enum.map(fn {key, index} -> Auth.public_key!(key, "#{section}.jwt.keys[#{index}]") end)
+        |> Enum.map(fn {key, index} ->
+          Auth.public_key!(key, "#{label(realm, jwt)}.keys[#{index}]")
+        end)
 
-      :ets.insert(table, {{section, :static}, keys})
+      :ets.insert(table, {{realm, :static}, keys})
     end
 
     {:ok, state, {:continue, :fetch}}
   end
+
+  # The control planes of the instance's config in `mode: :jwt`, one realm
+  # each, labelled by their section as before realms existed.
+  defp config_realms(instance) do
+    config = Ankusa.config(instance)
+
+    for section <- @sections,
+        %{mode: :jwt, jwt: jwt} <- [Auth.auth_config(config, section)],
+        into: %{},
+        do: {section, Map.merge(jwt, %{label: "#{section}.jwt", log_label: "#{section}.auth"})}
+  end
+
+  defp label(realm, jwt), do: Map.get_lazy(jwt, :label, fn -> inspect(realm) end)
 
   @impl true
   def handle_continue(:fetch, state) do
@@ -174,7 +204,7 @@ defmodule Ankusa.Admin.Auth.JWT.Keys do
 
         {:error, reason} ->
           Logger.warning(
-            "[ankusa] could not fetch the JWKS of #{section}.auth: " <>
+            "[ankusa] could not fetch the JWKS of #{log_label(section, jwt)}: " <>
               inspect(reason, limit: 10, printable_limit: 200) <> "; keeping the keys it has"
           )
 
@@ -191,6 +221,10 @@ defmodule Ankusa.Admin.Auth.JWT.Keys do
 
     {result, state}
   end
+
+  # The config-derived realms keep the wording of the warning they always had
+  # (`admin.auth`); an explicit realm is named by its label.
+  defp log_label(realm, jwt), do: Map.get_lazy(jwt, :log_label, fn -> label(realm, jwt) end)
 
   defp fetch_jwks(url) do
     case HttpClient.request(:get, url, [{"accept", "application/json"}], nil, @fetch_timeout_ms,

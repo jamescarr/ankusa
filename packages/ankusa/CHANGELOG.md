@@ -13,6 +13,22 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Seams for a gateway outside core (ADR 0005).** `Ankusa.Principal` gains
+  `claims` (the claims of the credential that authenticated it) and `groups`,
+  both empty for core's own authenticators. `Ankusa.Admin.Auth.JWT.verify/5`
+  (signature and claim checks, returning the claims) and `principal/2` are
+  public. `Ankusa.Admin.Auth.JWT.Keys` holds named realms: `start_link/1` takes
+  `server:` (the registered name and table, default `:auth_keys`) and
+  `realms:` (`%{realm => jwt}`, default the control planes in `mode: :jwt`),
+  and `candidates/4`, `refresh/3`, `reload/3` take the server as their last
+  argument. `metrics.extra` (default `[]`) lists modules exporting
+  `metrics/1` whose definitions join the node's scrape under the same
+  cardinality policy; `Ankusa.Metrics.scope/2` gives them core's instance
+  scoping. `Ankusa.BlobStore.Pool.child_specs_for/2` pools stores the
+  instance's config does not name, skipping endpoints already pooled.
+  `Ankusa.Admin.Redact.closed_view/2` redacts any term in closed mode with
+  extra shown keys.
+
 - **`{{ var }}` templates on per-hook sink addresses (CR-3).**
   `Ankusa.Sink.Template` compiles `{{ var }}` / `{{ var ?? fallback }}` strings
   (`tenant`, `source`, `id`, `event_type`, `header.<name>`) when
