@@ -5,8 +5,8 @@ set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT"
 
-gen="${EIP_EXCALIDRAW:-$HOME/.omp/agent/skills/excalidraw-architecture/scripts/eip_excalidraw.py}"
-[ -f "$gen" ] || fail "no generator at $gen: install the excalidraw-architecture skill or set EIP_EXCALIDRAW to its scripts/eip_excalidraw.py"
+gen="${EIP_EXCALIDRAW:-$HOME/.omp/agent/skills/excalidraw-architecture/scripts/eip_excalidraw.mjs}"
+[ -f "$gen" ] || fail "no generator at $gen: install the excalidraw-architecture skill (2.0.0 or later) or set EIP_EXCALIDRAW to its scripts/eip_excalidraw.mjs"
 
 ids=()
 eval "ids=(${usage_ids:-})"
@@ -24,8 +24,8 @@ for id in "${ids[@]}"; do
   [ -f "$spec" ] || fail "no $spec"
   echo "==> $id"
   # One retry: the esm.sh import behind --png occasionally fails to fetch.
-  python3 "$gen" build "$spec" -o "$scratch/$id.excalidraw" --no-svg --png "docs/diagrams/$id.png" --strict ||
-    python3 "$gen" build "$spec" -o "$scratch/$id.excalidraw" --no-svg --png "docs/diagrams/$id.png" --strict ||
+  node "$gen" build "$spec" -o "$scratch/$id.excalidraw" --no-svg --png "docs/diagrams/$id.png" --strict ||
+    node "$gen" build "$spec" -o "$scratch/$id.excalidraw" --no-svg --png "docs/diagrams/$id.png" --strict ||
     failed+=("$id")
 done
 [ ${#failed[@]} -eq 0 ] || fail "layout warnings or export errors in: ${failed[*]}"
