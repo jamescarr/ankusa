@@ -183,6 +183,17 @@ cleanup() {
         compose logs --no-color --tail 20 "$s" >&2 || true
       done
     fi
+    # A dependency that died (RabbitMQ, Redis, MinIO, Postgres, a bootstrap
+    # job) is the likeliest cause of a failed start: its own logs and state.
+    compose ps -a --format '{{.Service}} {{.State}} {{.ExitCode}}' 2>/dev/null |
+      while read -r svc state code; do
+        if [ "$state" = exited ] && [ "$code" != 0 ]; then
+          echo "--- $svc (exited $code) ---" >&2
+          docker inspect --format 'oom_killed={{.State.OOMKilled}} error={{.State.Error}}' \
+            "$PROJECT-$svc-1" >&2 2>/dev/null || true
+          compose logs --no-color --tail 80 "$svc" >&2 || true
+        fi
+      done
   fi
   if [ "$KEEP" != "1" ]; then
     echo "==> tearing down the stack"
