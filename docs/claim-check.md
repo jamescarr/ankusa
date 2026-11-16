@@ -416,6 +416,118 @@ store. The pre-carve names `ankusa_claim_gateway_requests_total` and
 `ankusa_claim_gateway_duration_seconds` are gone; update dashboards and alerts
 that name them.
 
+### The objects API
+
+The same gateway can put an object store behind the same permissioning: a
+**space** is a store, a prefix in it and a policy, so a group reads what the
+policy allows and nothing else. Spaces are `gateway.spaces` (every key is in
+[the gateway section](configuration.md#the-gateway-config_version-2)):
+
+```yaml
+gateway:
+  authz:
+    authorizers:
+      teams:
+        type: rules
+        rules:
+          - effect: allow
+            actions: [read, list]
+            spaces: [docs]
+            keys: ["teams/{team}/**"]
+            when: {groups_any: ["team-{{ vars.team }}"]}
+    policies:
+      docs: {mode: first, steps: [teams]}
+  spaces:
+    docs:
+      store: {type: s3, s3: {bucket: reports, region: us-east-1}}
+      prefix: reports/
+      policy: docs
+      max_object_bytes: 16777216
+```
+
+```
+GET    /v1/objects/{space}/{key...}                               read
+HEAD   /v1/objects/{space}/{key...}                               read
+PUT    /v1/objects/{space}/{key...}                               write
+DELETE /v1/objects/{space}/{key...}                               delete
+GET    /v1/objects/{space}?prefix=&delimiter=&cursor=&limit=      list
+```
+
+Every request takes the same road: authenticate, the space (`404` when the
+name is not configured), the key (`400 invalid_key`), the space's policy
+(`403 forbidden`, `503 authz_unavailable`), a slot among
+`gateway.max_concurrent_requests` (`503 overloaded`), then the store. A `GET`
+(and `HEAD`) is authorized as `read`, a listing as `list` on the prefix,
+`PUT` as `write` and `DELETE` as `delete`.
+
+**One key, however it arrives.** A key in the path is each raw segment
+percent-decoded exactly once — a decoded `/` or `\` is refused, so `%2F` never
+becomes a segment boundary — and a key in `?key=`, `?prefix=` or a JSON body
+is taken as decoded. Both then pass one rule set: valid UTF-8, 1 to 1024
+bytes, at most 32 segments, none empty, `.` or `..`, none containing `\` or a
+control byte, and no segment starting with `.ankusa` (the ACL and audit
+trees). `my%20file.txt` in a path and `key=my+file.txt` in a query name one
+object. A malformed percent-escape is Plug's own bare `400`.
+
+**`GET` and `HEAD`.** The first store read covers up to `read_first_bytes` from
+the first byte asked for, which also yields the size and the version; the rest,
+when there is more, is a second read held to that version — an object
+overwritten in between restarts the read once, then `503 store_unavailable`.
+
+| Answer | When |
+| --- | --- |
+| `200` | The stored `content-type`, `etag` (the store's version), `last-modified`, `accept-ranges: bytes` |
+| `206` | One `bytes` range, with `content-range: bytes <from>-<to>/<size>` |
+| `304` | `If-None-Match` equals the version |
+| `416` | The range is past the object, with `content-range: bytes */<size>` |
+| `422 object_too_large` | More than the space's `max_object_bytes` to send; the body carries `max_bytes` |
+| `404 not_found` | No such object |
+| `503 store_forbidden` | The store answered `403` (the credential needs `GetObject` **and** `ListBucket`, as for claims); `Retry-After: 60` |
+
+Every object answer is `cache-control: private, no-cache`,
+`x-content-type-options: nosniff`, `content-disposition: attachment` and
+`content-security-policy: default-src 'none'; sandbox`, so a browser never runs
+an uploaded file; the stored metadata rides out as `x-ankusa-meta-<name>`
+(anything starting with `ankusa-` stays private). `HEAD` sends the same
+headers and `content-length`, no body. An object of zero bytes on a plain
+`GET` is `200` with an empty body.
+
+**`PUT`.** `content-length` is required (`411 length_required`) and at most the
+space's `max_object_bytes` (`413 too_large`, the body carrying `max_bytes`); the
+body comes back bounded by the same number. `x-ankusa-meta-<name>` headers
+become the object's metadata: at most 16 pairs, a name `[a-z0-9-]{1,64}` (not
+starting with `ankusa-`) and a value of at most 1024 printable ASCII bytes, else
+`400 invalid_metadata`.
+`if-none-match: *` writes only if the object is absent, `if-match: "<version>"`
+only over that version, and a failed condition is `412 precondition_failed`.
+The answer is `200 {"space","key","size","version"}` with the new `etag`.
+`DELETE` answers `204`. Both are `405 method_not_allowed` on a
+`spaces.<name>.read_only` space.
+
+**`LIST`.** `prefix` defaults to `""`; `delimiter` is absent or `/` (`400
+invalid_delimiter`); `limit` is 1 to 1000, default 100 (`400 invalid_limit`);
+`cursor` is the previous answer's `next_cursor`, passed to the store as it came,
+at most 2048 bytes (`400 invalid_cursor`). The answer is
+`{"objects":[{"key","size"}],"prefixes":[…],"next_cursor":<string or null>}`,
+with each space's prefix stripped. Entries under `.ankusa/` never show. **A
+principal allowed `list` on a prefix sees every key under it, whatever `read`
+says about each**: grant listing only where reading the whole prefix is fine,
+or make the policy's `list` rule as narrow as its `read` one.
+
+**The byte budget.** Object bytes are held in memory while they are served or
+written, so one gateway caps them at `gateway.objects.max_inflight_bytes`
+(512 MiB by default, which must be at least every space's `max_object_bytes`).
+A reservation past it is `503 overloaded` with `Retry-After` 1 to 3 before
+anything is read. A write reserves its `content-length`; a read reserves
+`read_first_bytes` and then the rest it has to send; the reservation is
+released when the request ends, and a request process that dies leaves nothing
+behind. The gauge `ankusa_gateway_objects_inflight_bytes` (from
+`Ankusa.Gateway.Gauges`) tracks the total.
+
+`Ankusa.Gateway.Objects` emits `[:ankusa, :gateway, :request]` with
+`api: :objects` for every answer, so `ankusa_gateway_requests_total{api="objects"}`
+counts them beside the claim routes.
+
 ## Redeem a claim
 
 ```

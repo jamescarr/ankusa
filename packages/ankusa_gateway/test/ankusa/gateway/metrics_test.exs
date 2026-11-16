@@ -111,7 +111,8 @@ defmodule Ankusa.Gateway.MetricsTest do
           ~s(ankusa_gateway_caller_queued{caller="authz:pdp",instance="#{inst}"} 0),
           ~s(ankusa_gateway_caller_breaker_transitions_total{caller="authz:flaky",instance="#{inst}",state="open"} 1),
           ~s(ankusa_gateway_cache_entries{cache="authz",instance="#{inst}"} 1),
-          ~s(ankusa_gateway_cache_bytes{cache="authn",instance="#{inst}"})
+          ~s(ankusa_gateway_cache_bytes{cache="authn",instance="#{inst}"}),
+          ~s(ankusa_gateway_objects_inflight_bytes{instance="#{inst}"} 0)
         ] do
       assert scrape =~ family
     end

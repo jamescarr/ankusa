@@ -19,6 +19,8 @@ defmodule Ankusa.Gateway.Metrics do
       `ankusa_gateway_caller_breaker_transitions_total{instance,caller,state}`.
     * `ankusa_gateway_cache_entries` and `ankusa_gateway_cache_bytes`
       `{instance,cache}` — the `authn`, `authz` and `acl` caches.
+    * `ankusa_gateway_objects_inflight_bytes{instance}` — object bytes the
+      objects API holds in memory now.
 
   Every label value is fixed or operator configuration: nothing a caller sends
   (a tenant, a claim id, a method) is a label.
@@ -116,7 +118,19 @@ defmodule Ankusa.Gateway.Metrics do
           tags: [:instance, :caller, :state]
         )
       )
-    ] ++ caller_gauges(instance) ++ cache_gauges(instance)
+    ] ++
+      caller_gauges(instance) ++
+      cache_gauges(instance) ++
+      [
+        last_value(
+          "ankusa.gateway.objects.inflight.bytes",
+          Ankusa.Metrics.scope(instance,
+            event_name: [:ankusa, :gateway, :objects_state],
+            measurement: :inflight_bytes,
+            tags: [:instance]
+          )
+        )
+      ]
   end
 
   defp caller_gauges(instance) do

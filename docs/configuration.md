@@ -141,6 +141,17 @@ runs it when `node.roles` lists `claim_check`, and the gateway's own image
 | `claims.enabled` | `true` | Serve `GET`/`HEAD /v1/claims/…`; `false` answers `404 not_found` on those routes |
 | `claims.policy` | `claims` | The authorizer policy the claim routes evaluate |
 | `claims.integrity_check` | `manifest` | `manifest`: check every whole-claim `GET` against the sha256 its pack's manifest records, and answer `502 integrity_mismatch` rather than send bytes that differ; `off` serves the store's bytes unchecked and sends no digest |
+| `spaces` | `%{}` | The objects API's spaces: `%{name => space}`, at most 256. A name matches `[a-z0-9][a-z0-9_-]{0,62}`; `claims` is the claims API's. An empty map serves no space (`404`). See [The objects API](claim-check.md#the-objects-api) |
+| `spaces.<name>.store` | required | `{module, opts}`, the store the space's objects live in. In YAML the `claim_check.store` shape: `type: local` (with `root`), `s3` or `gcs`; Azure and OCI stores are Elixir config only, exactly as for claim stores |
+| `spaces.<name>.prefix` | `""` | `""` or ending in `/`, at most 512 bytes; a segment may not be empty, `.` or `..`, nor start with `.ankusa`. The store key of an object is this prefix plus its key. Two spaces on one store (equal `store` tuples) may not have overlapping prefixes; two stores that differ in options but name one bucket are the operator's to keep apart |
+| `spaces.<name>.policy` | required | A policy of `authz.policies` (the default `claims` counts); every request in the space is decided by it, with `kind: :object` for one object and `kind: :prefix` for a listing |
+| `spaces.<name>.max_object_bytes` | `67108864` | 1..4294967295: the largest object written or read whole (`413` on `PUT`, `422 object_too_large` on `GET`, past it) |
+| `spaces.<name>.read_first_bytes` | `1048576` | 1024..`max_object_bytes`: the first store read of a `GET`, which also yields the size and the version |
+| `spaces.<name>.read_only` | `false` | Refuse `PUT` and `DELETE` with `405 method_not_allowed` |
+| `objects.max_inflight_bytes` | `536870912` | Object bytes held in memory at once across requests on one gateway; past it `503 overloaded`. Must be at least every space's `max_object_bytes` |
+| `objects.op_deadline_ms` | `30000` | 1000..600000: one store operation's deadline, every attempt included; past it `503 store_unavailable` |
+| `objects.timeout_ms` | `10000` | 1..600000: one store request, the store's own `timeout_ms` overridden |
+| `objects.retries` | `1` | 0..10: extra attempts after a transient store failure, the store's own `retries` overridden |
 
 An authenticator is one list entry with a `type` and a `name` (default
 `"<type>-<index>"`, `[a-z][a-z0-9_-]{0,31}`, unique in the chain). A bearer

@@ -46,18 +46,17 @@ defmodule Ankusa.Gateway.Claims do
   ## Under load
 
   Every claim request answers within `claim_check.read_deadline_ms`. Its reads
-  go through `Ankusa.ClaimCheck.Cache` and `Ankusa.ClaimCheck.Reader`. Each
-  authorized request emits `[:ankusa, :gateway, :request]` with `api:
-  :claims`, its method, status and duration; a `401` or `403` is refused
-  before any of it and emits nothing.
+  go through `Ankusa.ClaimCheck.Cache` and `Ankusa.ClaimCheck.Reader`. Every
+  answer past authentication emits `[:ankusa, :gateway, :request]` with `api:
+  :claims`, its method, status and duration: a policy's `403` and a
+  fail-closed `503 authz_unavailable` are counted beside the reads (a `401`
+  is the authentication plug's, before any of it).
 
   With `gateway.claims.enabled: false` every claim route is `404`.
   """
 
-  require Logger
-
   alias Ankusa.{ClaimCheck, Http, Telemetry}
-  alias Ankusa.ClaimCheck.{Reader, Ref, Stores}
+  alias Ankusa.ClaimCheck.{Reader, Ref}
   alias Ankusa.Gateway.{Authz, Range}
   alias Ankusa.Gateway.Authz.Request
 
@@ -66,14 +65,24 @@ defmodule Ankusa.Gateway.Claims do
   @doc "Serve `GET` or `HEAD` of one claim."
   @spec serve(Plug.Conn.t(), String.t(), String.t()) :: Plug.Conn.t()
   def serve(conn, tenant_id, claim_id) do
+    started = System.monotonic_time()
     instance = instance(conn)
     gateway = Ankusa.Gateway.config(instance)
 
-    if gateway.claims.enabled do
-      authorized(conn, instance, gateway, tenant_id, claim_id)
-    else
-      Http.send_json(conn, 404, %{error: "not_found"})
-    end
+    conn =
+      if gateway.claims.enabled do
+        authorized(conn, instance, gateway, tenant_id, claim_id)
+      else
+        Http.send_json(conn, 404, %{error: "not_found"})
+      end
+
+    Telemetry.emit(
+      [:gateway, :request],
+      %{duration: System.monotonic_time() - started},
+      %{instance: instance, api: :claims, method: conn.method, status: conn.status}
+    )
+
+    conn
   end
 
   defp authorized(conn, instance, gateway, tenant_id, claim_id) do
@@ -104,17 +113,8 @@ defmodule Ankusa.Gateway.Claims do
   defp forbidden(_meta), do: %{error: "forbidden"}
 
   defp serve_claim(conn, instance, gateway, tenant_id, claim_id) do
-    started = System.monotonic_time()
     config = Ankusa.config(instance)
-    conn = proven_and_admitted(conn, config, gateway, instance, tenant_id, claim_id)
-
-    Telemetry.emit(
-      [:gateway, :request],
-      %{duration: System.monotonic_time() - started},
-      %{instance: instance, api: :claims, method: conn.method, status: conn.status}
-    )
-
-    conn
+    proven_and_admitted(conn, config, gateway, instance, tenant_id, claim_id)
   end
 
   # The ref's proof first (cheap, and a forged ref must not take a slot), then
@@ -249,9 +249,6 @@ defmodule Ankusa.Gateway.Claims do
   defp error_response(conn, :invalid_id, _tenant_id, _claim_id),
     do: Http.send_json(conn, 400, %{error: "invalid_id"})
 
-  defp error_response(conn, :not_found, _tenant_id, _claim_id),
-    do: Http.send_json(conn, 404, %{error: "not_found"})
-
   # A forged or mangled proof and a refused v1 ref are the caller's bug, and a
   # ref past its expiry is gone for good: none is worth a retry.
   defp error_response(conn, :bad_signature, _tenant_id, _claim_id),
@@ -263,17 +260,6 @@ defmodule Ankusa.Gateway.Claims do
   defp error_response(conn, :ref_expired, _tenant_id, _claim_id),
     do: Http.send_json(conn, 410, %{error: "ref_expired"})
 
-  # The store's bytes (or the pack's manifest) are not what the manifest
-  # records: the claim is damaged in the store, so a retry reads the same
-  # bytes. Permanent, and worth a log line an operator can find.
-  defp error_response(conn, :integrity_mismatch, tenant_id, claim_id) do
-    Logger.warning(
-      "[ankusa] claim gateway: #{tenant_id}/#{claim_id} does not match its pack's manifest"
-    )
-
-    Http.send_json(conn, 502, %{error: "integrity_mismatch"})
-  end
-
   # This node is at `gateway.max_concurrent_requests`: expected under load,
   # counted on `[:ankusa, :gateway, :request]` by its status.
   defp error_response(conn, :overloaded, _tenant_id, _claim_id) do
@@ -282,35 +268,7 @@ defmodule Ankusa.Gateway.Claims do
     |> Http.send_json(503, %{error: "overloaded"})
   end
 
-  # Kept retryable on purpose: a gateway with the wrong credential is a
-  # configuration fault, and answering it permanently would make every worker
-  # dead-letter claims that are there.
-  defp error_response(conn, :forbidden, tenant_id, claim_id) do
-    Logger.warning(
-      "[ankusa] claim gateway: the object store refused this node's credential reading " <>
-        "#{tenant_id}/#{claim_id}"
-    )
-
-    conn
-    |> Plug.Conn.put_resp_header("retry-after", "60")
-    |> Http.send_json(503, %{error: "store_forbidden"})
-  end
-
-  # Shedding, the deadline and a throttling store are expected under load and
-  # counted by `[:ankusa, :claim_check, :read]`: logged at debug. A store that
-  # could not answer at all is a warning.
-  defp error_response(conn, {:unavailable, reason}, tenant_id, claim_id) do
-    message = fn ->
-      "[ankusa] claim gateway: store unavailable reading #{tenant_id}/#{claim_id}: " <>
-        inspect(reason, limit: 20, printable_limit: 512)
-    end
-
-    if reason in [:overloaded, :deadline] or Stores.throttled?({:unavailable, reason}),
-      do: Logger.debug(message),
-      else: Logger.warning(message)
-
-    conn
-    |> Plug.Conn.put_resp_header("retry-after", Integer.to_string(Enum.random(1..3)))
-    |> Http.send_json(503, %{error: "store_unavailable"})
-  end
+  # A store that failed: the answers the objects API gives too.
+  defp error_response(conn, reason, _tenant_id, _claim_id),
+    do: Ankusa.Gateway.Http.store_error(conn, reason)
 end

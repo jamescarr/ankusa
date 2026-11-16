@@ -855,6 +855,34 @@ gateway:
   #     claims:
   #       mode: first                  # first | all | any; every step abstaining denies
   #       steps: [teams, {use: scopes, on_unavailable: fail}]
+  # The objects API: a space is an object store, a prefix in it and a policy,
+  # and the gateway then serves GET/HEAD/PUT/DELETE on
+  # /v1/objects/<space>/<key> and one page of a listing on
+  # /v1/objects/<space>?prefix=&delimiter=&cursor=&limit=. Every request is
+  # decided by the space's `policy`, as a claim is by claims.policy. A key is
+  # 1..1024 bytes, at most 32 segments, none empty, `.` or `..` nor starting
+  # with `.ankusa`. At most 256 spaces; `claims` is the claims API's. YAML
+  # reaches local, s3 and gcs stores here; Azure and OCI stores are Elixir
+  # config only, as for claim stores. Two spaces on one store may not have
+  # overlapping prefixes; two stores that differ in options but name one
+  # bucket are yours to keep apart.
+  # spaces:
+  #   docs:
+  #     store: {type: s3, s3: {bucket: "${DOCS_BUCKET}", region: "${S3_REGION}"}}
+  #     prefix: docs/                # a store key is this prefix + the object's key
+  #     policy: claims               # a policy of gateway.authz, required
+  #     max_object_bytes: 67108864   # PUT past it: 413; a GET that would send more: 422
+  #     read_first_bytes: 1048576    # the first store read of a GET
+  #     read_only: false             # 405 on PUT and DELETE
+  # Object bytes are held in memory while a request is served, so one gateway
+  # caps them. max_inflight_bytes must be at least every space's
+  # max_object_bytes; past it a request is 503 overloaded with Retry-After 1-3.
+  # The three store keys below are merged over each space store's own.
+  # objects:
+  #   max_inflight_bytes: 536870912
+  #   op_deadline_ms: 30000          # one store operation, every attempt included
+  #   timeout_ms: 10000              # one store request
+  #   retries: 1                     # extra attempts after a transient failure
   claims:
     # Serve the claims API (else its routes answer 404).
     enabled: true
