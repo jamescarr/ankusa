@@ -2,9 +2,10 @@ name: ankusa-fleet-e2e
 
 # The fleet end to end: a load balancer, two Ankusa edge nodes with their own
 # stores, a shared route/source store (Redis), a shared bucket (MinIO) and a
-# second one for the secondary backup, a claim-check gateway, RabbitMQ, and a
-# consumer that records every hook in Postgres. With `--wal dual` (the `dual`
-# profile) a three-broker Kafka is the intake log (ADR 0002).
+# second one for the secondary backup, the claim-check gateway (its own image,
+# `GATEWAY_IMAGE`), RabbitMQ, and a consumer that records every hook in Postgres.
+# With `--wal dual` (the `dual` profile) a three-broker Kafka is the intake log
+# (ADR 0002).
 #
 #   examples/fleet-e2e/run.sh                        # builds, starts, drives load, verifies
 #   examples/fleet-e2e/run.sh --wal dual --kill-node # host loss, the log's brokers down, the secondary backup
@@ -202,15 +203,28 @@ services:
       - "127.0.0.1:14002:4000"
     depends_on: *ankusa-node-depends
 
-  # The gateway: same image, same config, one role. It holds the bucket
-  # credentials; the consumer holds none.
+  # The gateway: its own image (`packages/ankusa_gateway_server`), its own config
+  # (`gateway.yml`), no core role. It holds the bucket credentials; the consumer
+  # holds none.
   claim-check:
-    <<: *ankusa
+    image: ${GATEWAY_IMAGE:-ankusa-gateway-fleet-e2e:local}
+    volumes:
+      - ./gateway.yml:/etc/ankusa/gateway.yml:ro
     environment:
-      <<: *ankusa-env
-      ANKUSA_ROLES: claim_check
+      S3_BUCKET: ankusa-fleet
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+    restart: "no"
     depends_on:
       minio-bootstrap: {condition: service_completed_successfully}
+
+  # The server image with `ankusa.yml`, for a command run against the fleet:
+  # `docker-entrypoint replay --nodes …` (the `--replay-drill` phase). Never
+  # started with the stack (`profiles: [cli]`); `compose run ankusa-cli` enables it.
+  ankusa-cli:
+    <<: *ankusa
+    profiles: [cli]
 
   nginx:
     image: nginx:1.29-alpine

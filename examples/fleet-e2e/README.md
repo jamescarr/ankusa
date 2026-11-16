@@ -17,9 +17,14 @@ fleet acknowledged was processed, with a node killed in the middle.
   route definitions and API-managed sources through Redis (`routes.store` and
   `source_store`, both `type: redis`, from `ankusa_redis`). One
   [`ankusa.yml`](ankusa.yml) configures them all.
-- `claim-check`: the same image with `ANKUSA_ROLES=claim_check`. Claims are
-  never prefixed, so it serves the fat bodies of both nodes. It is the only
-  reader of the bucket on the consumer's side of the fence.
+- `claim-check`: the claim-check gateway, its own image
+  (`packages/ankusa_gateway_server`, `jamescarr/ankusa-gateway`) with its own
+  [`gateway.yml`](gateway.yml): no core role, so it reads claims and nothing
+  else. Claims are never prefixed, so it serves the fat bodies of both nodes. It
+  is the only reader of the bucket on the consumer's side of the fence.
+- `ankusa-cli`: the server image with [`ankusa.yml`](ankusa.yml) and nothing
+  started, for a command run against the fleet (`--replay-drill` runs the replay
+  in it). It is behind the `cli` compose profile, so the stack never starts it.
 - `nginx`: round robin over both nodes, re-resolving their names, so a node
   that was killed and restarted rejoins ([`nginx.conf`](nginx.conf)).
 - `consumer/`: the [`rabbitmq-consumer`](../rabbitmq-consumer/) worker, with the
@@ -37,9 +42,11 @@ examples/fleet-e2e/run.sh
 ```
 
 Needs `docker` with Compose, `mix`, `curl` and `jq`. It builds the server image
-(`ankusa-fleet-e2e:local`, slow the first time: RocksDB compiles), brings the
-stack up, and runs four phases. Only `18080` (the load balancer), `14001` and
-`14002` (the nodes) and `15433` (Postgres) are published, on loopback.
+(`ankusa-fleet-e2e:local`, slow the first time: RocksDB compiles) and the gateway
+image (`ankusa-gateway-fleet-e2e:local`: core, the gateway library and the
+gateway server), brings the stack up, and runs four phases. Only `18080` (the
+load balancer), `14001` and `14002` (the nodes) and `15433` (Postgres) are
+published, on loopback.
 
 | Phase | What it does | What it asserts |
 | --- | --- | --- |
@@ -117,14 +124,15 @@ examples/fleet-e2e/run.sh --replay-drill
 
 The nodes' admin ports are not published, so the drill reads their DLQs from
 inside their containers, and runs the command in a one-off container of the
-`claim-check` service (the same image).
+`ankusa-cli` service (the server image with `ankusa.yml`, not the gateway image).
 
 ### On kind, from the Helm chart
 
 `examples/fleet-e2e/kind.sh` (`mise run e2e fleet`) runs the `disk` fleet from
 [`deploy/helm/ankusa`](../../deploy/helm/ankusa/) on a kind cluster instead of
-compose: two StatefulSet pods with a PVC each and a claim-check gateway
-(`kind/values.yaml` is the chart's input, `kind/infra.yaml` the dependencies), the
+compose: two StatefulSet pods with a PVC each and a claim-check gateway (the
+gateway image, built and loaded by `kind.sh`; `kind/values.yaml` is the chart's
+input, `kind/infra.yaml` the dependencies), the
 chart in a namespace that enforces the `restricted` Pod Security Standard. The chaos
 phase deletes `ankusa-0` (SIGTERM: the drain), `SIGKILL`s `ankusa-1` and deletes the
 consumer; the run ends with `verify: missing=0 sha_mismatches=0 …`. Needs `docker`,
@@ -139,8 +147,9 @@ published ports are `18180` (the Service) and `15434` (Postgres).
 | `HOSTLOSS_RATE` | `1000` | paced requests per second of the `--kill-node` host-loss phases (the plan's per-node rate) |
 | `DURATION` | `45` | seconds per paced phase; at least 40, the chaos timeline runs to +36 s |
 | `BURST_SECONDS`, `CONCURRENCY` | `10`, `32` | the closed-loop burst |
-| `BUILD_ANKUSA` | `1` | `0` skips `docker build` and uses `ANKUSA_IMAGE` |
-| `ANKUSA_IMAGE` | `ankusa-fleet-e2e:local` | the server image the nodes run |
+| `BUILD_ANKUSA` | `1` | `0` skips `docker build` and uses `ANKUSA_IMAGE` and `GATEWAY_IMAGE` |
+| `ANKUSA_IMAGE` | `ankusa-fleet-e2e:local` | the server image the nodes run (`:kind` on kind) |
+| `GATEWAY_IMAGE` | `ankusa-gateway-fleet-e2e:local` | the gateway image the claim-check Deployment runs (`:kind` on kind) |
 | `KEEP` | `0` | `1` leaves the stack up |
 | `OUT_DIR` | `examples/fleet-e2e/.e2e-out` | loadgen CSVs and JSON reports |
 | `WAL`, `BACKUP` | set by `--wal`, `--kill-node` | what the compose file passes the nodes (`ANKUSA_WAL_TYPE`, `ANKUSA_BACKUP_ENABLED`) |

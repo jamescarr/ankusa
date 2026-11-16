@@ -1,4 +1,4 @@
-defmodule AnkusaServer.SecretProvider.Vault do
+defmodule AnkusaGatewayServer.SecretProvider.Vault do
   @moduledoc """
   `${sm:<name>:<path>}` against HashiCorp Vault's KV version 2 engine
   (`type: vault`).

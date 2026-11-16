@@ -1,6 +1,7 @@
-# The claim-check gateway: a node with only the claim_check role, reading the
-# same bucket the edge pods write to. Consumers redeem `claim` refs here, so
-# they hold no object-store credentials.
+# The claim-check gateway's own config (`gateway.yml`, the gateway image's
+# default path): it runs no core role. Consumers redeem `claim` refs here, so
+# they hold no object-store credentials. Claims default to the `storage` store,
+# and the edge pods check them in to the same bucket.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,20 +9,16 @@ metadata:
   labels:
     {{- include "demo.labels" "claim-check" | nindent 4 }}
 data:
-  ankusa.yml: |
+  gateway.yml: |
     config_version: 2
     node:
-      roles: [claim_check]
+      data_dir: /var/lib/ankusa
     log:
       banner: false
-    admin:
+    # The gateway serves its own metrics on 4004 (the port Prometheus scrapes).
+    metrics:
       enabled: true
       ip: 0.0.0.0
-      # Demo: the cluster network is the boundary (the mesh's policies decide
-      # who reaches these ports). Real deployments set auth.mode instead.
-      auth:
-        mode: none
-        allow_insecure: true
     claim_check:
       store:
         {{- include "demo.claimStore" . | nindent 8 }}

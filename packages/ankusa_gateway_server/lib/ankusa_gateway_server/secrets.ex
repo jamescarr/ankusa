@@ -1,8 +1,8 @@
-defmodule AnkusaServer.Secrets do
+defmodule AnkusaGatewayServer.Secrets do
   @moduledoc """
   Where the config file's secrets come from, and how they are read again.
 
-  The loader (`AnkusaServer.Config`) leaves two kinds of reference in a string
+  The loaders (`AnkusaServer.Config`, `AnkusaGatewayServer.Config`) leaves two kinds of reference in a string
   value for this module to resolve, after the environment overrides and before
   the file is validated:
 
@@ -21,7 +21,7 @@ defmodule AnkusaServer.Secrets do
 
   ## Outage rule
 
-  At boot, a reference that cannot be resolved is a `AnkusaServer.ConfigError`
+  At boot, a reference that cannot be resolved is a `AnkusaGatewayServer.ConfigError`
   naming the dotted key and the reference (never a value). On a reload
   (`AnkusaServer.Reload`), a reference that fails keeps the value it had at the last good
   load and is reported in `:kept` and logged as a warning: a secret manager
@@ -39,15 +39,15 @@ defmodule AnkusaServer.Secrets do
   ## What reload does
 
   `AnkusaServer.Reload` loads the file again with the `t:t/0` of the last load
-  (`AnkusaServer.Config.load!/1`'s `:secrets` option), so every reference is
+  (the `:secrets` option of either loader's `load!/1`), so every reference is
   resolved again and an outage keeps the old value. Nothing here is applied to a
   running instance: that is the reload's job.
   """
 
   require Logger
 
-  alias AnkusaServer.{Config, ConfigError}
-  alias AnkusaServer.SecretProvider.{AwsSecretsManager, Vault}
+  alias AnkusaGatewayServer.{ConfigError, Schema}
+  alias AnkusaGatewayServer.SecretProvider.{AwsSecretsManager, Vault}
 
   @max_file_bytes 65_536
   @default_timeout_ms 5_000
@@ -120,7 +120,7 @@ defmodule AnkusaServer.Secrets do
   defp check_ref!({:file, file} = ref, path) do
     if Path.type(file) != :absolute do
       raise ConfigError,
-        message: "#{Config.render_path(path)}: a file secret needs an absolute path, got #{file}"
+        message: "#{Schema.render_path(path)}: a file secret needs an absolute path, got #{file}"
     end
 
     ref
@@ -252,7 +252,7 @@ defmodule AnkusaServer.Secrets do
   defp ask(name, _id, path, %{providers: :none}) do
     raise ConfigError,
       message:
-        "#{Config.render_path(path)}: ${sm:#{name}:…} cannot configure a provider " <>
+        "#{Schema.render_path(path)}: ${sm:#{name}:…} cannot configure a provider " <>
           "(use ${VAR} or ${file:/path} for a provider's own credentials)"
   end
 
@@ -266,7 +266,7 @@ defmodule AnkusaServer.Secrets do
 
         raise ConfigError,
           message:
-            "#{Config.render_path(path)}: ${sm:#{name}:…} names no provider " <>
+            "#{Schema.render_path(path)}: ${sm:#{name}:…} names no provider " <>
               "(secrets.providers has: #{if configured == "", do: "none", else: configured})"
     end
   end
@@ -289,14 +289,14 @@ defmodule AnkusaServer.Secrets do
        when is_map_key(prev, ref) do
     {value, at} = Map.fetch!(prev, ref)
 
-    kept = %{ref: describe(ref), path: Config.render_path(path), reason: reason}
+    kept = %{ref: describe(ref), path: Schema.render_path(path), reason: reason}
 
     {value, %{state | values: Map.put(state.values, ref, {value, at}), kept: [kept | state.kept]}}
   end
 
   defp failed(ref, reason, path, _state) do
     raise ConfigError,
-      message: "#{Config.render_path(path)}: #{describe(ref)}: #{reason_text(reason)}"
+      message: "#{Schema.render_path(path)}: #{describe(ref)}: #{reason_text(reason)}"
   end
 
   defp describe({:file, file}), do: "${file:#{file}}"
@@ -375,7 +375,7 @@ defmodule AnkusaServer.Secrets do
       unless is_binary(name) and Regex.match?(@provider_name, name) do
         raise ConfigError,
           message:
-            "#{Config.render_path(path)}: a provider name is [a-z0-9_-]+ (it appears in ${sm:<name>:…})"
+            "#{Schema.render_path(path)}: a provider name is [a-z0-9_-]+ (it appears in ${sm:<name>:…})"
       end
 
       {name, parse_provider(spec, path)}
@@ -395,13 +395,13 @@ defmodule AnkusaServer.Secrets do
     unless module do
       raise ConfigError,
         message:
-          "#{Config.render_path(path ++ ["type"])} must be one of " <>
+          "#{Schema.render_path(path ++ ["type"])} must be one of " <>
             "#{@provider_types |> Map.keys() |> Enum.sort() |> Enum.join(", ")}, got #{inspect(type)}"
     end
 
     Enum.each(spec, fn {key, _value} ->
       unless key in Map.fetch!(@provider_keys, type) do
-        raise ConfigError, message: "#{Config.render_path(path)}: unknown key \"#{key}\""
+        raise ConfigError, message: "#{Schema.render_path(path)}: unknown key \"#{key}\""
       end
     end)
 
@@ -410,7 +410,7 @@ defmodule AnkusaServer.Secrets do
 
   defp parse_provider(other, path) do
     raise ConfigError,
-      message: "#{Config.render_path(path)}: expected a mapping, got #{inspect(other)}"
+      message: "#{Schema.render_path(path)}: expected a mapping, got #{inspect(other)}"
   end
 
   defp provider_opts("aws", spec, path) do
@@ -443,11 +443,11 @@ defmodule AnkusaServer.Secrets do
       nil ->
         if opts[:required] do
           raise ConfigError,
-            message: "#{Config.render_path(path)}: missing required key \"#{key}\""
+            message: "#{Schema.render_path(path)}: missing required key \"#{key}\""
         end
 
       "" ->
-        raise ConfigError, message: "#{Config.render_path(path ++ [key])} must not be empty"
+        raise ConfigError, message: "#{Schema.render_path(path ++ [key])} must not be empty"
 
       value when is_binary(value) ->
         value
@@ -455,7 +455,7 @@ defmodule AnkusaServer.Secrets do
       other ->
         raise ConfigError,
           message:
-            "#{Config.render_path(path ++ [key])}: expected a string, got #{inspect(other)}"
+            "#{Schema.render_path(path ++ [key])}: expected a string, got #{inspect(other)}"
     end
   end
 
@@ -467,7 +467,7 @@ defmodule AnkusaServer.Secrets do
       other ->
         raise ConfigError,
           message:
-            "#{Config.render_path(path ++ ["timeout_ms"])} must be an integer in " <>
+            "#{Schema.render_path(path ++ ["timeout_ms"])} must be an integer in " <>
               "1..#{@max_timeout_ms}, got #{inspect(other)}"
     end
   end
@@ -485,7 +485,7 @@ defmodule AnkusaServer.Secrets do
       _other ->
         raise ConfigError,
           message:
-            "#{Config.render_path(path)} must be an https:// URL " <>
+            "#{Schema.render_path(path)} must be an https:// URL " <>
               "(http:// is accepted only for a loopback address)"
     end
   end

@@ -55,7 +55,10 @@ processed, and breaks things on request, once or on a timer.
 - **Large bodies take the claim-check path.** A body over `inline_max_bytes`
   (64 KiB here) is checked in to an S3 bucket (floci, the repo's emulator) by
   the ingest pod before it publishes; the message carries a claim ref, which
-  the consumer redeems through the claim-check gateway. The consumer holds no
+  the consumer redeems through the claim-check gateway. That gateway is its own
+  image (`jamescarr/ankusa-gateway`, `packages/ankusa_gateway_server`) with its
+  own `gateway.yml`: a process with no core role that serves claims and its own
+  metrics, and nothing else. The consumer holds no
   object-store credentials. See [`docs/claim-check.md`](../../docs/claim-check.md).
 - **The mesh is the chaos surface.** Every pod has an Envoy sidecar, so sidecar
   to sidecar traffic is mTLS and carries the caller's ServiceAccount. The panel
@@ -99,8 +102,9 @@ the deployments. `examples/jetstream-k8s/run.sh down` deletes the cluster.
 | --- | --- | --- |
 | `CLUSTER` | `ankusa-jetstream` | kind cluster name |
 | `NS` | `ankusa-jetstream` | namespace of the demo (labelled for sidecar injection) |
-| `ANKUSA_IMAGE` | `jamescarr/ankusa:dev` | the ingest / claim-check image |
-| `BUILD_ANKUSA` | `1` | `0` skips `mise run docker:build`; pair with a published `ANKUSA_IMAGE`, e.g. `BUILD_ANKUSA=0 ANKUSA_IMAGE=jamescarr/ankusa:edge` |
+| `ANKUSA_IMAGE` | `jamescarr/ankusa:dev` | the ingest image |
+| `GATEWAY_IMAGE` | `jamescarr/ankusa-gateway:dev` | the claim-check gateway image (its own package, `packages/ankusa_gateway_server`) |
+| `BUILD_ANKUSA` | `1` | `0` skips `mise run docker:build`; pair with published images, e.g. `BUILD_ANKUSA=0 ANKUSA_IMAGE=jamescarr/ankusa:edge GATEWAY_IMAGE=jamescarr/ankusa-gateway:edge` |
 | `ISTIO_VERSION` | `1.30.6` | Istio chart version |
 | `KEDA_VERSION` | `2.21.0` | KEDA chart version |
 | `NATS_CHART_VERSION` | `2.15.1` | `nats/nats` chart version |
@@ -189,9 +193,9 @@ CA, so there is no supported way to run it on the host.
 ## Metrics: Prometheus and Grafana
 
 Prometheus ([`chart/templates/prometheus*.yaml`](chart/templates/)) discovers
-every pod of this chart with a container port named `admin` (the direct pods,
-the three durable pods and the claim-check gateway) and scrapes
-`:4002/metrics` every 5 s, as job `ankusa`, adding the labels `app` (the pod's
+every pod of this chart with a container port named `admin` (the direct pods and
+the three durable pods) or `metrics` (the claim-check gateway), and scrapes
+`/metrics` every 5 s, as job `ankusa`, adding the labels `app` (the pod's
 `app.kubernetes.io/name`) and `pod`. Ankusa labels every series
 `instance="default"` itself; Prometheus owns `instance` (the target address),
 so ankusa's label is kept as `exported_instance`.
@@ -210,7 +214,7 @@ Which pods export what (observed on this cluster):
 |---|---|
 |direct (`ankusa`)|the ingest counters and latency histogram; `ankusa_dispatch_deliveries_total` for the in-request publish (a failed publish counts `result="error"` and is answered `503 store_unavailable`); `ankusa_claim_check_operations_total` for its check-ins; the quarantine, queue and store gauges (the last two always 0, `wal: none`); the disk gauges|
 |durable (`ankusa-durable`)|all of the direct pods' families, plus WAL commits, compaction, the dispatch scheduler gauges, breakers, DLQ and replay|
-|claim-check gateway|the disk gauges, nothing else|
+|claim-check gateway|its own request series: `ankusa_gateway_requests_total` and `ankusa_gateway_request_duration_seconds` (`api="claims"`). It runs no core role, so no store, queue or dispatch families|
 
 Four things to know when reading it:
 
@@ -222,10 +226,11 @@ Four things to know when reading it:
   scraped value, not 0, so `rate()` and `increase()` miss whatever it counted
   before Prometheus first saw it.
 - The claim-check gateway's HTTP reads (`GET /v1/claims/…`, which the
-  consumers make) emit no telemetry. `ankusa_claim_check_redeems_total`
-  counts in-process `Ankusa.ClaimCheck.redeem/3` calls only, so the *Redeems*
-  panel stays empty here; the consumers' own logs (`via=claim`) are the record
-  of redeems.
+  consumers make) are counted in `ankusa_gateway_requests_total{api="claims"}`,
+  not in a claim-check family. `ankusa_claim_check_redeems_total` counts
+  in-process `Ankusa.ClaimCheck.redeem/3` calls only, so the *Redeems* panel
+  stays empty here; the consumers' own logs (`via=claim`) are the record of
+  redeems.
 - `ankusa_wal_commit_batch_size` is a counter (each WAL commit's batch size, summed)
   without the `_total` suffix, so Prometheus attaches an info annotation to
   its `rate()` ("metric might not be a counter"), which Grafana shows as a
@@ -336,7 +341,8 @@ Things you may notice, none of them a bug:
 - Prometheus and Grafana run without sidecars
   (`sidecar.istio.io/inject: "false"`). mTLS is PERMISSIVE (there is no
   `PeerAuthentication`), so each ankusa pod's sidecar accepts Prometheus's
-  plaintext scrape of `:4002`; a chaos `AuthorizationPolicy` matches the
+  plaintext scrape of `:4002`, and the gateway's of `:4004`; a chaos
+  `AuthorizationPolicy` matches the
   caller's mTLS principal, which a plaintext scrape does not have, so it never
   catches the scraper; and the gateway reaches Grafana and Prometheus in
   plaintext.

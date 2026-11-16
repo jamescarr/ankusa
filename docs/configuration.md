@@ -692,8 +692,8 @@ sources:
 `#<field>` picks one field of a JSON secret (Vault KV v2 data, or an AWS
 `SecretString` holding a JSON object). Vault with no `#` needs exactly one
 field. A provider's own credentials come from `${VAR}` or `${file:…}`, never
-from another `${sm:}`. Providers are `AnkusaServer.SecretProvider.Vault` and
-`AnkusaServer.SecretProvider.AwsSecretsManager`, behind the
+from another `${sm:}`. Providers are `AnkusaGatewayServer.SecretProvider.Vault` and
+`AnkusaGatewayServer.SecretProvider.AwsSecretsManager`, behind the
 `Ankusa.SecretProvider` behaviour (`fetch(ref, opts)` returning
 `{:ok, binary} | {:error, :not_found | :unavailable}`).
 

@@ -1,4 +1,5 @@
-# The claim-check gateway; its config is in claim-check-configmap.yaml.
+# The claim-check gateway (the gateway image, `images.gateway`); its config is in
+# claim-check-configmap.yaml as gateway.yml.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -29,17 +30,17 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: claim-check
-          image: {{ include "demo.image" .Values.images.ankusa }}
+          image: {{ include "demo.image" .Values.images.gateway }}
           command: ["/bin/sh", "-c", "ulimit -n {{ .Values.nofile }} && exec /sbin/tini -- /usr/local/bin/docker-entrypoint start"]
-          imagePullPolicy: {{ .Values.images.ankusa.pullPolicy }}
+          imagePullPolicy: {{ .Values.images.gateway.pullPolicy }}
           ports:
             - {name: claim, containerPort: 4001}
-            - {name: admin, containerPort: 4002}
+            - {name: metrics, containerPort: 4004}
           readinessProbe:
-            httpGet: {path: /health, port: 4001}
+            httpGet: {path: /ready, port: claim}
             periodSeconds: 5
           livenessProbe:
-            httpGet: {path: /health, port: 4001}
+            httpGet: {path: /health, port: claim}
             initialDelaySeconds: 10
             periodSeconds: 10
           lifecycle:
@@ -48,7 +49,7 @@ spec:
           resources:
             {{- toYaml .Values.claimCheck.resources | nindent 12 }}
           volumeMounts:
-            - {name: config, mountPath: /etc/ankusa/ankusa.yml, subPath: ankusa.yml, readOnly: true}
+            - {name: config, mountPath: /etc/ankusa/gateway.yml, subPath: gateway.yml, readOnly: true}
             - {name: data, mountPath: /var/lib/ankusa}
       volumes:
         - name: config

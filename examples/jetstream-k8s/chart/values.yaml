@@ -3,6 +3,9 @@
 
 images:
   ankusa: {repository: jamescarr/ankusa, tag: dev, pullPolicy: IfNotPresent}
+  # The claim-check gateway: its own image (`packages/ankusa_gateway_server`), no
+  # core role. run.sh overrides repository/tag to whatever $GATEWAY_IMAGE names.
+  gateway: {repository: jamescarr/ankusa-gateway, tag: dev, pullPolicy: IfNotPresent}
   consumer: {repository: ankusa-jetstream-consumer, tag: dev, pullPolicy: IfNotPresent}
   controlPanel: {repository: ankusa-jetstream-panel, tag: dev, pullPolicy: IfNotPresent}
   floci: {repository: floci/floci, tag: latest, pullPolicy: IfNotPresent}
@@ -91,8 +94,9 @@ controlPanel:
   claimBytesPerSec: 2097152
   resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 512Mi}}
 
-# Prometheus scrapes every ankusa-image pod's admin port (:4002/metrics) every
-# 5 s; Grafana serves a provisioned dashboard of what it collects. Both run
+# Prometheus scrapes every ankusa pod's admin port (:4002/metrics) and the
+# claim-check gateway's metrics port (:4004/metrics) every 5 s; Grafana serves a
+# provisioned dashboard of what it collects. Both run
 # outside the mesh (no sidecar) and are reached through the ingress gateway
 # at /prometheus/ and /grafana/. Prometheus keeps its data in an emptyDir and
 # Grafana in its container layer: a demo, not a store.

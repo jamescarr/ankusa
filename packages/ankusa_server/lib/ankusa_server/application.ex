@@ -79,7 +79,7 @@ defmodule AnkusaServer.Application do
 
     with {:ok, pid} <-
            Supervisor.start_link(
-             [AnkusaServer.GcpToken, {Ankusa.Instance, config}] ++
+             [AnkusaGatewayServer.GcpToken, {Ankusa.Instance, config}] ++
                gateway ++
                [{AnkusaServer.Reload.Signal, instance: config.instance}],
              strategy: :one_for_one,
@@ -94,7 +94,7 @@ defmodule AnkusaServer.Application do
   defp start_logging(%{level: level, format: format}, instance) do
     {:ok, _previous} = Ankusa.LogLevel.set(level)
 
-    with {:error, reason} <- AnkusaServer.LogFormatter.install(format, instance) do
+    with {:error, reason} <- AnkusaGatewayServer.LogFormatter.install(format, instance) do
       Logger.error(
         "[ankusa] log.format #{format} did not start (#{inspect(reason)}); logging as text"
       )
@@ -106,7 +106,7 @@ defmodule AnkusaServer.Application do
   defp start_tracing(%{enabled: false}), do: :ok
 
   defp start_tracing(tracing) do
-    case AnkusaServer.Tracing.start(tracing) do
+    case AnkusaGatewayServer.Tracing.start(tracing, %{name: "ankusa", version: version()}) do
       :ok ->
         Logger.info(
           "[ankusa] tracing on: OTLP to #{tracing.otlp_endpoint}, " <>

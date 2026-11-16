@@ -66,6 +66,15 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end }}
 
+{{/* The gateway image reference: a digest wins over a tag. */}}
+{{- define "ankusa.gatewayImage" -}}
+{{- if .Values.claimCheck.image.digest -}}
+{{- printf "%s@%s" .Values.claimCheck.image.repository .Values.claimCheck.image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.claimCheck.image.repository .Values.claimCheck.image.tag -}}
+{{- end -}}
+{{- end }}
+
 {{/*
 One listener's exposure. Call with (dict "port" 4002 "scope" .Values.admin "what" "admin").
 A token Secret authenticates it (the server hashes ANKUSA_*_TOKEN at load, and the
@@ -97,10 +106,36 @@ it (the user's keys win, maps merge).
 {{- if .Values.admin.expose -}}
 {{- $_ := set $base "admin" (merge (dict "enabled" true) (fromYaml (include "ankusa.listener" (dict "port" 4002 "scope" .Values.admin "what" "admin")))) -}}
 {{- end -}}
-{{- if .Values.claimCheck.enabled -}}
-{{- $_ := set $base "claim_check" (fromYaml (include "ankusa.listener" (dict "port" 4001 "scope" .Values.claimCheck "what" "claimCheck"))) -}}
-{{- end -}}
 {{- toYaml (mustMergeOverwrite $base (deepCopy .Values.config)) -}}
+{{- end }}
+
+{{/*
+The gateway Deployment's gateway.yml (`ankusa_gateway_server`): what the chart
+derives, with claimCheck.config merged over it. No `config_version` key, so a
+`claim_check:` block a values file still carries (under `config` or here) is a
+version-1 document and the loader migrates it to `gateway:`. The gateway runs no
+core role: it needs `storage` (claims default to that store) and nothing else.
+*/}}
+{{- define "ankusa.gatewayConfig" -}}
+{{- $cfg := .Values.config | default (dict) -}}
+{{- $base := dict
+  "node" (dict "data_dir" "/var/lib/ankusa")
+  "log" (dict "format" "json")
+  "listener" (dict "drain_delay_ms" (int .Values.drain.delayMs) "drain_timeout_ms" (int .Values.drain.timeoutMs))
+  "gateway" (dict "port" 4001 "ip" "0.0.0.0") -}}
+{{- if not .Values.claimCheck.tokenSecret.name -}}
+{{- if not .Values.claimCheck.allowInsecure -}}
+{{- fail "claimCheck is exposed on the pod address: set claimCheck.tokenSecret.name, or claimCheck.allowInsecure: true when a mesh or the NetworkPolicy authenticates its callers" -}}
+{{- end -}}
+{{- $_ := set (get $base "gateway") "auth" (dict "allow_insecure" true) -}}
+{{- end -}}
+{{- with get $cfg "storage" -}}
+{{- $_ := set $base "storage" . -}}
+{{- end -}}
+{{- with get $cfg "claim_check" -}}
+{{- $_ := set $base "claim_check" . -}}
+{{- end -}}
+{{- toYaml (mustMergeOverwrite $base (deepCopy (.Values.claimCheck.config | default (dict)))) -}}
 {{- end }}
 
 {{/*

@@ -250,7 +250,7 @@ case "$kind" in
       mix_plt_save "$pkg"
       # Plug applications only: the packages that serve HTTP.
       case "$pkg" in
-        ankusa | ankusa_gateway | ankusa_server) mix sobelow --exit --skip ;;
+        ankusa | ankusa_gateway | ankusa_gateway_server | ankusa_server) mix sobelow --exit --skip ;;
       esac
     fi
     if [ "$lane" != static ]; then

@@ -14,22 +14,24 @@ for p in "${pkgs[@]}"; do
   [ "$code" = 200 ] || fail "$p $v is not published (HTTP $code)"
 
   if [ "$(pkg_kind "$p")" = docker ]; then
+    image=$(pkg_docker_image "$p")
+
     # docker.yml never moves `latest` for a prerelease.
     case "$v" in
       *-*) ;;
       *)
         code=$(pkg_registry_code "$p" latest)
         printf '  %-18s %-12s %s\n' "$p" latest "$code"
-        [ "$code" = 200 ] || fail "$DOCKER_IMAGE:latest is not published (HTTP $code)"
+        [ "$code" = 200 ] || fail "$image:latest is not published (HTTP $code)"
         ;;
     esac
 
     # Both architectures, or the tag is not really usable.
-    manifest=$(docker buildx imagetools inspect "$DOCKER_IMAGE:$v")
+    manifest=$(docker buildx imagetools inspect "$image:$v")
     grep -E 'Platform|Manifest' <<<"$manifest"
     for platform in linux/amd64 linux/arm64; do
       grep -qE "Platform:[[:space:]]+$platform(/v[0-9]+)?\$" <<<"$manifest" ||
-        fail "$platform missing from $DOCKER_IMAGE:$v"
+        fail "$platform missing from $image:$v"
     done
   fi
 done

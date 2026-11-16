@@ -313,7 +313,7 @@ package's own `DynamicSupervisor` (started by its `Application`); brod's
 client id, an atom that `Sink.Kafka` scopes as
 `:"ankusa_kafka.<instance>.<client>"`; the AWS credential cache
 (`:ankusa_aws_credentials`), one ETS table keyed by credential source; and, in
-the image only, `AnkusaServer.GcpToken`. Each instance's route snapshot is
+the image only, `AnkusaGatewayServer.GcpToken`. Each instance's route snapshot is
 its own named ETS table. That's what makes two
 independent instances runnable in one VM (and what makes the test suite
 `async: true`-safe for anything that doesn't share on-disk state).

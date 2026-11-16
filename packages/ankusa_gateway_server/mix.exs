@@ -1,0 +1,68 @@
+defmodule AnkusaGatewayServer.MixProject do
+  use Mix.Project
+
+  # Read by the release tooling: `sed -n 's/^  @version "\(.*\)"$/\1/p'`.
+  # Its own artifact (the `jamescarr/ankusa-gateway` Docker image), tagged
+  # `ankusa_gateway_server-vX.Y.Z`, never published to Hex.
+  @version "0.0.0"
+
+  def project do
+    [
+      app: :ankusa_gateway_server,
+      version: @version,
+      elixir: "~> 1.20",
+      start_permanent: Mix.env() == :prod,
+      deps: deps(),
+      releases: releases(),
+      test_coverage: [summary: [threshold: 80]],
+      # Every PLT lives under _build, which CI caches (keyed on the toolchain pins
+      # and mix.lock), so a run rebuilds a PLT only when one of them changed.
+      dialyzer: [plt_core_path: "_build/plts", plt_local_path: "_build/plts"]
+    ]
+  end
+
+  def application do
+    [extra_applications: [:logger], mod: {AnkusaGatewayServer.Application, []}]
+  end
+
+  # The gateway image: core (claim stores, blob stores, listener limits) and the
+  # gateway library, driven by the same YAML format as `jamescarr/ankusa`. This
+  # package is also where that format's shared machinery lives (the document
+  # pipeline, the typed accessors, the sections both images read, secrets,
+  # logging, tracing): `ankusa_server` path-depends on it. `override: true` on
+  # core and `async_api_spex`: path dependencies are evaluated under :prod,
+  # where they name their Hex releases.
+  defp deps do
+    [
+      {:ankusa, path: "../ankusa", override: true},
+      {:async_api_spex, path: "../async_api_spex", override: true},
+      {:ankusa_gateway, path: "../ankusa_gateway"},
+      {:yaml_elixir, "~> 2.12"},
+      # Signs the secret manager's requests (`AnkusaGatewayServer.SecretProvider.AwsSecretsManager`);
+      # the requirement core holds, so the lock does not change.
+      {:aws_signature, "~> 0.4"},
+      # The OpenTelemetry SDK and the OTLP exporter behind `tracing.enabled`
+      # (`AnkusaGatewayServer.Tracing`). `runtime: false` and `:load` in the
+      # release: the image starts them only when tracing is on.
+      {:opentelemetry, "~> 1.5", runtime: false},
+      {:opentelemetry_exporter, "~> 1.8", runtime: false},
+      # Static analysis gates run by `mise run check:package` (dev only).
+      {:credo, "~> 1.7", only: :dev, runtime: false},
+      {:dialyxir, "~> 1.4", only: :dev, runtime: false},
+      {:sobelow, "~> 0.14", only: :dev, runtime: false}
+    ]
+  end
+
+  defp releases do
+    [
+      ankusa_gateway: [
+        include_executables_for: [:unix],
+        applications: [
+          ankusa_gateway_server: :permanent,
+          opentelemetry: :load,
+          opentelemetry_exporter: :load
+        ]
+      ]
+    ]
+  end
+end

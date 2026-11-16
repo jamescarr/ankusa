@@ -1,4 +1,4 @@
-defmodule AnkusaServer.GcpToken do
+defmodule AnkusaGatewayServer.GcpToken do
   @moduledoc """
   Bearer-token sources for the Google Cloud adapters: `Ankusa.BlobStore.GCS`
   (`storage.gcs.auth`, `claim_check.store.gcs.auth`) and

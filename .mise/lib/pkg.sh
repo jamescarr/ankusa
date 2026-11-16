@@ -8,11 +8,15 @@
 #   else go.mod -> go, else composer.json -> php, else build.sbt -> java,
 #   else deps.edn -> clojure.
 #
+# A docker package's Docker Hub repository is the one line of its IMAGE file
+# (packages/<name>/IMAGE), read by `pkg_docker_image`: two images can differ in
+# repository name while sharing the tag scheme, so the repository is a per
+# package fact, not a constant here.
+#
 # Written for bash 3.2 (macOS /bin/bash): no mapfile, no associative arrays.
 
 ROOT="${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
 GITHUB_REPO=jamescarr/ankusa
-DOCKER_IMAGE=jamescarr/ankusa
 
 # stderr in both cases: a failure inside `x=$(pkg_...)` must still be seen, and
 # the Actions runner picks `::error::` up from stderr as well as stdout.
@@ -85,6 +89,15 @@ pkg_kind() {
   else
     fail "$dir has no package.json, Dockerfile, mix.exs, pyproject.toml, Cargo.toml, *.gemspec, go.mod, composer.json, build.sbt, or deps.edn"
   fi
+}
+
+# The Docker Hub repository of a docker package: the one line of its IMAGE
+# file, whitespace stripped (`jamescarr/ankusa`, `jamescarr/ankusa-gateway`).
+pkg_docker_image() {
+  local dir
+  dir=$(pkg_dir "$1") || exit 1
+  [ -f "$ROOT/$dir/IMAGE" ] || fail "$dir has no IMAGE file (its Docker Hub repository)"
+  tr -d '[:space:]' <"$ROOT/$dir/IMAGE"
 }
 
 # `ankusa` first (everything else depends on it), then the other Hex packages,
@@ -170,7 +183,7 @@ pkg_notes() {
 
 # HTTP status of NAME@VERSION on its registry: 200 published, 404 not.
 pkg_registry_code() {
-  local dir kind url npm_name pypi_name crate_name gem_name hex_name module composer_name meta code maven_group maven_artifact clj_lib clj_group clj_artifact
+  local dir kind url npm_name pypi_name crate_name gem_name hex_name module composer_name meta code maven_group maven_artifact clj_lib clj_group clj_artifact docker_image
   dir=$(pkg_dir "$1") || exit 1
   kind=$(pkg_kind "$1") || exit 1
   case "$kind" in
@@ -182,7 +195,12 @@ pkg_registry_code() {
       [ -n "$hex_name" ] || fail "could not read the app name from $dir/mix.exs"
       url="https://hex.pm/api/packages/$hex_name/releases/$2"
       ;;
-    docker) url="https://hub.docker.com/v2/namespaces/${DOCKER_IMAGE%%/*}/repositories/${DOCKER_IMAGE#*/}/tags/$2" ;;
+    docker)
+      # The repository is the package's IMAGE file, not a constant: the gateway
+      # image publishes as `jamescarr/ankusa-gateway`.
+      docker_image=$(pkg_docker_image "$1") || exit 1
+      url="https://hub.docker.com/v2/namespaces/${docker_image%%/*}/repositories/${docker_image#*/}/tags/$2"
+      ;;
     npm)
       npm_name=$(node -p "require('$ROOT/$dir/package.json').name")
       url="https://registry.npmjs.org/$npm_name/$2"

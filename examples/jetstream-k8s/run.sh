@@ -13,8 +13,11 @@ cd "$(git rev-parse --show-toplevel)"
 : "${CLUSTER:=ankusa-jetstream}"
 : "${NS:=ankusa-jetstream}"
 : "${ANKUSA_IMAGE:=jamescarr/ankusa:dev}"
-# 0 skips `mise run docker:build`: use a published image, e.g.
-#   BUILD_ANKUSA=0 ANKUSA_IMAGE=jamescarr/ankusa:edge ./run.sh
+# The claim-check gateway's image (packages/ankusa_gateway_server). `mise run
+# docker:build` tags it `jamescarr/ankusa-gateway:dev`, which is the default.
+: "${GATEWAY_IMAGE:=jamescarr/ankusa-gateway:dev}"
+# 0 skips `mise run docker:build`: use published images, e.g.
+#   BUILD_ANKUSA=0 ANKUSA_IMAGE=jamescarr/ankusa:edge GATEWAY_IMAGE=jamescarr/ankusa-gateway:edge ./run.sh
 : "${BUILD_ANKUSA:=1}"
 : "${ISTIO_VERSION:=1.30.6}"
 : "${KEDA_VERSION:=2.21.0}"
@@ -53,14 +56,17 @@ up() {
   kubectl config use-context "kind-$CLUSTER" >/dev/null
 
   echo "==> building images"
-  if [ "$BUILD_ANKUSA" = 1 ]; then mise run docker:build; fi
+  if [ "$BUILD_ANKUSA" = 1 ]; then
+    mise run docker:build
+    mise run docker:build ankusa_gateway_server
+  fi
   docker build -f "$DIR/consumer/Dockerfile" -t "$CONSUMER_IMAGE" .
   docker build -t "$PANEL_IMAGE" "$DIR/control_panel"
 
   echo "==> loading images into kind"
   # An image that only exists in a registry (a published $ANKUSA_IMAGE) is
   # pulled by the nodes instead.
-  for img in "$ANKUSA_IMAGE" "$CONSUMER_IMAGE" "$PANEL_IMAGE"; do
+  for img in "$ANKUSA_IMAGE" "$GATEWAY_IMAGE" "$CONSUMER_IMAGE" "$PANEL_IMAGE"; do
     if docker image inspect "$img" >/dev/null 2>&1; then
       kind load docker-image "$img" --name "$CLUSTER"
     else
@@ -106,6 +112,8 @@ up() {
   helm upgrade --install demo "$DIR/chart" -n "$NS" \
     --set "images.ankusa.repository=${ANKUSA_IMAGE%:*}" \
     --set "images.ankusa.tag=${ANKUSA_IMAGE##*:}" \
+    --set "images.gateway.repository=${GATEWAY_IMAGE%:*}" \
+    --set "images.gateway.tag=${GATEWAY_IMAGE##*:}" \
     --wait --timeout 10m
   if [ "$existed" = 1 ]; then
     # Rebuilt images keep the same :dev tag, so Helm sees nothing to change.

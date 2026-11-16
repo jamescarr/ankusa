@@ -1,0 +1,21 @@
+# The config baked into the jamescarr/ankusa-gateway image: the gateway on
+# 4001, metrics on 4004, claims read from the node's local store.
+#
+# Mount your own file over it (`-v ./gateway.yml:/etc/ankusa/gateway.yml`) or
+# override fields with ANKUSA_* env vars (ANKUSA_CLAIM_CHECK_PORT, _IP, _TOKEN,
+# ANKUSA_STORAGE_TYPE, ANKUSA_S3_BUCKET, ...). The format is jamescarr/ankusa's
+# (config-examples/reference.yml), restricted to: config_version node log
+# listener metrics tracing secrets egress storage claim_check gateway.
+#
+# SECURITY: the gateway listens on 127.0.0.1 inside the container unless
+# ANKUSA_CLAIM_CHECK_IP (or gateway.ip) says otherwise, and off loopback it
+# refuses to boot without an authenticator: set ANKUSA_CLAIM_CHECK_TOKEN, or
+# gateway.auth.authenticators (token, jwt, mtls). Point claim_check.store(s)
+# at the bucket your dispatch nodes write claims to.
+config_version: 2
+node:
+  data_dir: /var/lib/ankusa
+metrics:
+  enabled: true
+gateway:
+  port: 4001

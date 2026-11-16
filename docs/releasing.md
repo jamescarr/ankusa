@@ -10,8 +10,9 @@ the files in it decide where it publishes:
 
 | Package | Kind | Tag | Published by |
 | --- | --- | --- | --- |
-| `ankusa`, `ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats`, `ankusa_redis`, `async_api_spex` | Hex (`mix.exs`) | `<pkg>-vX.Y.Z` | [`release.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release.yml) |
-| `ankusa_server` | Docker image `jamescarr/ankusa` (`Dockerfile`) | `ankusa_server-vX.Y.Z` | [`docker.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/docker.yml) |
+| `ankusa`, `ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats`, `ankusa_redis`, `ankusa_gateway`, `async_api_spex` | Hex (`mix.exs`) | `<pkg>-vX.Y.Z` | [`release.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release.yml) |
+| `ankusa_server` | Docker image `jamescarr/ankusa` (`Dockerfile`, `IMAGE`) | `ankusa_server-vX.Y.Z` | [`docker.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/docker.yml) |
+| `ankusa_gateway_server` | Docker image `jamescarr/ankusa-gateway` (`Dockerfile`, `IMAGE`) | `ankusa_gateway_server-vX.Y.Z` | [`docker.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/docker.yml) |
 | `sdk-typescript` | npm package `ankusa` (`package.json`) | `sdk-typescript-vX.Y.Z` | [`release-npm.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-npm.yml) |
 | `sdk-python` | PyPI package `ankusa` (`pyproject.toml`) | `sdk-python-vX.Y.Z` | [`release-python.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-python.yml) |
 | `sdk-rust` | crates.io crate `ankusa` (`Cargo.toml`) | `sdk-rust-vX.Y.Z` | [`release-crates.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-crates.yml) |
@@ -21,6 +22,12 @@ the files in it decide where it publishes:
 | `sdk-elixir` | Hex package `ankusa_sdk` (`mix.exs`) | `sdk-elixir-vX.Y.Z` | [`release.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release.yml) |
 | `sdk-java` | Maven Central `io.github.jamescarr:ankusa-sdk` (`build.sbt`) | `sdk-java-vX.Y.Z` | [`release-maven.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-maven.yml) |
 | `sdk-clojure` | Clojars `io.github.jamescarr/ankusa-clj` (`deps.edn`, `build.clj`) | `sdk-clojure-vX.Y.Z` | [`release-clojars.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-clojars.yml) |
+
+A Docker package's image name is not written in the release tooling: its
+`IMAGE` file holds the Docker Hub repository (one line) — `jamescarr/ankusa`
+for `ankusa_server`, `jamescarr/ankusa-gateway` for `ankusa_gateway_server` —
+which `pkg_docker_image` in `.mise/lib/pkg.sh` reads, so `release:verify`,
+`docker:build`, `docker:smoke` and `docker.yml` all agree on it.
 
 The npm, PyPI, and crates.io packages are all named `ankusa`, the RubyGems gem
 is `ankusa-sdk` because RubyGems' `ankusa` belongs to an unrelated project, the
@@ -94,6 +101,13 @@ with nothing else to say gets a one-line "version aligned with `ankusa` X.Y"
 entry, and the adapters' `{:ankusa, "~> X.Y"}` follows. Patch versions are
 each package's own: a fix to one is `X.Y.1` of that one alone.
 
+`ankusa_gateway` (Hex) and `ankusa_gateway_server` (the
+`jamescarr/ankusa-gateway` image) keep their own SemVer, starting at `0.1.0`.
+`ankusa_gateway` names its core requirement (`{:ankusa, "~> 0.8"}`), which is
+what pins a gateway release to the core releases it builds against; the image
+bundles the two from this checkout. Neither is tied to `ankusa_server`'s
+version.
+
 The SDKs (`sdk-*`) and `async_api_spex` keep independent SemVer. No SDK
 depends on any package here: they speak the wire format to a running server,
 and their compatibility with a server is the queue message versions each one
@@ -117,45 +131,75 @@ live fails the same way. Tag `async_api_spex` alone first, wait for
 `release:preflight` fails a core tag until the `async_api_spex` version in the
 tree is on Hex.
 
+`ankusa_gateway` comes before anything that depends on it on Hex, and after
+core: it requires `{:ankusa, "~> 0.8"}`, so tag `ankusa` (0.8.0 or later)
+first, then `ankusa_gateway` (0.1.0), then `ankusa_gateway_postgres` (whose
+`mix.exs` requires it) — `release:preflight` fails a Hex package whose `mix.exs`
+names `{:ankusa_gateway, "~> …"}` until that version is on Hex. The gateway
+image (`ankusa_gateway_server`) has no such constraint: it builds from this
+checkout with path dependencies, like the server image.
+
 The server image and the npm, Python, Rust, Ruby, and Go SDKs have no ordering
-constraint: the image builds from this checkout, and none of the SDKs depends
+constraint: the images build from this checkout, and none of the SDKs depends
 on anything here. `sdk-elixir` is a Hex package but has no `ankusa` dependency
 either, so `release:preflight` skips the core-first check for it (the check
 applies only to packages whose `mix.exs` depends on `ankusa`).
 
-## The server image
+## The images
 
 Every push to `main` touching `packages/ankusa*/**`, `packages/async_api_spex/**`, `.dockerignore`, or the
-docker/ci workflows publishes `jamescarr/ankusa:edge` and `:sha-<short>` for
+docker/ci workflows publishes both images — `jamescarr/ankusa:edge` and
+`jamescarr/ankusa-gateway:edge`, each with `:sha-<short>` — for
 `linux/amd64` and `linux/arm64`. Pull requests touching the same paths build and
-smoke-test the image without pushing.
+smoke-test both without pushing. `docker.yml`'s `build` and `merge` jobs run a
+matrix over the packages: one package on a release tag, both on a branch or a
+pull request; the image each job builds comes from that package's `IMAGE` file,
+never from a name in the workflow.
 
-The tag run builds both architectures natively, runs
-[`packages/ankusa_server/scripts/smoke.sh`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/scripts/smoke.sh)
-against the built image (the same script as `mise run docker:smoke`), and only
+The tag run builds both architectures natively, runs the package's
+`scripts/smoke.sh` against the built image (the same script as
+`mise run docker:smoke <pkg>`: `ankusa_server`'s for `jamescarr/ankusa`,
+`ankusa_gateway_server`'s for `jamescarr/ankusa-gateway`), and only
 then publishes `X.Y.Z`, `X.Y`, `latest` (plus `X` from 1.0 on). A prerelease
 version publishes its exact tag only, so nobody can pull `latest` and get an rc.
-The same job pushes `packages/ankusa_server/README.md` as the Docker Hub
-repository description. `release:verify ankusa_server` also checks `latest`
-(for a non-prerelease) and that the tag carries both architectures.
+The same job pushes the package's `README.md` as its Docker Hub
+repository description. `release:verify <pkg>` also checks `latest` for a
+non-prerelease and that the tag carries both architectures; the image it checks
+is the package's `IMAGE`.
+
+```sh
+mise run docker:build                          # jamescarr/ankusa:dev
+mise run docker:build ankusa_gateway_server    # jamescarr/ankusa-gateway:dev
+mise run docker:smoke                          # build and smoke the server image
+mise run docker:smoke ankusa_gateway_server    # build and smoke the gateway image
+```
+
+Both take the package directory under `packages/` (default `ankusa_server`).
 
 The Helm chart ([`deploy/helm/ankusa`](https://github.com/jamescarr/ankusa/tree/main/deploy/helm/ankusa))
 runs `jamescarr/ankusa:<appVersion>` unless `image.tag` says otherwise: set its
 `appVersion` in `Chart.yaml` to the new `ankusa_server` version in the release PR, and
-bump the chart's own `version` when its templates or values changed.
+bump the chart's own `version` when its templates or values changed. Its
+claim-check Deployment runs `claimCheck.image`
+(`jamescarr/ankusa-gateway:<tag>`); `claimCheck.image.tag` is kept by hand, like
+`appVersion` — set it to the new `ankusa_gateway_server` version in the release
+PR (0.1.0 is its first, cut from `@version "0.0.0"` by
+`mise run release:prepare minor ankusa_gateway_server`), or to an `edge`/`sha-`
+tag until that release is published.
 
 ### Supply chain: pins, SBOM, provenance, signature
 
 Nothing the image or its pipeline pulls is a moving name. `mise run lint:pins`
 (in `mise run check` and the CI `lint` job) fails any GitHub action not pinned
 to a 40-character commit SHA, the BuildKit and SBOM-scanner images `docker.yml`
-builds with, and any `FROM` or `# syntax=` in
-[`packages/ankusa_server/Dockerfile`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/Dockerfile)
-not pinned by digest. The tag or version each pin came from is the trailing
+builds with, and any `FROM` or `# syntax=` in a
+`packages/*/Dockerfile` (the server image's and the gateway image's) not pinned
+by digest. The tag or version each pin came from is the trailing
 comment; bump the SHA and the comment together (the header of
 `.mise/tasks/lint/pins` has the commands).
 
-A push to `main` or a server tag then does, in `docker.yml`:
+A push to `main` or an image tag then does, in `docker.yml`, for each package in
+the matrix:
 
 1. **`build`** pushes each architecture by digest with `provenance: mode=max`
    (SLSA provenance) and an SPDX SBOM from the digest-pinned BuildKit Syft
@@ -164,15 +208,18 @@ A push to `main` or a server tag then does, in `docker.yml`:
    `docker buildx imagetools inspect … --format '{{json .SBOM}}'` and `.Provenance`
    each have `linux/amd64` and `linux/arm64`; signs the index digest with
    `cosign sign --yes` (keyless: the job's OIDC token, `id-token: write`, is the
-   identity); and runs `smoke.sh` against `jamescarr/ankusa@sha256:<index>`,
-   whose first step is `cosign verify` with the identity of this workflow on
-   `main` or a server tag. A failure leaves the job red and no GitHub release.
+   identity); and runs the package's `smoke.sh` against
+   `<image>@sha256:<index>`, whose first step is `cosign verify` with the
+   identity of this workflow on `main` or that image's tag. A failure leaves the
+   job red and no GitHub release.
 
-`mise run docker:smoke` builds locally and prints `cosign verify: skipped` (a
-local build is unsigned); `SMOKE_COSIGN_IMAGE=jamescarr/ankusa:X.Y.Z mise run
-docker:smoke`, or `smoke.sh jamescarr/ankusa@sha256:…`, verifies a published one
-(needs `cosign`). How a consumer verifies is in the image's
-[README](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/README.md#verify-an-image).
+`mise run docker:smoke [pkg]` builds locally and prints `cosign verify:
+skipped` (a local build is unsigned); `SMOKE_COSIGN_IMAGE=jamescarr/ankusa:X.Y.Z
+mise run docker:smoke`, or `smoke.sh jamescarr/ankusa@sha256:…`, verifies a
+published one (needs `cosign`) — the gateway image takes the same two forms with
+its own name. How a consumer verifies is in each image's README
+([`ankusa_server`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/README.md#verify-an-image),
+[`ankusa_gateway_server`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway_server/README.md)).
 Each CI package job also uploads `mix hex.audit`'s report as the
 `hex-audit-<package>` artifact.
 

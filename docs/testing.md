@@ -36,8 +36,10 @@ gate.
 | --- | --- |
 | `docs/**`, any `*.md`, `marketing/**`, `static/**` | none of the package jobs; `lint` is the guard, and the summary says "docs-only" |
 | `deploy/monitoring/**` | none of the package jobs; `check:monitoring` is one of `lint`'s steps |
-| `packages/ankusa/**` | the whole Mix group — `ankusa (static)`, `ankusa (tests, 1/4)` … `(tests, 4/4)`, `ankusa (coverage)`, the five adapters, `ankusa_server`, `async_api_spex`, `sdk-elixir` — plus `core integration`, `sdk conformance`, both crash drills and `examples`. Every adapter package and `ankusa_server` path-depend on `ankusa`, so a core change is not finished until they pass, and the producer vectors `sdk conformance` regenerates are core's encoder's output |
+| `packages/ankusa/**` | the whole Mix group — `ankusa (static)`, `ankusa (tests, 1/4)` … `(tests, 4/4)`, `ankusa (coverage)`, the five adapters, `ankusa_gateway`, `ankusa_gateway_server`, `ankusa_server`, `async_api_spex`, `sdk-elixir` — plus `core integration`, `sdk conformance`, both crash drills and `examples`. Every adapter package, the gateway packages and `ankusa_server` path-depend on `ankusa`, so a core change is not finished until they pass, and the producer vectors `sdk conformance` regenerates are core's encoder's output |
 | `packages/async_api_spex/**` | the whole Mix group (`ankusa`'s `Ankusa.AsyncApi` and every project that pins it by path) and `examples` |
+| `packages/ankusa_gateway/**` | `ankusa_gateway`, `ankusa_gateway_server` and `ankusa_server` (both path-depend on it), both crash drills (its `lib/` is in the drill rule), and `examples` for the two example apps that path-depend on it |
+| `packages/ankusa_gateway_server/**` | `ankusa_gateway_server` and `ankusa_server` (it path-depends on it); both crash drills when the diff touches its `lib/` or `mix.exs` |
 | `packages/sdk-*` | that SDK alone; its `check:package` runs its own `conformance_test`, so the shared `sdk conformance` job is only for `conformance/**` and the producer vectors core generates |
 | an adapter (`packages/ankusa_kafka`, `…_nats`, `…_rabbitmq`, `…_redis`) | that package, both crash drills (they ack through the image), and `examples` for the two an example path-depends on |
 | `packages/ankusa_server/**` | `ankusa_server` and both crash drills |
@@ -77,14 +79,15 @@ reaches only the jobs that list it.
 
 ## Static analysis and coverage gates
 
-`check:package` runs these on every Mix package (sobelow only on the two Plug
-applications) between `mix compile --warnings-as-errors` and the tests:
+`check:package` runs these on every Mix package (sobelow only on the packages
+that serve HTTP: `ankusa`, `ankusa_gateway`, `ankusa_gateway_server`,
+`ankusa_server`) between `mix compile --warnings-as-errors` and the tests:
 
 | Gate | What fails it | Config |
 | --- | --- | --- |
 | `mix credo --strict` | any issue | [`.credo.exs`](../.credo.exs): the default checks, except `Design.AliasUsage` is off and the nesting and cyclomatic-complexity ceilings sit at the worst function that exists today (5 and 20) |
 | `mix dialyzer` | any warning (a wrong `@spec`, an unreachable clause, a call that can never succeed) | PLTs live in `_build/plts`; CI caches `_build` keyed on the toolchain pins and `mix.lock`, so a PLT rebuilds only when one changes |
-| `mix sobelow --exit --skip` | any finding in `ankusa` core or `ankusa_server` | a deliberate finding is marked in the code with `# sobelow_skip ["<Check>"]` and a line saying why it is safe; `--skip` is what makes sobelow read those marks |
+| `mix sobelow --exit --skip` | any finding in `ankusa` core, `ankusa_gateway`, `ankusa_gateway_server` or `ankusa_server` | a deliberate finding is marked in the code with `# sobelow_skip ["<Check>"]` and a line saying why it is safe; `--skip` is what makes sobelow read those marks |
 | `mix test --cover` | line coverage under the package's `test_coverage` threshold | `85` for `ankusa` core (shared test helpers excluded), `80` for every other package, in each `mix.exs`. Core's suite runs as four shards, each of which only exports its share, so the floor is enforced on the **merged** report in the `ankusa (coverage)` job (`mix test.coverage`, same threshold and `ignore_modules`); every other package runs one process in its own job |
 
 The test run prints its ExUnit seed; in CI `check:package` also appends it to the
@@ -144,7 +147,7 @@ actor), and changes nothing when the row cannot be written. The VM's log level i
 global, so the test restores it. `ankusa_server`'s `test/ankusa_server/log_test.exs`
 is the proof of the JSON log: `json line` boots a `wal.type: none` edge whose sink
 refuses every hook, sends a request with a `traceparent`, and parses the line the
-refusal wrote with `AnkusaServer.LogFormatter` (`source_id`, `tenant_id`, `hook_id`,
+refusal wrote with `AnkusaGatewayServer.LogFormatter` (`source_id`, `tenant_id`, `hook_id`,
 `sink`, `trace_id`, `instance`, one line, a timestamp); it also covers the ids of
 one request not leaking onto the next on the same connection process, a delivery
 attempt's correlation, the fixed key order, and the redaction of
@@ -449,7 +452,9 @@ The always-on tests cover:
   `test/fixtures/tls/`, regenerated by `gen.sh`); every other listener takes
   its own `tls` block; the metrics listener serves only `/metrics`, `/health`
   and `/ready` and answers `404` to the operator API's routes. The image
-  smoke drill (`mise run docker:smoke`) repeats the mutual-TLS check with
+  smoke drill (`mise run docker:smoke`, the server image;
+  `mise run docker:smoke ankusa_gateway_server` smokes the gateway image)
+  repeats the mutual-TLS check with
   `openssl s_client` and `curl` against the built image.
   The same smoke drill also stops a container under 200 throttled uploads
   (`docker stop`, `listener.drain_delay_ms: 2000`) and asserts `/ready` flips to
@@ -487,6 +492,28 @@ The always-on tests cover:
   file that no longer loads is `422`, and a real `SIGHUP` reloads as the system.
   `config_test.exs` covers `config_version`: absent is 1, a newer version or a
   non-integer is refused naming the key, `migrate!/3` runs each step.
+- **The gateway image** (`packages/ankusa_gateway_server/test/ankusa_gateway_server/`):
+  `config_test.exs` (a version-1 file written for the full image's gateway loads
+  and is migrated; the image's own `rel/gateway.yml` loads; every full-image
+  section — `sources`, `dispatch`, `admin`, … — is refused by name and anything
+  else is an unknown key; `node.roles` is `[claim_check]` or absent; each env
+  override reaches its key; an unset `${VAR}` names the dotted key and a
+  `${file:}` secret resolves; TLS and authenticator mistakes carry `gateway.`
+  paths), `secrets_test.exs` (a Vault reference and an AWS `GetSecretValue`
+  stub resolve into a `token` authenticator through the gateway's loader),
+  `application_test.exs` (a temp `gateway.yml` on a free port: the gateway
+  answers, `prep_stop/1` flips `/ready` to `503`, and without `autostart` the
+  application starts nothing), `log_formatter_test.exs` (one JSON object per
+  line, secret-key values redacted), `tracing_test.exs` (off starts nothing;
+  on starts the SDK with a parent-based ratio sampler and an OTLP/HTTP
+  exporter, and core's spans are recorded) and `gcp_token_test.exs` (concurrent
+  callers share one fetch, a failure retries once, a token near expiry is
+  refreshed). `mise run docker:smoke ankusa_gateway_server` runs
+  `packages/ankusa_gateway_server/scripts/smoke.sh` against the built image:
+  `/health` and `/ready`, a claim path `401` without the token and `404` with
+  it, a claim seeded over `rpc` read back, `print-config` showing no secret, a
+  config with a `sources:` key exiting `78`, and `cosign verify` on a published
+  image.
 - **Dispatch** (`dispatch_test.exs`): a hook reaches every sink of its source
   exactly once; a failing sink is retried until it succeeds; a failing sink's
   retries do not hold the slots a healthy source needs (D1); one dead row per
@@ -1853,7 +1880,8 @@ runs it nightly, on `workflow_dispatch`, on every release tag, and on a pull
 request that touches the example, beside `mise run e2e` (the kind drills below).
 The load generator's reports are uploaded as the `fleet-e2e-reports` artifact.
 `RATE`, `DURATION` (at least 40), `BURST_SECONDS`, `CONCURRENCY`, `KEEP=1` and
-`BUILD_ANKUSA=0` (use the image named by `ANKUSA_IMAGE`) tune a run.
+`ANKUSA_IMAGE` / `GATEWAY_IMAGE` (the two images a run builds;
+`BUILD_ANKUSA=0` skips building them) tune a run.
 
 ### The same fleet from the Helm chart, on kind
 

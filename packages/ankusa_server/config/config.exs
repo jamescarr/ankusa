@@ -2,7 +2,7 @@ import Config
 
 # The release logs to stdout in the container-friendly shape: no metadata, one
 # line per event (`log.format: text`, the default). `log.format: json` replaces
-# this formatter at boot with AnkusaServer.LogFormatter, which prints the
+# this formatter at boot with AnkusaGatewayServer.LogFormatter, which prints the
 # correlation metadata core sets. The level itself comes from the operator's
 # config file (`log.level`), applied by AnkusaServer.Application at boot and
 # changeable at runtime (`PUT /v1/log-level`).
@@ -12,6 +12,10 @@ config :logger, :console, format: "$time [$level] $message\n", metadata: []
 # everywhere but `mix test`: the suite is about the loader, not about a running
 # server, and booting one would take 4000/4002 and write into ./data.
 config :ankusa_server, autostart: config_env() != :test
+
+# The gateway image's application is a dependency here, for its config
+# machinery: this application owns the node, so that one never starts one.
+config :ankusa_gateway_server, autostart: false
 
 # Deliberately no `config :ankusa, autostart: true`. Core defaults to false and
 # AnkusaServer.Application owns the instance: it builds the config from YAML and

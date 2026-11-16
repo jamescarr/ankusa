@@ -44,12 +44,13 @@ defmodule AnkusaServer.MixProject do
       {:ankusa_redis, path: "../ankusa_redis"},
       # The gateway (`claim_check` role): `Ankusa.Gateway`, beside the instance.
       {:ankusa_gateway, path: "../ankusa_gateway"},
+      # The gateway image's package: the YAML machinery both images share (the
+      # document pipeline, the typed accessors, the common sections, secrets,
+      # logging, tracing) lives there once.
+      {:ankusa_gateway_server, path: "../ankusa_gateway_server"},
       {:yaml_elixir, "~> 2.12"},
-      # Signs the secret manager's requests (`AnkusaServer.SecretProvider.AwsSecretsManager`);
-      # the requirement core holds, so the lock does not change.
-      {:aws_signature, "~> 0.4"},
       # The OpenTelemetry SDK and the OTLP exporter behind `tracing.enabled`
-      # (`AnkusaServer.Tracing`). `runtime: false` and `:load` in the release: the
+      # (`AnkusaGatewayServer.Tracing`). `runtime: false` and `:load` in the release: the
       # image starts them only when tracing is on, so a node with it off runs
       # core's no-op `opentelemetry_api` and nothing else.
       {:opentelemetry, "~> 1.5", runtime: false},

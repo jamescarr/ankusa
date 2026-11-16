@@ -8,7 +8,7 @@ defmodule AnkusaServer.Reload do
     1. the file is loaded again (`AnkusaServer.Config.load!/1`): the environment
        is substituted, `config_version` migrated, every `${file:}` / `${sm:}`
        reference resolved again (a reference that fails keeps the value of the
-       last good load, see `AnkusaServer.Secrets`) and the whole file validated;
+       last good load, see `AnkusaGatewayServer.Secrets`) and the whole file validated;
     2. the document is compared, key by key, with the one the running config was
        built from. Each key that differs is *reloadable* or not;
     3. a change to any non-reloadable key refuses the reload
@@ -39,7 +39,8 @@ defmodule AnkusaServer.Reload do
   require Logger
 
   alias Ankusa.Audit.Context
-  alias AnkusaServer.{Config, ConfigError, Secrets}
+  alias AnkusaGatewayServer.{ConfigError, Schema, Secrets}
+  alias AnkusaServer.Config
 
   # A changed key is reloadable when its path starts with one of these…
   @reloadable [
@@ -99,7 +100,7 @@ defmodule AnkusaServer.Reload do
          {:ok, %{sources: sources}} <-
            Ankusa.Reload.apply_config(instance, loaded.config,
              audit: Keyword.get(opts, :audit) || Context.system(),
-             keys: Enum.map(paths, &Config.render_path/1)
+             keys: Enum.map(paths, &Schema.render_path/1)
            ) do
       applied(instance, loaded, paths, sources)
     else
@@ -156,7 +157,7 @@ defmodule AnkusaServer.Reload do
   defp reloadable(paths) do
     case Enum.reject(paths, &reloadable?/1) do
       [] -> {:ok, paths}
-      refused -> {:error, {:not_reloadable, Enum.map(refused, &Config.render_path/1)}}
+      refused -> {:error, {:not_reloadable, Enum.map(refused, &Schema.render_path/1)}}
     end
   end
 
@@ -172,7 +173,7 @@ defmodule AnkusaServer.Reload do
     Secrets.log_kept(loaded.secrets.kept)
     warn_unpublished(instance, paths)
     remember(instance, loaded)
-    keys = Enum.map(paths, &Config.render_path/1)
+    keys = Enum.map(paths, &Schema.render_path/1)
 
     Logger.info(
       "[ankusa] config reloaded: #{length(keys)} key(s) changed, #{length(sources)} source(s) changed, " <>
@@ -194,7 +195,7 @@ defmodule AnkusaServer.Reload do
       do: {:ok, _previous} = Ankusa.LogLevel.set(log.level)
 
     if Enum.any?(paths, &List.starts_with?(&1, ["log", "format"])) do
-      with {:error, reason} <- AnkusaServer.LogFormatter.install(log.format, instance) do
+      with {:error, reason} <- AnkusaGatewayServer.LogFormatter.install(log.format, instance) do
         Logger.error("[ankusa] log.format #{log.format} did not start (#{inspect(reason)})")
       end
     end

@@ -75,8 +75,10 @@ case "$WAL" in disk | dual) ;; *) usage ;; esac
 : "${REPLAY_RATE:=10}"
 : "${BUILD_ANKUSA:=1}"
 : "${ANKUSA_IMAGE:=ankusa-fleet-e2e:local}"
+: "${GATEWAY_IMAGE:=ankusa-gateway-fleet-e2e:local}"
 : "${OUT_DIR:=examples/fleet-e2e/.e2e-out}"
 export ANKUSA_IMAGE
+export GATEWAY_IMAGE
 export WAL
 if [ "$KILL_NODE" = 1 ]; then export BACKUP=true; else export BACKUP=false; fi
 
@@ -202,6 +204,8 @@ compose_all down -v --remove-orphans >/dev/null 2>&1 || true
 if [ "$BUILD_ANKUSA" = "1" ]; then
   echo "==> building $ANKUSA_IMAGE"
   docker build -f packages/ankusa_server/Dockerfile -t "$ANKUSA_IMAGE" .
+  echo "==> building $GATEWAY_IMAGE"
+  docker build -f packages/ankusa_gateway_server/Dockerfile -t "$GATEWAY_IMAGE" .
 fi
 
 echo "==> starting the fleet (wal.type: $WAL$([ "$KILL_NODE" = 1 ] && echo ', backup on'))"
@@ -596,7 +600,7 @@ if [ "$REPLAY_DRILL" = 1 ]; then
 
   replay_out="$OUT_ABS/replay.out"
   echo "    docker-entrypoint replay --nodes ankusa-a:4002,ankusa-b:4002 --filter tenant=acme --rate $REPLAY_RATE"
-  compose run --rm --no-deps -T claim-check replay \
+  compose run --rm --no-deps -T ankusa-cli replay \
     --nodes ankusa-a:4002,ankusa-b:4002 --kind dlq --filter tenant=acme \
     --rate "$REPLAY_RATE" --timeout 900 >"$replay_out" 2>&1 &
   REPLAY_PID=$!

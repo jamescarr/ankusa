@@ -38,21 +38,23 @@ done < <(
     grep -vE '(image=moby/buildkit|generator=)[^[:space:]]*@sha256:[0-9a-f]{64}' || true
 )
 
-# The release image: the syntax frontend and both stages' base images.
-dockerfile=packages/ankusa_server/Dockerfile
-stages=" $(sed -n -E 's/^FROM .* [Aa][Ss] ([A-Za-z0-9_.-]+)[[:space:]]*$/\1/p' "$dockerfile" | tr '\n' ' ') "
-while IFS= read -r line; do
-  image=$(echo "${line#*FROM }" | awk '{print $1}')
-  case "$image" in
-    scratch) continue ;;
-    *@sha256:????????????????????????????????????????????????????????????????) continue ;;
-  esac
-  case "$stages" in *" $image "*) continue ;; esac
-  problems+=("$dockerfile: base image not pinned by digest: $line")
-done < <(grep -E '^FROM ' "$dockerfile")
+# Every release image: the syntax frontend and both stages' base images.
+for dockerfile in packages/*/Dockerfile; do
+  [ -f "$dockerfile" ] || continue
+  stages=" $(sed -n -E 's/^FROM .* [Aa][Ss] ([A-Za-z0-9_.-]+)[[:space:]]*$/\1/p' "$dockerfile" | tr '\n' ' ') "
+  while IFS= read -r line; do
+    image=$(echo "${line#*FROM }" | awk '{print $1}')
+    case "$image" in
+      scratch) continue ;;
+      *@sha256:????????????????????????????????????????????????????????????????) continue ;;
+    esac
+    case "$stages" in *" $image "*) continue ;; esac
+    problems+=("$dockerfile: base image not pinned by digest: $line")
+  done < <(grep -E '^FROM ' "$dockerfile")
 
-grep -qE '^# syntax=[^[:space:]]+@sha256:[0-9a-f]{64}$' "$dockerfile" ||
-  problems+=("$dockerfile: the '# syntax=' frontend is not pinned by digest")
+  grep -qE '^# syntax=[^[:space:]]+@sha256:[0-9a-f]{64}$' "$dockerfile" ||
+    problems+=("$dockerfile: the '# syntax=' frontend is not pinned by digest")
+done
 
 # The compose files `check:package` brings up and `test:integration` starts.
 # Each `image:` is the same kind of input as a `FROM`: a mutable tag unless the

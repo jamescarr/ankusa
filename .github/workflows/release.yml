@@ -22,6 +22,7 @@ on:
       - "async_api_spex-v*"
       - "sdk-elixir-v*"
       - "!ankusa_server-v*"
+      - "!ankusa_gateway_server-v*"
 
 concurrency:
   group: release-${{ github.ref }}
