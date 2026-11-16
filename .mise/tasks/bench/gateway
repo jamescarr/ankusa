@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#MISE description="The gateway's self-asserting bench (rules decision, cached remote decision, warm authentication, auth overhead on a claim read): each case has its own p99 budget"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT/packages/ankusa_gateway"
+
+# The bench runs under MIX_ENV=test (its stubs and the core test helpers are
+# test code), so fetch and compile that environment first: compile time must
+# not land in the measured runs. No baseline: `bench/authz_bench.exs` asserts
+# every case's budget itself and exits 1 naming the case that missed.
+export MIX_ENV=test
+mix deps.get --check-locked
+mix compile
+mix run bench/authz_bench.exs

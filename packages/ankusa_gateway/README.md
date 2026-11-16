@@ -93,10 +93,35 @@ authz: %{
 ```
 
 A step that cannot decide fails closed (`503 authz_unavailable`) unless its
-`on_unavailable` is `:abstain` or `:deny`.
+`on_unavailable` is `:abstain` or `:deny`. The whole policy has
+`authz.deadline_ms` (250 ms).
+
+`Ankusa.Gateway.Authz.Rules` decides from the token alone: ordered rules over
+actions, spaces, key patterns (`teams/{team}/**`) and the principal's groups,
+scopes, tenants and claims, the first match wins:
+
+```elixir
+authorizers: %{
+  "teams" =>
+    {Ankusa.Gateway.Authz.Rules,
+     %{rules: [%{effect: :allow, actions: [:read], spaces: ["claims"],
+                 keys: ["{tenant}/**"], when: %{groups_any: ["tenant-{{ vars.tenant }}"]}}]}}
+}
+```
+
+An authorizer's `kind/1` says where it runs: `:inline` in the request,
+`:cached` behind the decision cache, `:remote` behind the cache and one
+`Ankusa.Gateway.Caller` per backend (coalesced, bounded, batched, behind a
+breaker). Authentication is cached too, under the credential's SHA-256, never
+past its expiry. Both caches are bounded (`auth.cache`, `authz.cache`).
 
 ## Metrics
 
 Add `Ankusa.Gateway.Metrics` to core's `metrics.extra`:
-`ankusa_gateway_requests_total{api,status}` and
-`ankusa_gateway_request_duration_seconds{api}`.
+`ankusa_gateway_requests_total{api,status}`,
+`ankusa_gateway_request_duration_seconds{api}`, the authentication and policy
+decisions (`ankusa_gateway_authn_total`, `ankusa_gateway_authz_decisions_total`,
+`ankusa_gateway_authz_duration_seconds`), each remote backend's caller
+(`ankusa_gateway_calls_total`, `ankusa_gateway_caller_{limit,inflight,queued}`,
+`ankusa_gateway_caller_breaker_transitions_total`) and the caches
+(`ankusa_gateway_cache_{entries,bytes}`).

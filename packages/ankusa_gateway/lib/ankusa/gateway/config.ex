@@ -24,6 +24,14 @@ defmodule Ankusa.Gateway.Config do
   | `max_concurrent_requests` | `1024` | requests served at once on this node; `0` = no cap |
   | `auth.allow_insecure` | `false` | allow an empty chain on a non-loopback `ip` |
   | `auth.authenticators` | `[]` | the chain, at most 8, at most one `mtls` |
+  | `auth.cache.ttl_ms` | `60000` | how long an authenticated credential is remembered (never past its own expiry); `0` = off |
+  | `auth.cache.negative_ttl_ms` | `5000` | how long a refusal by an authenticator that calls out is remembered |
+  | `auth.cache.max_entries`, `auth.cache.max_bytes` | `100000`, `33554432` | the authentication cache's bounds |
+  | `authz.deadline_ms` | `250` | the whole policy's budget per request |
+  | `authz.cache.max_entries`, `authz.cache.max_bytes` | `200000`, `67108864` | the decision cache's bounds |
+  | `authz.cache.allow_ttl_ms`, `authz.cache.deny_ttl_ms` | `5000`, `1000` | how long a `:cached`/`:remote` authorizer's allow, and deny or abstain, is reused (`0` = never) |
+  | `authz.cache.refresh_ahead` | `true` | a `:remote` decision in the last fifth of its TTL is refreshed in the background |
+  | `authz.cache.serve_stale_ms` | `0` | how long past its TTL a decision is kept, to answer with when its backend is unavailable |
   | `authz.authorizers` | `%{}` | `%{name => {module, opts}}`; `"scopes"` is reserved and always defined |
   | `authz.policies` | `%{}` | `%{name => %{mode: :first \\| :all \\| :any, steps: [...]}}`; `"claims"` defaults to `[scopes]` |
   | `claims.enabled` | `true` | serve the claims API (else its routes are `404`) |
@@ -49,8 +57,29 @@ defmodule Ankusa.Gateway.Config do
             ip: "127.0.0.1",
             tls: nil,
             max_concurrent_requests: 1024,
-            auth: %{allow_insecure: false, authenticators: []},
-            authz: %{authorizers: %{}, policies: %{}},
+            auth: %{
+              allow_insecure: false,
+              authenticators: [],
+              cache: %{
+                ttl_ms: 60_000,
+                negative_ttl_ms: 5_000,
+                max_entries: 100_000,
+                max_bytes: 33_554_432
+              }
+            },
+            authz: %{
+              authorizers: %{},
+              policies: %{},
+              deadline_ms: 250,
+              cache: %{
+                max_entries: 200_000,
+                max_bytes: 67_108_864,
+                allow_ttl_ms: 5_000,
+                deny_ttl_ms: 1_000,
+                refresh_ahead: true,
+                serve_stale_ms: 0
+              }
+            },
             claims: %{enabled: true, policy: "claims", integrity_check: :manifest}
 
   @type authenticator :: %{type: atom(), name: String.t(), module: module(), config: map()}
@@ -64,17 +93,32 @@ defmodule Ankusa.Gateway.Config do
           ip: String.t() | :inet.ip_address(),
           tls: map() | nil,
           max_concurrent_requests: non_neg_integer(),
-          auth: %{allow_insecure: boolean(), authenticators: [authenticator()]},
+          auth: %{allow_insecure: boolean(), authenticators: [authenticator()], cache: map()},
           authz: %{
             authorizers: %{String.t() => authorizer()},
-            policies: %{String.t() => policy()}
+            policies: %{String.t() => policy()},
+            deadline_ms: pos_integer(),
+            cache: map()
           },
           claims: %{enabled: boolean(), policy: String.t(), integrity_check: :off | :manifest}
         }
 
   @top_keys [:instance, :port, :ip, :tls, :max_concurrent_requests, :auth, :authz, :claims]
-  @auth_keys [:allow_insecure, :authenticators]
-  @authz_keys [:authorizers, :policies]
+  @auth_keys [:allow_insecure, :authenticators, :cache]
+  @authz_keys [:authorizers, :policies, :deadline_ms, :cache]
+  @auth_cache %{
+    ttl_ms: 0..3_600_000,
+    negative_ttl_ms: 0..60_000,
+    max_entries: 1_000..5_000_000,
+    max_bytes: 1_048_576..1_073_741_824
+  }
+  @authz_cache %{
+    max_entries: 1_000..10_000_000,
+    max_bytes: 1_048_576..4_294_967_296,
+    allow_ttl_ms: 0..3_600_000,
+    deny_ttl_ms: 0..3_600_000,
+    serve_stale_ms: 0..3_600_000
+  }
   @claims_keys [:enabled, :policy, :integrity_check]
   @policy_keys [:mode, :steps]
   @step_keys [:use, :on_unavailable]
@@ -104,10 +148,9 @@ defmodule Ankusa.Gateway.Config do
     address = Ankusa.Config.listen_ip!(ip, "gateway.ip")
     tls = Ankusa.Listener.normalize_tls!(Map.get(given, :tls), "gateway.tls")
 
-    authorizers =
-      authorizers!(given |> Map.get(:authz, %{}) |> section!("gateway.authz", @authz_keys))
-
-    policies = policies!(Map.get(given, :authz, %{}), authorizers)
+    authz = given |> Map.get(:authz, %{}) |> section!("gateway.authz", @authz_keys)
+    authorizers = authorizers!(authz)
+    policies = policies!(authz, authorizers)
     auth = auth!(Map.get(given, :auth, %{}), tls)
 
     if check_exposure?, do: exposure!(auth, address)
@@ -123,7 +166,17 @@ defmodule Ankusa.Gateway.Config do
           "gateway.max_concurrent_requests"
         ),
       auth: auth,
-      authz: %{authorizers: authorizers, policies: policies},
+      authz: %{
+        authorizers: authorizers,
+        policies: policies,
+        deadline_ms:
+          Options.int_in!(
+            Map.get(authz, :deadline_ms, 250),
+            10..30_000,
+            "gateway.authz.deadline_ms"
+          ),
+        cache: authz_cache!(Map.get(authz, :cache, %{}))
+      },
       claims: claims!(Map.get(given, :claims, %{}), policies)
     }
   end
@@ -157,7 +210,30 @@ defmodule Ankusa.Gateway.Config do
       end
 
     chain!(authenticators, tls)
-    %{allow_insecure: allow_insecure, authenticators: authenticators}
+
+    %{
+      allow_insecure: allow_insecure,
+      authenticators: authenticators,
+      cache:
+        ranged!(
+          Map.get(given, :cache, %{}),
+          "gateway.auth.cache",
+          @auth_cache,
+          %__MODULE__{}.auth.cache
+        )
+    }
+  end
+
+  # A section of integer keys with ranges, over its defaults.
+  defp ranged!(value, key, ranges, defaults) do
+    given = section!(value, key, Map.keys(defaults))
+
+    Map.new(defaults, fn {k, default} ->
+      case Map.fetch(ranges, k) do
+        {:ok, range} -> {k, Options.int_in!(Map.get(given, k, default), range, "#{key}.#{k}")}
+        :error -> {k, Map.get(given, k, default)}
+      end
+    end)
   end
 
   defp authenticator!(entry, index) do
@@ -335,6 +411,12 @@ defmodule Ankusa.Gateway.Config do
     end
 
     %{use: name, on_unavailable: on_unavailable}
+  end
+
+  defp authz_cache!(value) do
+    key = "gateway.authz.cache"
+    cache = ranged!(value, key, @authz_cache, %__MODULE__{}.authz.cache)
+    %{cache | refresh_ahead: Options.boolean!(cache.refresh_ahead, "#{key}.refresh_ahead")}
   end
 
   # ── claims ──────────────────────────────────────────────────────────────────

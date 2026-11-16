@@ -7,12 +7,14 @@ defmodule Ankusa.Gateway.Supervisor do
        registry stops the gateway, so its parent starts it again registered
        in the new one);
     2. the `:gateway` failure domain (`Ankusa.Instance.Isolated`), in order:
-       the keys server of the chain's `jwt` authenticators, every
-       authenticator's and authorizer's own children, the claim read cache
-       (`Ankusa.ClaimCheck.Cache`, when the claims API is on and
+       the keys server of the chain's `jwt` authenticators, the three caches
+       (`Ankusa.Gateway.Cache`: `:authn`, `:authz`, `:acl`), every
+       authenticator's own children, one `Ankusa.Gateway.Caller` per
+       `:remote` authorizer and every authorizer's own children, the claim
+       read cache (`Ankusa.ClaimCheck.Cache`, when the claims API is on and
        `claim_check.read_cache_bytes > 0`), the reader
-       (`Ankusa.ClaimCheck.Reader`, always: it owns the request gate), and the
-       listener, last.
+       (`Ankusa.ClaimCheck.Reader`, always: it owns the request gate),
+       `Ankusa.Gateway.Gauges`, and the listener, last.
 
   The listener takes core's `listener.*` limits (`Ankusa.Listener.bandit_options/3`)
   with `gateway.tls`, `gateway.ip` and `gateway.port`.
@@ -24,7 +26,10 @@ defmodule Ankusa.Gateway.Supervisor do
 
   require Logger
 
-  alias Ankusa.Gateway.{Authn, Authz, Config}
+  alias Ankusa.Gateway.{Authn, Authz, Cache, Config}
+
+  # The ACL cache's bounds until `gateway.sharing` configures them.
+  @acl_cache [max_entries: 100_000, max_bytes: 67_108_864, max_ttl_ms: 60_000]
 
   @spec start_link(atom()) :: Supervisor.on_start()
   def start_link(instance) when is_atom(instance),
@@ -57,10 +62,16 @@ defmodule Ankusa.Gateway.Supervisor do
 
   defp domain_children(config, %Config{instance: instance} = gateway) do
     keys_children(gateway) ++
+      cache_children(gateway) ++
       authenticator_children(gateway) ++
+      Authz.caller_specs(gateway) ++
       authorizer_children(gateway) ++
       claim_children(config, gateway) ++
-      [{Ankusa.ClaimCheck.Reader, instance: instance}, listener(config, gateway)]
+      [
+        {Ankusa.ClaimCheck.Reader, instance: instance},
+        {Ankusa.Gateway.Gauges, instance: instance},
+        listener(config, gateway)
+      ]
   end
 
   @doc false
@@ -80,6 +91,26 @@ defmodule Ankusa.Gateway.Supervisor do
         {Ankusa.Admin.Auth.JWT.Keys,
          instance: instance, server: Authn.JWT.keys_server(), realms: realms}
       ]
+  end
+
+  defp cache_children(%Config{instance: instance, auth: auth, authz: authz}) do
+    authz_max_ttl =
+      Enum.max([authz.cache.allow_ttl_ms, authz.cache.deny_ttl_ms, 60_000]) +
+        authz.cache.serve_stale_ms
+
+    [
+      Cache.child_spec_for(instance, :authn,
+        max_entries: auth.cache.max_entries,
+        max_bytes: auth.cache.max_bytes,
+        max_ttl_ms: max(auth.cache.ttl_ms, auth.cache.negative_ttl_ms)
+      ),
+      Cache.child_spec_for(instance, :authz,
+        max_entries: authz.cache.max_entries,
+        max_bytes: authz.cache.max_bytes,
+        max_ttl_ms: authz_max_ttl
+      ),
+      Cache.child_spec_for(instance, :acl, @acl_cache)
+    ]
   end
 
   defp authenticator_children(%Config{

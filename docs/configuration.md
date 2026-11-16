@@ -89,7 +89,7 @@ is the [key reference](#ankusa-config) below.
 | `storage.s3.*`, `storage.gcs.*` transport options | `timeout_ms` (10000), `upload_timeout_ms` (60000), `op_deadline_ms` (120000), `multipart_threshold_bytes` (8388608), `multipart_part_bytes` (8388608), `retries` (2), `breaker_failures` (5; 0 = no breaker), `breaker_open_ms` (30000), `breaker_slow_ms` (5000), `pool_size` (32), `pool_count` (1), `pool_timeout` (5000). The same keys are accepted by the `s3`/`gcs` block of `claim_check.store(s)` and `backup.store`. Integers, range-checked when the instance starts. See [Conditional writes, retries, checksums, multipart, pools](storage.md#conditional-writes-retries-checksums-multipart-pools) |
 | `archive` | `retention_days` (`nil` keeps segment objects; an integer deletes a segment object and its index through the blob store, with the catalogue row, once the newest hook in it is that old). See the key reference for its relation to `storage.catalogue_retention_days` |
 | `claim_check` | `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`), `stores` (a list of `store`-shaped entries, exclusive with `store`: failover between them), `placement` (`ordered` \| `hash`), `store_cooldown_ms` (30000), `key_layout` (`flat` \| `sharded`), and the claim read engine's tuning: `read_deadline_ms` (5000), `read_timeout_ms` (3000), `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256), `read_cache_bytes` (134217728; 0 = no cache), `read_cache_max_entry_bytes` (1048576), and signed refs: `ref_signing_keys` (`[]`; a list or a comma-separated string of `[current, previous…]`, each ≥ 16 bytes; use `${VAR}`), `ref_ttl_ms` (null = the retention, else 30 days), `accept_unsigned_refs` (null = only while no key is set). The listener's keys (`port`, `ip`, `tls`, `auth`, `max_concurrent_requests`, `claims.integrity_check`) are the [`gateway` section's](#the-gateway-config_version-2). See [`claim-check.md`](claim-check.md#a-dedicated-claim-store), [Under load](claim-check.md#under-load) and [The reference](claim-check.md#the-reference) |
-| `gateway` | The claim-check listener, run by the `claim_check` role (or the `jamescarr/ankusa-gateway` image): `port` (4001), `ip` (`127.0.0.1`), `tls` (a TLS block), `max_concurrent_requests` (1024; 0 = no cap), `auth.allow_insecure` (`false`), `auth.authenticators` (`[]`: at most 8, at most one `mtls`; each `type` `token`, `jwt` or `mtls`), `claims.enabled` (`true`), `claims.policy` (`claims`), `claims.integrity_check` (`manifest`). The policy engine's `authz.*` keys are Elixir config (`Ankusa.Gateway.Config`) for now. See [The gateway](#the-gateway-config_version-2) |
+| `gateway` | The claim-check listener, run by the `claim_check` role (or the `jamescarr/ankusa-gateway` image): `port` (4001), `ip` (`127.0.0.1`), `tls` (a TLS block), `max_concurrent_requests` (1024; 0 = no cap), `auth.allow_insecure` (`false`), `auth.authenticators` (`[]`: at most 8, at most one `mtls`; each `type` `token`, `jwt` or `mtls`), `auth.cache.*` (the authentication cache), `authz.deadline_ms` (250), `authz.cache.*` (the decision cache), `authz.authorizers` (`{name => {type: rules, ...}}` in YAML; a module in Elixir), `authz.policies` (`claims` defaults to the built-in `scopes` step), `claims.enabled` (`true`), `claims.policy` (`claims`), `claims.integrity_check` (`manifest`). See [The gateway](#the-gateway-config_version-2) |
 | `backup` | `enabled` (`false`), `interval_ms` (60000), `keep` (3), `store` (unset = the `storage` bucket; same shape as `claim_check.store`), `secondary` (a second store of the same shape: every backup is written to both, restore falls back to it), `timeout_ms` (120000), `verify_interval_ms` (unset = never), `signing_key` (a string or a list, e.g. `["${BACKUP_SIGNING_KEY}"]`: the first signs, any verifies), `final_timeout_ms` (20000), `max_age_ms` (unset = no `/ready` label), `require_fresh` (`false`). Continuous backup of the node's store, restored at boot into an empty `data_dir`; keys go under `storage.key_prefix`. See [`storage.md`](storage.md#backup-and-restore) |
 | `routes` | `enabled` (`false`), `max_routes` (1000000), `memory_budget_bytes` (8589934592), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms`/`store.timeout_ms`/`store.load_timeout_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `admin.tls` (a TLS block), `admin.auth` (like `admin.auth` of the operator API), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
@@ -128,6 +128,16 @@ runs it when `node.roles` lists `claim_check`, and the gateway's own image
 | `max_concurrent_requests` | `1024` | Requests one gateway serves at once, cache hits included; past it `503 overloaded` with `Retry-After` 1–3 before anything is read. `0` is no cap |
 | `auth.allow_insecure` | `false` | Accept the empty chain off loopback: something in front of the listener authenticates every caller |
 | `auth.authenticators` | `[]` | The chain, tried in order; at most 8 entries, at most one `mtls`. See below |
+| `auth.cache.ttl_ms` | `60000` | How long an authenticated credential is remembered: a hit skips the chain, the signature check and the issuer peek. Never past the credential's own expiry; `0` = off |
+| `auth.cache.negative_ttl_ms` | `5000` | How long a refusal is remembered, by an authenticator whose `cache_negative?/0` says so (one that calls out) |
+| `auth.cache.max_entries`, `auth.cache.max_bytes` | `100000`, `33554432` | The authentication cache's bounds; an eviction only costs a re-authentication |
+| `authz.deadline_ms` | `250` | The whole policy's budget per request (10–30000): a step past it is `503 authz_unavailable` under `on_unavailable: fail` |
+| `authz.cache.max_entries`, `authz.cache.max_bytes` | `200000`, `67108864` | The decision cache's bounds |
+| `authz.cache.allow_ttl_ms`, `authz.cache.deny_ttl_ms` | `5000`, `1000` | How long a `:cached`/`:remote` step's allow, and its deny or abstain, is reused (`0` = never) |
+| `authz.cache.refresh_ahead` | `true` | A `:remote` decision in the last fifth of its TTL is refreshed in the background |
+| `authz.cache.serve_stale_ms` | `0` | How long past its TTL a decision is kept, to answer with when its backend is unavailable (`0` = fail closed) |
+| `authz.authorizers` | `%{}` | `%{name => {module, opts}}` in Elixir; in YAML `{type: rules, ...}`. `"scopes"` is reserved and always defined |
+| `authz.policies` | `%{}` | `%{name => %{mode, steps}}`; `claims` defaults to `%{mode: first, steps: [scopes]}` |
 | `claims.enabled` | `true` | Serve `GET`/`HEAD /v1/claims/…`; `false` answers `404 not_found` on those routes |
 | `claims.policy` | `claims` | The authorizer policy the claim routes evaluate |
 | `claims.integrity_check` | `manifest` | `manifest`: check every whole-claim `GET` against the sha256 its pack's manifest records, and answer `502 integrity_mismatch` rather than send bytes that differ; `off` serves the store's bytes unchecked and sends no digest |
@@ -175,11 +185,139 @@ on loopback or with `allow_insecure: true`; the gateway logs a warning at start.
 The authenticators answer `401` when a credential of their form is wrong, `503
 auth_unavailable` when an identity provider that had to be asked does not
 answer, and the policy engine answers `403 forbidden` or `503
-authz_unavailable`. Authorizing differently from the built-in scope rule
-(`claims:read` plus the claim's tenant) means a module implementing
-`Ankusa.Gateway.Authorizer` in `authz.authorizers`, named by the `claims`
-policy; that is Elixir config, see
-[`ankusa_gateway/README.md`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway/README.md).
+authz_unavailable`. Authorization is the `authz` block: the cache below,
+policies, the built-in `scopes` rule, the `rules` authorizer, and a module
+when YAML is not enough.
+
+#### The authentication cache
+
+Each authenticator's answer is kept under `{its index, sha256(credential)}`:
+a hit ends the chain at the first authenticator that reads that credential —
+no issuer peek, no signature check — restoring the principal, its
+`principal_via` type and its subject key (the fingerprint the decision caches
+key on). An entry lives `auth.cache.ttl_ms`, never past the credential's own
+expiry; `0` turns the cache off. A refusal is kept
+`auth.cache.negative_ttl_ms` only by an authenticator that calls out, and only
+its hash is ever stored. A credential over 16 KiB is not one: that
+authenticator is passed over.
+
+#### Authorization
+
+`gateway.authz` decides what a request may do. A **policy** is a mode and an
+ordered list of steps over named authorizers; the claim routes evaluate
+`gateway.claims.policy` (`claims` unless you define another):
+
+| Mode | Decides |
+| --- | --- |
+| `first` (default) | steps in order; the first `allow` or `deny` wins |
+| `all` | the first `deny` wins; allowed when at least one step allowed and none denied |
+| `any` | the first `allow` wins; otherwise deny |
+
+In every mode, every step abstaining is `deny`. A step is an authorizer name,
+or `%{use: <name>, on_unavailable: fail \| abstain \| deny}`: `fail` (the
+default) answers `503 authz_unavailable` when the step cannot decide, `abstain`
+and `deny` stand in for its answer. A step that raises counts as unavailable.
+The whole policy has `authz.deadline_ms`.
+
+Two authorizers ship: `scopes` (reserved, always defined: `claims:read` **and**
+the claim's tenant, `tenant:<tenant_id>` or `tenant:*`) and `rules`, which
+decides from the token alone:
+
+```yaml
+gateway:
+  authz:
+    authorizers:
+      teams:
+        type: rules              # the one YAML type for now
+        rules:                   # 1 to 256 entries; first match wins, no match abstains
+          - effect: allow        # allow | deny
+            actions: [read]      # read write delete list share, or ["*"]
+            spaces: [claims]     # claims: a key is <tenant>/<claim_id>
+            keys: ["{tenant}/**"] # the first matching pattern's captures are `vars`
+            when:                # every listed predicate must hold
+              groups_any: ["reader-{{ vars.tenant }}"]
+    policies:
+      claims: {mode: first, steps: [teams]}
+```
+
+| Rule field | Default | Meaning |
+| --- | --- | --- |
+| `effect` | required | `allow` or `deny` |
+| `actions` | required | a non-empty list of `read write delete list share`, or `["*"]` (which names nothing else) |
+| `spaces` | `["*"]` | space names; `claims` is the claims API |
+| `keys` | `["**"]` | `Ankusa.Gateway.Pattern` patterns over the resource key |
+| `when` | `%{}` | the predicates below; every present one must hold |
+
+| Predicate | Compares |
+| --- | --- |
+| `groups_any`, `groups_all` | templates with `principal.groups` |
+| `scopes_any`, `scopes_all` | templates with the principal's scopes plus the strings of its `claims["scope"]` and `claims["scp"]` (space-delimited or a list) |
+| `tenants_any` | templates with `principal.tenants` (a principal with every tenant matches any template) |
+| `principals` | exact principal ids |
+| `claims` | `%{"dotted.claim.path" => template or [templates]}`: holds when the claim equals — or, as a list, contains — a rendered value |
+
+A pattern is split on `/`: a segment is a literal, `{name}` (exactly one
+segment, captured; `[a-z][a-z0-9_]*`), `*` (exactly one segment, not captured)
+or `**` (zero or more, only as the last segment). A pattern has 1 to 32
+segments and at most 512 bytes.
+
+A predicate value is a **template**: `{{ var }}` or `{{ var ?? fallback }}`
+(whitespace optional). The template surface (`Ankusa.Gateway.Template`) has
+the roots `vars.<capture>`, `space`, `tenant`, `action`, `key`, `kind`,
+`principal.{id,groups,tenants,scopes}` and `claims.<dotted.path>`; a `rules`
+entry may use `vars`, `space`, `tenant` and `action`. A value is a
+string, an integer or a boolean; a list-valued variable is several values, and
+a variable that does not render — absent, `nil`, empty, a control character —
+makes its predicate false, so a rule never matches on a value the caller did
+not have. Everything is compiled at boot: a decision parses nothing.
+
+A `:cached` or `:remote` step's answer goes through the decision cache: keyed
+`{name, subject_key, action, scope}`, where `subject_key` fingerprints the
+whole principal (via, id, scopes, tenants, groups, claims), so a changed group
+or claim is a miss, and `scope` is the authorizer's `cache_scope/2` or
+`{kind, space, tenant, key}`. An allow is reused `authz.cache.allow_ttl_ms`
+(capped by `allow_ttl_max_ms`, 60 s, when the authorizer sets one), a deny or
+abstain `deny_ttl_ms`; `0` is never cached and an error never is. A hit skips
+the authorizer entirely — for a remote one, the network call. With
+`refresh_ahead`, a `:remote` decision in the last fifth of its TTL is
+refreshed in the background; `serve_stale_ms` keeps an entry that long past
+its TTL, to answer with when its backend is unavailable (`0` fails closed).
+
+An authorizer YAML cannot express — an ownership table, a policy service, a
+customer API — is a module implementing `Ankusa.Gateway.Authorizer`, listed in
+`authz.authorizers` (Elixir config, `%{name => {module, opts}}`; in YAML an
+entry is `{type: <a known type>, ...}`).
+`init!/2` compiles its options, `kind/1` says `:inline` (in the request
+process), `:cached` (behind the decision cache) or `:remote` (behind the cache
+and a caller), and `decide/3` answers `{:ok, :allow | :deny | :abstain, meta}`
+(`meta.scope` is what a 403 names) or `{:error, {:unavailable, reason}}`.
+
+#### Remote authorizers
+
+A `:remote` authorizer — one that asks a policy decision point — takes the
+common options below beside its own, validated by
+`Ankusa.Gateway.Authz.Remote` (a `:cached` one takes the three TTL keys
+alone):
+
+| Key | Default | Range |
+| --- | --- | --- |
+| `timeout_ms` | `200` | 10..30000 |
+| `max_inflight` | `64` | 1..10000 |
+| `queue_max` | `1024` | 0..100000 |
+| `batch_max` | `50` | 1..1000 |
+| `batch_window_ms` | `2` | 0..100 |
+| `breaker_failures` | `5` | 0..1000 (`0` = off) |
+| `breaker_open_ms` | `5000` | 100..600000 |
+| `allow_ttl_ms`, `deny_ttl_ms` | unset: `authz.cache`'s | 0..3600000 |
+| `allow_ttl_max_ms` | `60000` | 0..3600000 |
+
+Each remote authorizer gets one `Ankusa.Gateway.Caller`: one run per key in
+flight (coalesced), an adaptive in-flight limit, a bounded per-tenant queue,
+batching through `decide_many/3` when the module exports it, a breaker, and
+the policy deadline. An answer that arrives unavailable is handled by the
+step's `on_unavailable`.
+
+#### The file format
 
 `config_version: 2` is the current format. A file without `config_version` is
 version 1 and is migrated on load: `claim_check.port`/`ip`/`tls` become

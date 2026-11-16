@@ -39,6 +39,7 @@ gate.
 | `packages/ankusa/**` | the whole Mix group — `ankusa (static)`, `ankusa (tests, 1/4)` … `(tests, 4/4)`, `ankusa (coverage)`, the five adapters, `ankusa_gateway`, `ankusa_gateway_server`, `ankusa_server`, `async_api_spex`, `sdk-elixir` — plus `core integration`, `sdk conformance`, both crash drills and `examples`. Every adapter package, the gateway packages and `ankusa_server` path-depend on `ankusa`, so a core change is not finished until they pass, and the producer vectors `sdk conformance` regenerates are core's encoder's output |
 | `packages/async_api_spex/**` | the whole Mix group (`ankusa`'s `Ankusa.AsyncApi` and every project that pins it by path) and `examples` |
 | `packages/ankusa_gateway/**` | `ankusa_gateway`, `ankusa_gateway_server` and `ankusa_server` (both path-depend on it), both crash drills (its `lib/` is in the drill rule), and `examples` for the two example apps that path-depend on it |
+| `packages/ankusa_gateway/{lib,bench}/**`, `.mise/tasks/bench/gateway` | `bench-gateway` (`mise run bench:gateway`: the gateway's own budgets, [below](#the-gateways-budgets-mise-run-benchgateway)) |
 | `packages/ankusa_gateway_server/**` | `ankusa_gateway_server` and `ankusa_server` (it path-depends on it); both crash drills when the diff touches its `lib/` or `mix.exs` |
 | `packages/sdk-*` | that SDK alone; its `check:package` runs its own `conformance_test`, so the shared `sdk conformance` job is only for `conformance/**` and the producer vectors core generates |
 | an adapter (`packages/ankusa_kafka`, `…_nats`, `…_rabbitmq`, `…_redis`) | that package, both crash drills (they ack through the image), and `examples` for the two an example path-depends on |
@@ -48,9 +49,10 @@ gate.
 | `tools/**` | `tools` and `examples` |
 | `.mise.toml`, `.mise/**`, `scripts/**`, `.github/**`, or a path the filter does not know | every job |
 
-The perf gate and `bench-tenant` keep their own scope decision (below): on a
-PR that touches no hot-path file they still start, spend a few seconds judging
-the diff, and skip the minutes of benching. If a skip looks wrong, read the
+The perf gate, `bench-tenant` and `bench-gateway` each run only on
+`bench-scope`'s decision (below): `bench-scope` starts on every run, spends a
+few seconds judging the diff, and a bench job it turns off is `skipped`
+instead of benching. If a skip looks wrong, read the
 `ci-summary` job's table and then the `changes` job's log: it prints the diff
 it read, the packages and flags it decided, and the rule that decided them.
 When a diff runs no package at all, that row is named `matrix.package` in the
@@ -669,7 +671,19 @@ The always-on tests cover:
   (`authz_test.exs`: `first`/`all`/`any` and `on_unavailable`), its config and
   OpenAPI contract (`config_test.exs`, `openapi_test.exs`) and a real socket
   with `/health`, `/ready` and the `ankusa_gateway_requests_total` series
-  (`supervisor_test.exs`); and the
+  (`supervisor_test.exs`); the engine M4 added: `authz_engine_test.exs` (hit and
+  miss per kind, allow/deny TTLs and `ttl_ms` hints, refresh-ahead and
+  stale-on-error, a changed group or claim is a miss, a shared `cache_scope`,
+  the policy deadline), `authn_cache_test.exs` (a hit skips the signature check
+  and fails once the token's `exp` passes, a bad token is never cached, `ttl_ms:
+  0` verifies every time, a 17 KiB credential is not cached),
+  `caller_test.exs` (coalescing, the adaptive limit, queue and
+  partition shedding, deadlines, batching, the breaker, and the 99:1
+  partition-fairness case), `pattern_test.exs` and `template_test.exs` (with
+  StreamData properties, and `compile_url!/3`'s literal origin),
+  `rules_test.exs` (first match wins, the group-from-capture rule, `when.claims`
+  on a list claim, a prefix request, abstain) and `metrics_test.exs` (one
+  authenticated, authorized request exports every gateway series); and the
   `LocalFS` retention sweeper deleting whole `dt=` day partitions (`sweeper_test.exs`,
   "bounded sweep": 10 000 partitions over 100 tenants, one tenant per tick, a
   restart resuming after the persisted cursor, a tenant the budget cut short
@@ -1694,7 +1708,9 @@ Redis half (boot and reload through `HSCAN`) is
 (`BENCH_REBASELINE=1`) skips them: it measures the
 base commit's sources, which have neither the layout nor these APIs.
 
-CI runs it as three jobs in `ci.yml`, and the split is what decides the
+CI runs it as three jobs in `ci.yml` (a fourth, `bench-gateway`, has a scope
+output of its own: [below](#the-gateways-budgets-mise-run-benchgateway)), and
+the split is what decides the
 pipeline's length. `bench-scope` is the decision on its own: a checkout, the
 run's file list from the API (a PR) or `github.event.before..github.sha` (a
 push), and one `grep -E` against `HOT_PATHS` — seconds. `perf gate` is
@@ -1732,6 +1748,27 @@ baseline changes only in a pull request titled `perf: rebaseline <reason>`
 that carries the before/after table: copy the `bench-last` artifact's cells
 and `runner` into `baseline.json`, or run `BENCH_REBASELINE=1 mise run
 bench:gate` on the machine the baseline is for (the `f1_code` block stays).
+
+### The gateway's budgets: `mise run bench:gateway`
+
+[`bench/authz_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_gateway/bench/authz_bench.exs)
+asserts that permissioning does not slow the read path (ADR 0005): one process
+times one call with `System.monotonic_time(:nanosecond)`, 5 000 warm-up
+iterations then 50 000 measured, prints p50/p99 and exits 1 naming every case
+over its budget. No baseline: each case is its own gate.
+
+| Case | Measures | Budget |
+| --- | --- | --- |
+| `rules` | `Authz.decide/4` over a `rules` authorizer of 64 rules (the last one matches) for a principal in 20 groups | p99 ≤ 100 µs |
+| `cached remote` | `Authz.decide/4` over a `:remote` authorizer whose decision is in the cache | p99 ≤ 50 µs |
+| `authn hit` | `Authn.call/2` with a 2 KiB JWT already in the authentication cache | p99 ≤ 50 µs |
+| `router overhead` | `Router.call/2` for a 1 KiB claim read from the claim cache, one warm `jwt` authenticator and the policy `[rules, cached remote]`, minus the same request with no authenticator and the policy `[scopes]` | p50 ≤ 100 µs, p99 ≤ 300 µs |
+
+`mise run bench:gateway` fetches and compiles `MIX_ENV=test` first (its stubs
+and core's test helpers are test code), so compile time is not measured. CI
+runs it as the `bench-gateway` job, from `bench-scope`'s `gateway` output: a
+diff under `packages/ankusa_gateway/{lib,bench}/` or
+`.mise/tasks/bench/gateway` runs it, and nothing else does.
 
 ### Soak: `mise run bench:soak`
 

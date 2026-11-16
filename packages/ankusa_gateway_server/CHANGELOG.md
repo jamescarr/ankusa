@@ -27,3 +27,10 @@ All notable changes to the Ankusa gateway image are documented here. It is the
   modules moved from `ankusa_server`: `ConfigError`, `Secrets` and its
   providers, `LogFormatter`, `Tracing` (now told the service it traces),
   `GcpToken`.
+- **`gateway.auth.cache` and `gateway.authz` in `gateway.yml`**: the
+  authentication cache's `ttl_ms`, `negative_ttl_ms`, `max_entries` and
+  `max_bytes`; `authz.deadline_ms`; `authz.cache` (`max_entries`,
+  `max_bytes`, `allow_ttl_ms`, `deny_ttl_ms`, `refresh_ahead`,
+  `serve_stale_ms`); `authz.authorizers` (`type: rules`, with its `rules` and
+  `when` predicates) and `authz.policies` (`mode`, `steps` with `use` and
+  `on_unavailable`). An unknown `type` names the known ones.

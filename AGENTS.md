@@ -103,6 +103,7 @@ one; CI runs the same tasks this table does.
 | `mise run bench` | core's in-process ingest → dispatch bench (`N`, `CONCURRENCY`, `BODY_BYTES`, `SINK_LATENCY_MS` pass through) |
 | `mise run bench:gate` | the perf regression gate: bench matrix (512 B / 10 KB), median of 3, vs. `packages/ankusa/bench/baseline.json`; p99 > 1.2× or ingest/s < 0.8× fails ([`testing.md`](docs/testing.md#perf-gate-mise-run-benchgate)) |
 | `mise run bench:tenants` | the self-asserting tenant benches (gauges, dispatch tick, intake, routes): no baseline entry, each asserts its own flatness and budgets; `bench:gate` runs them too, and CI runs them as the `bench-tenant` job beside `perf gate` (`BENCH_SKIP_TENANTS=1`) |
+| `mise run bench:gateway` | the gateway's self-asserting bench (`packages/ankusa_gateway/bench/authz_bench.exs`): p99 of a `rules` decision, of a cached remote decision and of a warm authentication, and what auth adds to a claim read; no baseline, each case has its own budget, and CI runs it as `bench-gateway` when the gateway's code or bench changed |
 | `mise run bench:soak` | build the image and soak it under loadgen (`DURATION`, default 3600 s); fails on `missing > 0` or RSS growth > 5 % |
 | `mise run build [pkg]` | local only: build one Mix package from source (default `ankusa_server`); compiled Hex deps come from a cache in `~/.cache/ankusa/mix` shared by every worktree, their warnings go to `_build/<env>/deps-compile.log`, ours stay fatal |
 
@@ -135,6 +136,7 @@ until they pass too.
 | an SDK (`packages/sdk-*`) or `conformance/` | `mise run check:conformance` (also part of `mise run check`) |
 | core's object-store adapters | `mise run test:integration` |
 | a hot-path file (`edge/`, `queue/`, `store/`, `dispatch/`, `verifier/`, `routes/`, `store.ex`, `queue.ex`, `dedupe.ex`, `envelope.ex`, `http.ex`, `route_resolver.ex`, `sink/message.ex`, `sink/http.ex` under `packages/ankusa/lib/ankusa/`) | `mise run bench:gate`; put before/after numbers in the PR |
+| a gateway file (`packages/ankusa_gateway/lib/`, `packages/ankusa_gateway/bench/` or `.mise/tasks/bench/gateway`) | `mise run bench:gateway`; put the p50/p99 numbers in the PR |
 | the ack path (`queue/writer.ex`, `store.ex`, `edge/batcher.ex`) | `ci.yml`'s two crash drills on the PR (ENOSPC/`kill -9`, and the device-mapper power cut); cite them, don't run them ([below](#long-drills-run-in-ci-not-here)) |
 | the claim check, route or source stores, or anything a second node shares | `e2e.yml`'s compose fleet run: on the PR when it touches its paths, otherwise the next nightly ([below](#long-drills-run-in-ci-not-here)) |
 | the ack path under `wal.type: dual`, the intake log or its recovery | `mise run check:package ankusa_kafka`; the `--kill-node` fleet drills are `e2e.yml`'s ([below](#long-drills-run-in-ci-not-here)) |

@@ -33,3 +33,38 @@ follows [Semantic Versioning](https://semver.org/).
   `[:ankusa, :gateway, :request]`.
 - `priv/openapi/claim_check.v1.yaml` moved here from core, with `/ready`, and
   `auth_unavailable` / `authz_unavailable` among the error codes.
+- **The authentication and authorization caches** (`gateway.auth.cache`,
+  `gateway.authz.cache`): three bounded caches per instance (`:authn`,
+  `:authz`, `:acl`). An authentication hit ends the chain at the first
+  authenticator that reads the credential, with no signature check or issuer
+  peek; a decision hit skips the authorizer. An allow lives `allow_ttl_ms`
+  (5 s) and a deny or abstain `deny_ttl_ms` (1 s), with `refresh_ahead` and
+  `serve_stale_ms`.
+- **`Ankusa.Gateway.Caller`**, one process per remote backend: per-key
+  coalescing, an adaptive in-flight limit, a bounded per-partition queue, the
+  policy deadline, batching through `decide_many/3` and a breaker.
+- **The engine's kinds** — `:inline`, `:cached` and `:remote` — keyed
+  `{authorizer, subject_key, action, scope}`, with `authz.deadline_ms` over
+  the whole policy and a `ttl_ms` hint capped by `allow_ttl_max_ms`.
+- **The `rules` authorizer** (`type: rules`): ordered rules of effect,
+  actions, spaces, key patterns and `when` predicates (groups, scopes,
+  tenants, principals, claims), decided from the token alone.
+- **`Ankusa.Gateway.Pattern` and `Ankusa.Gateway.Template`**: compiled key
+  patterns (`{name}`, `*`, `**`) and `{{ var }}` / `{{ var ?? fallback }}`
+  templates, with URLs templated after the origin only and percent-encoded.
+- **`Ankusa.Gateway.Authz.Remote`**, the common options of a `:remote`
+  authorizer (`timeout_ms`, `max_inflight`, `queue_max`, batching, breaker,
+  per-authorizer TTLs).
+- `Ankusa.Gateway.Metrics` gains the authentication, decision, caller and
+  cache series (`ankusa_gateway_authn_total`,
+  `ankusa_gateway_authz_decisions_total`, `ankusa_gateway_authz_duration_seconds`,
+  `ankusa_gateway_calls_total`, `ankusa_gateway_call_duration_seconds`,
+  `ankusa_gateway_caller_limit`/`_inflight`/`_queued`,
+  `ankusa_gateway_caller_breaker_transitions_total`,
+  `ankusa_gateway_cache_entries`, `ankusa_gateway_cache_bytes`), and
+  `Ankusa.Gateway.Gauges` samples the caches every 5 s.
+- `GET /ready` lists each authorizer that exports `ready?/3` under
+  `authorizers` (`"ok"` / `"not_ready"`); a `not_ready` one answers `503`.
+- `bench/authz_bench.exs` (`mise run bench:gateway`): self-asserting budgets
+  for a `rules` decision, a cached remote decision, a warm authentication and
+  the auth overhead on a claim read.
