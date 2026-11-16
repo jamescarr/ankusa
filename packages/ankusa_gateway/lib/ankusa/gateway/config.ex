@@ -251,7 +251,7 @@ defmodule Ankusa.Gateway.Config do
 
     authz = given |> Map.get(:authz, %{}) |> section!("gateway.authz", @authz_keys)
     sharing = sharing!(Map.get(given, :sharing, %{}))
-    authorizers = authorizers!(authz, sharing)
+    authorizers = authorizers!(authz, sharing, instance)
     policies = policies!(authz, authorizers)
     auth = auth!(Map.get(given, :auth, %{}), tls)
 
@@ -299,7 +299,33 @@ defmodule Ankusa.Gateway.Config do
               "gateway.objects.max_inflight_bytes (#{objects.max_inflight_bytes}) must be at " <>
                 "least gateway.spaces.#{space.name}.max_object_bytes (#{space.max_object_bytes})"
     end
+    |> permissions!()
   end
+
+  # A table source that reads a store must not read a space's keys: the
+  # objects API would expose (and a grant could be written over) its files.
+  defp permissions!(%__MODULE__{authz: %{authorizers: authorizers}, spaces: spaces} = config) do
+    for {name, %{module: Ankusa.Gateway.Authz.Table, state: state}} <- authorizers,
+        reach = permission_reach(state),
+        reach != nil,
+        {space_name, space} <- spaces,
+        reach.store == space.store,
+        overlap?(reach.prefix, space.prefix) do
+      raise ArgumentError,
+            "gateway.authz.authorizers.#{name}.source: its store and prefix overlap " <>
+              "gateway.spaces.#{space_name}; keep permission files outside every space"
+    end
+
+    config
+  end
+
+  defp permission_reach(%{source: %{module: module, opts: opts}}) do
+    if function_exported?(module, :reach, 1), do: module.reach(opts), else: nil
+  end
+
+  defp permission_reach(_state), do: nil
+
+  defp overlap?(a, b), do: String.starts_with?(a, b) or String.starts_with?(b, a)
 
   @doc """
   The store options of one call to `space`'s store: its own, with
@@ -541,7 +567,7 @@ defmodule Ankusa.Gateway.Config do
 
   # ── authz ───────────────────────────────────────────────────────────────────
 
-  defp authorizers!(%{} = authz, sharing) do
+  defp authorizers!(%{} = authz, sharing, instance) do
     given =
       authz
       |> Map.get(:authorizers, %{})
@@ -556,7 +582,7 @@ defmodule Ankusa.Gateway.Config do
           raise ArgumentError, "#{key}: the name #{name} is reserved for the built-in authorizer"
         end
 
-        {name, authorizer!(spec, key)}
+        {name, authorizer!(spec, key, instance)}
       end)
 
     built_in =
@@ -567,7 +593,11 @@ defmodule Ankusa.Gateway.Config do
     Map.merge(
       defined,
       Map.new(built_in, fn {name, module} ->
-        {name, %{module: module, state: module.init!(%{}, "gateway.authz.authorizers.#{name}")}}
+        {name,
+         put_instance(
+           %{module: module, state: module.init!(%{}, "gateway.authz.authorizers.#{name}")},
+           instance
+         )}
       end)
     )
   end
@@ -622,18 +652,26 @@ defmodule Ankusa.Gateway.Config do
     %{auth | authenticators: auth.authenticators ++ [link]}
   end
 
-  defp authorizer!({module, opts}, key) when is_atom(module) do
+  defp authorizer!({module, opts}, key, instance) when is_atom(module) do
     unless Options.implements?(module, init!: 2, kind: 1, decide: 3) do
       raise ArgumentError,
             "#{key} must name a module implementing Ankusa.Gateway.Authorizer, got #{inspect(module)}"
     end
 
-    state = module.init!(Options.map!(opts, key), key)
-    %{module: module, state: state}
+    module.init!(Options.map!(opts, key), key)
+    |> put_instance(instance)
+    |> then(&%{module: module, state: &1})
   end
 
-  defp authorizer!(other, key),
+  defp authorizer!(other, key, _instance),
     do: raise(ArgumentError, "#{key} must be {module, opts}, got #{inspect(other)}")
+
+  # The instance is part of every authorizer's state: `cache_scope/2` takes no
+  # instance, and a `table` authorizer's scope names its snapshot generation.
+  defp put_instance(%{module: module, state: state}, instance),
+    do: %{module: module, state: Map.put(state, :instance, instance)}
+
+  defp put_instance(state, instance), do: Map.put(state, :instance, instance)
 
   defp policies!(authz, authorizers) do
     given =

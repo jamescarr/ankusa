@@ -137,7 +137,7 @@ runs it when `node.roles` lists `claim_check`, and the gateway's own image
 | `authz.cache.allow_ttl_ms`, `authz.cache.deny_ttl_ms` | `5000`, `1000` | How long a `:cached`/`:remote` step's allow, and its deny or abstain, is reused (`0` = never) |
 | `authz.cache.refresh_ahead` | `true` | A `:remote` decision in the last fifth of its TTL is refreshed in the background |
 | `authz.cache.serve_stale_ms` | `0` | How long past its TTL a decision is kept, to answer with when its backend is unavailable (`0` = fail closed) |
-| `authz.authorizers` | `%{}` | `%{name => {module, opts}}` in Elixir; in YAML `{type: rules, ...}`. `"scopes"` is reserved and always defined |
+| `authz.authorizers` | `%{}` | `%{name => {module, opts}}` in Elixir; in YAML `{type: rules, ...}` or `{type: table, ...}`. `"scopes"` is reserved and always defined |
 | `authz.policies` | `%{}` | `%{name => %{mode, steps}}`; `claims` defaults to `%{mode: first, steps: [scopes]}` |
 | `claims.enabled` | `true` | Serve `GET`/`HEAD /v1/claims/…`; `false` answers `404 not_found` on those routes |
 | `claims.policy` | `claims` | The authorizer policy the claim routes evaluate |
@@ -306,18 +306,19 @@ default) answers `503 authz_unavailable` when the step cannot decide, `abstain`
 and `deny` stand in for its answer. A step that raises counts as unavailable.
 The whole policy has `authz.deadline_ms`.
 
-Two authorizers ship: `scopes` (reserved, always defined: `claims:read` **and**
-the claim's tenant, `tenant:<tenant_id>` or `tenant:*`) and `rules`, which
-decides from the token alone. With `gateway.sharing.enabled` a third, `grants`
-(reserved too), reads the native grants: a policy takes the grants into account
-only when its steps list it ([Sharing](claim-check.md#sharing)).
+Besides the external decision points (`http`, `openfga`, below), the gateway
+ships `scopes` (reserved, always defined: `claims:read` **and** the claim's
+tenant, `tenant:<tenant_id>` or `tenant:*`), `rules`, which decides from the
+token alone, and `table`, which decides from rows somebody else maintains. With
+`gateway.sharing.enabled`, `grants` (reserved too) reads the native grants: a policy takes the grants into account only when
+its steps list it ([Sharing](claim-check.md#sharing)). A `rules` example:
 
 ```yaml
 gateway:
   authz:
     authorizers:
       teams:
-        type: rules              # rules | http | openfga
+        type: rules              # rules | http | openfga | table
         rules:                   # 1 to 256 entries; first match wins, no match abstains
           - effect: allow        # allow | deny
             actions: [read]      # read write delete list share, or ["*"]
@@ -380,6 +381,68 @@ entry is `{type: <a known type>, ...}`).
 process), `:cached` (behind the decision cache) or `:remote` (behind the cache
 and a caller), and `decide/3` answers `{:ok, :allow | :deny | :abstain, meta}`
 (`meta.scope` is what a 403 names) or `{:error, {:unavailable, reason}}`.
+
+#### The `table` authorizer
+
+`table` turns permissions that already live somewhere — an NDJSON file in an
+object store, an HTTP endpoint, a customer's Postgres database — into policies,
+without a copy the gateway has to keep in step. A **row** names a `principal`,
+an `action`, a `space`, a `prefix` and an `effect`:
+
+```yaml
+gateway:
+  authz:
+    authorizers:
+      teamie:
+        type: table
+        mode: snapshot            # snapshot | lookup
+        source:
+          type: object
+          store: {type: s3, s3: {bucket: perms, region: eu-west-1}}
+          key: gateway/permissions.ndjson
+        identities:               # templates; one identity per rendered value
+          - "user:{{ principal.id }}"
+          - "group:{{ principal.groups }}"
+          - "tenant:{{ principal.tenants }}"
+    policies:
+      documents: {mode: first, steps: [teamie]}
+```
+
+A row matches when its `principal` is one of the caller's identities, its
+`action` is the request's action or `*`, its `space` is the request's space or
+`*`, and its `prefix` is the resource key or one of its ancestor directories
+(`""`, `"a/"`, `"a/b/"`, …). Any matching deny denies, any matching allow
+allows (`effect` absent is `allow`), and no match abstains. Every row is
+validated when it is loaded; a bad row is counted and skipped, and a load with
+more than 1 % bad rows is refused.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `snapshot` | `snapshot`: load the source into an ETS table at boot and every `refresh_ms`, so a decision is a bounded number of reads; `lookup`: ask the source once per cache miss (the common `:remote` options apply) |
+| `source` | required | `{type: object \| http \| postgres, ...}`; `postgres` comes from `ankusa_gateway_postgres` |
+| `columns` | `principal`, `action`, `space`, `prefix`, `effect` | the source's column names, when they differ |
+| `identities` | `user:{{ principal.id }}`, `group:{{ principal.groups }}`, `tenant:{{ principal.tenants }}` | templates (`Ankusa.Gateway.Template`); a list-valued variable is one identity per element |
+| `max_identities` | `256` | a caller with more is `503 authz_unavailable` (fail closed; raise it for that deployment) |
+| `ready_timeout_ms` | `60000` | `/ready` is `503` (`authorizers: {name: not_ready}`) only while no load has ever succeeded and less than this has passed; `0` = never |
+| `refresh_ms` | `30000` | a snapshot's reload period |
+| `max_rows`, `max_bytes` | `1000000`, `268435456` | a larger load is refused and the previous snapshot kept |
+| `stale_after_ms` | `300000` | a snapshot older than this answers `503 authz_unavailable` (never a stale decision) |
+
+`source.type: object` reads NDJSON: exactly one of `key` (one object) or
+`prefix` (every object under it, sorted, at most 1000), with `max_object_bytes`
+(64 MiB). `source.type: http` pages `GET url` (`rows_path` `"rows"`,
+`next_path` `"next"`, `cursor_param` `"cursor"`, `timeout_ms` 15000,
+`max_pages` 10000); the URL must be `https://`, or `http://` to a loopback
+host. `source.type: postgres` runs the operator's `query` (snapshot, with an
+optional `version_query` that skips an unchanged load) or `lookup_query`
+(lookup; request data arrives as `$1..$4`, never as SQL text) in a read-only
+transaction over TLS unless the host is loopback.
+
+A new snapshot orphans every decision cached from the old one (the cache key
+carries the snapshot's generation), so a refresh is visible at once on this
+node; another node sees it on its own `refresh_ms`. Permission rows must stay
+out of reach of the objects API: `Ankusa.Gateway.Config.new/2` refuses a
+`type: object` source whose store and prefix overlap a `gateway.spaces` space.
 
 #### Remote authorizers
 

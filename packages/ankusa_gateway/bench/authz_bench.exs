@@ -18,6 +18,9 @@
 #                   one warm `jwt` authenticator and the policy [rules, cached
 #                   remote], minus the same request with no authenticator and
 #                   the policy [scopes]: p50 <= 100 us, p99 <= 300 us
+#   table snapshot  Authz.Table.decide/3, uncached, over a snapshot of 100 000
+#                   rows with a caller in 64 identities on a key six levels
+#                   deep: p99 <= 1 ms
 
 Logger.configure(level: :warning)
 
@@ -34,6 +37,37 @@ defmodule Bench.RemoteStub do
 
   @impl true
   def decide(_request, _state, _ctx), do: {:ok, :allow, %{}}
+end
+
+defmodule Bench.TableSource do
+  @moduledoc false
+  @behaviour Ankusa.Gateway.Authz.Table.Source
+
+  @impl true
+  def init!(opts, _key), do: Map.new(opts)
+
+  # A row per key under a folder five levels deep, spread over 64 principals.
+  @impl true
+  def load(%{count: count}, _ctx, acc, fun) do
+    Enum.reduce_while(1..count, {:cont, acc}, fn i, {:cont, acc} ->
+      row = %{
+        "principal" => "user:g#{rem(i, 64)}",
+        "action" => "read",
+        "space" => "docs",
+        "prefix" => "a/b/c/d/e/#{i}/",
+        "effect" => "allow"
+      }
+
+      case fun.(row, acc) do
+        {:cont, acc} -> {:cont, {:cont, acc}}
+        {:halt, acc} -> {:halt, {:halt, acc}}
+      end
+    end)
+    |> case do
+      {:cont, acc} -> {:ok, acc}
+      {:halt, acc} -> {:ok, acc}
+    end
+  end
 end
 
 defmodule Bench.Gateway do
@@ -178,6 +212,7 @@ end
 
 alias Bench.Gateway, as: B
 alias Ankusa.Gateway.{Authn, Authz, Router}
+alias Ankusa.Gateway.Authz.Request
 
 {jwk, public} = B.keypair()
 token = B.jwt(jwk)
@@ -190,7 +225,16 @@ inst =
     authz: %{
       authorizers: %{
         "rules" => {Ankusa.Gateway.Authz.Rules, %{rules: B.rules()}},
-        "remote" => {Bench.RemoteStub, %{}}
+        "remote" => {Bench.RemoteStub, %{}},
+        "table" =>
+          {Ankusa.Gateway.Authz.Table,
+           %{
+             mode: :snapshot,
+             source: {Bench.TableSource, %{count: 100_000}},
+             refresh_ms: 30_000,
+             stale_after_ms: 600_000,
+             ready_timeout_ms: 0
+           }}
       },
       policies: %{
         "rules" => %{mode: :first, steps: ["rules"]},
@@ -207,6 +251,20 @@ request = B.request(principal, :jwt)
 
 {:allow, _} = Authz.decide(inst, "rules", request)
 {:allow, _} = Authz.decide(inst, "remote", request)
+:ok = Ankusa.Gateway.Authz.Table.Snapshot.await(inst, "table", 60_000)
+
+table_state = Ankusa.Gateway.config(inst).authz.authorizers["table"].state
+
+table_request = %Request{
+  principal: %{principal | groups: for(i <- 1..63, do: "group-#{i}")},
+  via: :jwt,
+  subject_key: Ankusa.Gateway.Authn.subject_key(:jwt, principal),
+  action: :read,
+  resource: %{kind: :object, space: "docs", key: "a/b/c/d/e/f/x", tenant: nil}
+}
+
+table_ctx = %{instance: inst, name: "table", deadline: 0}
+{:ok, :abstain, _} = Ankusa.Gateway.Authz.Table.decide(table_request, table_state, table_ctx)
 
 # ── the claim both read ─────────────────────────────────────────────────────
 
@@ -243,6 +301,12 @@ authn_conn =
 # ── measure ─────────────────────────────────────────────────────────────────
 
 rules = B.measure(fn -> {:allow, _} = Authz.decide(inst, "rules", request) end)
+
+table =
+  B.measure(fn ->
+    {:ok, :abstain, _} = Ankusa.Gateway.Authz.Table.decide(table_request, table_state, table_ctx)
+  end)
+
 remote = B.measure(fn -> {:allow, _} = Authz.decide(inst, "remote", request) end)
 authn = B.measure(fn -> %{assigns: %{principal: _}} = Authn.call(authn_conn, []) end)
 
@@ -257,7 +321,8 @@ results = [
   {"authn cache hit (2 KiB JWT, #{byte_size(token)} B)", "p99", B.percentile(authn, 0.99),
    50_000},
   {"router overhead (auth + authz)", "p50", overhead.(0.5), 100_000},
-  {"router overhead (auth + authz)", "p99", overhead.(0.99), 300_000}
+  {"router overhead (auth + authz)", "p99", overhead.(0.99), 300_000},
+  {"table snapshot (100k rows, 64 ids, 6 levels)", "p99", B.percentile(table, 0.99), 1_000_000}
 ]
 
 IO.puts("")

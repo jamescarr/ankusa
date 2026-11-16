@@ -36,7 +36,10 @@ defmodule AnkusaGatewayServer.MixProject do
     [
       {:ankusa, path: "../ankusa", override: true},
       {:async_api_spex, path: "../async_api_spex", override: true},
-      {:ankusa_gateway, path: "../ankusa_gateway"},
+      {:ankusa_gateway, path: "../ankusa_gateway", override: true},
+      # The `table` authorizer's Postgres source: the YAML parser
+      # (`GatewaySection`) names the module, so the image carries it.
+      {:ankusa_gateway_postgres, path: "../ankusa_gateway_postgres"},
       {:yaml_elixir, "~> 2.12"},
       # Signs the secret manager's requests (`AnkusaGatewayServer.SecretProvider.AwsSecretsManager`);
       # the requirement core holds, so the lock does not change.

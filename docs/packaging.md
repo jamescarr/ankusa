@@ -58,6 +58,18 @@ packages/
                               (Ankusa.RateLimiter.Store.Redis), and
                               Ankusa.Sink.Redis (delivered hooks published to
                               a pub/sub channel).
+  ankusa_gateway              the gateway library (Hex `ankusa_gateway`):
+                              `Ankusa.Gateway` — the claims API, the
+                              authentication chain, the authorization engine
+                              (`rules`, `table`, `scopes`) and the objects API —
+                              path-dep on ankusa + plug/bandit/jose/nebulex.
+  ankusa_gateway_postgres     the gateway's `table` authorizer over Postgres
+                              (Hex `ankusa_gateway_postgres`): the operator's
+                              own query, read-only, with request data as bound
+                              parameters. path-dep on ankusa + ankusa_gateway +
+                              postgrex.
+  ankusa_gateway_server       the jamescarr/ankusa-gateway Docker image, and
+                              the YAML machinery both images share. Not on Hex.
   ankusa_server               the jamescarr/ankusa Docker image: core + every
                               adapter, configured by YAML. Not on Hex.
   async_api_spex              generic AsyncAPI 3.0 library: document structs,
@@ -98,14 +110,15 @@ tools/loadgen/                load generator for the examples
 conformance/                  language-neutral SDK conformance vectors + checker
 ```
 
-`ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats`, and `ankusa_redis` each
-depend on `ankusa` via `{:ankusa, path: "../ankusa"}` for local development,
-and on the Hex package once published. Each ships its **own**
-`docker-compose.yml` for local dev/test infra (`packages/ankusa_rabbitmq/` →
-RabbitMQ on `:5673`/`:15673`; `packages/ankusa_kafka/` → Redpanda on `:19092`;
-`packages/ankusa_nats/` → NATS with JetStream on `:4223`/`:8223`;
-`packages/ankusa_redis/` → Redis on `:6399`), which `mise run check:package
-<pkg>` brings up and tears down around the suite. Every adapter package test
+`ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats`, `ankusa_redis` and
+`ankusa_gateway_postgres` each depend on `ankusa` (the last through
+`ankusa_gateway` too) via path deps for local development, and on the Hex
+package once published. Each ships its **own** `docker-compose.yml` for local
+dev/test infra (`packages/ankusa_rabbitmq/` → RabbitMQ on `:5673`/`:15673`;
+`packages/ankusa_kafka/` → Redpanda on `:19092`; `packages/ankusa_nats/` →
+NATS with JetStream on `:4223`/`:8223`; `packages/ankusa_redis/` → Redis on
+`:6399`; `packages/ankusa_gateway_postgres/` → Postgres on `:5499`), which
+`mise run check:package <pkg>` brings up and tears down around the suite. Every adapter package test
 suite needs `Ankusa.Registry` running (started by `ankusa`'s own Application);
 none needs any config to get it, since Ankusa.Application's built-in default
 instance is off (`autostart: false`) by default and only the core project's

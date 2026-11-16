@@ -284,7 +284,8 @@ defmodule Ankusa.Gateway.ConfigTest do
           }
         )
 
-      assert config.authz.authorizers["allow"] == %{module: Allow, state: %{x: 1}}
+      assert config.authz.authorizers["allow"] ==
+               %{module: Allow, state: %{x: 1, instance: :default}}
 
       assert config.authz.policies["claims"] == %{
                mode: :any,

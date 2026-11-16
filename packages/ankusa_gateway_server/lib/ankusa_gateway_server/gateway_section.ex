@@ -36,7 +36,8 @@ defmodule AnkusaGatewayServer.GatewaySection do
   @authorizer_types %{
     "rules" => Ankusa.Gateway.Authz.Rules,
     "http" => Ankusa.Gateway.Authz.Http,
-    "openfga" => Ankusa.Gateway.Authz.OpenFGA
+    "openfga" => Ankusa.Gateway.Authz.OpenFGA,
+    "table" => Ankusa.Gateway.Authz.Table
   }
   # The common `:remote` options, as integers; the module checks their ranges.
   @remote_authorizer_keys ~w(timeout_ms max_inflight queue_max batch_max batch_window_ms
@@ -78,6 +79,32 @@ defmodule AnkusaGatewayServer.GatewaySection do
   @authorizer_batch_keys ~w(url items_key results_path)
   @openfga_resource_keys ~w(space match object)
   @openfga_tuple_keys ~w(user relation object)
+  @table_keys ~w(mode source columns identities max_identities ready_timeout_ms refresh_ms max_rows
+                 max_bytes stale_after_ms timeout_ms max_inflight queue_max batch_max
+                 batch_window_ms breaker_failures breaker_open_ms allow_ttl_ms deny_ttl_ms
+                 allow_ttl_max_ms)
+  @table_remote_atoms Map.new(
+                        ~w(timeout_ms max_inflight queue_max batch_max batch_window_ms
+                           breaker_failures breaker_open_ms allow_ttl_ms deny_ttl_ms
+                           allow_ttl_max_ms),
+                        &{&1, String.to_atom(&1)}
+                      )
+  @table_columns %{
+    "principal" => :principal,
+    "action" => :action,
+    "space" => :space,
+    "prefix" => :prefix,
+    "effect" => :effect
+  }
+  @table_source_types %{
+    "object" => Ankusa.Gateway.Authz.Table.Source.Object,
+    "http" => Ankusa.Gateway.Authz.Table.Source.Http,
+    "postgres" => Ankusa.Gateway.Postgres.Source
+  }
+  @object_source_keys ~w(type store key prefix max_object_bytes)
+  @http_source_keys ~w(type url headers rows_path next_path cursor_param timeout_ms max_pages)
+  @postgres_source_keys ~w(type url hostname port database username password ssl query
+                            version_query lookup_query pool_size timeout_ms)
   # A rule's keys and its `when` keys, string to atom (closed sets).
   @rule_keys Map.new(~w(effect actions spaces keys when)a, &{Atom.to_string(&1), &1})
   @rule_when_keys Map.new(
@@ -310,6 +337,119 @@ defmodule AnkusaGatewayServer.GatewaySection do
     |> put_map(:allow_insecure_http, bool_opt(given, "allow_insecure_http", path))
     |> remote_authorizer_opts(given, path)
   end
+
+  defp authorizer_opts(Ankusa.Gateway.Authz.Table, map, path) do
+    section!(map, @table_keys, path)
+
+    %{}
+    |> put_map(:mode, atom_enum_opt(map, "mode", ~w(snapshot lookup), path))
+    |> put_map(:source, table_source(map["source"], path ++ ["source"]))
+    |> put_map(:columns, table_columns(map["columns"], path ++ ["columns"]))
+    |> put_map(
+      :identities,
+      map["identities"] && string_list!(map["identities"], path ++ ["identities"])
+    )
+    |> put_map(:max_identities, int_opt(map, "max_identities", path))
+    |> put_map(:ready_timeout_ms, int_opt(map, "ready_timeout_ms", path))
+    |> put_map(:refresh_ms, int_opt(map, "refresh_ms", path))
+    |> put_map(:max_rows, int_opt(map, "max_rows", path))
+    |> put_map(:max_bytes, int_opt(map, "max_bytes", path))
+    |> put_map(:stale_after_ms, int_opt(map, "stale_after_ms", path))
+    |> then(&table_remote(&1, map, path))
+  end
+
+  defp table_remote(opts, map, path) do
+    Enum.reduce(@table_remote_atoms, opts, fn {name, atom}, acc ->
+      put_opt(acc, atom, int_opt(map, name, path))
+    end)
+  end
+
+  defp table_columns(nil, _path), do: nil
+
+  defp table_columns(%{} = columns, path) do
+    given = section!(columns, Map.keys(@table_columns), path)
+
+    Map.new(given, fn {name, value} ->
+      {Map.fetch!(@table_columns, name), expect_string(value, path ++ [name])}
+    end)
+  end
+
+  defp table_columns(other, path),
+    do: raise(ConfigError, message: type_error(path, "a mapping of column names", other))
+
+  defp table_source(nil, path),
+    do: raise(ConfigError, message: "#{render_path(path)} is required")
+
+  defp table_source(%{} = source, path) do
+    case Map.fetch(@table_source_types, source["type"]) do
+      {:ok, module} ->
+        keys =
+          case module do
+            Ankusa.Gateway.Authz.Table.Source.Object -> @object_source_keys
+            Ankusa.Gateway.Authz.Table.Source.Http -> @http_source_keys
+            Ankusa.Gateway.Postgres.Source -> @postgres_source_keys
+          end
+
+        entry = section!(source, keys, path)
+        {module, table_source_opts(module, entry, path)}
+
+      :error ->
+        known = @table_source_types |> Map.keys() |> Enum.sort() |> Enum.join(", ")
+
+        raise ConfigError,
+          message:
+            "#{render_path(path)}.type: unknown type #{inspect(source["type"])} (known: #{known})"
+    end
+  end
+
+  defp table_source(other, path),
+    do: raise(ConfigError, message: type_error(path, "a mapping", other))
+
+  defp table_source_opts(Ankusa.Gateway.Authz.Table.Source.Object, entry, path) do
+    %{}
+    |> put_map(:store, entry["store"] && claim_store!(entry["store"], path ++ ["store"]))
+    |> put_map(:key, string_opt(entry, "key", path))
+    |> put_map(:prefix, string_opt(entry, "prefix", path))
+    |> put_map(:max_object_bytes, int_opt(entry, "max_object_bytes", path))
+  end
+
+  defp table_source_opts(Ankusa.Gateway.Authz.Table.Source.Http, entry, path) do
+    %{}
+    |> put_map(:url, string_opt(entry, "url", path))
+    |> put_map(:headers, table_headers(entry["headers"], path ++ ["headers"]))
+    |> put_map(:rows_path, string_opt(entry, "rows_path", path))
+    |> put_map(:next_path, string_opt(entry, "next_path", path))
+    |> put_map(:cursor_param, string_opt(entry, "cursor_param", path))
+    |> put_map(:timeout_ms, int_opt(entry, "timeout_ms", path))
+    |> put_map(:max_pages, int_opt(entry, "max_pages", path))
+  end
+
+  defp table_source_opts(Ankusa.Gateway.Postgres.Source, entry, path) do
+    %{}
+    |> put_map(:url, string_opt(entry, "url", path))
+    |> put_map(:hostname, string_opt(entry, "hostname", path))
+    |> put_map(:port, int_opt(entry, "port", path))
+    |> put_map(:database, string_opt(entry, "database", path))
+    |> put_map(:username, string_opt(entry, "username", path))
+    |> put_map(:password, string_opt(entry, "password", path))
+    |> put_map(:ssl, bool_opt(entry, "ssl", path))
+    |> put_map(:query, string_opt(entry, "query", path))
+    |> put_map(:version_query, string_opt(entry, "version_query", path))
+    |> put_map(:lookup_query, string_opt(entry, "lookup_query", path))
+    |> put_map(:pool_size, int_opt(entry, "pool_size", path))
+    |> put_map(:timeout_ms, int_opt(entry, "timeout_ms", path))
+  end
+
+  defp table_headers(nil, _path), do: nil
+
+  defp table_headers(%{} = headers, path) do
+    Map.new(headers, fn {name, value} ->
+      {to_string(name), expect_string(value, path ++ [name])}
+    end)
+  end
+
+  defp table_headers(other, path),
+    do: raise(ConfigError, message: type_error(path, "a mapping of headers", other))
 
   # The values (`effect`, `actions`, patterns, templates) are the module's to
   # check; its messages name the same dotted key.

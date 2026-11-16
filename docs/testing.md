@@ -41,6 +41,7 @@ gate.
 | `packages/ankusa_gateway/**` | `ankusa_gateway`, `ankusa_gateway_server` and `ankusa_server` (both path-depend on it), both crash drills (its `lib/` is in the drill rule), and `examples` for the two example apps that path-depend on it |
 | `packages/ankusa_gateway/{lib,bench}/**`, `.mise/tasks/bench/gateway` | `bench-gateway` (`mise run bench:gateway`: the gateway's own budgets, [below](#the-gateways-budgets-mise-run-benchgateway)) |
 | `packages/ankusa_gateway_server/**` | `ankusa_gateway_server` and `ankusa_server` (it path-depends on it); both crash drills when the diff touches its `lib/` or `mix.exs` |
+| `packages/ankusa_gateway_postgres/**` | `ankusa_gateway_postgres` (its compose Postgres), plus `ankusa_gateway_server` and `ankusa_server` (both bundle it) |
 | `packages/sdk-*` | that SDK alone; its `check:package` runs its own `conformance_test`, so the shared `sdk conformance` job is only for `conformance/**` and the producer vectors core generates |
 | an adapter (`packages/ankusa_kafka`, `…_nats`, `…_rabbitmq`, `…_redis`) | that package, both crash drills (they ack through the image), and `examples` for the two an example path-depends on |
 | `packages/ankusa_server/**` | `ankusa_server` and both crash drills |

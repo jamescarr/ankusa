@@ -24,6 +24,10 @@ defmodule Ankusa.Gateway.Metrics do
     * `ankusa_gateway_shares_total{instance,action,result}` — sharing
       mutations (`grant_create`, `grant_revoke`, `link_create`, and
       `acl_cleanup` when a deleted object's ACL document could not be removed).
+    * `ankusa_gateway_table_refreshes_total{instance,authorizer,result}` — a
+      `table` authorizer's snapshot loads, by outcome, and
+      `ankusa_gateway_table_rows` / `ankusa_gateway_table_bytes`
+      `{instance,authorizer}` — the last published snapshot.
 
   Every label value is fixed or operator configuration: nothing a caller sends
   (a tenant, a claim id, a method) is a label.
@@ -140,7 +144,29 @@ defmodule Ankusa.Gateway.Metrics do
             tags: [:instance]
           )
         )
-      ]
+      ] ++ table_metrics(instance)
+  end
+
+  defp table_metrics(instance) do
+    [
+      counter(
+        "ankusa.gateway.table.refreshes.total",
+        Ankusa.Metrics.scope(instance,
+          event_name: [:ankusa, :gateway, :table_refresh],
+          tags: [:instance, :authorizer, :result]
+        )
+      )
+    ] ++
+      for measurement <- [:rows, :bytes] do
+        last_value(
+          "ankusa.gateway.table.#{measurement}",
+          Ankusa.Metrics.scope(instance,
+            event_name: [:ankusa, :gateway, :table_refresh],
+            measurement: measurement,
+            tags: [:instance, :authorizer]
+          )
+        )
+      end
   end
 
   defp caller_gauges(instance) do

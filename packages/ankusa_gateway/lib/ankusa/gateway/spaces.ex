@@ -129,7 +129,11 @@ defmodule Ankusa.Gateway.Spaces do
     }
   end
 
-  defp store!({module, opts}, key) when is_atom(module) and is_list(opts) do
+  @doc false
+  # `{module, opts}` validated for object operations; shared with an object
+  # `table` source, whose store is a space's shape.
+  @spec store!(term(), String.t()) :: {module(), keyword()}
+  def store!({module, opts}, key) when is_atom(module) and is_list(opts) do
     unless Options.implements?(module, @object_operations) do
       raise ArgumentError,
             "#{key}: #{inspect(module)} does not implement the object operations " <>
@@ -145,7 +149,7 @@ defmodule Ankusa.Gateway.Spaces do
     {module, opts}
   end
 
-  defp store!(other, key),
+  def store!(other, key),
     do: raise(ArgumentError, "#{key} must be {module, opts}, got #{inspect(other)}")
 
   defp prefix!("", _key), do: ""

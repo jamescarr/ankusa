@@ -9,6 +9,10 @@ own ([`docs/releasing.md`](../../docs/releasing.md)).
 
 ### Changed
 
+- The image also bundles `ankusa_gateway_postgres`, the `table` authorizer's
+  Postgres source, so a `gateway.authz.authorizers.<name>` of `type: table`
+  with `source: {type: postgres}` loads here as it does in the gateway image.
+
 - **`config_version: 2`: the gateway's keys moved to `gateway:` (ADR 0005).**
   The claim-check gateway is now `Ankusa.Gateway` (package `ankusa_gateway`),
   started beside the instance when `node.roles` lists `claim_check` (core gets
