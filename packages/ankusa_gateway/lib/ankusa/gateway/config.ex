@@ -197,9 +197,16 @@ defmodule Ankusa.Gateway.Config do
   # Defined only with `sharing.enabled`, but never a name of your own.
   @sharing_authorizers %{"grants" => Authz.Grants}
 
+  # M8's PDP authorizers add keys that are operator configuration, never
+  # credentials: the protocol, the paths and templates (a value under `url`
+  # still goes through the URL rules, which hide its query values), the action
+  # and relation names, and a store or model's id. `headers` and `api_token`
+  # stay out: closed mode hides them.
   @shown ~w(instance ip name type issuer audience jwks_url header scope_claim tenants_claim
             groups_claim subject_prefix id scopes groups policy mode use on_unavailable steps
-            prefix)
+            prefix protocol evaluation_path evaluations_path allow_path ttl_path actions relations
+            consistency store_id authorization_model_id user object match space items_key
+            results_path)
 
   @doc "Validate `opts` into a config. Raises `ArgumentError` naming the key."
   @spec new(keyword() | map(), keyword()) :: t()

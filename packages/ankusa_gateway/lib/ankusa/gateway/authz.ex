@@ -255,8 +255,9 @@ defmodule Ankusa.Gateway.Authz do
 
       stale ->
         partition = request.resource[:tenant] || request.resource.space
-        # A remote authorizer decides from the principal and the resource; the
-        # connection stays in the request process.
+        # The connection stays in the request process: a queued key must not
+        # hold a copy of every header. What a remote authorizer may read from
+        # it is on the request already (`authorization`, `request_id`).
         item = {key, %{request | conn: nil}}
 
         case Caller.call(instance, {:authz, name}, key, partition, item, deadline) do

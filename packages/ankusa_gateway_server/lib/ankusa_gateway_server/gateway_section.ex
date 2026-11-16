@@ -26,7 +26,51 @@ defmodule AnkusaGatewayServer.GatewaySection do
   @gateway_policy_keys ~w(mode steps)
   @gateway_step_keys ~w(use on_unavailable)
   # Every authorizer type the YAML knows, and its module.
-  @authorizer_types %{"rules" => Ankusa.Gateway.Authz.Rules}
+  @authorizer_types %{
+    "rules" => Ankusa.Gateway.Authz.Rules,
+    "http" => Ankusa.Gateway.Authz.Http,
+    "openfga" => Ankusa.Gateway.Authz.OpenFGA
+  }
+  # The common `:remote` options, as integers; the module checks their ranges.
+  @remote_authorizer_keys ~w(timeout_ms max_inflight queue_max batch_max batch_window_ms
+                             breaker_failures breaker_open_ms allow_ttl_ms deny_ttl_ms
+                             allow_ttl_max_ms headers allow_insecure_http)
+  # The integer remote keys, as option atoms (a literal map: a name must never
+  # create an atom).
+  @remote_authorizer_int_keys %{
+    "timeout_ms" => :timeout_ms,
+    "max_inflight" => :max_inflight,
+    "queue_max" => :queue_max,
+    "batch_max" => :batch_max,
+    "batch_window_ms" => :batch_window_ms,
+    "breaker_failures" => :breaker_failures,
+    "breaker_open_ms" => :breaker_open_ms,
+    "allow_ttl_ms" => :allow_ttl_ms,
+    "deny_ttl_ms" => :deny_ttl_ms,
+    "allow_ttl_max_ms" => :allow_ttl_max_ms
+  }
+  @http_authorizer_keys ~w(protocol url evaluation_path evaluations_path forward_authorization
+                           subject resource actions context request allow_path ttl_path batch) ++
+                          @remote_authorizer_keys
+  @openfga_authorizer_keys ~w(url store_id authorization_model_id api_token consistency user
+                              object resources relations contextual_tuples batch) ++
+                             @remote_authorizer_keys
+  # The five action names, and the two consistency modes: closed sets, so the
+  # atoms are fixed.
+  @authorizer_action_keys %{
+    "read" => :read,
+    "write" => :write,
+    "delete" => :delete,
+    "list" => :list,
+    "share" => :share
+  }
+  @consistency_keys %{
+    "minimize_latency" => :minimize_latency,
+    "higher_consistency" => :higher_consistency
+  }
+  @authorizer_batch_keys ~w(url items_key results_path)
+  @openfga_resource_keys ~w(space match object)
+  @openfga_tuple_keys ~w(user relation object)
   # A rule's keys and its `when` keys, string to atom (closed sets).
   @rule_keys Map.new(~w(effect actions spaces keys when)a, &{Atom.to_string(&1), &1})
   @rule_when_keys Map.new(
@@ -199,6 +243,57 @@ defmodule AnkusaGatewayServer.GatewaySection do
     end
   end
 
+  # `type: http`: the protocol picks its keys; action names and a bulk
+  # endpoint block are converted here, everything else is the module's to
+  # check (its messages name the same dotted key).
+  defp authorizer_opts(Ankusa.Gateway.Authz.Http, map, path) do
+    given = section!(map, @http_authorizer_keys, path)
+
+    %{}
+    |> put_map(:protocol, enum_opt(given, "protocol", ~w(authzen template), path))
+    |> put_map(:url, given["url"])
+    |> put_map(:evaluation_path, given["evaluation_path"])
+    |> put_map(:evaluations_path, given["evaluations_path"])
+    |> put_map(:forward_authorization, bool_opt(given, "forward_authorization", path))
+    |> put_map(:subject, given["subject"])
+    |> put_map(:resource, given["resource"])
+    |> put_map(:actions, actions!(given["actions"], path ++ ["actions"]))
+    |> put_map(:context, given["context"])
+    |> put_map(:request, given["request"])
+    |> put_map(:allow_path, given["allow_path"])
+    |> put_map(:ttl_path, given["ttl_path"])
+    |> put_map(:batch, http_batch!(given["batch"], path ++ ["batch"]))
+    |> put_map(:headers, given["headers"])
+    |> put_map(:allow_insecure_http, bool_opt(given, "allow_insecure_http", path))
+    |> remote_authorizer_opts(given, path)
+  end
+
+  # `type: openfga`: the relation map and the consistency mode are closed
+  # sets; resources and contextual tuples keep their string leaves for the
+  # module.
+  defp authorizer_opts(Ankusa.Gateway.Authz.OpenFGA, map, path) do
+    given = section!(map, @openfga_authorizer_keys, path)
+
+    %{}
+    |> put_map(:url, given["url"])
+    |> put_map(:store_id, given["store_id"])
+    |> put_map(:authorization_model_id, given["authorization_model_id"])
+    |> put_map(:api_token, given["api_token"])
+    |> put_map(:consistency, consistency!(given["consistency"], path ++ ["consistency"]))
+    |> put_map(:user, given["user"])
+    |> put_map(:object, given["object"])
+    |> put_map(:resources, openfga_resources!(given["resources"], path ++ ["resources"]))
+    |> put_map(:relations, actions!(given["relations"], path ++ ["relations"]))
+    |> put_map(
+      :contextual_tuples,
+      openfga_tuples!(given["contextual_tuples"], path ++ ["contextual_tuples"])
+    )
+    |> put_map(:batch, bool_opt(given, "batch", path))
+    |> put_map(:headers, given["headers"])
+    |> put_map(:allow_insecure_http, bool_opt(given, "allow_insecure_http", path))
+    |> remote_authorizer_opts(given, path)
+  end
+
   # The values (`effect`, `actions`, patterns, templates) are the module's to
   # check; its messages name the same dotted key.
   defp rule!(rule, path) do
@@ -213,6 +308,114 @@ defmodule AnkusaGatewayServer.GatewaySection do
         {Map.fetch!(@rule_keys, key), value}
     end)
   end
+
+  defp remote_authorizer_opts(opts, given, path) do
+    Enum.reduce(@remote_authorizer_int_keys, opts, fn {name, key}, acc ->
+      put_map(acc, key, int_opt(given, name, path))
+    end)
+  end
+
+  defp enum_opt(map, key, allowed, path) do
+    case map[key] do
+      nil -> nil
+      value -> enum!(value, allowed, path ++ [key])
+    end
+  end
+
+  defp actions!(nil, _path), do: nil
+
+  defp actions!(value, path) do
+    map = expect_map(value, path)
+
+    Map.new(map, fn {name, action} ->
+      case Map.fetch(@authorizer_action_keys, name) do
+        {:ok, action_name} ->
+          {action_name, expect_string(action, path)}
+
+        :error ->
+          raise ConfigError,
+            message:
+              "#{render_path(path)}: unknown action #{inspect(name)}; " <>
+                "expected one of read, write, delete, list, share"
+      end
+    end)
+  end
+
+  defp consistency!(nil, _path), do: nil
+
+  defp consistency!(value, path) do
+    case Map.fetch(@consistency_keys, value) do
+      {:ok, consistency} ->
+        consistency
+
+      :error ->
+        raise ConfigError,
+          message:
+            "#{render_path(path)}: unknown value #{inspect(value)}; " <>
+              "expected minimize_latency, higher_consistency"
+    end
+  end
+
+  # For the authzen protocol `batch` is a boolean; for the template protocol
+  # it is null or a bulk endpoint block.
+  defp http_batch!(nil, _path), do: nil
+  defp http_batch!(value, _path) when is_boolean(value), do: value
+  defp http_batch!(%{} = map, path), do: batch_block!(map, path)
+
+  defp http_batch!(other, path) do
+    raise ConfigError,
+      message: type_error(path, "true, false, null, or a bulk endpoint block", other)
+  end
+
+  defp batch_block!(map, path) do
+    section!(map, @authorizer_batch_keys, path)
+
+    Map.new(map, fn {key, value} ->
+      case key do
+        "url" -> {:url, value}
+        "items_key" -> {:items_key, value}
+        "results_path" -> {:results_path, value}
+      end
+    end)
+  end
+
+  defp openfga_resources!(nil, _path), do: nil
+
+  defp openfga_resources!(list, path) when is_list(list) do
+    list
+    |> Enum.with_index()
+    |> Enum.map(fn {entry, index} ->
+      entry = section!(entry, @openfga_resource_keys, path ++ [index])
+
+      Map.new(entry, fn
+        {"space", value} -> {:space, value}
+        {"match", value} -> {:match, value}
+        {"object", value} -> {:object, value}
+      end)
+    end)
+  end
+
+  defp openfga_resources!(other, path),
+    do: raise(ConfigError, message: type_error(path, "a list of entries", other))
+
+  defp openfga_tuples!(nil, _path), do: nil
+
+  defp openfga_tuples!(list, path) when is_list(list) do
+    list
+    |> Enum.with_index()
+    |> Enum.map(fn {entry, index} ->
+      entry = section!(entry, @openfga_tuple_keys, path ++ [index])
+
+      Map.new(entry, fn
+        {"user", value} -> {:user, value}
+        {"relation", value} -> {:relation, value}
+        {"object", value} -> {:object, value}
+      end)
+    end)
+  end
+
+  defp openfga_tuples!(other, path),
+    do: raise(ConfigError, message: type_error(path, "a list of entries", other))
 
   defp policies(authz, path) do
     case authz["policies"] do

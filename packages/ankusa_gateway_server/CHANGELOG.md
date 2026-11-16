@@ -27,6 +27,12 @@ All notable changes to the Ankusa gateway image are documented here. It is the
   modules moved from `ankusa_server`: `ConfigError`, `Secrets` and its
   providers, `LogFormatter`, `Tracing` (now told the service it traces),
   `GcpToken`.
+- **`type: http` and `type: openfga` authorizers in `gateway.yml`**
+  (`gateway.authz.authorizers`): an AuthZEN or templated permissions API, and
+  an OpenFGA store, with their action/relation maps checked against the five
+  action names, `consistency` through a fixed map, and a bulk endpoint block
+  for the template protocol. Commented examples are in
+  `config-examples/reference.yml`.
 - **`gateway.auth.cache` and `gateway.authz` in `gateway.yml`**: the
   authentication cache's `ttl_ms`, `negative_ttl_ms`, `max_entries` and
   `max_bytes`; `authz.deadline_ms`; `authz.cache` (`max_entries`,

@@ -54,7 +54,28 @@ follows [Semantic Versioning](https://semver.org/).
   templates, with URLs templated after the origin only and percent-encoded.
 - **`Ankusa.Gateway.Authz.Remote`**, the common options of a `:remote`
   authorizer (`timeout_ms`, `max_inflight`, `queue_max`, batching, breaker,
-  per-authorizer TTLs).
+  per-authorizer TTLs), and the validation of a backend's address: `url!`
+  (a literal, `https` or loopback `http` or `allow_insecure_http: true`),
+  `headers!` (at most 16) and `req_options!`.
+- **The `http` authorizer** (`Ankusa.Gateway.Authz.Http`, `type: http`): the
+  OpenID AuthZEN Access Evaluation API (`/access/v1/evaluation`, batched
+  through `/access/v1/evaluations`, `404`/`405`/`501` there memoized for five
+  minutes) or a bespoke API with `protocol: :template` (`request`,
+  `allow_path`, `ttl_path`, an optional bulk endpoint). `subject` and
+  `resource` are JSON shapes of templates, a leaf that is one list-valued
+  variable renders as an array, a `cache-control: max-age` names an allow's
+  freshness, and `forward_authorization` sends the caller's own credential
+  (the decision is then keyed by it).
+- **The `openfga` authorizer** (`Ankusa.Gateway.Authz.OpenFGA`, `type:
+  openfga`): `check` and `batch-check` with per-check correlation ids, a
+  `relations` entry per action, `resources` mapping a space and a key pattern
+  to one object (`vars` from the pattern), `contextual_tuples` expanded one per
+  group (at most 100), and identifiers built from request data denied
+  `:unmappable` when they are `*`, contain `#`, whitespace or a control
+  character.
+- The gateway's redacted config view now shows the PDP authorizers'
+  non-secret keys (`protocol`, paths, actions, relations, consistency, store
+  and model ids, templates); `headers` and `api_token` stay hidden.
 - `Ankusa.Gateway.Metrics` gains the authentication, decision, caller and
   cache series (`ankusa_gateway_authn_total`,
   `ankusa_gateway_authz_decisions_total`, `ankusa_gateway_authz_duration_seconds`,

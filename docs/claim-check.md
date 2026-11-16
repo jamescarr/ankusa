@@ -323,6 +323,18 @@ values are templates — `{{ vars.team }}`, `{{ space }}`, `{{ tenant }}`,
 Every rule field and predicate: [the gateway
 section](configuration.md#the-gateway-config_version-2).
 
+An external PDP takes over decisioning without leaving the gateway's cache and
+breakers: `type: http` speaks the OpenID AuthZEN Access Evaluation API
+(`/access/v1/evaluation`, batched through `/access/v1/evaluations`) or your own
+API through `protocol: template`, and `type: openfga` checks an OpenFGA store
+(`check`, `batch-check`, a relation per action, `contextual_tuples` expanded one
+per group). Only the verdict is cached; the policy deadline, `on_unavailable`
+and `serve_stale_ms` behave exactly as above, and the resource template decides
+what shares a decision — the default `{{ space }}/{{ key }}` makes every object
+its own, a coarser one (or an OpenFGA `resources` entry) makes a folder one
+call. Options and examples: [the gateway
+section](configuration.md#the-gateway-config_version-2).
+
 Neither side re-derives the same answer for every request:
 
 - **Authentication** is cached per credential (`auth.cache.*`): a hit ends the

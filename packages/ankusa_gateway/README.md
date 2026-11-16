@@ -109,11 +109,35 @@ authorizers: %{
 }
 ```
 
+`Ankusa.Gateway.Authz.Http` asks an HTTP policy decision point: the OpenID
+AuthZEN Access Evaluation API (`/access/v1/evaluation`, batched through
+`/access/v1/evaluations`) or your own API (`protocol: :template` with
+`request` and `allow_path`). `Ankusa.Gateway.Authz.OpenFGA` checks an OpenFGA
+store (one `check` per decision, `batch-check` under load, a `relations` entry
+per action, `contextual_tuples` one per group). Both are `:remote`:
+
+```elixir
+authorizers: %{
+  "pdp" => {Ankusa.Gateway.Authz.Http, %{url: "https://pdp.example"}},
+  "fga" => {Ankusa.Gateway.Authz.OpenFGA, %{url: "https://fga.example", store_id: "01J..."}}
+}
+```
+
 An authorizer's `kind/1` says where it runs: `:inline` in the request,
 `:cached` behind the decision cache, `:remote` behind the cache and one
 `Ankusa.Gateway.Caller` per backend (coalesced, bounded, batched, behind a
 breaker). Authentication is cached too, under the credential's SHA-256, never
 past its expiry. Both caches are bounded (`auth.cache`, `authz.cache`).
+
+A cached decision is keyed by what the subject and resource templates render,
+not by the key the caller asked for: the default `resource.id` is
+`{{ space }}/{{ key }}`, so every object is its own decision. A **coarser
+resource template** — or an OpenFGA `resources` entry such as
+`object: "folder:{{ vars.team }}"` — makes every key that renders alike share
+one decision and one PDP call. That is deliberate: it is the only way a
+folder-wide decision is one call, and it is also how one subject's decision
+can cover keys they never asked about. `forward_authorization: true` adds the
+caller's own credential to the key, because the PDP sees it.
 
 ## The objects API
 
