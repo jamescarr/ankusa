@@ -127,7 +127,8 @@ runs it when `node.roles` lists `claim_check`, and the gateway's own image
 | `tls` | `nil` | A TLS block for the gateway listener, the same keys as `listener.tls` (see [Listeners](#listeners-limits-tls-and-mtls)); `auth` `mtls` needs `verify: verify_peer` and a `cacertfile` |
 | `max_concurrent_requests` | `1024` | Requests one gateway serves at once, cache hits included; past it `503 overloaded` with `Retry-After` 1–3 before anything is read. `0` is no cap |
 | `auth.allow_insecure` | `false` | Accept the empty chain off loopback: something in front of the listener authenticates every caller |
-| `auth.authenticators` | `[]` | The chain, tried in order; at most 8 entries, at most one `mtls`. See below |
+| `auth.authenticators` | `[]` | The chain, tried in order; at most 8 entries, at most one `mtls`, at most one `introspection` (with nothing that reads the bearer token after it). See below |
+| `auth.enrichers` | `[]` | At most 4, in order: groups and claims added to a freshly authenticated principal before it is fingerprinted and cached. See [Enrichers](#enrichers) |
 | `auth.cache.ttl_ms` | `60000` | How long an authenticated credential is remembered: a hit skips the chain, the signature check and the issuer peek. Never past the credential's own expiry; `0` = off |
 | `auth.cache.negative_ttl_ms` | `5000` | How long a refusal is remembered, by an authenticator whose `cache_negative?/0` says so (one that calls out) |
 | `auth.cache.max_entries`, `auth.cache.max_bytes` | `100000`, `33554432` | The authentication cache's bounds; an eviction only costs a re-authentication |
@@ -193,12 +194,47 @@ gateway:
 - `mtls`: `subject_map` maps a certificate identity (`cn:…`, or a subject
   alternative name as `dns:`/`email:`/`uri:`/`ip:`) to a list of scopes or a
   map with `scopes` and `groups`.
+- `okta`: Okta's issuer layout, expanded at boot into a `jwt` or an
+  `introspection` authenticator — no network at boot. `domain` (required) and
+  `authorization_server` (`default`) name the issuer:
+  `https://<domain>/oauth2/<server>` with its `/v1/keys` as `jwks_url`, and
+  `audience` is required. `authorization_server: org` selects Okta's org
+  authorization server, whose access tokens are opaque: that form becomes an
+  `introspection` authenticator for `https://<domain>/oauth2/v1/introspect`
+  checking `iss: https://<domain>`, and needs `client_id` and `client_secret`.
+  Any `jwt` or `introspection` option in the entry (`subject_prefix`,
+  `groups_claim`, `keys`, `timeout_ms`, …) overrides what the expansion
+  derives.
+- `introspection`: RFC 7662 token introspection for identity providers whose
+  access tokens are not JWTs. `url` (https, or http to loopback), `client_id`
+  and `client_secret` are required; `issuer` and `audience` check the
+  response's `iss`/`aud`; `subject_claim` (`sub`), `scope_claim`,
+  `tenants_claim` and `groups_claim` name the principal's parts, and
+  `subject_prefix` applies as for `jwt`. The response is the principal's
+  claims; its `exp` is the expiry (a minute when absent). One call process per
+  authenticator coalesces concurrent requests for one token, and an inactive
+  token's refusal is cached for `auth.cache.negative_ttl_ms`.
 
 In Elixir config (`Ankusa.Gateway.Config`) an entry's `type` may also be a
-module implementing `Ankusa.Gateway.Authenticator`; YAML takes the three types.
-With `gateway.sharing.enabled` a fourth, `link`, is appended by the gateway
+module implementing `Ankusa.Gateway.Authenticator`; YAML takes these five.
+With `gateway.sharing.enabled` one more, `link`, is appended by the gateway
 itself: it accepts a share link (`link`, `exp` and `sig` in the query of a
 `GET`/`HEAD` of one object) and answers `410 link_expired` past its `exp`.
+
+```yaml
+gateway:
+  auth:
+    authenticators:
+      - type: okta
+        domain: acme.okta.com
+        authorization_server: default
+        audience: api://default
+    enrichers:
+      - type: okta_groups
+        domain: acme.okta.com
+        api_token: "${OKTA_API_TOKEN}"
+        only: [okta]
+```
 
 An empty chain gives every request the anonymous operator principal, legal only
 on loopback or with `allow_insecure: true`; the gateway logs a warning at start.
@@ -208,6 +244,37 @@ answer, and the policy engine answers `403 forbidden` or `503
 authz_unavailable`. Authorization is the `authz` block: the cache below,
 policies, the built-in `scopes` rule, the `rules` authorizer, and a module
 when YAML is not enough.
+
+#### Enrichers
+
+`gateway.auth.enrichers` (at most 4, in order) runs after an authenticator
+accepts a credential and before the principal is fingerprinted and cached: it
+adds groups and claims, so a `rules` predicate can read groups the token does
+not carry. An enricher that cannot answer is `503 auth_unavailable`, or — with
+`on_unavailable: skip` — the principal is used unenriched and cached for
+`auth.cache.negative_ttl_ms` instead of `auth.cache.ttl_ms`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `only` | `[]` | The authenticators it runs after; empty is every one |
+| `on_unavailable` | `fail` | `fail`: `503 auth_unavailable`; `skip`: continue unenriched |
+| `ttl_ms` | `60000` | How long the enricher's groups and claims are reused (1000..86400000) — `ttl_ms`, not `auth.cache.ttl_ms`, is how long a group removed at the source can still be seen |
+| `timeout_ms` | `2000` | The enricher's budget per call (100..30000) |
+
+Two ship:
+
+- `okta_groups`: `GET https://<domain>/api/v1/users/<id>/groups` with an Okta
+  API token (`api_token`, sent as `Authorization: SSWS`), paging through the
+  `link` header while it stays on that host, up to `max_groups` (500). `user_id`
+  is a template (`{{ claims.uid }}` by default) naming the user; one that does
+  not render leaves the principal unchanged. A `404` leaves it unchanged too.
+- `http`: `GET` a JSON API of your own. `url` is compiled with the origin
+  literal (`https`, or `http` to loopback): only the path and query may be
+  templated, and every substituted value is percent-encoded. `headers` (at most
+  16, redacted in `print-config`); `groups_path` and `claims_path` are dotted
+  paths into the response — a string or a list of strings added to the groups
+  (1000 in total), and an object merged under the token's claims without
+  overriding them. One of the two is required.
 
 #### The authentication cache
 

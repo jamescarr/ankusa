@@ -101,26 +101,9 @@ defmodule Ankusa.Gateway.Authz.Remote do
             "#{key}.url must be a literal URL, without any {{ template }}, got #{inspect(value)}"
     end
 
-    uri = URI.parse(value)
-    insecure? = Keyword.get(opts, :allow_insecure_http, false)
-
-    cond do
-      uri.scheme == "https" and present?(uri.host) ->
-        value
-
-      uri.scheme == "http" and (insecure? or loopback_host?(uri.host)) ->
-        value
-
-      insecure? ->
-        raise ArgumentError,
-              "#{key}.url must be an http or https URL, got #{inspect(value)}"
-
-      true ->
-        raise ArgumentError,
-              "#{key}.url must be an https URL, or http to a loopback host " <>
-                "(set #{key}.allow_insecure_http: true to accept http anywhere), " <>
-                "got #{inspect(value)}"
-    end
+    Ankusa.Gateway.Url.https!(value, "#{key}.url",
+      allow_insecure_http: Keyword.get(opts, :allow_insecure_http, false)
+    )
   end
 
   @doc """
@@ -193,25 +176,6 @@ defmodule Ankusa.Gateway.Authz.Remote do
   @doc "The statuses that mean \"this decision point has no bulk endpoint\"."
   @spec no_batch_status?(non_neg_integer()) :: boolean()
   def no_batch_status?(status), do: status in [404, 405, 501]
-
-  defp present?(value), do: is_binary(value) and value != ""
-
-  defp loopback_host?(host) when is_binary(host) do
-    cond do
-      host == "localhost" -> true
-      String.ends_with?(host, ".localhost") -> true
-      true -> parse_loopback?(host)
-    end
-  end
-
-  defp loopback_host?(_host), do: false
-
-  defp parse_loopback?(host) do
-    case :inet.parse_address(String.to_charlist(host)) do
-      {:ok, address} -> Options.loopback?(address)
-      {:error, _reason} -> false
-    end
-  end
 
   defp header_name!(name, key) when is_binary(name) and name != "" do
     if Regex.match?(@header_name, name),

@@ -263,6 +263,23 @@ that matches no `token` entry falls through to the next entry. The types:
 - `mtls` — client certificates on a listener with `tls.verify: verify_peer`,
   mapped by `subject_map` from a certificate identity (`cn:…`, `dns:…`,
   `email:…`, `uri:…`, `ip:…`) to scopes and groups.
+- `okta` — Okta's issuer layout: `domain` plus `authorization_server` (or
+  `authorization_server: org`), expanded at boot into a `jwt` authenticator for
+  the custom authorization server, or an `introspection` one for the org server
+  (whose access tokens are opaque and need `client_id`/`client_secret`). Any
+  `jwt`/`introspection` option in the entry overrides what it derives.
+- `introspection` — RFC 7662 introspection for opaque tokens: `url`,
+  `client_id`, `client_secret`, optional `issuer`/`audience` checks. One call
+  process per authenticator, so a hundred concurrent requests carrying one
+  token make one call; an inactive token is `401` and remembered for
+  `auth.cache.negative_ttl_ms`.
+
+`gateway.auth.enrichers` (at most 4) then adds groups and claims to the
+principal — `okta_groups` from Okta's Users API, `http` from an API of your own
+— before it is fingerprinted and cached, so a `rules` predicate can decide on a
+group the access token does not carry. An enricher's result is cached
+`ttl_ms`; `on_unavailable: skip` uses the unenriched principal instead of
+answering `503`.
 
 An empty chain is the anonymous operator principal, and is accepted on loopback
 only, or with `auth.allow_insecure: true` when a service mesh, Envoy or an API
