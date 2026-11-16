@@ -92,7 +92,6 @@ defmodule Ankusa.ConfigTest do
     test "listeners bind loopback by default" do
       config = Config.new()
       assert config.admin.ip == "127.0.0.1"
-      assert config.claim_check.ip == "127.0.0.1"
       assert config.routes.admin.ip == "127.0.0.1"
     end
 
@@ -466,8 +465,8 @@ defmodule Ankusa.ConfigTest do
     test "drops the WAL's reader roles, keeping the rest" do
       assert Config.new(wal: :none).roles == [:edge]
 
-      config = Config.new(wal: :none, roles: [:edge, :dispatch, :storage, :claim_check])
-      assert config.roles == [:edge, :claim_check]
+      config = Config.new(wal: :none, roles: [:edge, :dispatch, :storage])
+      assert config.roles == [:edge]
 
       # The default roles only narrow under :none; a disk config is untouched.
       assert Config.new().roles == [:edge, :dispatch, :storage]
@@ -482,8 +481,26 @@ defmodule Ankusa.ConfigTest do
         Config.new(wal: :none, roles: [:dispatch, :storage])
       end
 
-      # A role the WAL does not serve survives on its own.
-      assert Config.new(wal: :none, roles: [:claim_check]).roles == [:claim_check]
+      # A node given no role at all (a gateway-only node) is left alone.
+      assert Config.new(wal: :none, roles: []).roles == []
+    end
+  end
+
+  describe "the claim-check gateway left core" do
+    test "the role and the listener keys are gone" do
+      assert_raise ArgumentError, ~r/unknown Ankusa role/, fn ->
+        Config.new(roles: [:claim_check])
+      end
+
+      assert_raise ArgumentError, ~r/expected one of: edge, dispatch, storage$/, fn ->
+        Config.parse_roles!("claim_check")
+      end
+
+      for key <- [:port, :ip, :tls, :auth, :authorize, :max_concurrent_reads, :integrity_check] do
+        assert_raise ArgumentError, "unknown Ankusa.Config key: claim_check.#{key}", fn ->
+          Config.new(claim_check: %{key => 1})
+        end
+      end
     end
   end
 
@@ -795,7 +812,7 @@ defmodule Ankusa.ConfigTest do
                      Config.new(batcher: %{max_delay_ms: -1})
                    end
 
-      for key <- [:read_retries, :read_queue_max, :read_cache_bytes, :max_concurrent_reads] do
+      for key <- [:read_retries, :read_queue_max, :read_cache_bytes] do
         assert_raise ArgumentError,
                      "claim_check.#{key} must be a non-negative integer, got -1",
                      fn -> Config.new(claim_check: %{key => -1}) end
@@ -808,16 +825,6 @@ defmodule Ankusa.ConfigTest do
       end
 
       assert %Config{} = Config.new(claim_check: %{ref_ttl_ms: 1})
-      assert %Config{} = Config.new(claim_check: %{max_concurrent_reads: 0})
-
-      assert Config.new().claim_check.integrity_check == :manifest
-      assert %Config{} = Config.new(claim_check: %{integrity_check: :off})
-
-      for bad <- [nil, true, :sha1, "manifest"] do
-        assert_raise ArgumentError,
-                     "claim_check.integrity_check must be :off or :manifest, got #{inspect(bad)}",
-                     fn -> Config.new(claim_check: %{integrity_check: bad}) end
-      end
 
       for bad <- [0, "true", :yes] do
         assert_raise ArgumentError,
@@ -1135,7 +1142,7 @@ defmodule Ankusa.ConfigTest do
                extra: []
              }
 
-      for section <- [config.admin, config.claim_check, config.routes.admin] do
+      for section <- [config.admin, config.routes.admin] do
         assert section.tls == nil
       end
     end
@@ -1206,7 +1213,6 @@ defmodule Ankusa.ConfigTest do
       for {opts, get} <- [
             {[listener: %{tls: tls()}], & &1.listener.tls},
             {[admin: %{tls: tls()}], & &1.admin.tls},
-            {[claim_check: %{tls: tls()}], & &1.claim_check.tls},
             {[metrics: %{tls: tls()}], & &1.metrics.tls},
             {[routes: %{admin: %{tls: tls()}}], & &1.routes.admin.tls}
           ] do
@@ -1242,8 +1248,8 @@ defmodule Ankusa.ConfigTest do
         Config.new(admin: %{tls: [keyfile: Path.join(@tls_dir, "server-key.pem")]})
       end
 
-      assert_raise ArgumentError, ~r/claim_check\.tls\.keyfile must be a readable file/, fn ->
-        Config.new(claim_check: %{tls: tls(keyfile: "/no/such/key.pem")})
+      assert_raise ArgumentError, ~r/metrics\.tls\.keyfile must be a readable file/, fn ->
+        Config.new(metrics: %{tls: tls(keyfile: "/no/such/key.pem")})
       end
 
       assert_raise ArgumentError, "unknown Ankusa.Config key: metrics.tls.password", fn ->
@@ -1305,8 +1311,7 @@ defmodule Ankusa.ConfigTest do
 
     @sections [
       {"admin", :admin},
-      {"routes.admin", :routes_admin},
-      {"claim_check", :claim_check}
+      {"routes.admin", :routes_admin}
     ]
 
     # Boot options that start one control plane's listener, with `section_opts`
@@ -1316,11 +1321,8 @@ defmodule Ankusa.ConfigTest do
     defp opts(:routes_admin, section_opts),
       do: [roles: [:edge], routes: %{enabled: true, admin: section_opts}]
 
-    defp opts(:claim_check, section_opts), do: [roles: [:claim_check], claim_check: section_opts]
-
     defp auth_of(config, :admin), do: config.admin.auth
     defp auth_of(config, :routes_admin), do: config.routes.admin.auth
-    defp auth_of(config, :claim_check), do: config.claim_check.auth
 
     test "every control plane defaults to mode none with the other blocks empty" do
       config = Config.new()
@@ -1367,7 +1369,6 @@ defmodule Ankusa.ConfigTest do
 
     test "a listener this instance does not run is not held to the rule" do
       assert Config.new(admin: %{enabled: false, ip: "0.0.0.0"}).admin.ip == "0.0.0.0"
-      assert Config.new(claim_check: %{ip: "0.0.0.0"}).claim_check.ip == "0.0.0.0"
 
       assert Config.new(routes: %{enabled: false, admin: %{ip: "0.0.0.0"}}).routes.admin.ip ==
                "0.0.0.0"
@@ -1543,8 +1544,8 @@ defmodule Ankusa.ConfigTest do
         Config.new(admin: %{auth: %{token: "x"}})
       end
 
-      assert_raise ArgumentError, "unknown Ankusa.Config key: claim_check.auth.jwt.secret", fn ->
-        Config.new(claim_check: %{auth: %{jwt: %{secret: "x"}}})
+      assert_raise ArgumentError, "unknown Ankusa.Config key: routes.admin.auth.jwt.secret", fn ->
+        Config.new(routes: %{admin: %{auth: %{jwt: %{secret: "x"}}}})
       end
 
       assert_raise ArgumentError,

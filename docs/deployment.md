@@ -7,18 +7,21 @@ a container runs is decided at startup.
 
 ## Roles and topologies
 
-Four roles, `edge` (ingest), `dispatch` (delivery), `storage` (compaction and
-archiving), and `claim_check` (the large-payload gateway), chosen per container
-with `ANKUSA_ROLES`:
+Three core roles — `edge` (ingest), `dispatch` (delivery) and `storage`
+(compaction and archiving) — plus `claim_check`, which starts the gateway
+(`Ankusa.Gateway`, from the `ankusa_gateway` library) beside the instance;
+chosen per container with `ANKUSA_ROLES`:
 
 ```sh
-docker run -e ANKUSA_ROLES=edge,dispatch,storage ...  jamescarr/ankusa:edge   # a store-backed node
-docker run -e ANKUSA_ROLES=claim_check ...            jamescarr/ankusa:edge   # gateway only
+docker run -e ANKUSA_ROLES=edge,dispatch,storage ...  jamescarr/ankusa:edge       # a store-backed node
+docker run -e ANKUSA_ROLES=claim_check ...            jamescarr/ankusa:edge       # gateway only
+docker run ...                                        jamescarr/ankusa-gateway    # nothing but the gateway
 ```
 
 The first three share one local store and therefore one BEAM node (see the
 constraint below); `claim_check` is the only role that can run as its own
-container. Under `wal.type: none`, `edge` alone is a complete node.
+container, and it has an image of its own. Under `wal.type: none`, `edge` alone
+is a complete node.
 
 ![edge, dispatch and storage run in one BEAM node around one RocksDB store — edge commits, dispatch delivers and retries, storage archives segments — while claim_check is the only role that can run on another node, reading the shared claim bucket.](diagrams/roles.png)
 
@@ -27,26 +30,29 @@ decision, never a build-time one. Embedding the library instead?
 [`elixir.md#roles-from-code`](elixir.md#roles-from-code) shows the same switch
 inside your own supervision tree.
 
-**`:claim_check` is a fourth, opt-in role**, absent from the default
-`roles` list (`[:edge, :dispatch, :storage]`) because it opens a port that
-serves stored payloads. A node running it alone needs no store, only
+**`claim_check` is an opt-in role that starts the gateway**, absent from the
+default `roles` list (`[:edge, :dispatch, :storage]`) because it opens a port
+that serves stored payloads. The gateway is its own library and its own image
+(`jamescarr/ankusa-gateway`); the role only bundles it into this one. A node
+running it alone needs no store — core boots with `roles: []`, no queue — only
 blob-store credentials, and can be scaled independently
 from ingest/dispatch/storage exactly like any other role. It authenticates its
-readers (`claim_check.auth`: a bearer token, OIDC access token or client
-certificate, holding `claims:read` and the claim's tenant), and `mode: none`
-is accepted only on loopback or with `allow_insecure: true`; a proxy or network
+readers (`gateway.auth`: an ordered chain of token, jwt and mtls
+authenticators) and authorizes them with a policy (`gateway.authz`; the
+default needs `claims:read` and the claim's tenant), and an empty chain is
+accepted only on loopback or with `allow_insecure: true`; a proxy or network
 policy in front is still a good idea. See
 [`claim-check.md`](claim-check.md) for the full contract and the worked
 `examples/rabbitmq-consumer/` deployment (an `ingest` service plus a
-separate `claim-check` service, same image, different `ANKUSA_ROLES`).
+separate `claim-check` service).
 
 **Important constraint:** the queue is a RocksDB store on the node's own disk,
 so **every role that reads or writes hooks must run in one BEAM node**: that is
 the topology a single container or `mix run` gets you. Splitting `edge`,
 `dispatch`, and `storage` across processes, containers, or hosts is not
 supported: there is no network-reachable store to point them at. The constraint
-does not apply to `:claim_check`, which only reads the blob store and can run
-on its own node.
+does not apply to `claim_check`, which only reads the blob store: the gateway
+can run on its own node.
 
 This whole paragraph is about the store-backed modes, `wal.type: disk` (the
 default) and `dual`. Under
@@ -71,12 +77,12 @@ node's data directory needs a persistent volume.
 | Port | What | Who can reach it |
 | --- | --- | --- |
 | 4000 | ingest | publish it: providers post here |
-| 4001 | claim check gateway (`claim_check` role) | your own proxy or network policy |
+| 4001 | claim check gateway (`claim_check` role, or the `jamescarr/ankusa-gateway` image) | your own proxy or network policy |
 | 4002 | admin API + `/metrics` | your own proxy or network policy |
 | 4003 | route management API (`routes.admin.ip`, default `127.0.0.1`; only when `routes.enabled`) | your own proxy or network policy |
 | 4004 | metrics listener: only `/metrics`, `/health`, `/ready` (`metrics.enabled`, default off; `metrics.ip`, default `127.0.0.1`) | your Prometheus / kubelet network rule |
 
-Every surface is on its own port so it can be firewalled on its own. 4001/4002/4003/4004 listen on `127.0.0.1` by default; inside a container set `ANKUSA_ADMIN_IP` / `ANKUSA_CLAIM_CHECK_IP` / `ANKUSA_METRICS_IP` (or `admin.ip` / `claim_check.ip` / `metrics.ip`, and `routes.admin.ip` for 4003) to `0.0.0.0` before a published port can reach them. Every listener, ingest included, can terminate TLS, and demand a client certificate (mTLS) with `verify: verify_peer`: see [Listeners: limits, TLS and mTLS](configuration.md#listeners-limits-tls-and-mtls). The admin, route-management and claim-check APIs authenticate their callers (`admin.auth`, `routes.admin.auth`, `claim_check.auth`: a bearer token, an OIDC access token, or a client certificate, each with scopes): off loopback they refuse to boot with `mode: none` unless `allow_insecure: true` says something in front authenticates every caller. The image takes `ANKUSA_ADMIN_TOKEN` / `ANKUSA_CLAIM_CHECK_TOKEN` / `ANKUSA_ROUTES_ADMIN_TOKEN` for the simple case; see [Control-plane authentication](configuration.md#control-plane-authentication).
+Every surface is on its own port so it can be firewalled on its own. 4001/4002/4003/4004 listen on `127.0.0.1` by default; inside a container set `ANKUSA_ADMIN_IP` / `ANKUSA_CLAIM_CHECK_IP` / `ANKUSA_METRICS_IP` (or `admin.ip` / `gateway.ip` / `metrics.ip`, and `routes.admin.ip` for 4003) to `0.0.0.0` before a published port can reach them. Every listener, ingest included, can terminate TLS, and demand a client certificate (mTLS) with `verify: verify_peer`: see [Listeners: limits, TLS and mTLS](configuration.md#listeners-limits-tls-and-mtls). The admin and route-management APIs authenticate their callers (`admin.auth`, `routes.admin.auth`: a bearer token, an OIDC access token, or a client certificate, each with scopes), and the gateway has its own chain (`gateway.auth`): off loopback they refuse to boot with no authentication unless `allow_insecure: true` says something in front authenticates every caller. The image takes `ANKUSA_ADMIN_TOKEN` / `ANKUSA_CLAIM_CHECK_TOKEN` / `ANKUSA_ROUTES_ADMIN_TOKEN` for the simple case; see [Control-plane authentication](configuration.md#control-plane-authentication).
 
 `/var/lib/ankusa` holds the node's store (`store/`: hooks, delivery rows, the
 quarantine pen, API-managed sources, rate-limit overrides, the archive
@@ -174,8 +180,10 @@ store, no threshold set, another `wal` mode) has no key. The node answers `503`
 | `backup` | `backup.enabled` and `backup.max_age_ms` | `stale`: the last successful backup is older than `max_age_ms` | only with `backup.require_fresh` |
 
 A node with none of these checks (a claim-check-only gateway: no store)
-is ready while it runs. Both probes are on the ingest port and on the admin
-port. Point a Kubernetes `livenessProbe` at `/health` and the `readinessProbe`
+is ready while it runs; the gateway's own `GET /ready` (on 4001, no
+credential) adds `"gateway": "ok"` to that answer. Both probes are on the
+ingest port and on the admin port. Point a Kubernetes `livenessProbe` at
+`/health` and the `readinessProbe`
 at `:4000/ready` (a probe from outside the pod hits the pod address, and `:4002`
 binds loopback unless `admin.ip` says otherwise), so a node with a full disk
 leaves the load balancer instead of being restarted in a loop. The image's
@@ -236,7 +244,7 @@ Two things to get right once you run more than one node:
 
 - **Every queue role in one node.** The store is local to a BEAM node, so
   `edge`, `dispatch`, and `storage` cannot be split across hosts (see above).
-  `:claim_check` is the exception and can run anywhere.
+  `claim_check` is the exception and can run anywhere.
 - **Distinct segment keys per node.** Segment keys are
   `archive/v1/dt=<day>/<node>/seg-<first_seq>-<last_seq>.seg`, where `<node>` is
   `intake.node_id` (else the host name), and remote blob stores ignore the
@@ -460,7 +468,8 @@ The server's YAML goes under `config:` in your values (merged over what the char
 derives: `wal.type`, `listener.drain_*`, JSON logs, the admin and claim-check
 listeners); secrets stay out of it as `${VAR}` references filled from `extraEnv` /
 `extraEnvFrom`. `claimCheck.enabled` adds the gateway as a Deployment of its own
-(`ANKUSA_ROLES=claim_check`). `deploy/helm/ankusa/ci/{disk,dual,none}-values.yaml`
+(`ANKUSA_ROLES=claim_check`, so core boots with `roles: []` in that pod and the
+gateway serves 4001). `deploy/helm/ankusa/ci/{disk,dual,none}-values.yaml`
 are one worked example per mode.
 
 ![One chart release renders a StatefulSet with a PVC per pod for wal.type disk or dual (dual also confirming each hook in a Kafka intake topic) or a Deployment with an emptyDir and an HPA for none; every mode gets the Service, PDB, spread and NetworkPolicy, plus an optional claim-check Deployment.](diagrams/helm-chart.png)
@@ -478,8 +487,9 @@ so a cluster policy that needs another uid changes the chart's input, not its te
 the startup probe allows 10 minutes, for a store's boot migrations), `readinessProbe`
 is `GET /ready` with `failureThreshold: 1`: a full disk, a reopening store, an intake
 log that is down, or a drain takes the pod out of the Service within one period
-([Liveness and readiness](#running-the-container)). A claim-check pod has no `/ready`,
-so all three probes are `GET /health` on 4001.
+([Liveness and readiness](#running-the-container)). A claim-check pod's three probes are `GET /health` on 4001
+(the gateway's unauthenticated `/ready`, with `"gateway": "ok"` in the body, is
+the endpoint a probe outside the chart would use).
 
 **`terminationGracePeriodSeconds` is computed from the drain.** The chart writes
 `drain.delayMs` / `drain.timeoutMs` into `listener.drain_delay_ms` /

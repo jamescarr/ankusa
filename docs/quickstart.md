@@ -150,7 +150,7 @@ attempt, so replay delivers `evt_4` once and never again.
 
 ```sh
 curl localhost:4002/health
-# => {"status":"ok","instance":"default","version":"…","roles":["claim_check","dispatch","edge","storage"]}
+# => {"status":"ok","instance":"default","version":"…","roles":["dispatch","edge","storage"]}
 curl localhost:4002/ready
 # => {"status":"ready","instance":"default","store":"ok"}
 curl -s localhost:4002/metrics | grep ankusa_ingest_requests_total
@@ -190,7 +190,7 @@ Pass the secret in as an environment variable by adding `environment:
 
 ```sh
 STRIPE_WHSEC=whsec_... docker compose run --rm ankusa check-config
-# config OK: roles=[:edge, :dispatch, :storage, :claim_check] sources=demo,stripe ...
+# config OK: roles=[:edge, :dispatch, :storage] gateway=4001 sources=demo,stripe ...
 STRIPE_WHSEC=whsec_... docker compose up -d
 ```
 

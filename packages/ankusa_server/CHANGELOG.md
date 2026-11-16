@@ -7,6 +7,26 @@ own ([`docs/releasing.md`](../../docs/releasing.md)).
 
 ## [Unreleased]
 
+### Changed
+
+- **`config_version: 2`: the gateway's keys moved to `gateway:` (ADR 0005).**
+  The claim-check gateway is now `Ankusa.Gateway` (package `ankusa_gateway`),
+  started beside the instance when `node.roles` lists `claim_check` (core gets
+  the other roles; none is a gateway-only node). `claim_check.port`, `ip` and
+  `tls` are `gateway.port`, `ip` and `tls`; `max_concurrent_reads` is
+  `gateway.max_concurrent_requests`; `integrity_check` is
+  `gateway.claims.integrity_check`; `claim_check.auth` is
+  `gateway.auth.authenticators` (one `token`, `jwt` or `mtls` entry, `[]` for
+  `mode: none`). A file without `config_version` is migrated on load; a
+  version-2 file that still names a moved key fails with `claim_check.<k>:
+  moved to <new key> (config_version 2)`. `ANKUSA_CLAIM_CHECK_PORT`, `_IP` and
+  `_TOKEN` keep their names and set the `gateway` keys (the token replaces the
+  authenticator list only). `check-config` prints `gateway=<port|off>`,
+  `print-config` a redacted `"gateway"` object. The gateway's metrics are
+  `ankusa_gateway_requests_total{api,status}` and
+  `ankusa_gateway_request_duration_seconds{api}` (were
+  `ankusa_claim_gateway_*`), and it answers `GET /ready`.
+
 ### Added
 
 - **`{{ var }}` templates on sink addresses (CR-3).** Any sink of a source (YAML

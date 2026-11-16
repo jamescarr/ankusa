@@ -31,8 +31,9 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
     4. **Every example is an example of its own schema.** The document is
        validated against itself, so prose-level examples cannot silently rot into
        values the schemas forbid.
-    5. **The security scheme is declared and executed.** Both documents (this
-       one and `claim_check.v1.yaml`) declare bearer and mutual-TLS auth, every
+    5. **The security scheme is declared and executed.** The document
+       declares bearer and mutual-TLS auth (as `ankusa_gateway`'s
+       `claim_check.v1.yaml` does, tested there), every
        operation but the health probes inherits it and documents `401` and
        `403`, and the `401`/`403` probes of point 3 run against an instance with
        token authentication, so a route added without a scope check fails there.
@@ -417,16 +418,9 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
 
   # ── the security scheme ─────────────────────────────────────────────────────
 
-  @claim_spec_path Path.expand("../../../priv/openapi/claim_check.v1.yaml", __DIR__)
-
   test "the admin document declares bearer and mutual-TLS auth, on every operation but the probes",
        %{document: document} do
     assert_secured(document, ["/health", "/ready"])
-  end
-
-  test "the claim gateway document declares the same schemes and secures readClaim" do
-    {:ok, claim_document} = YamlElixir.read_from_file(@claim_spec_path)
-    assert_secured(claim_document, ["/health"])
   end
 
   defp assert_secured(document, exempt) do

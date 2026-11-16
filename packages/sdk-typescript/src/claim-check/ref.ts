@@ -14,7 +14,7 @@ export type ParsedClaimRef = {
   proof?: { exp: string; sig: string };
 };
 
-// Mirrors `#/components/schemas/Ref` in priv/openapi/claim_check.v1.yaml —
+// Mirrors `#/components/schemas/Ref` in ankusa_gateway/priv/openapi/claim_check.v1.yaml —
 // keep the two in sync. A ref is one string:
 //   urn:ankusa:claim:v1:<tenant>:<claim_id>
 //   urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>

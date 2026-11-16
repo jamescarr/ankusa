@@ -1,7 +1,7 @@
 defmodule Ankusa.Admin.RouterTest do
   @moduledoc """
   Exercises `Ankusa.Admin.Router`'s HTTP semantics directly via
-  `Plug.Test`/`Router.call`, the same pattern `Ankusa.ClaimCheck.RouterTest`
+  `Plug.Test`/`Router.call`, the same pattern the gateway's router tests
   uses — no real socket needed to prove status-code mapping, role gating, and
   redaction are correct.
   """

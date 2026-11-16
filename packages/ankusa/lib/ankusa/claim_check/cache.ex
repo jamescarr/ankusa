@@ -10,7 +10,7 @@ defmodule Ankusa.ClaimCheck.Cache do
       (`read`), so a short prefix (a small pack) is told apart from one that
       was never asked for that far. Every later claim of the pack is located
       without a store read. Once the gateway has checked a claim of the pack
-      (`claim_check.integrity_check: :manifest`) the entry also holds the
+      (`gateway.claims.integrity_check: :manifest`) the entry also holds the
       sha256 of every claim in it, 32 bytes each, taken from the pack's
       manifest: the rest of the pack's claims are checked without a store
       read. Kept 10 minutes.
@@ -52,7 +52,7 @@ defmodule Ankusa.ClaimCheck.Cache do
 
   Instance-scoped: this process registers under
   `Ankusa.via(instance, :claim_cache)` and owns the tables. When it isn't
-  running (no `:claim_check` role, or `read_cache_bytes: 0`) every lookup
+  running (no gateway on this node, or `read_cache_bytes: 0`) every lookup
   misses and every insert is dropped.
   """
 

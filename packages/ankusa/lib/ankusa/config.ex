@@ -254,23 +254,11 @@ defmodule Ankusa.Config do
               # An integer >= 1.
               catalogue_retention_days: 365
             },
-            # claim check: payloads too large to ride inline in a queue message
+            # claim check: payloads too large to ride inline in a queue message.
+            # The HTTP gateway that serves them is `ankusa_gateway`
+            # (`Ankusa.Gateway`); these keys are what it and in-process
+            # redeem/3 read.
             claim_check: %{
-              # :claim_check role only
-              port: 4001,
-              # address the claim gateway binds; "0.0.0.0" exposes it on every interface
-              ip: "127.0.0.1",
-              # nil (plain HTTP) or a TLS block, shaped like `listener.tls`
-              tls: nil,
-              # who may read claims: see `Ankusa.Admin.Auth`. `mode: :none` is
-              # accepted on loopback only
-              auth: %{mode: :none},
-              # `{module, fun, args}`: called before every claim read, after
-              # authentication, as `apply(module, fun, [ctx | args])` with
-              # `ctx = %{principal, tenant_id, claim_id, conn}`; it returns
-              # `:ok` or `{:error, :forbidden}`. nil = the built-in check: the
-              # principal holds `claims:read` and `tenant:<t>` or `tenant:*`
-              authorize: nil,
               # HMAC keys for v2 refs (`Ankusa.ClaimCheck.Ref`), each at least
               # 16 bytes, `[current | previous]`: a ref is signed with the
               # first and accepted if any signed it. [] mints v1 refs
@@ -281,9 +269,6 @@ defmodule Ankusa.Config do
               # whether a v1 ref (no signature, no expiry) is still served;
               # nil = only while `ref_signing_keys` is empty
               accept_unsigned_refs: nil,
-              # claim requests the gateway serves at once, node-wide; past it
-              # a request is `503` + `Retry-After`. 0 = no limit
-              max_concurrent_reads: 1024,
               # target size of one pack object; a body larger than this still
               # gets a pack of its own
               pack_max_bytes: 16 * 1024 * 1024,
@@ -322,7 +307,7 @@ defmodule Ankusa.Config do
               # shard=<c>/ under the tenant (32 prefixes per tenant) — see
               # Ankusa.ClaimCheck.Ref
               key_layout: :flat,
-              # ── reads: the gateway, and redeem/3 in-process on a :claim_check node ──
+              # ── reads: the gateway, and redeem/3 in-process ──
               # one read (the pack index, then the bytes) must finish within this;
               # past it the gateway answers 503 + Retry-After, and the store read
               # that outlived it still completes and fills the cache
@@ -342,12 +327,7 @@ defmodule Ankusa.Config do
               # memory for cached pack indexes and claim bodies; 0 = no cache
               read_cache_bytes: 128 * 1024 * 1024,
               # a claim larger than this is served but never cached
-              read_cache_max_entry_bytes: 1024 * 1024,
-              # `:manifest`: the gateway checks every whole-claim `GET` against the
-              # sha256 in the pack's manifest (`502 integrity_mismatch` on a
-              # difference) and sends it as `x-ankusa-sha256`; `:off` serves the
-              # store's bytes unchecked
-              integrity_check: :manifest
+              read_cache_max_entry_bytes: 1024 * 1024
             },
             # continuous backup of the store to an object store, and restore into
             # an empty data_dir at boot (see Ankusa.Store.Backup). Off by default.
@@ -667,19 +647,18 @@ defmodule Ankusa.Config do
   # a bare `%__MODULE__{}` tells dialyzer about the field.
   @type t :: %__MODULE__{lifecycle: %{sinks: [{module(), keyword()}]}}
 
-  @roles [:edge, :dispatch, :storage, :claim_check]
+  @roles [:edge, :dispatch, :storage]
 
   @role_names %{
     "edge" => :edge,
     "dispatch" => :dispatch,
-    "storage" => :storage,
-    "claim_check" => :claim_check
+    "storage" => :storage
   }
 
   @doc """
   Parse a comma-separated `ANKUSA_ROLES`-shaped string into role atoms.
   Never calls `String.to_atom/1` — each part must name one of the fixed
-  roles (`edge`, `dispatch`, `storage`, `claim_check`).
+  roles (`edge`, `dispatch`, `storage`).
   """
   @spec parse_roles!(String.t()) :: [atom()]
   def parse_roles!(value) do
@@ -691,7 +670,7 @@ defmodule Ankusa.Config do
       |> Enum.map(fn name ->
         Map.get(@role_names, name) ||
           raise ArgumentError,
-                "unknown Ankusa role #{inspect(name)}; expected one of: edge, dispatch, storage, claim_check"
+                "unknown Ankusa role #{inspect(name)}; expected one of: edge, dispatch, storage"
       end)
 
     if roles == [] do
@@ -706,7 +685,7 @@ defmodule Ankusa.Config do
   sections (`:listener`, `:batcher`, `:dispatch`, `:storage`, `:claim_check`,
   `:backup`, `:admin`, `:metrics`, `:routes`, `:rate_limits`, `:dedupe`, `:fleet`,
   `:quarantine`, `:tenants`, `:lifecycle`, `:egress`, `:secrets`) over the defaults (`egress.pools` is merged one level down). Every `tls` block (`listener.tls`,
-  `admin.tls`, `routes.admin.tls`, `claim_check.tls`, `metrics.tls`) is
+  `admin.tls`, `routes.admin.tls`, `metrics.tls`) is
   validated and normalised by `Ankusa.Listener.normalize_tls!/2`, and
   `listener.num_acceptors: nil` becomes two per scheduler.
 
@@ -825,7 +804,6 @@ defmodule Ankusa.Config do
 
   defp validate_listen_ips!(config) do
     listen_ip!(config.admin.ip, "admin.ip")
-    listen_ip!(config.claim_check.ip, "claim_check.ip")
     listen_ip!(config.routes.admin.ip, "routes.admin.ip")
     listen_ip!(config.metrics.ip, "metrics.ip")
     config
@@ -866,10 +844,6 @@ defmodule Ankusa.Config do
       | listener: listener,
         admin:
           config.admin |> put_tls!("admin.tls") |> put_auth!("admin.auth", config.admin.enabled),
-        claim_check:
-          config.claim_check
-          |> put_tls!("claim_check.tls")
-          |> put_auth!("claim_check.auth", :claim_check in config.roles),
         metrics: put_tls!(config.metrics, "metrics.tls"),
         routes: %{
           config.routes
@@ -891,7 +865,6 @@ defmodule Ankusa.Config do
   @ports [
     {[:port], "port"},
     {[:admin, :port], "admin.port"},
-    {[:claim_check, :port], "claim_check.port"},
     {[:routes, :admin, :port], "routes.admin.port"},
     {[:metrics, :port], "metrics.port"}
   ]
@@ -956,7 +929,6 @@ defmodule Ankusa.Config do
     {[:claim_check, :read_retries], "claim_check.read_retries"},
     {[:claim_check, :read_queue_max], "claim_check.read_queue_max"},
     {[:claim_check, :read_cache_bytes], "claim_check.read_cache_bytes"},
-    {[:claim_check, :max_concurrent_reads], "claim_check.max_concurrent_reads"},
     {[:listener, :drain_delay_ms], "listener.drain_delay_ms"}
   ]
 
@@ -1085,14 +1057,6 @@ defmodule Ankusa.Config do
       "claim_check.accept_unsigned_refs",
       "nil, true or false",
       &(&1 == nil or is_boolean(&1))
-    )
-
-    check!(
-      config,
-      [:claim_check, :integrity_check],
-      "claim_check.integrity_check",
-      ":off or :manifest",
-      &(&1 in [:off, :manifest])
     )
 
     check!(
@@ -1417,10 +1381,11 @@ defmodule Ankusa.Config do
   # `:dispatch` and `:storage` read the queue and nothing else, so with no queue
   # they have no work: they are dropped rather than rejected, which lets an
   # existing `roles: [:edge, :dispatch, :storage]` deployment flip
-  # `wal.type: none` with no other change. The check is "a role is left", not
-  # "`:edge` is left": a `:claim_check`-only node survives, which is a
-  # legitimate standalone deployment. The effective roles are visible on the
-  # admin API's `GET /health`.
+  # `wal.type: none` with no other change. A node given no role at all
+  # (`roles: []`, what a gateway-only node runs on) is left alone. The
+  # effective roles are visible on the admin API's `GET /health`.
+  defp normalize_wal(%__MODULE__{wal: :none, roles: []} = config), do: config
+
   defp normalize_wal(%__MODULE__{wal: :none} = config) do
     case Enum.reject(config.roles, &(&1 in [:dispatch, :storage])) do
       [] -> raise ArgumentError, "wal: :none requires the :edge role"

@@ -555,34 +555,6 @@ defmodule Ankusa.ClaimCheckTest do
                  Config.new(claim_check: %{accept_unsigned_refs: false, ref_signing_keys: [key]})
                )
     end
-
-    test "authorize: nil or an exported {module, fun, args}" do
-      assert :ok = ClaimCheck.validate_config!(Config.new(claim_check: %{authorize: nil}))
-
-      assert :ok =
-               ClaimCheck.validate_config!(
-                 Config.new(claim_check: %{authorize: {__MODULE__, :allow_all, [:extra]}})
-               )
-
-      for bad <- [
-            {__MODULE__, :missing, []},
-            # arity counts the context argument
-            {__MODULE__, :allow_all, []},
-            {NoSuchModule, :allow, []}
-          ] do
-        assert_raise ArgumentError, ~r/claim_check.authorize .* is not defined/, fn ->
-          ClaimCheck.validate_config!(Config.new(claim_check: %{authorize: bad}))
-        end
-      end
-
-      for bad <- [:yes, {__MODULE__, :allow_all}, {"m", :f, []}, {__MODULE__, :allow_all, :x}] do
-        assert_raise ArgumentError, ~r/claim_check.authorize must be nil or/, fn ->
-          ClaimCheck.validate_config!(Config.new(claim_check: %{authorize: bad}))
-        end
-      end
-    end
-
-    def allow_all(_context, _extra), do: :ok
   end
 
   describe "a dedicated claim store" do

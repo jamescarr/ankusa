@@ -11,7 +11,29 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Removed
+
+- **The claim-check gateway left core (ADR 0005).** `Ankusa.ClaimCheck.Router`
+  and the `:claim_check` role are gone; the gateway is `Ankusa.Gateway` in the
+  new `ankusa_gateway` package, started beside `{Ankusa.Instance, config}`.
+  `Ankusa.Config.new(roles: [:claim_check])` raises `unknown Ankusa role`, and
+  `parse_roles!/1` knows `edge`, `dispatch` and `storage`. These `claim_check`
+  keys are removed (`unknown Ankusa.Config key`) and live in
+  `Ankusa.Gateway.Config`: `port`, `ip`, `tls`, `auth` (now an authenticator
+  chain), `authorize` (now an `Ankusa.Gateway.Authorizer` module),
+  `max_concurrent_reads` (now `max_concurrent_requests`) and `integrity_check`
+  (now `claims.integrity_check`). The claim read engine (`locate/4`,
+  `read_bytes/5`, `digest/3`, `Ankusa.ClaimCheck.Reader`,
+  `Ankusa.ClaimCheck.Cache`) stays. The `[:ankusa, :claim_check, :gateway]`
+  event and the `ankusa_claim_gateway_*` series are now the gateway's
+  `[:ankusa, :gateway, :request]` and `ankusa_gateway_request*`. `roles: []`
+  is a valid node (a gateway-only one), under every `wal`, and
+  `priv/openapi/claim_check.v1.yaml` moved to `ankusa_gateway`.
+
 ### Added
+
+- `jwt_block!/2` in `Ankusa.Admin.Auth` (`@doc false`): the rules of one `jwt`
+  block, for a verifier outside core.
 
 - **Seams for a gateway outside core (ADR 0005).** `Ankusa.Principal` gains
   `claims` (the claims of the credential that authenticated it) and `groups`,

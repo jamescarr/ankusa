@@ -28,7 +28,10 @@ defmodule AnkusaExample.Ingest.MixProject do
       # dependency, which conflicts with this path entry.
       {:ankusa, path: "../../../packages/ankusa", override: true},
       {:async_api_spex, path: "../../../packages/async_api_spex", override: true},
-      {:ankusa_kafka, path: "../../../packages/ankusa_kafka"}
+      {:ankusa_kafka, path: "../../../packages/ankusa_kafka"},
+      # The claim-check gateway (`ANKUSA_ROLES` naming `claim_check`), which
+      # left core for its own package.
+      {:ankusa_gateway, path: "../../../packages/ankusa_gateway"}
     ]
   end
 end

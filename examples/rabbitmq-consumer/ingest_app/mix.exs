@@ -31,7 +31,10 @@ defmodule AnkusaExample.Ingest.MixProject do
       # monorepo example wiring both path-dependent packages together needs.
       {:ankusa, path: "../../../packages/ankusa", override: true},
       {:async_api_spex, path: "../../../packages/async_api_spex", override: true},
-      {:ankusa_rabbitmq, path: "../../../packages/ankusa_rabbitmq"}
+      {:ankusa_rabbitmq, path: "../../../packages/ankusa_rabbitmq"},
+      # The claim-check gateway (`ANKUSA_ROLES` naming `claim_check`), which
+      # left core for its own package.
+      {:ankusa_gateway, path: "../../../packages/ankusa_gateway"}
     ]
   end
 end

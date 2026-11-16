@@ -42,6 +42,8 @@ defmodule AnkusaServer.MixProject do
       {:ankusa_kafka, path: "../ankusa_kafka"},
       {:ankusa_nats, path: "../ankusa_nats"},
       {:ankusa_redis, path: "../ankusa_redis"},
+      # The gateway (`claim_check` role): `Ankusa.Gateway`, beside the instance.
+      {:ankusa_gateway, path: "../ankusa_gateway"},
       {:yaml_elixir, "~> 2.12"},
       # Signs the secret manager's requests (`AnkusaServer.SecretProvider.AwsSecretsManager`);
       # the requirement core holds, so the lock does not change.

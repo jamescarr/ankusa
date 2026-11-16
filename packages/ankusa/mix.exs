@@ -117,7 +117,6 @@ defmodule Ankusa.MixProject do
           Ankusa.Store,
           Ankusa.Queue.Writer,
           Ankusa.Dispatch.Pipeline,
-          Ankusa.ClaimCheck.Router,
           Ankusa.ClaimCheck.Sweeper,
           Ankusa.Http,
           Ankusa.HttpClient,

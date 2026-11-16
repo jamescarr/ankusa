@@ -1,7 +1,8 @@
 defmodule AnkusaServer.Application do
   @moduledoc """
   Boot: read the operator's config file, then start exactly one
-  `Ankusa.Instance`.
+  `Ankusa.Instance`, and the gateway (`Ankusa.Gateway`) after it when
+  `node.roles` names `claim_check`.
 
   The instance is owned here rather than by `config :ankusa, autostart: true`
   so there is one place that decides what runs: the YAML file. Core's
@@ -66,20 +67,21 @@ defmodule AnkusaServer.Application do
     Logger.info(
       "[ankusa] ankusa_server #{version()} roles=#{inspect(config.roles)} http=#{config.port} " <>
         "admin=#{admin(config)} routes=#{routes(config)} wal=#{Ankusa.Queue.label(config.wal)} " <>
-        "sources=#{sources(config)}"
+        "gateway=#{gateway(loaded.gateway)} sources=#{sources(config)}"
     )
 
     start_tracing(loaded.tracing)
 
     # The GCP token cache first: the blob store and Pub/Sub sinks ask it for tokens.
-    # `SIGHUP` last: a reload needs the instance it reloads.
+    # The gateway after the instance it runs beside. `SIGHUP` last: a reload
+    # needs the instance it reloads.
+    gateway = if loaded.gateway, do: [{Ankusa.Gateway, loaded.gateway}], else: []
+
     with {:ok, pid} <-
            Supervisor.start_link(
-             [
-               AnkusaServer.GcpToken,
-               {Ankusa.Instance, config},
-               {AnkusaServer.Reload.Signal, instance: config.instance}
-             ],
+             [AnkusaServer.GcpToken, {Ankusa.Instance, config}] ++
+               gateway ++
+               [{AnkusaServer.Reload.Signal, instance: config.instance}],
              strategy: :one_for_one,
              name: AnkusaServer.Supervisor
            ),
@@ -141,6 +143,11 @@ defmodule AnkusaServer.Application do
 
   defp admin(%{admin: %{enabled: true, port: port}}), do: to_string(port)
   defp admin(_config), do: "off"
+
+  @doc "The gateway's port for the boot line and `check-config`, or `off`."
+  @spec gateway(Ankusa.Gateway.Config.t() | nil) :: String.t()
+  def gateway(%Ankusa.Gateway.Config{port: port}), do: to_string(port)
+  def gateway(nil), do: "off"
 
   # Off, or on and which store the definitions live in: the one thing about
   # routes an operator needs from the banner is whether an edge is enforcing

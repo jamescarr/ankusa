@@ -20,7 +20,7 @@ export interface paths {
          * Read a claim's bytes
          * @description Returns exactly the claim's bytes. Claims are written once and never
          *     rewritten, so a response is cacheable forever. With the gateway's
-         *     `claim_check.integrity_check: manifest` (the default) a whole claim
+         *     `gateway.claims.integrity_check: manifest` (the default) a whole claim
          *     is checked against its pack's manifest before it is sent, `502
          *     integrity_mismatch` when it differs, and `200` and `206` carry the
          *     digest as `X-Ankusa-Sha256`. The reader still MUST check the bytes
@@ -49,6 +49,29 @@ export interface paths {
         };
         /** Liveness probe */
         get: operations["getHealth"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Readiness probe
+         * @description The node's readiness checks (its store, sinks and disk when it has
+         *     them; none on a gateway-only node) with `"gateway": "ok"`. `503` while
+         *     the node drains on its way down, or while an authorizer that must load
+         *     before serving has not.
+         */
+        get: operations["getReady"];
         put?: never;
         post?: never;
         delete?: never;
@@ -96,17 +119,32 @@ export interface components {
         Sig: string;
         Error: {
             /** @enum {string} */
-            error: "invalid_tenant" | "invalid_id" | "bad_signature" | "unsigned_ref" | "ref_expired" | "not_found" | "store_unavailable" | "store_forbidden" | "overloaded" | "integrity_mismatch" | "unauthenticated" | "forbidden";
+            error: "invalid_tenant" | "invalid_id" | "bad_signature" | "unsigned_ref" | "ref_expired" | "not_found" | "store_unavailable" | "store_forbidden" | "overloaded" | "integrity_mismatch" | "unauthenticated" | "forbidden" | "auth_unavailable" | "authz_unavailable";
             /**
-             * @description Present on `forbidden` from the built-in check; the scope the
-             *     principal lacks (`claims:read`, or `tenant:<tenant_id>`). A
-             *     `claim_check.authorize` hook's refusal names none.
+             * @description Present on `forbidden` from the built-in `scopes` authorizer; the
+             *     scope the principal lacks (`claims:read`, or `tenant:<tenant_id>`).
+             *     Another authorizer's refusal names one only when it sets it.
              */
             scope?: string;
         };
         Health: {
             /** @constant */
             status: "ok";
+        };
+        /**
+         * @description `status` is `ok` or `draining` (and `failing` when one of the node's
+         *     own checks fails); `gateway` is `ok` while the gateway runs. Other
+         *     keys are the node's readiness checks, as its admin API's `/ready`
+         *     reports them.
+         */
+        Ready: {
+            status: string;
+            /** @constant */
+            gateway?: "ok";
+            /** @description `ok` or `not_ready` per authorizer that reports readiness. */
+            authorizers?: {
+                [key: string]: "ok" | "not_ready";
+            };
         };
     };
     responses: {
@@ -165,7 +203,10 @@ export interface components {
         /**
          * @description `store_unavailable` (the object store is unreachable, throttling, or
          *     slower than the gateway's deadline) or `overloaded` (the node is at
-         *     `claim_check.max_concurrent_reads`). Transient. Retry.
+         *     `gateway.max_concurrent_requests`); `auth_unavailable` (an
+         *     authenticator's identity provider did not answer) or
+         *     `authz_unavailable` (an authorizer's backend did not answer, and the
+         *     policy fails closed). Transient. Retry.
          */
         StoreUnavailable: {
             headers: {
@@ -228,7 +269,7 @@ export interface components {
         AcceptRanges: "bytes";
         /**
          * @description The lowercase hex sha256 of the whole claim, as its pack's manifest
-         *     records it. Sent unless `claim_check.integrity_check` is `off`; on a
+         *     records it. Sent unless `gateway.claims.integrity_check` is `off`; on a
          *     `206` it is the whole claim's digest, to check once the ranges are
          *     reassembled.
          */
@@ -335,6 +376,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Health"];
+                };
+            };
+        };
+    };
+    getReady: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ready to serve. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Ready"];
+                };
+            };
+            /** @description Not ready; `Retry-After` is always `1`. */
+            503: {
+                headers: {
+                    /** @description Always `1`. */
+                    "Retry-After"?: 1;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Ready"];
                 };
             };
         };

@@ -12,6 +12,7 @@ WORKDIR /repo
 COPY packages/ankusa ./packages/ankusa
 COPY packages/async_api_spex ./packages/async_api_spex
 COPY packages/ankusa_kafka ./packages/ankusa_kafka
+COPY packages/ankusa_gateway ./packages/ankusa_gateway
 COPY examples/kafka-sqs-consumer/ingest_app ./examples/kafka-sqs-consumer/ingest_app
 
 WORKDIR /repo/examples/kafka-sqs-consumer/ingest_app

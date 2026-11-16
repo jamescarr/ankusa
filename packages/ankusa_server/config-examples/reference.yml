@@ -23,11 +23,14 @@
 # `dispatch.sink_concurrency`, `dispatch.tenants`, `metrics.detail` and
 # `admin.gauge_interval_ms`; a change to any other key is refused with `409`
 # naming it, and needs a restart. See docs/configuration.md#reloading-the-config.
-config_version: 1
+config_version: 2
 
 node:
   # [env ANKUSA_ROLES] which OTP roles run here. One all-roles process is fine
   # to start with; split for scale (edge in front, dispatch+storage behind).
+  # `claim_check` runs the gateway (the `gateway:` section below) beside the
+  # others; `[claim_check]` alone is a gateway-only node (or run the
+  # jamescarr/ankusa-gateway image).
   roles: [edge, dispatch, storage]
   # [env ANKUSA_DATA_DIR] the RocksDB store (hooks, delivery rows and DLQ, quarantine pen, API-managed sources, rate-limit overrides) and local segments land here.
   data_dir: /var/lib/ankusa
@@ -96,7 +99,7 @@ http:
     hash: []
 
 # Connection limits and timeouts, applied to EVERY HTTP listener below (ingest,
-# admin, routes.admin, claim_check, metrics), plus the ingest port's TLS.
+# admin, routes.admin, gateway, metrics), plus the ingest port's TLS.
 listener:
   # Open connections per listener, spread over the acceptors; past it new
   # connections are closed.
@@ -129,7 +132,7 @@ listener:
   # node with the edge role at least the listener wait above.
   drain_delay_ms: 5000
   drain_timeout_ms: 30000
-  # TLS for the ingest listener (admin, routes.admin, claim_check and metrics
+  # TLS for the ingest listener (admin, routes.admin, gateway and metrics
   # each take their own `tls:` of the same shape). Off = plain HTTP.
   # tls:
   #   certfile: /etc/ankusa/tls/server.pem
@@ -679,22 +682,9 @@ storage:
     # `op_deadline_ms`, `upload_timeout_ms`, `multipart_*`, `breaker_*`,
     # `pool_*`, `retries`) apply here.
 
+# Writing and storing claims (every node that checks claims in, and the
+# gateway that reads them). The gateway's own listener is `gateway:` below.
 claim_check:
-  # [env ANKUSA_CLAIM_CHECK_PORT] the gateway listener (:claim_check role).
-  port: 4001
-  # [env ANKUSA_CLAIM_CHECK_IP] the address the gateway binds. Loopback by
-  # default; set 0.0.0.0 to reach it from outside the container.
-  ip: 127.0.0.1
-  # A TLS block for the gateway, shaped like `listener.tls` above.
-  # tls: {certfile: /etc/ankusa/tls/server.pem, keyfile: /etc/ankusa/tls/server-key.pem}
-  # Who may read claims: the `claims:read` scope plus tenant:<tenant> for the
-  # claim's tenant (or tenant:*). Same shapes as under `admin.auth`;
-  # [env ANKUSA_CLAIM_CHECK_TOKEN] replaces this block with one token holding
-  # both. Consumers (the SDKs' claim-check clients) send the token as
-  # `Authorization: Bearer`, e.g. the TypeScript client's `headers` option.
-  auth:
-    mode: none
-    allow_insecure: false
   # Target size of one pack object; a body larger than this still gets a pack
   # of its own. Core defaults this to 16 MiB.
   pack_max_bytes: 16777216
@@ -770,14 +760,6 @@ claim_check:
   read_cache_bytes: 134217728
   # A claim larger than this (bytes) is served but never cached.
   read_cache_max_entry_bytes: 1048576
-  # Claim requests this node serves at once, cache hits included; past it a
-  # request is 503 overloaded with Retry-After 1-3. 0 = no limit.
-  max_concurrent_reads: 1024
-  # off | manifest. manifest: every whole-claim GET is checked against the
-  # sha256 in its pack's manifest (read once per pack, cached with the pack's
-  # index) and answers 502 integrity_mismatch on a difference; 200 and 206
-  # carry the digest as x-ankusa-sha256. off serves the store's bytes unchecked.
-  integrity_check: manifest
   # Signed, expiring refs. With keys, the claims a dispatch node checks in get
   # `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>` refs: an
   # HMAC-SHA256 over the tenant, claim and expiry, which the gateway verifies
@@ -796,8 +778,60 @@ claim_check:
   # ref_signing_keys is empty, so setting keys refuses every unsigned ref;
   # true keeps serving refs already in queues while you roll keys out.
   accept_unsigned_refs: null
-  # The gateway performs no authentication. Keep 4001 internal and put your
-  # proxy, mesh, or network policy in front of it, the same as 4002.
+
+# The gateway (node.roles: [claim_check], or the jamescarr/ankusa-gateway
+# image): the claims API, authenticated and authorized per request. A file
+# without `config_version` keeps its old `claim_check.port|ip|tls|auth|
+# max_concurrent_reads|integrity_check` keys: they are moved here on load.
+gateway:
+  # [env ANKUSA_CLAIM_CHECK_PORT] the gateway listener.
+  port: 4001
+  # [env ANKUSA_CLAIM_CHECK_IP] the address it binds. Loopback by default; set
+  # 0.0.0.0 to reach it from outside the container.
+  ip: 127.0.0.1
+  # A TLS block, shaped like `listener.tls` above.
+  # tls: {certfile: /etc/ankusa/tls/server.pem, keyfile: /etc/ankusa/tls/server-key.pem}
+  # Requests served at once on this node, cache hits included; past it a
+  # request is 503 overloaded with Retry-After 1-3. 0 = no limit.
+  max_concurrent_requests: 1024
+  auth:
+    # An empty chain is accepted on loopback only, unless something in front
+    # of the listener authenticates every caller.
+    allow_insecure: false
+    # Tried in order; the first that accepts the credential wins. At most 8,
+    # at most one mtls. [env ANKUSA_CLAIM_CHECK_TOKEN] replaces the list with
+    # one token authenticator holding claims:read and tenant:*. Consumers (the
+    # SDKs' claim-check clients) send a token as `Authorization: Bearer`.
+    authenticators: []
+    # - type: token
+    #   name: workers                 # default "<type>-<index>"
+    #   tokens:
+    #     - id: worker
+    #       token: "${WORKER_TOKEN}"   # or sha256: <hex>; hashed at load
+    #       scopes: [claims:read, "tenant:*"]
+    #       groups: [workers]          # optional, for authorizers that read them
+    # - type: jwt                      # one per issuer; a token is routed by its iss
+    #   issuer: https://login.example.com/
+    #   audience: ankusa
+    #   jwks_url: https://login.example.com/.well-known/jwks.json
+    #   groups_claim: groups           # list, or a space-delimited string
+    #   subject_prefix: ""             # prepended to sub (two issuers, two alices)
+    # - type: mtls                     # needs gateway.tls with verify: verify_peer
+    #   subject_map:
+    #     "uri:spiffe://prod/ns/billing/sa/worker": [claims:read, "tenant:billing"]
+    #     "cn:reports": {scopes: [claims:read, "tenant:*"], groups: [reports]}
+  claims:
+    # Serve the claims API (else its routes answer 404).
+    enabled: true
+    # The policy a claim read is decided by: `claims` is `[scopes]` (the
+    # claims:read scope and the claim's tenant) unless gateway.authz says otherwise.
+    policy: claims
+    # off | manifest. manifest: every whole-claim GET is checked against the
+    # sha256 in its pack's manifest (read once per pack, cached with the
+    # pack's index) and answers 502 integrity_mismatch on a difference; 200
+    # and 206 carry the digest as x-ankusa-sha256. off serves the store's
+    # bytes unchecked.
+    integrity_check: manifest
 
 backup:
   # [env ANKUSA_BACKUP_ENABLED] continuous backup of this node's store to an

@@ -593,16 +593,15 @@ defmodule Ankusa.InstanceTest do
     end
 
     @tag :capture_log
-    test "admin, route-management, claim-check and metrics listeners take their own tls block" do
-      [admin, routes, claim, metrics] = Enum.map(1..4, fn _ -> free_port() end)
+    test "admin, route-management and metrics listeners take their own tls block" do
+      [admin, routes, metrics] = Enum.map(1..3, fn _ -> free_port() end)
       tls = [certfile: fixture("server.pem"), keyfile: fixture("server-key.pem")]
 
       config =
         test_config(
-          roles: [:edge, :claim_check],
+          roles: [:edge],
           admin: %{enabled: true, port: admin, tls: tls},
           routes: %{enabled: true, admin: %{port: routes, tls: tls}},
-          claim_check: %{port: claim, tls: tls},
           metrics: %{enabled: true, port: metrics, tls: tls}
         )
 
@@ -611,7 +610,6 @@ defmodule Ankusa.InstanceTest do
       for {port, path} <- [
             {admin, "/health"},
             {routes, "/health"},
-            {claim, "/health"},
             {metrics, "/health"}
           ] do
         eventually(fn -> listening?(port) end)

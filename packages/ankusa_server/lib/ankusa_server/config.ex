@@ -44,12 +44,12 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_BANNER` | `log.banner` |
   | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
   | `ANKUSA_ADMIN_PORT` | `admin.port` |
-  | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
+  | `ANKUSA_CLAIM_CHECK_PORT` | `gateway.port` |
   | `ANKUSA_ADMIN_IP` | `admin.ip` |
-  | `ANKUSA_CLAIM_CHECK_IP` | `claim_check.ip` |
+  | `ANKUSA_CLAIM_CHECK_IP` | `gateway.ip` |
   | `ANKUSA_ADMIN_TOKEN` | `admin.auth`: one bearer token holding every scope and `tenant:*` (see below) |
   | `ANKUSA_ROUTES_ADMIN_TOKEN` | `routes.admin.auth`: one token holding `routes:read`, `routes:write`, `tenant:*` |
-  | `ANKUSA_CLAIM_CHECK_TOKEN` | `claim_check.auth`: one token holding `claims:read`, `tenant:*` |
+  | `ANKUSA_CLAIM_CHECK_TOKEN` | `gateway.auth.authenticators`: one `token` authenticator whose one token holds `claims:read`, `tenant:*` (the rest of `gateway.auth` is kept) |
   | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
   | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
   | `ANKUSA_SOURCE_STORE_URL` | `source_store.url` |
@@ -67,6 +67,18 @@ defmodule AnkusaServer.Config do
 
   The full annotated schema, with every default, is
   `config-examples/reference.yml` — this module is the code that enforces it.
+
+  ## The gateway
+
+  `node.roles` may name `claim_check`: the node then runs `Ankusa.Gateway`
+  (package `ankusa_gateway`) beside its instance, configured by the `gateway:`
+  section, and core gets the other roles (none at all is a gateway-only node;
+  under `wal.type: none` the gateway's node drops `dispatch` and `storage`, as
+  it always has). `load!/1` returns the gateway's config as `gateway`, `nil`
+  without the role. The section is validated either way.
+
+  `config_version: 2` moved the gateway's keys out of `claim_check:` (see
+  `migrate_gateway_keys/1`, which rewrites a version-1 file on load).
   """
 
   require Logger
@@ -77,7 +89,7 @@ defmodule AnkusaServer.Config do
   @fallback_path "./ankusa.yml"
 
   @node_keys ~w(roles data_dir min_free_bytes region)
-  @root_keys ~w(config_version node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive health)
+  @root_keys ~w(config_version node log http listener admin metrics tracing routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check gateway backup sources source_store secrets lifecycle egress audit tenants queue archive health)
   @health_keys ~w(sink_error_window_ms)
   @log_keys ~w(level banner format)
   @tracing_keys ~w(enabled otlp_endpoint sample_ratio)
@@ -120,11 +132,26 @@ defmodule AnkusaServer.Config do
   @sse_keys ~w(type key_id)
   @sse_types %{"aes256" => :aes256, "kms" => :kms}
   @secrets_keys ~w(kek kek_previous providers cache_ttl_ms)
-  @claim_check_keys ~w(port retention_days redeem_grace_ms sweep_max_objects bucket_expiry_days
-                       pack_max_bytes ip store stores placement key_layout store_cooldown_ms
+  @claim_check_keys ~w(retention_days redeem_grace_ms sweep_max_objects bucket_expiry_days
+                       pack_max_bytes store stores placement key_layout store_cooldown_ms
                        read_deadline_ms read_timeout_ms read_retries read_max_inflight read_queue_max
-                       read_cache_bytes read_cache_max_entry_bytes max_concurrent_reads
-                       ref_signing_keys ref_ttl_ms accept_unsigned_refs integrity_check tls auth)
+                       read_cache_bytes read_cache_max_entry_bytes
+                       ref_signing_keys ref_ttl_ms accept_unsigned_refs)
+  # The `claim_check` keys `config_version: 2` moved to `gateway:`, and where.
+  @claim_check_moved %{
+    "port" => "gateway.port",
+    "ip" => "gateway.ip",
+    "tls" => "gateway.tls",
+    "auth" => "gateway.auth",
+    "max_concurrent_reads" => "gateway.max_concurrent_requests",
+    "integrity_check" => "gateway.claims.integrity_check"
+  }
+  @gateway_keys ~w(port ip tls auth max_concurrent_requests claims)
+  @gateway_auth_keys ~w(allow_insecure authenticators)
+  @gateway_authenticator_types ~w(token jwt mtls)
+  @gateway_token_keys ~w(id token sha256 scopes groups claims)
+  @gateway_jwt_keys @auth_jwt_keys ++ ~w(groups_claim header subject_prefix)
+  @gateway_claims_keys ~w(enabled policy integrity_check)
   @backup_keys ~w(enabled interval_ms keep store secondary timeout_ms verify_interval_ms
                   signing_key final_timeout_ms max_age_ms require_fresh)
   @source_store_keys ~w(type url namespace tick_ms timeout_ms load_timeout_ms)
@@ -239,13 +266,14 @@ defmodule AnkusaServer.Config do
 
   # The version of the file format this image reads (`config_version`). A file
   # without the key is version 1: every file written before it existed.
-  @config_version 1
+  @config_version 2
 
   # `from => fun`: rewrites a document of version `from` into one of `from + 1`,
   # on the YAML map as written (before `${…}` is substituted). A format change
   # that renames or moves a key adds its step here and bumps `@config_version`;
-  # the files of the older version keep loading. Empty until one does.
-  @migrations %{}
+  # the files of the older version keep loading. A remote capture: a module
+  # attribute cannot hold a local one.
+  @migrations %{1 => &__MODULE__.migrate_gateway_keys/1}
 
   @typedoc """
   A loaded config plus the log level and banner switch the file asked for, and
@@ -255,6 +283,7 @@ defmodule AnkusaServer.Config do
   """
   @type loaded :: %{
           config: Ankusa.Config.t(),
+          gateway: Ankusa.Gateway.Config.t() | nil,
           doc: map(),
           log: %{format: :text | :json, level: Logger.level()},
           banner: boolean(),
@@ -301,8 +330,11 @@ defmodule AnkusaServer.Config do
         Keyword.take(opts, [:refresh])
       )
 
+    {config, gateway} = config!(doc)
+
     %{
-      config: config!(doc),
+      config: config,
+      gateway: gateway,
       doc: doc,
       log: log!(doc),
       banner: banner?(doc),
@@ -351,6 +383,83 @@ defmodule AnkusaServer.Config do
 
     Map.put(doc, "config_version", current)
   end
+
+  @doc false
+  # Version 1 -> 2 (ADR 0005): the gateway left core, and its keys left
+  # `claim_check:` for `gateway:`. `claim_check.port|ip|tls` become
+  # `gateway.port|ip|tls`, `max_concurrent_reads` becomes
+  # `gateway.max_concurrent_requests`, `integrity_check` becomes
+  # `gateway.claims.integrity_check`, and the `auth` block (one `mode` and its
+  # block) becomes `gateway.auth` with one authenticator of that type (none for
+  # `mode: none`). A target the file already sets is an error, never a silent
+  # winner; so is a `${…}` mode, which cannot be read before substitution.
+  @spec migrate_gateway_keys(map()) :: map()
+  def migrate_gateway_keys(%{"claim_check" => %{} = claim_check} = doc) do
+    moved = Map.take(claim_check, Map.keys(@claim_check_moved))
+
+    if moved == %{} do
+      doc
+    else
+      gateway =
+        case Map.get(doc, "gateway") do
+          nil -> %{}
+          %{} = gateway -> gateway
+          other -> raise ConfigError, message: type_error(["gateway"], "a mapping", other)
+        end
+
+      gateway =
+        Enum.reduce(moved, gateway, fn {key, value}, gateway ->
+          target = gateway_target(key)
+
+          if get_in(gateway, target) != nil do
+            raise ConfigError,
+              message: "claim_check.#{key} and gateway.#{Enum.join(target, ".")} are both set"
+          end
+
+          put_path(gateway, target, migrated_value(key, value))
+        end)
+
+      doc
+      |> Map.put("claim_check", Map.drop(claim_check, Map.keys(moved)))
+      |> Map.put("gateway", gateway)
+    end
+  end
+
+  def migrate_gateway_keys(doc), do: doc
+
+  defp gateway_target("max_concurrent_reads"), do: ["max_concurrent_requests"]
+  defp gateway_target("integrity_check"), do: ["claims", "integrity_check"]
+  defp gateway_target(key), do: [key]
+
+  defp migrated_value("auth", %{} = auth) do
+    mode = Map.get(auth, "mode")
+
+    if is_binary(mode) and String.contains?(mode, "${") do
+      raise ConfigError,
+        message:
+          "claim_check.auth.mode: a templated mode cannot be migrated; write gateway.auth " <>
+            "and set config_version: 2"
+    end
+
+    authenticators =
+      case mode do
+        none when none in [nil, "none"] -> []
+        "token" -> [%{"type" => "token", "tokens" => Map.get(auth, "tokens")}]
+        "jwt" -> [Map.put(Map.get(auth, "jwt") || %{}, "type", "jwt")]
+        "mtls" -> [Map.put(Map.get(auth, "mtls") || %{}, "type", "mtls")]
+        other -> raise ConfigError, message: "claim_check.auth.mode: " <> unknown(other)
+      end
+
+    case Map.fetch(auth, "allow_insecure") do
+      {:ok, allow} -> %{"allow_insecure" => allow, "authenticators" => authenticators}
+      :error -> %{"authenticators" => authenticators}
+    end
+  end
+
+  defp migrated_value(_key, value), do: value
+
+  defp unknown(value),
+    do: "unknown value #{inspect(value)}; expected one of #{Enum.join(@auth_modes, ", ")}"
 
   @doc """
   `load!/0` for the callers that run on the file: boot, and the `check-config`
@@ -545,8 +654,8 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_BANNER", ["log", "banner"]},
     {"ANKUSA_ADMIN_PORT", ["admin", "port"]},
     {"ANKUSA_ADMIN_IP", ["admin", "ip"]},
-    {"ANKUSA_CLAIM_CHECK_PORT", ["claim_check", "port"]},
-    {"ANKUSA_CLAIM_CHECK_IP", ["claim_check", "ip"]},
+    {"ANKUSA_CLAIM_CHECK_PORT", ["gateway", "port"]},
+    {"ANKUSA_CLAIM_CHECK_IP", ["gateway", "ip"]},
     {"ANKUSA_ROUTES_ENABLED", ["routes", "enabled"]},
     {"ANKUSA_ROUTES_STORE_URL", ["routes", "store", "url"]},
     {"ANKUSA_SOURCE_STORE_URL", ["source_store", "url"]},
@@ -569,13 +678,13 @@ defmodule AnkusaServer.Config do
   @token_overrides [
     {"ANKUSA_ADMIN_TOKEN", ["admin"], Ankusa.Principal.scopes() ++ ["tenant:*"]},
     {"ANKUSA_ROUTES_ADMIN_TOKEN", ["routes", "admin"],
-     ["routes:read", "routes:write", "tenant:*"]},
-    {"ANKUSA_CLAIM_CHECK_TOKEN", ["claim_check"], ["claims:read", "tenant:*"]}
+     ["routes:read", "routes:write", "tenant:*"]}
   ]
 
   defp apply_env_overrides(doc, env) do
     doc = Enum.reduce(@env_overrides, doc, &override(&2, &1, env))
     doc = Enum.reduce(@token_overrides, doc, &token_override(&2, &1, env))
+    doc = claim_check_token(doc, env)
 
     # `PORT` is the fallback every container platform sets; `ANKUSA_HTTP_PORT`
     # is the explicit one and wins.
@@ -605,6 +714,35 @@ defmodule AnkusaServer.Config do
         }
 
         put_path(doc, path ++ ["auth"], auth)
+
+      :error ->
+        doc
+    end
+  end
+
+  # The gateway's token: its authenticator list becomes one `token`
+  # authenticator holding it, and `gateway.auth`'s other keys
+  # (`allow_insecure`) are kept as the file has them.
+  defp claim_check_token(doc, env) do
+    case Map.fetch(env, "ANKUSA_CLAIM_CHECK_TOKEN") do
+      {:ok, ""} ->
+        raise ConfigError, message: "ANKUSA_CLAIM_CHECK_TOKEN is set but empty"
+
+      {:ok, token} ->
+        authenticators = [
+          %{
+            "type" => "token",
+            "tokens" => [
+              %{
+                "id" => "ANKUSA_CLAIM_CHECK_TOKEN",
+                "token" => token,
+                "scopes" => ["claims:read", "tenant:*"]
+              }
+            ]
+          }
+        ]
+
+        put_path(doc, ["gateway", "auth", "authenticators"], authenticators)
 
       :error ->
         doc
@@ -695,6 +833,8 @@ defmodule AnkusaServer.Config do
     check_keys!(doc, @root_keys, [])
 
     egress = egress_policy!(doc)
+    gateway? = gateway_role?(doc)
+    gateway = gateway_section(doc, gateway?)
 
     opts =
       node_section(doc) ++
@@ -723,6 +863,18 @@ defmodule AnkusaServer.Config do
         secrets_section(doc) ++
         lifecycle_section(doc, egress)
 
+    # The gateway's series join the node's scrape (`metrics.extra`).
+    opts =
+      if gateway?,
+        do:
+          Keyword.update(
+            opts,
+            :metrics,
+            [extra: [Ankusa.Gateway.Metrics]],
+            &(&1 ++ [extra: [Ankusa.Gateway.Metrics]])
+          ),
+        else: opts
+
     try do
       config = Ankusa.Config.new(opts)
       Ankusa.ClaimCheck.validate_config!(config)
@@ -740,7 +892,7 @@ defmodule AnkusaServer.Config do
       Ankusa.BlobStore.validate_config!(config)
       Ankusa.Lifecycle.validate_config!(config)
       Ankusa.HttpClient.Egress.validate_config!(config)
-      config
+      {config, if(gateway?, do: %{gateway | instance: config.instance})}
     rescue
       error in ArgumentError ->
         reraise ConfigError, [message: error.message], __STACKTRACE__
@@ -753,7 +905,7 @@ defmodule AnkusaServer.Config do
     node = section!(doc, "node", @node_keys, [])
 
     []
-    |> put_opt(:roles, node["roles"] && roles!(node["roles"], ["node", "roles"]))
+    |> put_opt(:roles, node["roles"] && core_roles(doc, roles!(node["roles"], ["node", "roles"])))
     |> put_opt(
       :data_dir,
       node["data_dir"] && expect_string(node["data_dir"], ["node", "data_dir"])
@@ -795,6 +947,33 @@ defmodule AnkusaServer.Config do
     |> string_list!(path)
     |> Enum.map(&String.to_atom(enum!(&1, @roles, path)))
   end
+
+  # `claim_check` is the gateway, which runs beside the instance, not in it:
+  # core gets the other roles, possibly none. Under `wal.type: none` the
+  # gateway's node also drops `dispatch` and `storage` (they read the queue,
+  # and a gateway node takes no hooks), so `[claim_check, dispatch]` keeps
+  # booting as it did when core dropped them itself.
+  defp core_roles(doc, roles) do
+    if :claim_check in roles do
+      dropped =
+        if wal_type(doc) == "none", do: [:claim_check, :dispatch, :storage], else: [:claim_check]
+
+      roles -- dropped
+    else
+      roles
+    end
+  end
+
+  defp gateway_role?(doc) do
+    case doc["node"] do
+      %{"roles" => roles} when roles != nil -> :claim_check in roles!(roles, ["node", "roles"])
+      _ -> false
+    end
+  end
+
+  # Peeked before the `wal` section is validated (it is, in `wal_section/1`).
+  defp wal_type(%{"wal" => %{"type" => type}}), do: type
+  defp wal_type(_doc), do: nil
 
   defp http_section(doc) do
     http = section!(doc, "http", @http_keys, [])
@@ -966,28 +1145,7 @@ defmodule AnkusaServer.Config do
   # hash of one (`sha256:`): the plaintext never reaches `Ankusa.Config`.
   defp auth_token!(entry, path) do
     token = section!(entry, @auth_token_keys, path)
-
-    sha256 =
-      case {token["token"], token["sha256"]} do
-        {nil, nil} ->
-          raise ConfigError, message: "#{render_path(path)}: needs token or sha256"
-
-        {plain, nil} ->
-          plain = expect_string(plain, path ++ ["token"])
-
-          if plain == "",
-            do:
-              raise(ConfigError, message: "#{render_path(path ++ ["token"])}: must not be empty")
-
-          Ankusa.Admin.Auth.Token.hash(plain)
-
-        {nil, hex} ->
-          expect_string(hex, path ++ ["sha256"])
-
-        {_plain, _hex} ->
-          raise ConfigError,
-            message: "#{render_path(path)}: token and sha256 are alternatives; give one"
-      end
+    sha256 = token_sha256!(token, path)
 
     scopes =
       case token["scopes"] do
@@ -998,6 +1156,28 @@ defmodule AnkusaServer.Config do
     %{id: required_string!(token, "id", path), sha256: sha256, scopes: scopes}
   end
 
+  defp token_sha256!(token, path) do
+    case {token["token"], token["sha256"]} do
+      {nil, nil} ->
+        raise ConfigError, message: "#{render_path(path)}: needs token or sha256"
+
+      {plain, nil} ->
+        plain = expect_string(plain, path ++ ["token"])
+
+        if plain == "",
+          do: raise(ConfigError, message: "#{render_path(path ++ ["token"])}: must not be empty")
+
+        Ankusa.Admin.Auth.Token.hash(plain)
+
+      {nil, hex} ->
+        expect_string(hex, path ++ ["sha256"])
+
+      {_plain, _hex} ->
+        raise ConfigError,
+          message: "#{render_path(path)}: token and sha256 are alternatives; give one"
+    end
+  end
+
   defp auth_jwt(auth, path) do
     case auth["jwt"] do
       nil ->
@@ -1005,19 +1185,23 @@ defmodule AnkusaServer.Config do
 
       value ->
         path = path ++ ["jwt"]
-        jwt = section!(value, @auth_jwt_keys, path)
-
-        []
-        |> put_opt(:issuer, string_opt(jwt, "issuer", path))
-        |> put_opt(:audience, jwt_audience(jwt, path))
-        |> put_opt(:jwks_url, string_opt(jwt, "jwks_url", path))
-        |> put_opt(:keys, jwt_keys(jwt, path))
-        |> put_opt(:refresh_ms, int_opt(jwt, "refresh_ms", path))
-        |> put_opt(:min_refresh_ms, int_opt(jwt, "min_refresh_ms", path))
-        |> put_opt(:leeway_s, int_opt(jwt, "leeway_s", path))
-        |> put_opt(:scope_claim, string_opt(jwt, "scope_claim", path))
-        |> put_opt(:tenants_claim, string_opt(jwt, "tenants_claim", path))
+        value |> section!(@auth_jwt_keys, path) |> jwt_opts(path)
     end
+  end
+
+  # The keys of a `jwt` block, typed; core checks the ranges and what has to
+  # go together.
+  defp jwt_opts(jwt, path) do
+    []
+    |> put_opt(:issuer, string_opt(jwt, "issuer", path))
+    |> put_opt(:audience, jwt_audience(jwt, path))
+    |> put_opt(:jwks_url, string_opt(jwt, "jwks_url", path))
+    |> put_opt(:keys, jwt_keys(jwt, path))
+    |> put_opt(:refresh_ms, int_opt(jwt, "refresh_ms", path))
+    |> put_opt(:min_refresh_ms, int_opt(jwt, "min_refresh_ms", path))
+    |> put_opt(:leeway_s, int_opt(jwt, "leeway_s", path))
+    |> put_opt(:scope_claim, string_opt(jwt, "scope_claim", path))
+    |> put_opt(:tenants_claim, string_opt(jwt, "tenants_claim", path))
   end
 
   # One audience, or several (a token carrying any of them is accepted).
@@ -1439,19 +1623,18 @@ defmodule AnkusaServer.Config do
   # ── claim check ─────────────────────────────────────────────────────────────
 
   defp claim_check_section(doc) do
+    moved!(doc["claim_check"])
     claim_check = section!(doc, "claim_check", @claim_check_keys, [])
     path = ["claim_check"]
 
     [
       claim_check:
         []
-        |> put_opt(:port, int_opt(claim_check, "port", path))
         |> put_opt(:pack_max_bytes, int_opt(claim_check, "pack_max_bytes", path))
         |> put_opt(:retention_days, int_opt(claim_check, "retention_days", path))
         |> put_opt(:redeem_grace_ms, int_opt(claim_check, "redeem_grace_ms", path))
         |> put_opt(:sweep_max_objects, int_opt(claim_check, "sweep_max_objects", path))
         |> put_opt(:bucket_expiry_days, int_opt(claim_check, "bucket_expiry_days", path))
-        |> put_opt(:ip, string_opt(claim_check, "ip", path))
         |> put_opt(:blob_stores, claim_stores!(claim_check))
         |> put_opt(:placement, atom_enum_opt(claim_check, "placement", ~w(ordered hash), path))
         |> put_opt(:key_layout, atom_enum_opt(claim_check, "key_layout", ~w(flat sharded), path))
@@ -1466,20 +1649,184 @@ defmodule AnkusaServer.Config do
           :read_cache_max_entry_bytes,
           int_opt(claim_check, "read_cache_max_entry_bytes", path)
         )
-        |> put_opt(:max_concurrent_reads, int_opt(claim_check, "max_concurrent_reads", path))
-        |> put_opt(
-          :integrity_check,
-          atom_enum_opt(claim_check, "integrity_check", ~w(off manifest), path)
-        )
         |> put_opt(:ref_signing_keys, ref_signing_keys(claim_check, path))
         |> put_opt(:ref_ttl_ms, int_opt(claim_check, "ref_ttl_ms", path))
         |> put_opt(
           :accept_unsigned_refs,
           nullable_bool_opt(claim_check, "accept_unsigned_refs", path)
         )
-        |> put_opt(:tls, tls_opt(claim_check, path))
-        |> put_opt(:auth, auth_opt(claim_check, path))
     ]
+  end
+
+  # A version-2 file (a version-1 one was migrated) that still names a key the
+  # gateway took: say where it went.
+  defp moved!(%{} = claim_check) do
+    case Enum.find(Map.keys(claim_check), &Map.has_key?(@claim_check_moved, &1)) do
+      nil ->
+        :ok
+
+      key ->
+        raise ConfigError,
+          message: "claim_check.#{key}: moved to #{@claim_check_moved[key]} (config_version 2)"
+    end
+  end
+
+  defp moved!(_other), do: :ok
+
+  # ── gateway ─────────────────────────────────────────────────────────────────
+
+  # The `gateway:` section, as `Ankusa.Gateway.Config` (which checks every
+  # range and cross-key rule; its messages name the dotted key). Validated
+  # whether or not this node runs the gateway, so `check-config` catches a bad
+  # one; an empty chain off loopback is only refused when it does (`gateway?`).
+  defp gateway_section(doc, gateway?) do
+    gateway = section!(doc, "gateway", @gateway_keys, [])
+    path = ["gateway"]
+
+    opts =
+      []
+      |> put_opt(:port, int_opt(gateway, "port", path))
+      |> put_opt(:ip, string_opt(gateway, "ip", path))
+      |> put_opt(:tls, tls_opt(gateway, path))
+      |> put_opt(:max_concurrent_requests, int_opt(gateway, "max_concurrent_requests", path))
+      |> put_opt(:auth, gateway_auth(gateway, path))
+      |> put_opt(:claims, gateway_claims(gateway, path))
+
+    try do
+      Ankusa.Gateway.Config.new(opts, check_exposure: gateway?)
+    rescue
+      error in ArgumentError ->
+        reraise ConfigError, [message: error.message], __STACKTRACE__
+    end
+  end
+
+  defp gateway_auth(gateway, path) do
+    case gateway["auth"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["auth"]
+        auth = section!(value, @gateway_auth_keys, path)
+
+        []
+        |> put_opt(:allow_insecure, bool_opt(auth, "allow_insecure", path))
+        |> put_opt(:authenticators, gateway_authenticators(auth, path))
+    end
+  end
+
+  defp gateway_authenticators(auth, path) do
+    case auth["authenticators"] do
+      nil ->
+        nil
+
+      list when is_list(list) ->
+        list
+        |> Enum.with_index()
+        |> Enum.map(fn {entry, index} ->
+          authenticator!(entry, path ++ ["authenticators", index])
+        end)
+
+      other ->
+        raise ConfigError,
+          message: type_error(path ++ ["authenticators"], "a list of authenticators", other)
+    end
+  end
+
+  # One authenticator: its `type` picks the keys it may have. The atoms are a
+  # closed set (`enum!/3` first).
+  # sobelow_skip ["DOS.StringToAtom"]
+  defp authenticator!(entry, path) do
+    map = expect_map(entry, path)
+    type = enum!(map["type"], @gateway_authenticator_types, path ++ ["type"])
+    entry = section!(map, ~w(type name) ++ authenticator_keys(type), path)
+
+    [type: String.to_atom(type)]
+    |> put_opt(:name, string_opt(entry, "name", path))
+    |> Kernel.++(authenticator_opts(type, entry, path))
+  end
+
+  defp authenticator_keys("token"), do: ~w(tokens)
+  defp authenticator_keys("jwt"), do: @gateway_jwt_keys
+  defp authenticator_keys("mtls"), do: @auth_mtls_keys
+
+  defp authenticator_opts("token", entry, path) do
+    case entry["tokens"] do
+      list when is_list(list) ->
+        tokens =
+          list
+          |> Enum.with_index()
+          |> Enum.map(fn {token, index} -> gateway_token!(token, path ++ ["tokens", index]) end)
+
+        [tokens: tokens]
+
+      other ->
+        raise ConfigError,
+          message: type_error(path ++ ["tokens"], "a list of token entries", other)
+    end
+  end
+
+  defp authenticator_opts("jwt", entry, path) do
+    entry
+    |> jwt_opts(path)
+    |> put_opt(:groups_claim, string_opt(entry, "groups_claim", path))
+    |> put_opt(:header, string_opt(entry, "header", path))
+    |> put_opt(:subject_prefix, string_opt(entry, "subject_prefix", path))
+  end
+
+  defp authenticator_opts("mtls", entry, path) do
+    case entry["subject_map"] do
+      map when is_map(map) ->
+        [
+          subject_map:
+            Map.new(map, fn {identity, value} ->
+              identity = to_string(identity)
+              {identity, subject_entry(value, path ++ ["subject_map", identity])}
+            end)
+        ]
+
+      other ->
+        raise ConfigError, message: type_error(path ++ ["subject_map"], "a mapping", other)
+    end
+  end
+
+  defp subject_entry(%{} = map, path) do
+    entry = section!(map, ~w(scopes groups), path)
+
+    %{}
+    |> put_map(:scopes, entry["scopes"] && string_list!(entry["scopes"], path ++ ["scopes"]))
+    |> put_map(:groups, entry["groups"] && string_list!(entry["groups"], path ++ ["groups"]))
+  end
+
+  defp subject_entry(scopes, path), do: string_list!(scopes, path)
+
+  # As a control plane's token (`auth_token!/2`): the plaintext is hashed here.
+  defp gateway_token!(entry, path) do
+    token = section!(entry, @gateway_token_keys, path)
+
+    %{id: required_string!(token, "id", path), sha256: token_sha256!(token, path)}
+    |> put_map(:scopes, token["scopes"] && string_list!(token["scopes"], path ++ ["scopes"]))
+    |> put_map(:groups, token["groups"] && string_list!(token["groups"], path ++ ["groups"]))
+    |> put_map(:claims, token["claims"] && expect_map(token["claims"], path ++ ["claims"]))
+  end
+
+  defp gateway_claims(gateway, path) do
+    case gateway["claims"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["claims"]
+        claims = section!(value, @gateway_claims_keys, path)
+
+        []
+        |> put_opt(:enabled, bool_opt(claims, "enabled", path))
+        |> put_opt(:policy, string_opt(claims, "policy", path))
+        |> put_opt(
+          :integrity_check,
+          atom_enum_opt(claims, "integrity_check", ~w(off manifest), path)
+        )
+    end
   end
 
   # `[current, previous...]`: a list, or one comma-separated string (`${VAR}`).

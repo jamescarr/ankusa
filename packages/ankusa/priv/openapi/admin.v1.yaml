@@ -1680,7 +1680,7 @@ components:
           description: The roles this node runs, sorted.
           items:
             type: string
-            enum: [claim_check, dispatch, edge, storage]
+            enum: [dispatch, edge, storage]
     CheckState:
       type: string
       enum: [ok, failing, draining]

@@ -81,9 +81,6 @@ defmodule Ankusa.Metrics do
 
   # 1 ms … 2.5 s, which covers a local WAL commit through a slow upstream sink.
   @seconds_buckets [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5]
-  # The claim gateway answers at up to `claim_check.read_deadline_ms` (5 s by
-  # default): the tail this histogram exists for sits past 2.5 s.
-  @gateway_seconds_buckets @seconds_buckets ++ [5, 10]
   # A reopen replays the WAL: 10 ms for an idle store, up to a minute for one
   # that crashed with 512 MiB of log to apply.
   @replay_seconds_buckets [0.01, 0.05, 0.1, 0.5, 1, 2.5, 5, 10, 30, 60]
@@ -509,25 +506,6 @@ defmodule Ankusa.Metrics do
         scoped(own,
           event_name: [:ankusa, :claim_check, :store_breaker],
           tags: [:instance, :store, :state]
-        )
-      ),
-      # The gateway's answers by status only: a status is one of a fixed set,
-      # and nothing the caller sends (tenant, claim, method) is a label.
-      counter(
-        "ankusa.claim.gateway.requests.total",
-        scoped(own,
-          event_name: [:ankusa, :claim_check, :gateway],
-          tags: [:instance, :status]
-        )
-      ),
-      distribution(
-        "ankusa.claim.gateway.duration.seconds",
-        scoped(own,
-          event_name: [:ankusa, :claim_check, :gateway],
-          measurement: &duration_seconds/1,
-          unit: :second,
-          tags: [:instance],
-          reporter_options: [buckets: @gateway_seconds_buckets]
         )
       ),
       counter(

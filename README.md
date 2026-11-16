@@ -193,8 +193,9 @@ balancer. Each node has its own data volume, its own store, and its own
 admin/replay API; they share nothing but the provider's traffic, and optionally
 Redis for routes, sources, and fleet-scoped rate limits and dedupe. `edge`,
 `dispatch`, and `storage` must stay in one node because they share the one
-local store — a node is the unit of scale. The one role you may split out is
-`:claim_check`, the large-payload gateway, which never opens the store.
+local store — a node is the unit of scale. The one thing you may split out is
+the claim-check gateway, its own library (`ankusa_gateway`) and image
+(`jamescarr/ankusa-gateway`), which never opens the store.
 
 Give each node its own `intake.node_id` (or archive prefix `storage.key_prefix`, or
 its own bucket): segment keys are

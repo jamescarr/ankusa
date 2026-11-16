@@ -4,7 +4,9 @@ info:
   version: 1.0.0
   summary: Read-only byte transport for claim-check refs.
   description: |
-    HTTP surface of the `:claim_check` role. This document is the
+    The claims API of the gateway (`Ankusa.Gateway`, package
+    `ankusa_gateway`: the `jamescarr/ankusa-gateway` image, or
+    `jamescarr/ankusa` with the `claim_check` role). This document is the
     cross-language contract. The Elixir code conforms to it, not the reverse.
 
     A claim-check ref is one string, in one of two forms:
@@ -21,19 +23,21 @@ info:
     returns the bytes; the reader checks them against the `sha256` the queue
     message carries next to the ref, which is never sent to the gateway.
 
-    Every operation except `GET /health` needs a credential
-    (`claim_check.auth`): a static bearer token (`mode: token`), an OIDC
-    access token (`mode: jwt`) or a client certificate (`mode: mtls`).
-    Reading a claim needs the `claims:read` scope **and** the tenant of the
-    path, as `tenant:<tenant_id>` or `tenant:*` (or whatever the gateway's
-    `claim_check.authorize` hook decides): `401` without an accepted
-    credential, `403` without the scope. `mode: none` is accepted on a
-    loopback address only, or with `allow_insecure: true` when a mesh or
-    proxy in front of the port authenticates every caller. A shared cache
-    must sit behind that layer, never in front of it.
+    Every operation except `GET /health` and `GET /ready` needs a credential
+    accepted by one of the gateway's authenticators (`gateway.auth`): a
+    static bearer token (`type: token`), an OIDC access token (`type: jwt`,
+    `okta`, `introspection`) or a client certificate (`type: mtls`). By
+    default reading a claim needs the `claims:read` scope **and** the tenant
+    of the path, as `tenant:<tenant_id>` or `tenant:*`; a gateway whose
+    `gateway.claims.policy` names other authorizers decides with those
+    instead: `401` without an accepted credential, `403` when the policy
+    refuses. An empty authenticator chain is accepted on a loopback address
+    only, or with `allow_insecure: true` when a mesh or proxy in front of the
+    port authenticates every caller. A shared cache must sit behind that
+    layer, never in front of it.
 servers:
   - url: http://localhost:4001
-    description: Local development listener (default `claim_check.port`).
+    description: Local development listener (default `gateway.port`).
 security:
   - bearerAuth: []
   - mutualTLS: []
@@ -41,7 +45,7 @@ tags:
   - name: claims
     description: Read claim bytes.
   - name: operations
-    description: Health.
+    description: Health and readiness.
 paths:
   /v1/claims/{tenant_id}/{claim_id}:
     parameters:
@@ -54,7 +58,7 @@ paths:
       description: |
         Returns exactly the claim's bytes. Claims are written once and never
         rewritten, so a response is cacheable forever. With the gateway's
-        `claim_check.integrity_check: manifest` (the default) a whole claim
+        `gateway.claims.integrity_check: manifest` (the default) a whole claim
         is checked against its pack's manifest before it is sent, `502
         integrity_mismatch` when it differs, and `200` and `206` carry the
         digest as `X-Ankusa-Sha256`. The reader still MUST check the bytes
@@ -172,6 +176,36 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Health'
+  /ready:
+    get:
+      operationId: getReady
+      security: []
+      tags: [operations]
+      summary: Readiness probe
+      description: |
+        The node's readiness checks (its store, sinks and disk when it has
+        them; none on a gateway-only node) with `"gateway": "ok"`. `503` while
+        the node drains on its way down, or while an authorizer that must load
+        before serving has not.
+      responses:
+        '200':
+          description: Ready to serve.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ready'
+        '503':
+          description: Not ready; `Retry-After` is always `1`.
+          headers:
+            Retry-After:
+              description: Always `1`.
+              schema:
+                type: integer
+                const: 1
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ready'
 components:
   securitySchemes:
     bearerAuth:
@@ -201,7 +235,7 @@ components:
     Sha256:
       description: |
         The lowercase hex sha256 of the whole claim, as its pack's manifest
-        records it. Sent unless `claim_check.integrity_check` is `off`; on a
+        records it. Sent unless `gateway.claims.integrity_check` is `off`; on a
         `206` it is the whole claim's digest, to check once the ranges are
         reassembled.
       schema:
@@ -282,18 +316,39 @@ components:
             - integrity_mismatch
             - unauthenticated
             - forbidden
+            - auth_unavailable
+            - authz_unavailable
         scope:
           type: string
           description: |
-            Present on `forbidden` from the built-in check; the scope the
-            principal lacks (`claims:read`, or `tenant:<tenant_id>`). A
-            `claim_check.authorize` hook's refusal names none.
+            Present on `forbidden` from the built-in `scopes` authorizer; the
+            scope the principal lacks (`claims:read`, or `tenant:<tenant_id>`).
+            Another authorizer's refusal names one only when it sets it.
     Health:
       type: object
       required: [status]
       properties:
         status:
           const: ok
+    Ready:
+      type: object
+      required: [status]
+      description: |
+        `status` is `ok` or `draining` (and `failing` when one of the node's
+        own checks fails); `gateway` is `ok` while the gateway runs. Other
+        keys are the node's readiness checks, as its admin API's `/ready`
+        reports them.
+      properties:
+        status:
+          type: string
+        gateway:
+          const: ok
+        authorizers:
+          type: object
+          description: '`ok` or `not_ready` per authorizer that reports readiness.'
+          additionalProperties:
+            type: string
+            enum: [ok, not_ready]
   responses:
     BadRequest:
       description: |
@@ -336,7 +391,10 @@ components:
       description: |
         `store_unavailable` (the object store is unreachable, throttling, or
         slower than the gateway's deadline) or `overloaded` (the node is at
-        `claim_check.max_concurrent_reads`). Transient. Retry.
+        `gateway.max_concurrent_requests`); `auth_unavailable` (an
+        authenticator's identity provider did not answer) or
+        `authz_unavailable` (an authorizer's backend did not answer, and the
+        policy fails closed). Transient. Retry.
       headers:
         Retry-After:
           description: Seconds to wait before retrying.

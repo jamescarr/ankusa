@@ -659,7 +659,7 @@ export interface components {
             status: "ok";
             instance: string;
             /** @description The roles this node runs, sorted. */
-            roles: ("claim_check" | "dispatch" | "edge" | "storage")[];
+            roles: ("dispatch" | "edge" | "storage")[];
         };
         /** @enum {string} */
         CheckState: "ok" | "failing" | "draining";

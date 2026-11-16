@@ -359,13 +359,17 @@ where it happens:
   what acks hooks, so a crash there restarts what depends on it, and a core that
   keeps crashing stops the instance for its supervisor to restart.
 - **Every other domain** (dispatch, storage, lifecycle events, metrics, and the
-  admin, route-admin and claim-check listeners) runs under its own restart
+  admin and route-admin listeners) runs under its own restart
   budget. When that is exhausted it is restarted later, backing off from 1 s up
   to 60 s, instead of taking the instance down: a sink that keeps raising or a
   port someone else took stops that domain, not the edge. Hooks wait in the
   store and are dispatched when the domain returns. A child that cannot start
   when the instance *boots* still fails the boot. Each outage emits
   `[:ankusa, :instance, :subtree_down]` (`ankusa_instance_subtree_down_total{domain}`) and each recovery `:subtree_up`.
+- **The gateway is its own failure domain**, `:gateway`:
+  `Ankusa.Gateway.Supervisor` starts it beside the instance, and its crashes do
+  not restart the instance's domains and theirs do not restart it. A gateway
+  that keeps crashing stops only itself.
 - **The registry.** A restart of `Ankusa.Registry`, or of one of its partitions,
   forgets every name an instance registered, and the processes that trap exits
   outlive it unregistered. The instance notices and stops itself so that
@@ -412,8 +416,10 @@ RocksDB takes an exclusive lock on its directory, so a second OS process
 cannot open the same store. Every role that uses it, `edge`, `dispatch`,
 `storage`, must therefore live in **one BEAM node**; running them as separate
 containers or hosts pointed at one store is not a supported topology. The one
-role you can split off is `:claim_check`, which never opens the store at all
-and can run anywhere, its own node included.
+thing you can split off is the claim-check gateway (the `claim_check` role's
+`Ankusa.Gateway`, or the `jamescarr/ankusa-gateway` image), which never opens
+the store at all and can run anywhere, its own node included. Core there boots
+with `roles: []`.
 
 This constraint is the store's, not the framework's: under `wal.type: none`
 there is no queue, only `:edge` runs, and every replica is independent
@@ -452,8 +458,11 @@ gateway serves them all.
 
 A consumer that shouldn't hold object-store credentials (any worker, in any
 language, or a third party) redeems the reference with `GET /v1/claims/...`
-against a `claim_check`-role node instead of reading the object store. The
-gateway is read-only and authenticates its readers (`claim_check.auth`: `claims:read`
+against a node running the gateway (the `claim_check` role, or
+`jamescarr/ankusa-gateway`) instead of reading the object store. The
+gateway is read-only, authenticates its readers (`gateway.auth`: a chain of
+token, jwt and mtls authenticators) and authorizes them with a policy
+(`gateway.authz`; the default needs `claims:read`
 plus the claim's tenant). See [`claim-check.md`](claim-check.md) for the API and the
 reference format.
 
@@ -493,7 +502,7 @@ asks for it), API-managed sources and rate-limit overrides. See
 
 Every stage emits `:telemetry` events under the `[:ankusa, ...]` prefix:
 `ingest`, `commit`, `verify`, `load_shed`, `dispatch`, `compact`, `backup`, `quarantine`,
-`rate_limit`, `claim_check`, `replay`, `lifecycle`, `audit`, `routes`, `instance` (a failure domain going down or coming
+`rate_limit`, `claim_check`, `gateway`, `replay`, `lifecycle`, `audit`, `routes`, `instance` (a failure domain going down or coming
 back). Components emit events; they never call each
 other's reporters, so wiring a metrics/tracing backend is additive, never a
 code change to the pipeline itself. See `Ankusa.Telemetry`'s moduledoc for

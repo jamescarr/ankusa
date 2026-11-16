@@ -17,7 +17,7 @@ Redeem a claim-check ref, verify the bytes it returns against the sha256 the
 queue message carries next to it, and classify failures into dead-letter vs. retry,
 without holding any object-store credentials. Generated from the framework's
 own contract,
-[`priv/openapi/claim_check.v1.yaml`](../ankusa/priv/openapi/claim_check.v1.yaml),
+[`ankusa_gateway/priv/openapi/claim_check.v1.yaml`](../ankusa_gateway/priv/openapi/claim_check.v1.yaml),
 via [`openapi-typescript`](https://openapi-ts.dev/) + [`openapi-fetch`](https://openapi-ts.dev/openapi-fetch/).
 The spec is the source of truth; this package conforms to it, not the
 reverse.
