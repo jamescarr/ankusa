@@ -5,7 +5,7 @@ durable local store before answering `2xx`, then dispatch it to
 HTTP/RabbitMQ/Kafka/NATS sinks with retries, DLQ, and replay. Full pipeline and
 guarantees: [`docs/architecture.md`](docs/architecture.md).
 
-![Ankusa default pipeline: Provider → Edge (router, verify) → Group-commit Batcher → Store (fsync, then 201) → Dispatch → Sinks, give-ups to the DLQ; Store → Compactor → blob store](docs/diagrams/overview.png)
+![Ankusa default pipeline: Provider → Edge (router, verify) → Group-commit Batcher → Store (fsync, then 201) → Dispatch → Sinks, give-ups to the DLQ, bodies too large for a queue message to the blob store as claim packs; Store → Compactor → blob store as archive segments](docs/diagrams/overview.png)
 
 ## Repo map
 
