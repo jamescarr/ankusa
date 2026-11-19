@@ -156,7 +156,7 @@ request, one concurrent publish, and the provider's retry is the only retry.
 (The store still opens for the quarantine pen, API-managed sources and
 rate-limit overrides.)
 
-![Provider posts to the edge; the batcher group-commits the hook to the local store and the provider gets 201 only after the fsync. Dispatch delivers due rows to sinks, dead-lettering give-ups; the compactor archives to the blob store.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/overview.png)
+![Provider posts to the edge; the batcher group-commits the hook to the local store and the provider gets 201 only after the fsync. Dispatch delivers due rows to sinks, dead-lettering give-ups, and writes bodies too large for a queue message to the blob store as claim packs; the compactor archives hooks to the same blob store as segments.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/overview.png)
 
 ## Operating it
 
