@@ -160,7 +160,10 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   request's `:receive_timeout` an idle timeout on HTTP/2, as it already was on
   HTTP/1: `Ankusa.HttpClient`'s timeout (`Sink.Http`'s `timeout_ms`) bounds the
   wait between two parts of an HTTP/2 response, no longer the whole response. A
-  delivery's wall-clock cap is still `dispatch.attempt_timeout_ms`.
+  delivery's wall-clock cap is still `dispatch.attempt_timeout_ms`, and a
+  `Sink.SQS`/`Sink.GooglePubSub` batch request's is the batcher's
+  `task_timeout_ms`. Every other caller (the blob stores, the credential and
+  JWKS fetches) now gets on HTTP/2 the idle timeout it already had on HTTP/1.
 
 ### Fixed
 
