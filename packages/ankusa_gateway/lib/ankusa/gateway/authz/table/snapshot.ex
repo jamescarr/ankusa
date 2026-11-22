@@ -5,7 +5,8 @@ defmodule Ankusa.Gateway.Authz.Table.Snapshot do
   `version/2` is unchanged), then publishes it atomically as
   `{name, tid, generation, loaded_at_ms, has_deny?}` in
   `:"ankusa_gateway_tables_<instance>"`, which `Ankusa.Gateway.Supervisor`
-  creates and the authorizer's decision reads.
+  creates and the authorizer's decision reads; a tick whose version is
+  unchanged rewrites `loaded_at_ms`, the table being as current as that check.
 
   A load that exceeds `max_rows` or `max_bytes`, has more than 1 % bad rows,
   or fails is discarded: the previous table keeps serving until the next
@@ -158,6 +159,7 @@ defmodule Ankusa.Gateway.Authz.Table.Snapshot do
     case version(state.source, ctx) do
       {:ok, version} ->
         if version == snapshot.last_version and snapshot.published != nil do
+          confirm(snapshot)
           emit(snapshot, started_ms, :unchanged)
           snapshot
         else
@@ -325,6 +327,22 @@ defmodule Ankusa.Gateway.Authz.Table.Snapshot do
 
   defp write_ready(state, loaded?, started_ms) do
     :ets.insert(Table.tables_table(state.instance), {{:ready, state.name}, {loaded?, started_ms}})
+  end
+
+  # An unchanged version says the published table is current as of this tick:
+  # its `loaded_at_ms` restarts the `stale_after_ms` clock. Otherwise a table
+  # whose rows hold still for longer than that would fail closed from a healthy
+  # source. The row is this process's own, written by `publish/5`; a missing row
+  # (`false`) is a table being torn down, and nothing to do.
+  defp confirm(%{state: state}) do
+    _ =
+      :ets.update_element(
+        Table.tables_table(state.instance),
+        state.name,
+        {4, System.monotonic_time(:millisecond)}
+      )
+
+    :ok
   end
 
   defp bytes(tid) do

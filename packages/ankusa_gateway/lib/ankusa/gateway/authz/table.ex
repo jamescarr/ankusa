@@ -24,16 +24,20 @@ defmodule Ankusa.Gateway.Authz.Table do
       process loads the source into a fresh ETS table every `refresh_ms` (or
       whenever `version/2` says it changed) and publishes it atomically. A
       decision is a bounded number of ETS reads, so a customer table never
-      sits in the request path. A snapshot older than `stale_after_ms` fails
-      closed (`{:error, {:unavailable, :stale_snapshot}}`) until the next load
-      succeeds.
+      sits in the request path. A snapshot neither loaded nor confirmed
+      unchanged within `stale_after_ms` fails closed (`{:error, {:unavailable,
+      :stale_snapshot}}`) until a load succeeds or a tick finds the version
+      unchanged.
     * `:lookup` (`kind: :remote`) — every miss asks the source
       (`lookup_query`) through the authorizer's caller and decision cache, so
       freshness is bounded by `authz.cache`, not by a refresh. Use this for
       permissions that are not prefix-shaped.
 
-  `cache_scope/2` is `{generation, kind, space, key}`: a new snapshot orphans
-  every cached decision, so no decision from before a refresh outlives it.
+  `cache_scope/2` is `{generation, kind, space, key}` while the snapshot is
+  within `stale_after_ms` of its last load or unchanged check, and a new
+  reference on every call past it: a new snapshot orphans every cached
+  decision and a stale one serves none, so no decision from before a refresh
+  outlives it and no cached allow outlives `stale_after_ms`.
 
   ## Options
 
@@ -48,7 +52,7 @@ defmodule Ankusa.Gateway.Authz.Table do
   | `refresh_ms` | `30000` | a snapshot's reload period |
   | `max_rows` | `1000000` | a larger load is refused and the previous table kept |
   | `max_bytes` | `268435456` | likewise, in ETS bytes |
-  | `stale_after_ms` | `300000` | a snapshot older than this is unavailable |
+  | `stale_after_ms` | `300000` | a snapshot neither loaded nor confirmed unchanged within this is unavailable |
 
   plus the common `:remote` options (`Ankusa.Gateway.Authz.Remote`), used by
   `mode: :lookup`.
@@ -452,16 +456,28 @@ defmodule Ankusa.Gateway.Authz.Table do
   end
 
   def cache_scope(%Request{resource: resource}, state) do
-    {generation(state), resource.kind, resource.space, resource.key}
+    case fresh_generation(state) do
+      {:ok, generation} -> {generation, resource.kind, resource.space, resource.key}
+      :stale -> make_ref()
+    end
   end
 
-  defp generation(%{instance: instance, name: name}) do
+  # The published table's generation while it is within `stale_after_ms` of
+  # its last load or unchanged check; `:stale` past it, or before any load. A
+  # stale table's scope is a new reference on every call, so it serves no
+  # cached decision: `decide/3` fails closed instead and that error is never
+  # cached, and an answer that raced an unchanged check (scope read stale,
+  # table read fresh) is stored under a scope nothing reads again.
+  defp fresh_generation(%{instance: instance, name: name} = state) do
     case :ets.lookup(tables_table(instance), name) do
-      [{^name, _tid, generation, _loaded_ms, _has_deny?}] -> generation
-      [] -> :none
+      [{^name, _tid, generation, loaded_ms, _has_deny?}] ->
+        if fresh?(loaded_ms, state), do: {:ok, generation}, else: :stale
+
+      [] ->
+        :stale
     end
   rescue
-    ArgumentError -> :none
+    ArgumentError -> :stale
   end
 
   @impl true

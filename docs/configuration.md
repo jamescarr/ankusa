@@ -426,7 +426,7 @@ more than 1 % bad rows is refused.
 | `ready_timeout_ms` | `60000` | `/ready` is `503` (`authorizers: {name: not_ready}`) only while no load has ever succeeded and less than this has passed; `0` = never |
 | `refresh_ms` | `30000` | a snapshot's reload period |
 | `max_rows`, `max_bytes` | `1000000`, `268435456` | a larger load is refused and the previous snapshot kept |
-| `stale_after_ms` | `300000` | a snapshot older than this answers `503 authz_unavailable` (never a stale decision) |
+| `stale_after_ms` | `300000` | a snapshot neither loaded nor confirmed unchanged (its `version/2` the same as the last load's) within this answers `503 authz_unavailable` (never a stale decision, cached or not) |
 
 `source.type: object` reads NDJSON: exactly one of `key` (one object) or
 `prefix` (every object under it, sorted, at most 1000), with `max_object_bytes`
@@ -434,15 +434,18 @@ more than 1 % bad rows is refused.
 `next_path` `"next"`, `cursor_param` `"cursor"`, `timeout_ms` 15000,
 `max_pages` 10000); the URL must be `https://`, or `http://` to a loopback
 host. `source.type: postgres` runs the operator's `query` (snapshot, with an
-optional `version_query` that skips an unchanged load) or `lookup_query`
-(lookup; request data arrives as `$1..$4`, never as SQL text) in a read-only
-transaction over TLS unless the host is loopback.
+optional `version_query` that skips an unchanged load; one that returns
+anything but one row of one column is logged on every refresh and the table
+reloaded) or `lookup_query` (lookup; request data arrives as `$1..$4`, never as
+SQL text) in a read-only transaction over TLS unless the host is loopback.
 
-A new snapshot orphans every decision cached from the old one (the cache key
-carries the snapshot's generation), so a refresh is visible at once on this
-node; another node sees it on its own `refresh_ms`. Permission rows must stay
-out of reach of the objects API: `Ankusa.Gateway.Config.new/2` refuses a
-`type: object` source whose store and prefix overlap a `gateway.spaces` space.
+A new snapshot orphans every decision cached from the old one, and a stale one
+serves none of them (the cache key carries the snapshot's generation, and a
+stale snapshot's key is never the same twice), so a refresh is visible at once
+on this node; another node sees it on its own `refresh_ms`. Permission rows
+must stay out of reach of the objects API: `Ankusa.Gateway.Config.new/2`
+refuses a `type: object` source whose store and prefix overlap a
+`gateway.spaces` space.
 
 #### Remote authorizers
 

@@ -176,7 +176,8 @@ A row matches the caller's identities (`user:<id>`, each group, each tenant by
 default), the action or `*`, the space or `*`, and the key or one of its
 ancestor directories; any deny wins, any allow allows, and no match abstains.
 A snapshot that has not loaded holds `/ready` at `503` for at most
-`ready_timeout_ms`; one older than `stale_after_ms` fails closed.
+`ready_timeout_ms`; one neither loaded nor confirmed unchanged within
+`stale_after_ms` fails closed, cached decisions included.
 
 An authorizer's `kind/1` says where it runs: `:inline` in the request,
 `:cached` behind the decision cache, `:remote` behind the cache and one
