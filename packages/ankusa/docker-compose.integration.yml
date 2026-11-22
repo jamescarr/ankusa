@@ -21,7 +21,7 @@ services:
   # runs in `persistent` storage mode (each change written to disk) into its
   # own named volume, instead of the images' in-memory default.
   floci:
-    image: floci/floci:latest@sha256:5ee85db604c4aa74ac76e07ea5cc83086f37bb472bf3dbb97e34019e48efae9c
+    image: floci/floci:latest@sha256:a0fbf944d7f338cc0856f1ef83831ea749ff2be71956eb7a7fce08fc21458e19
     ports:
       - "4566:4566"
     environment:
@@ -55,7 +55,7 @@ services:
 
   # GCS emulator.
   floci-gcp:
-    image: floci/floci-gcp:latest@sha256:d02e70407d6b37c3e24e31b5ccf100606735cba4f84fd476708b35afd052abb3
+    image: floci/floci-gcp:latest@sha256:a59403d43d524b1a08282d67d541a6d37bf7868cbd9d1311caa0d2983adf6f46
     ports:
       - "4588:4588"
     environment:
@@ -82,7 +82,7 @@ services:
   # Azure Blob emulator. `dev` auth mode: credentials are not validated, so
   # the adapter's unauthenticated requests work against it unchanged.
   floci-az:
-    image: floci/floci-az:latest@sha256:f9d7552c9c02be84f12e266d6201ff52c1f23421af94943cbf687526ded89790
+    image: floci/floci-az:latest@sha256:40f1bbf1ef13569c6eacb47e565bf4cd28785ca833208dcc074910e13aec64ea
     ports:
       - "4577:4577"
     environment:
@@ -107,7 +107,7 @@ services:
   # OCI Object Storage emulator. Request signatures are parsed for tenancy
   # context but never verified, so any locally generated RSA key works.
   floci-oci:
-    image: floci/floci-oci:latest@sha256:7b976aabefd8a53ebf09df52b788a1b3c3cd4e71f2e0b29efe8f9d8b3954fbd3
+    image: floci/floci-oci:latest@sha256:088bb759252560921adf1776c9114e62b26ce589f267d4afb13f2ebba20e4a8c
     ports:
       - "4599:4599"
     environment:

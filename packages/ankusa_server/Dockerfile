@@ -13,7 +13,7 @@
 # for the reader; Docker resolves only the digest. To bump one, change tag and
 # digest together, in a PR:
 #   docker buildx imagetools inspect elixir:1.20.4-alpine --format '{{json .Manifest.Digest}}'
-FROM elixir:1.20.4-alpine@sha256:f1a8c06b332cacc7239381a25331a807fb63962f8221dff545ea4d8f78b0f50c AS build
+FROM elixir:1.20.4-alpine@sha256:f95251968625b0b61716355b372b58b1916bb618b949de3d2e62fb803ad68784 AS build
 
 # build-base/cmake/git are for the C++ NIFs: `crc32cer` (via brod, the Kafka
 # client) compiles on install in :prod and has no prebuilt artifact. rocksdb
@@ -53,7 +53,7 @@ RUN mix deps.get --only prod && mix release ankusa
 # alarming stderr warning without it on every `eval` and `start`. coreutils is
 # for `:disksup` (the disk gauges): it runs `/bin/df -lk -x squashfs`, which
 # busybox's `df` rejects, so without GNU `df` every disk reading is zero.
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
 RUN apk add --no-cache libstdc++ libgcc zstd-libs ncurses-libs openssl ca-certificates tini curl liblksctp coreutils \
  && addgroup -S ankusa && adduser -S -G ankusa -h /var/lib/ankusa ankusa \
