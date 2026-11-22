@@ -312,6 +312,9 @@ defmodule Ankusa.Sink.SQS do
     if fifo?(Keyword.fetch!(opts, :queue_url)), do: Map.get(entry, "MessageGroupId")
   end
 
+  # The `MD5OfMessageBody` SQS answers with: the protocol's transfer check, not
+  # a security digest.
+  # sobelow_skip ["Crypto.WeakHash"]
   defp md5(payload), do: Base.encode16(:crypto.hash(:md5, payload), case: :lower)
 
   # SQS counts every attribute's name, data type and value toward the message

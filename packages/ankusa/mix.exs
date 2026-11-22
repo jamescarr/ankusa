@@ -136,7 +136,7 @@ defmodule Ankusa.MixProject do
     [
       async_api_spex_dep(),
       {:bandit, "~> 1.14 and >= 1.14.1"},
-      {:plug, "~> 1.18"},
+      {:plug, "~> 1.18 and >= 1.20.4"},
       # CIDR parsing and range membership for the route-management IP rules and
       # trusted proxies (`Ankusa.Routes`, `Ankusa.Net.ClientIP`). `Ankusa.Net`
       # keeps the :inet-tuple boundary and the IPv4-mapped normalization on top;
@@ -153,7 +153,7 @@ defmodule Ankusa.MixProject do
       # The connection pool computed `Sink.Http` destinations share
       # (`Ankusa.Sink.Http.Pool`). Req already brings it; core now calls it
       # directly, so it is declared (the version Req is locked to everywhere).
-      {:finch, "~> 0.24"},
+      {:finch, "~> 0.25"},
       # Tracing (`Ankusa.Trace`, ground rule 8): the API only. Without an SDK
       # every call is a no-op, so a library user pays nothing; `ankusa_server`
       # ships the SDK and the OTLP exporter behind `tracing.enabled`.

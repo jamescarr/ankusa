@@ -31,6 +31,9 @@ defmodule Ankusa.BlobStore.Pool do
   @tls_versions [:"tlsv1.3", :"tlsv1.2"]
 
   @doc "The name of `instance`'s pool for `endpoint`."
+  # The instance and the endpoint are operator config (one pool per configured
+  # store endpoint), never request input.
+  # sobelow_skip ["DOS.ModuleConcat"]
   @spec name(atom(), String.t()) :: atom()
   def name(instance, endpoint) when is_atom(instance) and is_binary(endpoint),
     do: Module.concat(__MODULE__, "#{instance}_#{:erlang.phash2(endpoint)}")
