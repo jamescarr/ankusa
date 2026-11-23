@@ -59,10 +59,24 @@ defmodule Ankusa.Intake.KafkaTest do
   # (see `create_topic/1`).
   @commit_timeout_ms 20_000
 
-  # The producer the adapter runs (`Ankusa.Intake.Kafka.init/1`, whose
-  # `request_timeout` is `publish_timeout_ms + 3_000`; the tests publish with
-  # `timeout: 2_000`), one attempt per call. `max_batch_size` is the adapter's
-  # floor: the probe record is small.
+  # The tests' publish deadline: the adapter's `publish_timeout_ms` (its
+  # producer's `ack_timeout`) and each call's `timeout`. The first acks=-1
+  # produce to a partition created a moment ago waits for both followers to
+  # start fetching it, which on a loaded runner has taken past 2 s (the
+  # production default) even after `wait_for_commit/1`; later produces commit in
+  # tens of ms. No test here asserts a latency, so the deadline is one that first
+  # commit does not miss. 8 s is the most the default `listener.drain_timeout_ms`
+  # (30 s) admits under `wal: :dual` (`Ankusa.Listener.ingress_shutdown_timeout_ms/1`
+  # is 22 s plus this). The outage test's two-down publishes still end
+  # `:unavailable`: `not_enough_replicas` once the in-sync set shrinks
+  # (`KAFKA_REPLICA_LAG_TIME_MAX_MS`, 6 s), or this deadline.
+  @publish_timeout_ms 8_000
+
+  # The producer the adapter runs (`Ankusa.Intake.Kafka.init/1`), one attempt
+  # per call, at the production default deadline (2 s, so `request_timeout` is
+  # 5 s) rather than the tests' `@publish_timeout_ms`: an attempt that misses it
+  # is retried by `wait_for_commit/1` against a partition its followers fetch by
+  # then. `max_batch_size` is the adapter's floor: the probe record is small.
   @probe_client [
     auto_start_producers: true,
     allow_topic_auto_creation: false,
@@ -133,12 +147,14 @@ defmodule Ankusa.Intake.KafkaTest do
     #     there is `not_leader_for_partition`
     #   * a replica is in the in-sync set from creation, before it has fetched
     #     anything, and an `acks=-1` produce is committed only when every
-    #     in-sync replica has fetched it: ~1 s on an idle cluster, which the
-    #     tests' 2 s publish deadline does not comfortably cover
+    #     in-sync replica has fetched it
     #
-    # So the fixture waits until the cluster commits a record to a topic created
-    # *after* this one (see `wait_for_commit/1`): a produce to this topic is
-    # then acked on the next follower fetch turn instead of racing the first.
+    # The fixture closes the first: it waits until the cluster commits a record
+    # to a topic created *after* this one (see `wait_for_commit/1`), so every
+    # broker has applied this topic's assignment. It cannot close the second
+    # for this topic's own partitions (a probe record here would move every
+    # offset a test asserts), and that first commit has taken past 2 s on a
+    # loaded runner, on any partition: `@publish_timeout_ms` covers it.
     wait_for_commit(topic)
 
     topic
@@ -149,8 +165,7 @@ defmodule Ankusa.Intake.KafkaTest do
   # another until an `acks=-1` produce is acked. Every broker has then applied
   # the probe topic's assignment (the leader appended it, both followers fetched
   # it) and, the metadata log being ordered per broker and this topic being
-  # newer than the test's, the test's assignment as well; and both followers
-  # have just fetched, so the test's own publish is committed on the next turn.
+  # newer than the test's, the test's assignment as well.
   defp wait_for_commit(topic) do
     probe =
       "ankusa.intake.probe.#{System.system_time(:microsecond)}.#{System.unique_integer([:positive])}"
@@ -242,7 +257,7 @@ defmodule Ankusa.Intake.KafkaTest do
               type: :kafka,
               node_id: node_id,
               topic: topic,
-              publish_timeout_ms: 2_000,
+              publish_timeout_ms: @publish_timeout_ms,
               kafka: [brokers: @brokers, health_interval_ms: 200]
             },
             intake
@@ -305,7 +320,10 @@ defmodule Ankusa.Intake.KafkaTest do
   defp record(seq, bin \\ nil), do: {seq, bin || "hook-#{seq}", meta("id-#{seq}")}
 
   defp opts(topic, partition, extra \\ []) do
-    Keyword.merge([timeout: 2_000, node: "node-a", topic: topic, partition: partition], extra)
+    Keyword.merge(
+      [timeout: @publish_timeout_ms, node: "node-a", topic: topic, partition: partition],
+      extra
+    )
   end
 
   defp fetch_all(topic, partition) do
