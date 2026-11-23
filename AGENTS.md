@@ -61,7 +61,7 @@ Why the package split (and when a new adapter earns its own package):
 | [`architecture.md`](docs/architecture.md) | the guarantees, the request path |
 | [`delivery.md`](docs/delivery.md) | sinks, retries, DLQ, quarantine |
 | [`storage.md`](docs/storage.md) | the node's store and the object stores |
-| [`claim-check.md`](docs/claim-check.md) | large payloads to queue workers |
+| [`claim-check.md`](docs/claim-check.md) | large payloads to queue workers, and the gateway that serves them: running it, authentication, the authorizers (rules, external PDPs, grants and share links, `table`), the objects API |
 | [`multi-tenancy.md`](docs/multi-tenancy.md) | catch URLs per customer |
 | [`integrations.md`](docs/integrations.md) | Oban, Celery, queues |
 | [`asyncapi.md`](docs/asyncapi.md) | the AsyncAPI document an instance serves, and lifecycle events (endpoint/route created, updated, deleted) |
