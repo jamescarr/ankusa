@@ -12,7 +12,7 @@ name: ankusa_gateway_postgres
 
 services:
   postgres:
-    image: postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065
+    image: postgres:17-alpine@sha256:526f86d93c6ea08fd3f1fe5605650cacc781b2c6013169a0ad8f42c7d3d84f32
     environment:
       POSTGRES_PASSWORD: ankusa
     ports:
