@@ -148,6 +148,23 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   by EEF-CVE-2026-116078 (High: an HTTP/2 request body sent as 1-byte DATA
   frames amplified memory use), fixed in 1.14.1; `mix hex.audit` fails on it.
 
+- Requires `plug ~> 1.18 and >= 1.20.4` (was `~> 1.18`): 1.20.3 is affected by
+  EEF-CVE-2026-120287 (Medium: `Plug.Parsers.MULTIPART` did not count empty part
+  headers towards its `:length` limit), fixed in 1.20.4; `mix hex.audit` fails
+  on it. No Ankusa code parses multipart bodies.
+
+- Requires `finch ~> 0.25` (was `~> 0.24`, which admitted 0.24): 0.25 fixes an
+  HTTP/2 pool stuck read-only after a GOAWAY (every later request to the host
+  failed `:pool_not_available`) and a pool crash when a server answers before
+  the request body is sent, both on `Sink.Http`'s HTTP/2 pools. It also makes a
+  request's `:receive_timeout` an idle timeout on HTTP/2, as it already was on
+  HTTP/1: `Ankusa.HttpClient`'s timeout (`Sink.Http`'s `timeout_ms`) bounds the
+  wait between two parts of an HTTP/2 response, no longer the whole response. A
+  delivery's wall-clock cap is still `dispatch.attempt_timeout_ms`, and a
+  `Sink.SQS`/`Sink.GooglePubSub` batch request's is the batcher's
+  `task_timeout_ms`. Every other caller (the blob stores, the credential and
+  JWKS fetches) now gets on HTTP/2 the idle timeout it already had on HTTP/1.
+
 ### Fixed
 
 - **A tenant-scoped DLQ page is bounded by the call's budget, not one per

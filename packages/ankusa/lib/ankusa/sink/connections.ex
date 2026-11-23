@@ -18,6 +18,8 @@ defmodule Ankusa.Sink.Connections do
   alias Ankusa.Sink.Reaper
 
   @doc "Start `sink`'s connection tree; an adapter's `Application.start/2` returns this."
+  # `sink` is an adapter module and the suffixes are fixed: no atom from input.
+  # sobelow_skip ["DOS.ModuleConcat"]
   @spec start_link(module()) :: Supervisor.on_start()
   def start_link(sink) when is_atom(sink) do
     supervisor = supervisor(sink)
@@ -35,10 +37,12 @@ defmodule Ankusa.Sink.Connections do
   # `Module.concat(sink, Reaper)` would name `<sink>.Ankusa.Sink.Reaper`.
 
   @doc "The `DynamicSupervisor` that owns `sink`'s connections."
+  # sobelow_skip ["DOS.ModuleConcat"]
   @spec supervisor(module()) :: atom()
   def supervisor(sink), do: Module.concat(sink, "Supervisor")
 
   @doc "The reaper (and its table) that closes `sink`'s idle connections."
+  # sobelow_skip ["DOS.ModuleConcat"]
   @spec reaper(module()) :: atom()
   def reaper(sink), do: Module.concat(sink, "Reaper")
 

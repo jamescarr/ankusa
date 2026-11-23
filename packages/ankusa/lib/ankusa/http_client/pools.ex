@@ -211,6 +211,8 @@ defmodule Ankusa.HttpClient.Pools do
   # A pool is identified by what makes its connections different: the instance
   # (whose ceilings apply), the shape (size, shards, protocols, idle time), and
   # the connection options. Hashed, so the registry key stays small.
+  # MD5 names the pool and guards nothing.
+  # sobelow_skip ["Crypto.WeakHash"]
   defp tag(instance, settings, connect_options) do
     shape =
       {settings.pool_size, settings.pool_count, settings.protocols, settings.conn_max_idle_ms}

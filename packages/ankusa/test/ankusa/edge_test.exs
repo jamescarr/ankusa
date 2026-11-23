@@ -796,12 +796,18 @@ defmodule Ankusa.EdgeTest do
   end
 
   # The listener answers 408 on the way out or just closes: either way the
-  # socket is gone within the timeout.
+  # socket is gone within the timeout. Since Bandit 1.15 the 408 carries the
+  # request's HTTP version rather than always HTTP/1.0.
   defp assert_closed(sock) do
     case :gen_tcp.recv(sock, 0, 3_000) do
-      {:ok, "HTTP/1.0 408" <> _} -> assert {:error, :closed} = :gen_tcp.recv(sock, 0, 3_000)
-      {:error, :closed} -> :ok
-      other -> flunk("expected the connection to be closed, got #{inspect(other)}")
+      {:ok, <<"HTTP/1.", _minor, " 408", _::binary>>} ->
+        assert {:error, :closed} = :gen_tcp.recv(sock, 0, 3_000)
+
+      {:error, :closed} ->
+        :ok
+
+      other ->
+        flunk("expected the connection to be closed, got #{inspect(other)}")
     end
   end
 
@@ -862,7 +868,7 @@ defmodule Ankusa.EdgeTest do
       )
 
     headers = Enum.map(1..10, &"X-H#{&1}: v")
-    assert {:ok, "HTTP/1.0 431" <> _} = raw_post(config.port, "/webhooks/demo", 1, "x", headers)
+    assert {:ok, "HTTP/1.1 431" <> _} = raw_post(config.port, "/webhooks/demo", 1, "x", headers)
     assert stored_ids(config.instance) == []
   end
 

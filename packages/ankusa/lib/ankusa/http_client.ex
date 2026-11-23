@@ -79,9 +79,10 @@ defmodule Ankusa.HttpClient do
   @doc """
   Issue one request, returning the status and raw body.
 
-  `timeout_ms` is applied to both the connection and the response. A
-  `:connect_options` in `req_options` is merged over it, so supplying a proxy
-  never drops the timeout.
+  `timeout_ms` bounds the connection and each wait for the response: it is an
+  idle timeout between two parts of the response (HTTP/1 and HTTP/2 alike), not
+  a cap on the whole response. A `:connect_options` in `req_options` is merged
+  over it, so supplying a proxy never drops the timeout.
 
   `:max_response_bytes` in `opts` (not a transport option; it is taken out
   before the request is built) stops reading the response once its body passes
