@@ -16,7 +16,8 @@ follows [Semantic Versioning](https://semver.org/).
   no match abstains. `mode: :snapshot` loads the rows into an ETS table at boot
   and every `refresh_ms` (`Ankusa.Gateway.Authz.Table.Snapshot`; `version/2`
   skips an unchanged load; `max_rows`/`max_bytes` keep the previous table;
-  `stale_after_ms` fails closed; a new generation orphans the old decisions),
+  `stale_after_ms` without a load or an unchanged version fails closed, cached
+  decisions included; a new generation orphans the old decisions),
   and `mode: :lookup` asks the source once per cache miss. A snapshot that has
   never loaded holds `/ready` at `503` for at most `ready_timeout_ms`.
 - **Table sources in the library**: `Source.Object` (NDJSON objects in a store,

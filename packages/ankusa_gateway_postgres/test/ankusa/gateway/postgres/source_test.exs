@@ -464,6 +464,29 @@ defmodule Ankusa.Gateway.Postgres.SourceTest do
                Source.version(versioned, %{instance: unique_instance(), name: "team", deadline: 0})
     end
 
+    test "a version_query that is not one row of one column is :unknown, and logged" do
+      instance = unique_instance()
+      wide = table_state(:snapshot, version_query: "SELECT 1, 2")
+      start_pool(instance, wide)
+      ctx = %{instance: instance, name: "team", deadline: 0}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Source.version(wide.source.state, ctx) == :unknown
+        end)
+
+      assert log =~ "version_query returned 1 row(s) of 2 column(s)"
+
+      empty = table_state(:snapshot, version_query: "SELECT 1 WHERE false")
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Source.version(empty.source.state, ctx) == :unknown
+        end)
+
+      assert log =~ "version_query returned 0 row(s) of 1 column(s)"
+    end
+
     test "one of query and lookup_query is required, and ranges are checked" do
       assert_raise ArgumentError, ~r/one of query .* and lookup_query .* is required/, fn ->
         Source.init!(%{url: url()}, @key)
