@@ -19,7 +19,7 @@ Ankusa is a self-hosted webhook receiver. I point Stripe, GitHub, or any provide
 
 Which system accepts the hook is one config key. By default the node's RocksDB store accepts it. When the destination slows down, Ankusa answers `503` with `Retry-After`, so providers back off and try again instead of losing events.
 
-![Provider posts to the edge; the batcher group-commits the hook to the local store and the provider gets 201 only after the fsync. Dispatch delivers due rows to sinks, dead-lettering give-ups; the compactor archives to the blob store.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/overview.png)
+![Provider posts to the edge; the batcher group-commits the hook to the local store and the provider gets 201 only after the fsync. Dispatch delivers due rows to sinks, dead-lettering give-ups, and writes bodies too large for a queue message to the blob store as claim packs; the compactor archives hooks to the same blob store as segments.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/overview.png)
 
 ## Run it in 60 seconds
 

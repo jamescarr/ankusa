@@ -7,7 +7,7 @@ Status: ready
 
 I built Ankusa because I kept losing webhooks I had already received: a worker down for an hour, a database-backed inbox buckling under a burst. Ankusa answers `201 accepted` only after the hook is in a synced RocksDB batch on disk, then delivers it to your sinks (HTTP, RabbitMQ, Kafka, NATS JetStream, Redis) with retries, a dead-letter queue and durable replay jobs. It ships as a Docker image and as a Hex library you can embed in your own supervision tree. Everything is 0.x, so APIs may change.
 
-![Provider posts to the edge; the batcher group-commits the hook to the local store and the provider gets 201 only after the fsync. Dispatch delivers due rows to sinks, dead-lettering give-ups; the compactor archives to the blob store.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/overview.png)
+![Provider posts to the edge; the batcher group-commits the hook to the local store and the provider gets 201 only after the fsync. Dispatch delivers due rows to sinks, dead-lettering give-ups, and writes bodies too large for a queue message to the blob store as claim packs; the compactor archives hooks to the same blob store as segments.](https://raw.githubusercontent.com/jamescarr/ankusa/main/docs/diagrams/overview.png)
 
 ## The Elixir angle
 
