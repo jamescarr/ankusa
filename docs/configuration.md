@@ -438,6 +438,10 @@ optional `version_query` that skips an unchanged load; one that returns
 anything but one row of one column is logged on every refresh and the table
 reloaded) or `lookup_query` (lookup; request data arrives as `$1..$4`, never as
 SQL text) in a read-only transaction over TLS unless the host is loopback.
+`timeout_ms` (15000) bounds each statement and the connection checkout; a
+snapshot load's whole transaction may stream until the snapshot's 300 s load
+deadline, so a table that takes longer than `2 × timeout_ms` to read still
+loads.
 
 A new snapshot orphans every decision cached from the old one, and a stale one
 serves none of them (the cache key carries the snapshot's generation, and a
