@@ -361,8 +361,9 @@ directories; any deny wins, any allow allows, and no match abstains. In
 `mode: snapshot` the rows are loaded into an ETS table at boot and every
 `refresh_ms`, so a decision never sits in the customer's database's latency;
 `mode: lookup` asks the source once per cache miss. A snapshot that has not
-loaded holds `/ready` at `503` for at most `ready_timeout_ms`, and one older
-than `stale_after_ms` fails closed. Permission rows may not live under a
+loaded holds `/ready` at `503` for at most `ready_timeout_ms`, and one neither
+loaded nor confirmed unchanged within `stale_after_ms` fails closed, cached
+decisions included. Permission rows may not live under a
 `gateway.spaces` space: the configuration refuses the overlap.
 
 ```yaml

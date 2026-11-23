@@ -13,6 +13,10 @@ this project follows [Semantic Versioning](https://semver.org/).
   (for example `invoice.paid`) from the message (`nil` when none); a non-string
   value is `invalid_field`.
 
+### Changed
+
+- Depends on `org.clojure/clojure` 1.12.7 (was 1.12.6).
+
 ## [0.1.0] - 2026-10-28
 
 ### Added

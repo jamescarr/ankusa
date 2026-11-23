@@ -158,6 +158,16 @@ defmodule Ankusa.Gateway.Authz.TableTest do
     end
   end
 
+  # Backdate the published row's loaded_at_ms by `by_ms`.
+  defp age(instance, by_ms) do
+    true =
+      :ets.update_element(
+        Table.tables_table(instance),
+        "team",
+        {4, System.monotonic_time(:millisecond) - by_ms}
+      )
+  end
+
   defp await_generation(instance, previous, deadline) do
     case generation(instance) do
       ^previous ->
@@ -296,20 +306,19 @@ defmodule Ankusa.Gateway.Authz.TableTest do
       agent = agent([row("user:alice", "read", "docs", "")])
 
       {instance, state} =
-        start_snapshot(state(agent, :snapshot, %{refresh_ms: 1_000, stale_after_ms: 2_000}))
+        start_snapshot(state(agent, :snapshot, %{refresh_ms: 60_000, stale_after_ms: 60_000}))
 
       assert :ok = Snapshot.await(instance, "team")
-      assert_receive {:telemetry, %{rows: 1}, %{instance: ^instance, result: :ok}}, 5_000
       assert {:ok, :allow, _} = decide(instance, state, alice())
 
-      # The version never moves, so every tick answers :unchanged; the source
-      # answering is what keeps the snapshot fresh.
+      age(instance, 60_001)
+      assert {:error, {:unavailable, :stale_snapshot}} = decide(instance, state, alice())
+
+      Snapshot.refresh(instance, "team")
+
       assert_receive {:telemetry, _measurements, %{instance: ^instance, result: :unchanged}},
                      5_000
 
-      # Past the staleness window since the last full load, but the last
-      # :unchanged check was recent: the table still decides.
-      Process.sleep(1_300)
       assert {:ok, :allow, _} = decide(instance, state, alice())
     end
 
@@ -452,6 +461,7 @@ defmodule Ankusa.Gateway.Authz.TableTest do
     test "a decision cached while fresh is not served once the snapshot is stale" do
       agent = agent([row("user:alice", "read", "docs", "teams/")])
       attach([:ankusa, :gateway, :authz])
+      attach([:ankusa, :gateway, :table_refresh])
 
       config = test_config(roles: [])
 
@@ -466,8 +476,8 @@ defmodule Ankusa.Gateway.Authz.TableTest do
                  %{
                    mode: :snapshot,
                    source: {Stub, %{agent: agent}},
-                   refresh_ms: 1_000,
-                   stale_after_ms: 1_000,
+                   refresh_ms: 60_000,
+                   stale_after_ms: 60_000,
                    ready_timeout_ms: 0
                  }}
             },
@@ -477,20 +487,25 @@ defmodule Ankusa.Gateway.Authz.TableTest do
 
       start_supervised!({Ankusa.Instance, config})
       start_supervised!({Ankusa.Gateway, gateway})
-
       inst = config.instance
       assert :ok = Snapshot.await(inst, "team")
+
       assert {:allow, _} = Authz.decide(inst, "p", request(alice()))
-      assert_receive {:telemetry, _measurements, %{decision: :allow, cached: false}}
+      assert_receive {:telemetry, _, %{decision: :allow, cached: false}}
+      assert {:allow, _} = Authz.decide(inst, "p", request(alice()))
+      assert_receive {:telemetry, _, %{decision: :allow, cached: true}}
 
-      # The load starts failing and the version moves: the snapshot goes
-      # stale while the engine's allow is still inside its cache TTL. The
-      # cached allow must not answer once stale.
-      Agent.update(agent, &%{&1 | version: 2, error: :down})
-      Process.sleep(1_200)
-
+      # Past stale_after_ms with the allow still cached: fail closed, not the allow.
+      age(inst, 60_001)
       assert {:error, {:unavailable, :stale_snapshot}} = Authz.decide(inst, "p", request(alice()))
-      assert_receive {:telemetry, _measurements, %{decision: :unavailable, cached: false}}
+      assert_receive {:telemetry, _, %{decision: :unavailable, cached: false}}
+
+      # A tick that finds the version unchanged makes the same generation current
+      # again, and the decision cached under it with it.
+      Snapshot.refresh(inst, "team")
+      assert_receive {:telemetry, _, %{result: :unchanged}}, 5_000
+      assert {:allow, _} = Authz.decide(inst, "p", request(alice()))
+      assert_receive {:telemetry, _, %{decision: :allow, cached: true}}
     end
   end
 

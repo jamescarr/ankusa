@@ -7,8 +7,8 @@ publish = false
 [dependencies]
 # The published crate. No default features: the claim-check gateway is plain
 # HTTP inside the compose network, so the client needs no TLS stack.
-ankusa = { version = "0.5.0", default-features = false }
-async-nats = "0.50.0"
+ankusa = { version = "0.6.0", default-features = false }
+async-nats = "0.53.0"
 base64 = "0.23.1"
 futures = "0.3.34"
 serde = { version = "1.0.229", features = ["derive"] }

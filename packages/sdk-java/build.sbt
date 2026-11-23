@@ -31,7 +31,7 @@ javacOptions ++= Seq("--release", "17", "-encoding", "UTF-8", "-proc:none", "-Xl
 Compile / doc / javacOptions := Seq("--release", "17", "-encoding", "UTF-8", "-Xdoclint:all", "-Werror", "-quiet", "-notimestamp")
 
 libraryDependencies ++= Seq(
-  "tools.jackson.core" % "jackson-databind" % "3.2.3",
+  "tools.jackson.core" % "jackson-databind" % "3.3.0",
   "org.jspecify" % "jspecify" % "1.0.1",
   "com.github.sbt.junit" % "jupiter-interface" % JupiterKeys.jupiterVersion.value % Test,
 )

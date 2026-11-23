@@ -403,7 +403,7 @@ different adapter tuples. Operational how-tos live in
 One process, every role. Nothing else to run: no broker, no database, no object
 store.
 
-![Provider posts to the edge; the batcher group-commits the hook to the local store and the provider gets 201 only after the fsync. Dispatch delivers due rows to sinks, dead-lettering give-ups; the compactor archives to the blob store.](diagrams/overview.png)
+![Provider posts to the edge; the batcher group-commits the hook to the local store and the provider gets 201 only after the fsync. Dispatch delivers due rows to sinks, dead-lettering give-ups, and writes bodies too large for a queue message to the blob store as claim packs; the compactor archives hooks to the same blob store as segments.](diagrams/overview.png)
 
 `mix run --no-halt` / `iex -S mix`, or the single-container
 [`examples/quickstart/`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/). Durable to

@@ -12,6 +12,13 @@ follows [Semantic Versioning](https://semver.org/).
   example `invoice.paid`) from the message (`nil` when none); a non-string value
   is `invalid_field`.
 
+### Changed
+
+- Requires `plug ~> 1.18 and >= 1.20.4` (was `~> 1.18`): 1.20.3 is affected by
+  EEF-CVE-2026-120287 (Medium: `Plug.Parsers.MULTIPART` did not count empty part
+  headers towards its `:length` limit), fixed in 1.20.4; `mix hex.audit` fails
+  on it.
+
 ## [0.6.0] - 2026-10-28
 
 ### Added

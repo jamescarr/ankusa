@@ -68,7 +68,7 @@ jobs:
       # check:package sdk-rust` built and tested with:
       # dtolnay/rust-toolchain's default floats, which would let the release be
       # built by a compiler nothing here ever validated.
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: "1.99.1"
 

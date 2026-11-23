@@ -5,21 +5,22 @@
     {"id": "provider", "kind": "external-system", "label": "Any provider", "col": 0, "row": 0},
     {"id": "edge", "kind": "service", "label": "Edge", "col": 0, "row": 1},
     {"id": "batcher", "kind": "service", "label": "Group-commit batcher", "col": 0, "row": 2},
-    {"id": "store", "kind": "message-store", "label": "Store (RocksDB)", "sub": "hooks · delivery rows", "col": 0, "row": 3},
-    {"id": "dispatch", "kind": "service", "label": "Dispatch", "sub": "due rows · retries", "badges": ["retry"], "col": 1, "row": 3},
+    {"id": "store", "kind": "message-store", "label": "Store (RocksDB)", "col": 0, "row": 3},
+    {"id": "dispatch", "kind": "service", "label": "Dispatch", "badges": ["retry"], "col": 1, "row": 3},
     {"id": "sinks", "kind": "external-system", "label": "Sinks", "sub": "HTTP · RabbitMQ · Kafka · NATS · SQS · Pub/Sub · Redis", "col": 2, "row": 3},
     {"id": "dlq", "kind": "dead-letter-channel", "label": "Dead letters", "sub": "node-local · replay from the admin API", "col": 2, "row": 4},
-    {"id": "compactor", "kind": "service", "label": "Compactor", "sub": "archived hooks → segments", "col": 1, "row": 5},
-    {"id": "blob", "kind": "message-store", "label": "Blob store", "sub": "LocalFS · S3 · GCS · Azure · OCI", "col": 2, "row": 5}
+    {"id": "compactor", "kind": "service", "label": "Compactor", "sub": "packs hooks into segments", "col": 0, "row": 5},
+    {"id": "blob", "kind": "message-store", "label": "Blob store", "sub": "LocalFS · S3 · GCS · Azure · OCI", "col": 1, "row": 5}
   ],
   "edges": [
     {"from": "provider", "to": "edge", "kind": "rpc", "message": "POST /webhooks/<source> · 201 after fsync", "seq": 1},
     {"from": "edge", "to": "batcher", "type": "event", "message": "verified, routed hook", "seq": 2},
     {"from": "batcher", "to": "store", "kind": "data", "label": "one batch, one fsync", "seq": 3},
-    {"from": "store", "to": "dispatch", "kind": "data", "label": "due rows"},
+    {"from": "store", "to": "dispatch", "kind": "data", "label": "due delivery rows"},
     {"from": "dispatch", "to": "sinks", "type": "event", "message": "hook", "label": "at-least-once"},
     {"from": "dispatch", "to": "dlq", "kind": "dlq", "label": "give up"},
-    {"from": "store", "to": "compactor", "kind": "data", "label": "archive"},
-    {"from": "compactor", "to": "blob", "kind": "data", "label": "segments"}
+    {"from": "store", "to": "compactor", "kind": "data", "label": "hooks to archive"},
+    {"from": "compactor", "to": "blob", "kind": "data", "label": "segments"},
+    {"from": "dispatch", "to": "blob", "kind": "data", "label": "claim packs (large bodies)"}
   ]
 }

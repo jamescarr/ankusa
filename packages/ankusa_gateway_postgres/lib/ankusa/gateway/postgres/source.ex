@@ -24,7 +24,7 @@ defmodule Ankusa.Gateway.Postgres.Source do
   | `hostname`, `port`, `database`, `username`, `password` | `port` 5432 | instead of `url` |
   | `ssl` | `true`, unless the host is loopback | TLS to the server |
   | `query` | required in `:snapshot` mode | the rows query; returns the configured columns |
-  | `version_query` | — | one row, one column: equal to the last load and nothing is read |
+  | `version_query` | — | one row, one column: equal to the last load and nothing is read; any other shape is logged and counts as no version |
   | `lookup_query` | required in `:lookup` mode | parameters `$1 text[]` identities, `$2 text` action, `$3 text` space, `$4 text` key |
   | `pool_size` | `4` | 1..64 |
   | `timeout_ms` | `15000` | per statement, and the connection checkout; a snapshot load's whole transaction gets the snapshot's load deadline |
@@ -43,6 +43,8 @@ defmodule Ankusa.Gateway.Postgres.Source do
   @behaviour Ankusa.Gateway.Authz.Table.Source
 
   alias Ankusa.Gateway.Options
+
+  require Logger
 
   @keys [
     :url,
@@ -195,9 +197,23 @@ defmodule Ankusa.Gateway.Postgres.Source do
 
   def version(%{version_query: sql} = state, ctx) do
     case query(state, ctx, sql, []) do
-      {:ok, %Postgrex.Result{rows: [[value]]}} -> {:ok, value}
-      {:ok, _empty} -> :unknown
-      {:error, reason} -> {:error, reason}
+      {:ok, %Postgrex.Result{rows: [[value]]}} ->
+        {:ok, value}
+
+      {:ok, %Postgrex.Result{num_rows: rows, columns: columns}} ->
+        # Anything but one row of one column counts as no version, which loads
+        # the table every refresh_ms. Said on every tick: it is a
+        # misconfiguration that costs a full load each one.
+        Logger.warning(
+          "[ankusa] gateway table #{ctx.name}: version_query returned #{rows} row(s) of " <>
+            "#{length(columns || [])} column(s), expected one row with one column; " <>
+            "every refresh reloads the table"
+        )
+
+        :unknown
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

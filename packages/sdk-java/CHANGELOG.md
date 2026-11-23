@@ -25,6 +25,10 @@ this project follows [Semantic Versioning](https://semver.org/).
   `total: null` on a filtered listing (any filter but `tenant`), which the `int`
   component failed to decode (`AdminUnavailableError: invalid JSON body`).
 
+### Changed
+
+- Depends on `tools.jackson.core:jackson-databind` 3.3.0 (was 3.2.3).
+
 ## [0.2.0] - 2026-10-28
 
 ### Added

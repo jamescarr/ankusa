@@ -60,7 +60,7 @@ defmodule AnkusaGateway.MixProject do
   defp deps do
     ankusa_deps() ++
       [
-        {:plug, "~> 1.18"},
+        {:plug, "~> 1.18 and >= 1.20.4"},
         {:bandit, "~> 1.14 and >= 1.14.1"},
         {:jose, "~> 1.11 and >= 1.11.13"},
         {:nebulex, "~> 3.0"},

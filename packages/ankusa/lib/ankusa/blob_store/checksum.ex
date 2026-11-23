@@ -22,6 +22,10 @@ defmodule Ankusa.BlobStore.Checksum do
   def sha256_base64(data), do: Base.encode64(:crypto.hash(:sha256, data))
 
   @doc "Base64 MD5 of `data`."
+  # `Content-MD5` and `x-goog-hash: md5=`, the transfer checks the stores'
+  # APIs define: an integrity check against damage in transit, not a security
+  # digest.
+  # sobelow_skip ["Crypto.WeakHash"]
   @spec md5_base64(iodata()) :: String.t()
   def md5_base64(data), do: Base.encode64(:crypto.hash(:md5, data))
 

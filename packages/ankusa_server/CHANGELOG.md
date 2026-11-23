@@ -109,6 +109,23 @@ own ([`docs/releasing.md`](../../docs/releasing.md)).
   amplified memory use). The 0.7.0 image ships 1.14.0; the advisory was
   published after it was built.
 
+- The image ships `plug 1.20.4` (was `1.20.3`, affected by
+  EEF-CVE-2026-120287, Medium: `Plug.Parsers.MULTIPART` did not count empty
+  part headers towards its `:length` limit; no Ankusa code parses multipart
+  bodies, but `mix hex.audit` fails on the version). Also `bandit 1.15.0`
+  (a response under 300 bytes, or of an already-compressed content type, is no
+  longer gzip-compressed; an idle connection process hibernates after 15 s),
+  `finch 0.25.0` and `nebulex 3.1.0`.
+
+- The store's engine is RocksDB 11.13.2 (`rocksdb 3.2.1`, was 11.1.2 in
+  `rocksdb 3.1.2`). `:rocksdb.close/1` now returns only once the files are
+  released, so the store's reopen after a write failure no longer races the
+  lock file, and it waits for calls still running on the database (the store
+  already waited for a running checkpoint before closing). The on-disk format
+  is unchanged (block-based `format_version` 7 in both): the 0.7.0 image reads
+  a store and a backup checkpoint this release wrote, so a rollback needs no
+  migration.
+
 ## [0.7.0] - 2026-10-28
 
 ### Added
