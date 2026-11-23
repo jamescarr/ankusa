@@ -273,6 +273,54 @@ defmodule Ankusa.Gateway.Postgres.SourceTest do
       assert_receive {:table_refresh, _measurements, %{result: :ok}}, 5_000
     end
 
+    test "a load streaming past 2*timeout_ms completes within the snapshot's deadline", %{
+      conn: conn
+    } do
+      Postgrex.query!(
+        conn,
+        """
+        INSERT INTO role_bindings (principal, role_id, space)
+        SELECT 'user:u' || g, 'reader', 'docs' FROM generate_series(1, 30_000) g
+        """,
+        []
+      )
+
+      state =
+        Table.init!(
+          %{
+            mode: :snapshot,
+            source:
+              {Source,
+               source_opts(
+                 query: "SELECT * FROM gateway_permissions, (SELECT pg_sleep(0.4)) s",
+                 version_query: nil,
+                 timeout_ms: 1_000
+               )},
+            ready_timeout_ms: 0
+          },
+          @key
+        )
+
+      instance = unique_instance()
+      start_pool(instance, state)
+
+      ctx = %{
+        instance: instance,
+        name: "team",
+        deadline: System.monotonic_time(:millisecond) + 60_000
+      }
+
+      # 30 001 view rows stream in seven 5000-row chunks, each sleeping 0.4 s:
+      # ~2.8 s in total, well past the old 2*timeout_ms transaction budget,
+      # inside the snapshot's load deadline.
+      assert {:ok, acc} =
+               Source.load(state.source.state, ctx, %{rows: 0}, fn _row, acc ->
+                 {:cont, %{acc | rows: acc.rows + 1}}
+               end)
+
+      assert acc.rows == 30_001
+    end
+
     test "a query that tries to write fails read-only and writes nothing", %{conn: conn} do
       state =
         Table.init!(

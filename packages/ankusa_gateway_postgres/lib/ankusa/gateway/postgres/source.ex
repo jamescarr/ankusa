@@ -27,7 +27,7 @@ defmodule Ankusa.Gateway.Postgres.Source do
   | `version_query` | — | one row, one column: equal to the last load and nothing is read |
   | `lookup_query` | required in `:lookup` mode | parameters `$1 text[]` identities, `$2 text` action, `$3 text` space, `$4 text` key |
   | `pool_size` | `4` | 1..64 |
-  | `timeout_ms` | `15000` | per statement, and the connection checkout |
+  | `timeout_ms` | `15000` | per statement, and the connection checkout; a snapshot load's whole transaction gets the snapshot's load deadline |
 
   Every statement runs inside `Postgrex.transaction/3` after `SET TRANSACTION
   READ ONLY`: a query that tries to write fails, the previous snapshot stays,
@@ -279,7 +279,7 @@ defmodule Ankusa.Gateway.Postgres.Source do
 
               fun.(conn)
             end,
-            timeout: state.timeout_ms * 2
+            timeout: budget(state, ctx)
           )
           |> case do
             {:ok, result} -> result
@@ -290,6 +290,19 @@ defmodule Ankusa.Gateway.Postgres.Source do
         catch
           kind, reason -> {:error, {kind, reason}}
         end
+    end
+  end
+
+  # The transaction's timeout bounds the whole hold, a snapshot's streaming
+  # load included: the snapshot's own load deadline is that budget, and the
+  # per-statement `timeout_ms` bounds each query and the checkout inside it.
+  defp budget(state, ctx) do
+    case Map.get(ctx, :deadline) do
+      deadline when is_integer(deadline) ->
+        max(deadline - System.monotonic_time(:millisecond), state.timeout_ms * 2)
+
+      _no_deadline ->
+        state.timeout_ms * 2
     end
   end
 end

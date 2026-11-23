@@ -291,6 +291,28 @@ defmodule Ankusa.Gateway.Authz.TableTest do
                      5_000
     end
 
+    test "an unchanged version keeps the snapshot fresh past stale_after_ms" do
+      attach([:ankusa, :gateway, :table_refresh])
+      agent = agent([row("user:alice", "read", "docs", "")])
+
+      {instance, state} =
+        start_snapshot(state(agent, :snapshot, %{refresh_ms: 1_000, stale_after_ms: 2_000}))
+
+      assert :ok = Snapshot.await(instance, "team")
+      assert_receive {:telemetry, %{rows: 1}, %{instance: ^instance, result: :ok}}, 5_000
+      assert {:ok, :allow, _} = decide(instance, state, alice())
+
+      # The version never moves, so every tick answers :unchanged; the source
+      # answering is what keeps the snapshot fresh.
+      assert_receive {:telemetry, _measurements, %{instance: ^instance, result: :unchanged}},
+                     5_000
+
+      # Past the staleness window since the last full load, but the last
+      # :unchanged check was recent: the table still decides.
+      Process.sleep(1_300)
+      assert {:ok, :allow, _} = decide(instance, state, alice())
+    end
+
     test "over max_rows keeps the previous snapshot" do
       attach([:ankusa, :gateway, :table_refresh])
       agent = agent([row("user:alice", "read", "docs", "")])
@@ -425,6 +447,50 @@ defmodule Ankusa.Gateway.Authz.TableTest do
 
       assert {:deny, _} = Authz.decide(inst, "p", request(alice()))
       assert_receive {:telemetry, _measurements, %{decision: :deny, cached: true}}
+    end
+
+    test "a decision cached while fresh is not served once the snapshot is stale" do
+      agent = agent([row("user:alice", "read", "docs", "teams/")])
+      attach([:ankusa, :gateway, :authz])
+
+      config = test_config(roles: [])
+
+      gateway =
+        Ankusa.Gateway.Config.new(
+          instance: config.instance,
+          port: 0,
+          authz: %{
+            authorizers: %{
+              "team" =>
+                {Table,
+                 %{
+                   mode: :snapshot,
+                   source: {Stub, %{agent: agent}},
+                   refresh_ms: 1_000,
+                   stale_after_ms: 1_000,
+                   ready_timeout_ms: 0
+                 }}
+            },
+            policies: %{"p" => %{mode: :first, steps: ["team"]}}
+          }
+        )
+
+      start_supervised!({Ankusa.Instance, config})
+      start_supervised!({Ankusa.Gateway, gateway})
+
+      inst = config.instance
+      assert :ok = Snapshot.await(inst, "team")
+      assert {:allow, _} = Authz.decide(inst, "p", request(alice()))
+      assert_receive {:telemetry, _measurements, %{decision: :allow, cached: false}}
+
+      # The load starts failing and the version moves: the snapshot goes
+      # stale while the engine's allow is still inside its cache TTL. The
+      # cached allow must not answer once stale.
+      Agent.update(agent, &%{&1 | version: 2, error: :down})
+      Process.sleep(1_200)
+
+      assert {:error, {:unavailable, :stale_snapshot}} = Authz.decide(inst, "p", request(alice()))
+      assert_receive {:telemetry, _measurements, %{decision: :unavailable, cached: false}}
     end
   end
 

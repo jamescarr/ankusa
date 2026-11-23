@@ -158,6 +158,7 @@ defmodule Ankusa.Gateway.Authz.Table.Snapshot do
     case version(state.source, ctx) do
       {:ok, version} ->
         if version == snapshot.last_version and snapshot.published != nil do
+          touch(snapshot)
           emit(snapshot, started_ms, :unchanged)
           snapshot
         else
@@ -177,6 +178,21 @@ defmodule Ankusa.Gateway.Authz.Table.Snapshot do
     if function_exported?(module, :version, 2),
       do: module.version(source.state, ctx),
       else: :unknown
+  end
+
+  # An unchanged version is a successful check: the source answered, and that
+  # answering is what staleness measures. Without the touch, a static table
+  # (the common case) goes permanently `:stale_snapshot` after
+  # `stale_after_ms` while telemetry keeps reporting healthy `:unchanged`
+  # refreshes.
+  defp touch(snapshot) do
+    :ets.update_element(
+      Table.tables_table(snapshot.state.instance),
+      snapshot.state.name,
+      {4, System.monotonic_time(:millisecond)}
+    )
+  rescue
+    ArgumentError -> :ok
   end
 
   defp build(snapshot, ctx, started_ms, version) do

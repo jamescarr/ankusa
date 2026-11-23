@@ -25,15 +25,17 @@ defmodule Ankusa.Gateway.Authz.Table do
       whenever `version/2` says it changed) and publishes it atomically. A
       decision is a bounded number of ETS reads, so a customer table never
       sits in the request path. A snapshot older than `stale_after_ms` fails
-      closed (`{:error, {:unavailable, :stale_snapshot}}`) until the next load
-      succeeds.
+      closed (`{:error, {:unavailable, :stale_snapshot}}`) until the next
+      load succeeds; a `version/2` that answers unchanged keeps it fresh.
     * `:lookup` (`kind: :remote`) — every miss asks the source
       (`lookup_query`) through the authorizer's caller and decision cache, so
       freshness is bounded by `authz.cache`, not by a refresh. Use this for
       permissions that are not prefix-shaped.
 
-  `cache_scope/2` is `{generation, kind, space, key}`: a new snapshot orphans
-  every cached decision, so no decision from before a refresh outlives it.
+  `cache_scope/2` is `{generation, fresh?, kind, space, key}`: a new snapshot
+  orphans every cached decision, so no decision from before a refresh outlives
+  it, and a decision cached while the snapshot was fresh is never served once
+  it is stale.
 
   ## Options
 
@@ -48,7 +50,7 @@ defmodule Ankusa.Gateway.Authz.Table do
   | `refresh_ms` | `30000` | a snapshot's reload period |
   | `max_rows` | `1000000` | a larger load is refused and the previous table kept |
   | `max_bytes` | `268435456` | likewise, in ETS bytes |
-  | `stale_after_ms` | `300000` | a snapshot older than this is unavailable |
+  | `stale_after_ms` | `300000` | a snapshot older than this is unavailable (an unchanged `version/2` is a fresh answer, so it does not age) |
 
   plus the common `:remote` options (`Ankusa.Gateway.Authz.Remote`), used by
   `mode: :lookup`.
@@ -452,16 +454,24 @@ defmodule Ankusa.Gateway.Authz.Table do
   end
 
   def cache_scope(%Request{resource: resource}, state) do
-    {generation(state), resource.kind, resource.space, resource.key}
+    {generation, fresh?} = generation(state)
+    {generation, fresh?, resource.kind, resource.space, resource.key}
   end
 
-  defp generation(%{instance: instance, name: name}) do
+  # The scope carries freshness, so a decision cached while the snapshot was
+  # fresh is never served once it is stale: the fail-closed boundary holds
+  # even inside `authz.cache`'s TTL.
+  defp generation(%{instance: instance, name: name} = state) do
     case :ets.lookup(tables_table(instance), name) do
-      [{^name, _tid, generation, _loaded_ms, _has_deny?}] -> generation
-      [] -> :none
+      [{^name, _tid, generation, loaded_ms, _has_deny?}] ->
+        fresh? = System.monotonic_time(:millisecond) - loaded_ms <= state.stale_after_ms
+        {generation, fresh?}
+
+      [] ->
+        {:none, false}
     end
   rescue
-    ArgumentError -> :none
+    ArgumentError -> {:none, false}
   end
 
   @impl true

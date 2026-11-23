@@ -11,4 +11,5 @@ follows [Semantic Versioning](https://semver.org/).
 - `Ankusa.Gateway.Postgres.Source`, the `table` authorizer's Postgres source:
   the operator's query (snapshot, with an optional `version_query`) or
   `lookup_query` (one query per cache miss, request data as bound parameters),
-  in a read-only transaction, over TLS unless the host is loopback.
+  in a read-only transaction whose whole-hold budget for a snapshot load is
+  the snapshot's load deadline, over TLS unless the host is loopback.
