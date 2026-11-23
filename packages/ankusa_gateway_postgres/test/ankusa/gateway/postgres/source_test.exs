@@ -273,14 +273,14 @@ defmodule Ankusa.Gateway.Postgres.SourceTest do
       assert_receive {:table_refresh, _measurements, %{result: :ok}}, 5_000
     end
 
-    test "a load streaming past 2*timeout_ms completes within the snapshot's deadline", %{
+    test "a load held past 2*timeout_ms completes within the snapshot's deadline", %{
       conn: conn
     } do
       Postgrex.query!(
         conn,
         """
         INSERT INTO role_bindings (principal, role_id, space)
-        SELECT 'user:u' || g, 'reader', 'docs' FROM generate_series(1, 30_000) g
+        SELECT 'user:u' || g, 'reader', 'docs' FROM generate_series(1, 20_000) g
         """,
         []
       )
@@ -292,9 +292,9 @@ defmodule Ankusa.Gateway.Postgres.SourceTest do
             source:
               {Source,
                source_opts(
-                 query: "SELECT * FROM gateway_permissions, (SELECT pg_sleep(0.4)) s",
+                 query: "SELECT * FROM gateway_permissions",
                  version_query: nil,
-                 timeout_ms: 1_000
+                 timeout_ms: 500
                )},
             ready_timeout_ms: 0
           },
@@ -310,15 +310,19 @@ defmodule Ankusa.Gateway.Postgres.SourceTest do
         deadline: System.monotonic_time(:millisecond) + 60_000
       }
 
-      # 30 001 view rows stream in seven 5000-row chunks, each sleeping 0.4 s:
-      # ~2.8 s in total, well past the old 2*timeout_ms transaction budget,
-      # inside the snapshot's load deadline.
-      assert {:ok, acc} =
-               Source.load(state.source.state, ctx, %{rows: 0}, fn _row, acc ->
-                 {:cont, %{acc | rows: acc.rows + 1}}
-               end)
+      # The reducer runs inside the transaction, so its hold counts against
+      # the whole-hold budget: 20 001 rows stream in five 5000-row chunks and
+      # sleep 400 ms between them, ~1.6 s in total — past the old
+      # 2*timeout_ms (1000 ms) budget, inside the snapshot's load deadline.
+      # (A pg_sleep in the query would not: the chunks resume one portal.)
+      reducer = fn _row, acc ->
+        acc = %{acc | rows: acc.rows + 1}
+        if rem(acc.rows, 5_000) == 0, do: Process.sleep(400)
+        {:cont, acc}
+      end
 
-      assert acc.rows == 30_001
+      assert {:ok, acc} = Source.load(state.source.state, ctx, %{rows: 0}, reducer)
+      assert acc.rows == 20_001
     end
 
     test "a query that tries to write fails read-only and writes nothing", %{conn: conn} do
