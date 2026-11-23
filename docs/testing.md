@@ -1448,7 +1448,12 @@ replication factor below 3, unclean leader election, a retention below twice
 `backup.max_age_ms` and a `max.message.bytes` below `max_record_bytes`; the node's
 partition survives a partition-count change; replay filters by node, skips unknown
 kinds and versions and returns a duplicate record twice; broker error codes map to the four
-classes. `bench/partition_bench.exs` measures what one partition carries.
+classes. Every test gets a topic of its own, handed over only once the cluster has
+committed a record to a newer probe topic (so every broker has applied the test topic's
+assignment), and publishes with an 8 s deadline rather than the production default 2 s:
+the first `acks=-1` commit on a partition created a moment ago waits for its followers
+to start fetching it, which a loaded CI runner has taken past 2 s.
+`bench/partition_bench.exs` measures what one partition carries.
 `mix ankusa.recover`'s option parsing and the `--allow-gap` audit row are in
 `intake/recovery_test.exs`; the server's `wal.type: dual` and `intake.*` keys, the
 `ANKUSA_WAL_TYPE` and `ANKUSA_INTAKE_NODE_ID` overrides and the credentials' redaction

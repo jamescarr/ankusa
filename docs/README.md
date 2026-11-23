@@ -14,7 +14,7 @@ If you want to run it first, start with [quickstart.md](quickstart.md).
 | [architecture.md](architecture.md) | What is the guarantee, and what happens on the request path when a component fails? |
 | [delivery.md](delivery.md) | Which sinks exist, how do retries and dead letters work, and how is delivery verified? |
 | [storage.md](storage.md) | Where does a hook live — the node store, the archive, backup, and restore? |
-| [claim-check.md](claim-check.md) | How do large payloads reach queue workers without giving them storage credentials? |
+| [claim-check.md](claim-check.md) | How do large payloads reach queue workers without giving them storage credentials, and how does the gateway decide who may read them (authentication, rules, external PDPs, grants and share links, permission tables)? |
 | [multi-tenancy.md](multi-tenancy.md) | How do I serve many customers from one instance, and isolate or erase one? |
 | [integrations.md](integrations.md) | How do I hand deliveries to Oban, Celery, or a queue consumer, and verify signatures? |
 | [asyncapi.md](asyncapi.md) | What AsyncAPI document and lifecycle events does an instance serve? |
@@ -29,7 +29,7 @@ If you want to run it first, start with [quickstart.md](quickstart.md).
 | [packaging.md](packaging.md) | Why are adapters separate packages, and how do I add one? |
 | [releasing.md](releasing.md) | How do I release a package, an SDK, or an image? |
 | [critical-review.md](critical-review.md) | What did the 2026-10 end-to-end review find, by root cause, and what is fixed? |
-| [adr/](adr/README.md) | Why is the tenant key layout, or the dual-commit intake log, the way it is? |
+| [adr/](adr/README.md) | Why are the tenant key layout, the dual-commit intake log, the segment format, ordering lanes and the standalone gateway the way they are? |
 | [CONTRIBUTING.md](https://github.com/jamescarr/ankusa/blob/main/CONTRIBUTING.md) | What must a PR include? |
 | [AGENTS.md](https://github.com/jamescarr/ankusa/blob/main/AGENTS.md) | Repo map, commands, and the rules an agent or maintainer works under. |
 
