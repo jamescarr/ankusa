@@ -273,6 +273,58 @@ defmodule Ankusa.Gateway.Postgres.SourceTest do
       assert_receive {:table_refresh, _measurements, %{result: :ok}}, 5_000
     end
 
+    test "a load held past 2*timeout_ms completes within the snapshot's deadline", %{
+      conn: conn
+    } do
+      Postgrex.query!(
+        conn,
+        """
+        INSERT INTO role_bindings (principal, role_id, space)
+        SELECT 'user:u' || g, 'reader', 'docs' FROM generate_series(1, 20_000) g
+        """,
+        []
+      )
+
+      state =
+        Table.init!(
+          %{
+            mode: :snapshot,
+            source:
+              {Source,
+               source_opts(
+                 query: "SELECT * FROM gateway_permissions",
+                 version_query: nil,
+                 timeout_ms: 500
+               )},
+            ready_timeout_ms: 0
+          },
+          @key
+        )
+
+      instance = unique_instance()
+      start_pool(instance, state)
+
+      ctx = %{
+        instance: instance,
+        name: "team",
+        deadline: System.monotonic_time(:millisecond) + 60_000
+      }
+
+      # The reducer runs inside the transaction, so its hold counts against
+      # the whole-hold budget: 20 001 rows stream in five 5000-row chunks and
+      # sleep 400 ms between them, ~1.6 s in total — past the old
+      # 2*timeout_ms (1000 ms) budget, inside the snapshot's load deadline.
+      # (A pg_sleep in the query would not: the chunks resume one portal.)
+      reducer = fn _row, acc ->
+        acc = %{acc | rows: acc.rows + 1}
+        if rem(acc.rows, 5_000) == 0, do: Process.sleep(400)
+        {:cont, acc}
+      end
+
+      assert {:ok, acc} = Source.load(state.source.state, ctx, %{rows: 0}, reducer)
+      assert acc.rows == 20_001
+    end
+
     test "a query that tries to write fails read-only and writes nothing", %{conn: conn} do
       state =
         Table.init!(
